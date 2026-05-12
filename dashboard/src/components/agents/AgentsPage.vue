@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
+  clearAgentBroken,
   createAgent,
   deleteAgent,
   fetchAgentRoster,
@@ -20,6 +21,7 @@ import { useStream } from "../../composables/useStream";
 import AgentCard from "./AgentCard.vue";
 import AgentEditDrawer from "./AgentEditDrawer.vue";
 import AgentDeleteModal from "./AgentDeleteModal.vue";
+import AgentResolveModal from "./AgentResolveModal.vue";
 
 /**
  * DX-160 Phase 2 — Agents tab CRUD UI.
@@ -65,6 +67,14 @@ const drawerError = ref<string | null>(null);
 const deleteTarget = ref<AgentRosterEntry | null>(null);
 const deleteBusy = ref(false);
 const deleteError = ref<string | null>(null);
+
+// DX-298 — Mark Resolved modal state. The dashboard cannot SET broken;
+// the only legal write is the null clear via `clearAgentBroken`. SSE
+// `agent:updated` will also push the cleared snapshot to every other
+// connected client.
+const resolveTarget = ref<AgentRosterEntry | null>(null);
+const resolveBusy = ref(false);
+const resolveError = ref<string | null>(null);
 
 const atCap = computed(() => roster.value.length >= AGENT_LIMIT);
 const newButtonDisabled = computed(() => atCap.value || !activeRepoName.value);
@@ -121,6 +131,18 @@ function attachLiveBusy(): void {
   };
   unsubscribers.push(stream.subscribe("dispatch:created", onEvent));
   unsubscribers.push(stream.subscribe("dispatch:updated", onEvent));
+  // DX-298 — Agents tab live-updates when an agent's `broken` field
+  // flips. The worker publishes `agent:updated` on every agents-side
+  // mutation (toggle, broken stamp/clear, CRUD); the payload is the
+  // full snapshot so `loadRoster` is the cheapest reconciliation. The
+  // snapshot carries `repoName` (explicit alias of `name`) so this
+  // filter reads symmetrically with the dispatch subscription above —
+  // both check `data.repoName`. See `agents-list.ts` AgentSnapshot.
+  unsubscribers.push(
+    stream.subscribe("agent:updated", (event) => {
+      if (matchesActiveRepo(event)) void loadRoster();
+    }),
+  );
 }
 function detachLiveBusy(): void {
   for (const off of unsubscribers) off();
@@ -250,6 +272,52 @@ async function confirmDelete(): Promise<void> {
     deleteBusy.value = false;
   }
 }
+
+// DX-298 — Mark Resolved flow. The card emits `resolve`; we open the
+// confirmation modal so the operator confirms env-was-fixed (the clear
+// is irreversible). On confirm we PATCH `{broken: null}`; the server
+// publishes `agent:updated` which triggers `loadRoster` everywhere.
+function askResolve(agent: AgentRosterEntry): void {
+  resolveError.value = null;
+  resolveTarget.value = agent;
+}
+
+function cancelResolve(): void {
+  resolveTarget.value = null;
+  resolveError.value = null;
+  resolveBusy.value = false;
+}
+
+async function confirmResolve(): Promise<void> {
+  if (!resolveTarget.value) return;
+  resolveBusy.value = true;
+  resolveError.value = null;
+  try {
+    const cleared = await clearAgentBroken(
+      activeRepoName.value,
+      resolveTarget.value.name,
+    );
+    const idx = roster.value.findIndex((a) => a.name === cleared.name);
+    if (idx !== -1) {
+      const next = [...roster.value];
+      // `clearAgentBroken` returns the bare `AgentRecordWithName`; the
+      // roster carries the enriched `AgentRosterEntry` with `busyOn`,
+      // so preserve the existing `busyOn` field while swapping in the
+      // cleared `broken: null`. SSE will reconcile via `loadRoster()`
+      // a moment later regardless.
+      next[idx] = { ...next[idx], ...cleared };
+      roster.value = next;
+    }
+    cancelResolve();
+    await loadRoster();
+  } catch (err) {
+    const te = err as ToggleError;
+    resolveError.value =
+      te?.serverMessage ?? te?.message ?? "Mark Resolved failed.";
+  } finally {
+    resolveBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -338,6 +406,7 @@ async function confirmDelete(): Promise<void> {
         :repo="activeRepoName"
         @edit="openEdit"
         @delete="askDelete"
+        @resolve="askResolve"
       />
     </div>
 
@@ -358,6 +427,15 @@ async function confirmDelete(): Promise<void> {
       :error="deleteError"
       @cancel="cancelDelete"
       @confirm="confirmDelete"
+    />
+
+    <AgentResolveModal
+      v-if="resolveTarget"
+      :agent="resolveTarget"
+      :busy="resolveBusy"
+      :error="resolveError"
+      @cancel="cancelResolve"
+      @confirm="confirmResolve"
     />
   </section>
 </template>

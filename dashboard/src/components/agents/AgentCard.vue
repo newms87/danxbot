@@ -21,7 +21,18 @@ const props = defineProps<{
 const emit = defineEmits<{
   edit: [AgentRosterEntry];
   delete: [AgentRosterEntry];
+  resolve: [AgentRosterEntry];
 }>();
+
+// DX-298 — broken-agent banner. The worker stamps `broken` via the
+// prep verdict route when an agent's worktree is in a bad state that
+// cannot recover without destroying work (rebase conflict, env break,
+// auth failure). The poller's pick gate filters any agent with
+// `broken !== null` out of the eligible pool, so the operator sees the
+// agent skipped on every tick until they hit "Mark Resolved" — which
+// PATCHes `{broken: null}` via `clearAgentBroken`.
+const broken = computed(() => props.agent.broken);
+const isBroken = computed(() => broken.value !== null);
 
 function summarizeSchedule(): string {
   const days: Array<keyof typeof daysMap> = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -62,14 +73,62 @@ function formatElapsed(ms: number): string {
   const days = Math.floor(hours / 24);
   return `${days}d`;
 }
+
+// Relative "set Nm ago" label for the broken banner. Reuses the same
+// 60s tick the busy badge uses so both labels animate in sync.
+const brokenSetLabel = computed<string>(() => {
+  const b = broken.value;
+  if (!b) return "";
+  const setMs = Date.parse(b.set_at);
+  if (Number.isNaN(setMs)) return b.set_at;
+  return `Set ${formatElapsed(now.value - setMs)} ago`;
+});
 </script>
 
 <template>
   <article
     class="card"
+    :class="{ 'card-broken': isBroken }"
     :data-test="`agent-card-${agent.name}`"
     :data-test-name="agent.name"
   >
+    <section
+      v-if="isBroken && broken"
+      class="broken-banner"
+      :data-test="`agent-broken-banner-${agent.name}`"
+      role="alert"
+    >
+      <h4
+        class="broken-title"
+        :data-test="`agent-broken-title-${agent.name}`"
+      >⚠ Agent {{ agent.name }} is broken</h4>
+      <p
+        class="broken-set-at"
+        :data-test="`agent-broken-set-at-${agent.name}`"
+      >{{ brokenSetLabel }}</p>
+      <p
+        class="broken-reason"
+        :data-test="`agent-broken-reason-${agent.name}`"
+      >{{ broken.reason }}</p>
+      <div
+        v-if="broken.suggested_steps.length > 0"
+        :data-test="`agent-broken-steps-${agent.name}`"
+      >
+        <p class="broken-steps-label">Suggested steps</p>
+        <ol class="broken-steps">
+          <li
+            v-for="(step, i) in broken.suggested_steps"
+            :key="i"
+          >{{ step }}</li>
+        </ol>
+      </div>
+      <button
+        type="button"
+        class="btn-resolve"
+        :data-test="`agent-resolve-${agent.name}`"
+        @click="emit('resolve', agent)"
+      >Mark Resolved</button>
+    </section>
     <header class="head">
       <div class="head-left">
         <AgentAvatar
@@ -135,6 +194,74 @@ function formatElapsed(ms: number): string {
   border-radius: 12px;
   border: 1px solid #1e293b;
   background: #0f172a;
+}
+.card-broken {
+  border-color: #f87171;
+  box-shadow: 0 0 0 1px rgba(248, 113, 113, 0.18);
+}
+.broken-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #f87171;
+  background: rgba(239, 68, 68, 0.12);
+  color: #fecaca;
+}
+.broken-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: #fecaca;
+}
+.broken-set-at {
+  margin: 0;
+  font-size: 11px;
+  font-style: italic;
+  color: rgba(254, 202, 202, 0.75);
+  font-variant-numeric: tabular-nums;
+}
+.broken-reason {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #fee2e2;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.broken-steps-label {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: rgba(254, 202, 202, 0.85);
+}
+.broken-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #fee2e2;
+}
+.broken-steps li {
+  margin-bottom: 2px;
+}
+.btn-resolve {
+  align-self: flex-end;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #22c55e;
+  background: rgba(34, 197, 94, 0.15);
+  color: #4ade80;
+  cursor: pointer;
+}
+.btn-resolve:hover {
+  background: rgba(34, 197, 94, 0.25);
 }
 .head {
   display: flex;

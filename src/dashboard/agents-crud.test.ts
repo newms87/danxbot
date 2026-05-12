@@ -356,6 +356,27 @@ describe("handlePostAgent", () => {
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/Failed to persist/);
   });
+
+  // DX-298 — `broken` is server-stamped on POST. A client trying to
+  // smuggle the field in (null or populated) must 400 — the server is
+  // the only writer of broken on create.
+  it("returns 400 when POST body carries `broken` — server stamps null on create, clients may not supply it", async () => {
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+      broken: null,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", tmpDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(
+      /broken is read-only on POST/i,
+    );
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================
@@ -470,6 +491,142 @@ describe("handlePatchAgent", () => {
     await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/Failed to persist/);
+  });
+
+  // DX-298 — Mark Resolved clear path. `broken: null` is the only legal
+  // dashboard write to this field; non-null values are reserved for the
+  // worker's prep verdict route (Phase 5) and must 400 here.
+  describe("DX-298 — broken clear (Mark Resolved)", () => {
+    function brokenAlice() {
+      return {
+        ...validAgentRecord({ bio: "broken alice" }),
+        broken: {
+          reason: "Rebase conflict couldn't be auto-resolved on origin/main",
+          suggested_steps: [
+            "SSH to the worker host",
+            "cd into the agent worktree",
+            "Resolve conflicts manually, then push",
+          ],
+          set_at: "2026-05-12T07:00:00Z",
+        },
+      };
+    }
+
+    it("PATCH {broken: null} clears a populated broken record and returns the refreshed agent", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: brokenAlice() }),
+      );
+      const req = authReqJSON("PATCH", { broken: null });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.broken).toBeNull();
+      // Other fields preserved — clear is orthogonal to bio/schedule/etc.
+      expect(body.bio).toBe("broken alice");
+      expect(body.capabilities).toEqual(["issue-worker"]);
+      // updated_at MUST bump so consumers can detect the clear.
+      expect(body.updated_at).not.toBe("2026-05-08T12:00:00Z");
+
+      // The persisted patch carries the cleared shape so a subsequent
+      // read sees `broken: null` durably.
+      const [, patch] = mockWriteSettings.mock.calls[0];
+      expect(patch.agents.alice.broken).toBeNull();
+    });
+
+    it("PATCH {broken: null} on an already-healthy agent is a no-op for the field (idempotent)", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({
+          alice: { ...validAgentRecord(), broken: null },
+        }),
+      );
+      const req = authReqJSON("PATCH", { broken: null });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      expect(JSON.parse(res._getBody()).broken).toBeNull();
+    });
+
+    it("PATCH {broken: <populated>} returns 400 — dashboard cannot SET broken, only clear", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: validAgentRecord() }),
+      );
+      const req = authReqJSON("PATCH", {
+        broken: {
+          reason: "Operator-stamped",
+          suggested_steps: [],
+          set_at: "2026-05-12T07:00:00Z",
+        },
+      });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(400);
+      const body = JSON.parse(res._getBody());
+      expect(body.errors.join(" ")).toMatch(/only be set to null/i);
+      expect(mockWriteSettings).not.toHaveBeenCalled();
+    });
+
+    it("PATCH {broken: 'cleared'} returns 400 — non-null scalars are rejected", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: validAgentRecord() }),
+      );
+      const req = authReqJSON("PATCH", { broken: "cleared" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(mockWriteSettings).not.toHaveBeenCalled();
+    });
+
+    it("PATCH {broken: null, bio: 'fresh'} — clear coexists with other field edits in one round-trip", async () => {
+      // Operators may want to update bio + clear in one click; the
+      // validator must not force an artificial split.
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: brokenAlice() }),
+      );
+      const req = authReqJSON("PATCH", { broken: null, bio: "fresh bio" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.broken).toBeNull();
+      expect(body.bio).toBe("fresh bio");
+    });
+
+    it("PATCH absent `broken` key preserves a populated broken record (bio-only edit doesn't clear)", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: brokenAlice() }),
+      );
+      const req = authReqJSON("PATCH", { bio: "tweaked" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      // Absence-means-preserve — the existing broken record must
+      // round-trip unchanged so a routine bio edit doesn't accidentally
+      // un-park an agent the worker just flagged.
+      expect(body.broken).not.toBeNull();
+      expect(body.broken.reason).toMatch(/Rebase conflict/);
+    });
+
+    it("publishes agent:updated on the event bus after a successful clear so other dashboard clients see it live", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({ alice: brokenAlice() }),
+      );
+      const req = authReqJSON("PATCH", { broken: null });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
+      const event = mockEventBusPublish.mock.calls[0][0];
+      expect(event.topic).toBe("agent:updated");
+    });
   });
 });
 

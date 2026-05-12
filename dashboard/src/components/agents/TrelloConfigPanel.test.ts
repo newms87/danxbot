@@ -13,6 +13,7 @@ import TrelloConfigPanel from "./TrelloConfigPanel.vue";
 function makeAgent(over: Partial<AgentSnapshot> = {}): AgentSnapshot {
   return {
     name: "danxbot",
+    repoName: "danxbot",
     url: "https://example.com/danxbot.git",
     settings: {
       overrides: {

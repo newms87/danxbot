@@ -43,6 +43,7 @@ export type {
   CriticalFailureSource,
 } from "@backend/critical-failure.js";
 export type {
+  AgentBrokenState,
   AgentCapability,
   AgentDefaults,
   AgentRecord,

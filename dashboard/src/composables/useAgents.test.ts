@@ -82,6 +82,7 @@ function snap(
 ): AgentSnapshot {
   return {
     name,
+    repoName: name,
     url: `https://github.com/x/${name}.git`,
     settings: {
       overrides: {

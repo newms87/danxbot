@@ -48,6 +48,16 @@ export interface WorkerHealth {
 
 export interface AgentSnapshot {
   name: string;
+  /**
+   * Repo name — explicit alias of `name` so SSE subscribers filter on
+   * the same key (`data.repoName`) used by `dispatch:created` /
+   * `dispatch:updated` payloads. Keeping `name` for backwards-compat
+   * with the SPA snapshot reader; new consumers should prefer
+   * `repoName` and treat `name`-is-repo-name as a coincidence about to
+   * be split out. DX-298 — eliminates the "is `data.name` the repo or
+   * the agent name?" ambiguity that bit the Agents tab SSE wiring.
+   */
+  repoName: string;
   url: string;
   settings: Settings;
   counts: RepoDispatchCounts;
@@ -171,6 +181,7 @@ export async function buildSnapshot(
 
   return {
     name: repo.name,
+    repoName: repo.name,
     url: repo.url,
     settings,
     counts,

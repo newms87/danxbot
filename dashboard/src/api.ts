@@ -272,6 +272,32 @@ export async function deleteAgent(
 }
 
 /**
+ * PATCH /api/agents/:name?repo=<name> with `{broken: null}` — DX-298
+ * "Mark Resolved" clear path. The dashboard cannot SET broken (that's
+ * the worker's prep verdict route); the only legal write here is the
+ * null clear. Returns the refreshed agent record on 200.
+ *
+ * Pairs with the SSE `agent:updated` topic — after a successful clear,
+ * every connected dashboard sees the agent return to the dispatchable
+ * pool without a manual refetch.
+ */
+export async function clearAgentBroken(
+  repo: string,
+  name: string,
+): Promise<AgentRecordWithName> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(name)}?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ broken: null }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
  * POST /api/agents/:name/avatar?repo=<name> — raw binary upload. The
  * server validates MIME (png/jpeg/webp) and size (≤1 MB). Returns the
  * refreshed agent record carrying the new `avatar_path`.

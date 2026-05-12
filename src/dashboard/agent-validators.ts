@@ -31,6 +31,14 @@ export interface AgentValidationFields {
   capabilities?: AgentCapability[];
   schedule?: AgentSchedule;
   enabled?: boolean;
+  /**
+   * DX-298 — dashboard "Mark Resolved" clear path. The only value the
+   * write surface accepts is `null` (clear); setting `broken` to a
+   * non-null value is reserved for the worker's prep verdict route
+   * (Phase 5). Presence of the field in the parsed result means the
+   * caller wants to clear; absence means leave unchanged.
+   */
+  broken?: null;
 }
 
 export function validateAgentFields(
@@ -99,6 +107,23 @@ export function validateAgentFields(
     else fields.schedule = sched.schedule;
   } else if (opts.requireAll) {
     errors.push("schedule is required");
+  }
+
+  // DX-298 — `broken: null` is the dashboard's only legal value for
+  // this field. Setting broken to a populated record from a human
+  // request is forbidden (only the worker's prep verdict route can
+  // stamp a `broken` record). `requireAll` callers (POST) never accept
+  // `broken` in the body — the server stamps `broken: null` itself.
+  if (has("broken")) {
+    if (opts.requireAll) {
+      errors.push("broken is read-only on POST — server stamps null on create");
+    } else if (body.broken !== null) {
+      errors.push(
+        "broken may only be set to null from the dashboard — populated broken records are stamped by the worker prep verdict route",
+      );
+    } else {
+      fields.broken = null;
+    }
   }
 
   if (errors.length > 0) return { errors };

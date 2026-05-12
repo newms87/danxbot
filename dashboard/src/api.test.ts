@@ -52,7 +52,12 @@ vi.mock("./composables/useStream", async () => {
 });
 
 // Import AFTER the mock so api.ts picks up the stubbed useStream.
-import { fetchWithAuth, followDispatch, resetAllData } from "./api";
+import {
+  clearAgentBroken,
+  fetchWithAuth,
+  followDispatch,
+  resetAllData,
+} from "./api";
 
 const TOKEN_KEY = "danxbot.authToken";
 
@@ -243,6 +248,93 @@ describe("resetAllData", () => {
     } finally {
       window.removeEventListener("auth:expired", fired);
     }
+  });
+});
+
+describe("clearAgentBroken — DX-298", () => {
+  it("PATCHes /api/agents/:name?repo=<name> with {broken: null} and JSON content type", async () => {
+    seedToken("ok");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          name: "alice",
+          type: "agent",
+          bio: "x",
+          capabilities: ["issue-worker"],
+          schedule: {
+            tz: "America/Chicago",
+            always_on: false,
+            mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+          },
+          enabled: true,
+          broken: null,
+          created_at: "2026-05-08T12:00:00Z",
+          updated_at: "2026-05-12T07:35:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await clearAgentBroken("danxbot", "alice");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/alice?repo=danxbot");
+    expect((init as RequestInit).method).toBe("PATCH");
+    const headers = new Headers((init as RequestInit).headers);
+    expect(headers.get("Content-Type")).toBe("application/json");
+    expect((init as RequestInit).body).toBe(JSON.stringify({ broken: null }));
+  });
+
+  it("returns the parsed agent record on 200 (broken cleared)", async () => {
+    seedToken("ok");
+    const updatedRec = {
+      name: "alice",
+      type: "agent",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: {
+        tz: "America/Chicago",
+        always_on: false,
+        mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+      },
+      enabled: true,
+      broken: null,
+      created_at: "2026-05-08T12:00:00Z",
+      updated_at: "2026-05-12T07:35:00Z",
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(updatedRec), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await clearAgentBroken("danxbot", "alice");
+    expect(result.broken).toBeNull();
+    expect(result.name).toBe("alice");
+  });
+
+  it("URL-encodes the agent name + repo (defense against weird characters)", async () => {
+    seedToken("ok");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({}), { status: 200 }),
+    );
+    await clearAgentBroken("repo with space", "weird/name");
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/agents/weird%2Fname?repo=repo%20with%20space");
+  });
+
+  it("throws a ToggleError carrying the server-supplied message on non-2xx", async () => {
+    seedToken("ok");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ error: 'agent "ghost" not found' }), {
+        status: 404,
+      }),
+    );
+
+    await expect(clearAgentBroken("danxbot", "ghost")).rejects.toThrow(
+      'agent "ghost" not found',
+    );
   });
 });
 

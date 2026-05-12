@@ -196,6 +196,66 @@ describe("handleListAgents", () => {
     expect(body[1].criticalFailure).toBeNull();
   });
 
+  // DX-298 — agents.<name>.broken landed in P1 (DX-292) on the
+  // settings schema; the dashboard banner depends on the field flowing
+  // through the GET response untouched. This pins the contract: the
+  // snapshot serializer must not strip or reshape `broken`.
+  it("preserves the agents.<name>.broken field intact in the snapshot response (DX-298 dashboard read path)", async () => {
+    const brokenRec = {
+      reason: "Rebase conflict couldn't be auto-resolved on origin/main",
+      suggested_steps: [
+        "SSH to the worker host",
+        "Resolve manually then push",
+      ],
+      set_at: "2026-05-12T07:00:00Z",
+    };
+    mockReadSettings.mockImplementation((path: string) =>
+      path === "/repos/danxbot"
+        ? {
+            ...settings(),
+            agents: {
+              alice: {
+                type: "agent",
+                bio: "broken alice",
+                capabilities: ["issue-worker"],
+                schedule: {
+                  tz: "America/Chicago",
+                  always_on: false,
+                  mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+                },
+                enabled: true,
+                broken: brokenRec,
+                created_at: "2026-05-08T12:00:00Z",
+                updated_at: "2026-05-12T07:00:00Z",
+              },
+              bob: {
+                type: "agent",
+                bio: "healthy bob",
+                capabilities: ["issue-worker"],
+                schedule: {
+                  tz: "America/Chicago",
+                  always_on: false,
+                  mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [],
+                },
+                enabled: true,
+                broken: null,
+                created_at: "2026-05-08T12:00:00Z",
+                updated_at: "2026-05-08T12:00:00Z",
+              },
+            },
+          }
+        : settings(),
+    );
+
+    const res = createMockRes();
+    await handleListAgents(res, deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body[0].settings.agents.alice.broken).toEqual(brokenRec);
+    expect(body[0].settings.agents.bob.broken).toBeNull();
+  });
+
   it("renders snapshots with issuePrefix=null when loadIssuePrefix throws (config missing/corrupt)", async () => {
     mockLoadIssuePrefix.mockImplementation((path: string) => {
       if (path === "/repos/danxbot") throw new Error("config.yml missing");

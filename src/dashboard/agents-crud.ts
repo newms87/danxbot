@@ -243,12 +243,19 @@ export async function handlePatchAgent(
         if (!record) {
           throw new MutateError(404, `agent "${agentName}" not found`);
         }
+        // DX-298: `broken: null` clears a worker-stamped broken record
+        // ("Mark Resolved" on the dashboard). The validator's literal
+        // `broken?: null` typing makes only two states reachable on
+        // the parsed result — `null` (clear) and `undefined` (absent /
+        // preserve). Non-null populated records were rejected upstream
+        // and cannot land here.
         const updated: AgentRecord = {
           ...record,
           bio: f.bio ?? record.bio,
           capabilities: f.capabilities ?? record.capabilities,
           schedule: f.schedule ?? record.schedule,
           enabled: f.enabled ?? record.enabled,
+          broken: f.broken === null ? null : record.broken,
           updated_at: new Date().toISOString(),
         };
         current[agentName] = updated;
