@@ -43,6 +43,23 @@ const blockedByCard = computed(
 // owned by that panel; this banner is the cue + scroll trigger only.
 const requiresHuman = computed(() => props.issue.requires_human);
 
+// DX-267 — header rollup line on Epics. "<N> phase(s) need human
+// action" surfaces beside the title when any of the epic's phase
+// children is flagged. Reads the backend-computed
+// `requires_human_child_count` so SSE `issue:updated` events that
+// reproject the IssueDetail keep the count live without a SPA-side
+// recompute. Hidden on non-Epic cards (per AC #3) and when count = 0.
+const requiresHumanChildCount = computed(
+  () => props.issue.requires_human_child_count,
+);
+const showRequiresHumanChildren = computed(
+  () => props.issue.type === "Epic" && requiresHumanChildCount.value > 0,
+);
+const requiresHumanChildrenText = computed(() => {
+  const n = requiresHumanChildCount.value;
+  return `${n} ${n === 1 ? "phase needs" : "phases need"} human action`;
+});
+
 function scrollToPanel(): void {
   const el = document.getElementById("requires-human-panel");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -183,6 +200,14 @@ function onTitleKeydown(e: KeyboardEvent): void {
       <span aria-hidden="true">👤</span>
       Requires human action — see panel below
     </button>
+    <div
+      v-if="showRequiresHumanChildren"
+      class="requires-human-children-line"
+      data-test="drawer-rh-children-line"
+    >
+      <span aria-hidden="true">👤</span>
+      {{ requiresHumanChildrenText }}
+    </div>
     <div v-if="issue.assigned_agent" class="agent-row">
       <button
         type="button"
@@ -395,5 +420,17 @@ function onTitleKeydown(e: KeyboardEvent): void {
 }
 .requires-human-banner:hover {
   background: rgb(249 115 22 / 0.2);
+}
+.requires-human-children-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fdba74;
+  background: rgb(249 115 22 / 0.08);
+  border: 1px solid rgb(249 115 22 / 0.25);
 }
 </style>

@@ -51,6 +51,7 @@ function makeListItem(overrides: Partial<IssueListItem> = {}): IssueListItem {
     position: null,
     assigned_agent: null,
     requires_human: null,
+    requires_human_child_count: 0,
     ...overrides,
   };
 }
@@ -99,12 +100,13 @@ describe("IssueCard — requires_human indicators", () => {
     expect(title.endsWith("…")).toBe(true);
   });
 
-  it("does NOT render the children rollup chip when no children are flagged", () => {
+  it("does NOT render the children rollup chip when count = 0", () => {
     const w = mountCard(
       makeListItem({
         type: "Epic",
         children: ["DX-2"],
         children_detail: [{ ...baseChild, requires_human: false }],
+        requires_human_child_count: 0,
       }),
     );
     expect(
@@ -112,7 +114,10 @@ describe("IssueCard — requires_human indicators", () => {
     ).toBe(false);
   });
 
-  it("renders '👤 N' children rollup chip with the flagged-child count", () => {
+  // DX-267 — chip reads the backend-computed count (issue:updated SSE
+  // carries the same number, so the chip stays live without inline
+  // recomputation).
+  it("renders '👤 N' children rollup chip from the backend count when Epic", () => {
     const w = mountCard(
       makeListItem({
         type: "Epic",
@@ -122,9 +127,77 @@ describe("IssueCard — requires_human indicators", () => {
           { ...baseChild, id: "DX-3", requires_human: true },
           { ...baseChild, id: "DX-4", requires_human: false },
         ],
+        requires_human_child_count: 2,
       }),
     );
     const chip = w.get("[data-test='requires-human-children-chip']");
     expect(chip.text()).toBe("👤 2");
+    expect(chip.attributes("title")).toBe("2 phases need human action");
+  });
+
+  it("uses singular 'phase needs' in the tooltip when count = 1", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        children: ["DX-2"],
+        children_detail: [{ ...baseChild, requires_human: true }],
+        requires_human_child_count: 1,
+      }),
+    );
+    const chip = w.get("[data-test='requires-human-children-chip']");
+    expect(chip.text()).toBe("👤 1");
+    expect(chip.attributes("title")).toBe("1 phase needs human action");
+  });
+
+  // AC #2 — chip is Epic-only. Non-Epic parents with flagged children
+  // do not surface the rollup (the data flows through the payload, the
+  // SPA just gates the render).
+  it("does NOT render the children rollup chip on non-Epic parents (count > 0 ignored)", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Feature", // explicitly non-Epic
+        children: ["DX-2"],
+        children_detail: [{ ...baseChild, requires_human: true }],
+        requires_human_child_count: 1,
+      }),
+    );
+    expect(
+      w.find("[data-test='requires-human-children-chip']").exists(),
+    ).toBe(false);
+  });
+
+  // DX-267 live-update — when the backend recomputes
+  // `requires_human_child_count` and the SSE pipeline pushes a fresh
+  // IssueListItem into the prop, the chip re-renders within one tick.
+  it("re-renders the chip count when the prop's requires_human_child_count updates", async () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        children: ["DX-2", "DX-3"],
+        children_detail: [
+          { ...baseChild, id: "DX-2", requires_human: false },
+          { ...baseChild, id: "DX-3", requires_human: false },
+        ],
+        requires_human_child_count: 0,
+      }),
+    );
+    expect(
+      w.find("[data-test='requires-human-children-chip']").exists(),
+    ).toBe(false);
+
+    await w.setProps({
+      issue: makeListItem({
+        type: "Epic",
+        children: ["DX-2", "DX-3"],
+        children_detail: [
+          { ...baseChild, id: "DX-2", requires_human: true },
+          { ...baseChild, id: "DX-3", requires_human: false },
+        ],
+        requires_human_child_count: 1,
+      }),
+    });
+
+    const chip = w.get("[data-test='requires-human-children-chip']");
+    expect(chip.text()).toBe("👤 1");
   });
 });

@@ -47,6 +47,7 @@ function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
   };
   return base;

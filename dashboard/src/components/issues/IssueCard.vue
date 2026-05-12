@@ -52,10 +52,13 @@ const childrenLabel = computed(() => (isEpic.value ? "phases" : "children"));
 
 // DX-239 / P8 of DX-231 — `requires_human` indicators on the card.
 // Two surfaces: the 👤 chip on the card itself (when this card has the
-// field set), and an aggregated "👤 N" chip when ANY of the card's
-// children is flagged (epic-level rollup). Tooltip on the self-chip
+// field set), and an Epic-level aggregated "👤 N" chip (DX-267) when
+// any of the epic's phase children is flagged. Tooltip on the self-chip
 // truncates the reason at 80 chars to fit Trello-card width without
-// reflow.
+// reflow. The rollup count is read from the backend payload
+// (`requires_human_child_count`) instead of derived inline so the SSE
+// `issue:updated` pipeline can refresh the badge from the same source
+// the backend computes — single source of truth, no SPA-side divergence.
 const requiresHuman = computed(() => props.issue.requires_human);
 const requiresHumanTooltip = computed(() => {
   const r = requiresHuman.value;
@@ -63,7 +66,13 @@ const requiresHumanTooltip = computed(() => {
   return r.reason.length > 80 ? `${r.reason.slice(0, 77)}…` : r.reason;
 });
 const requiresHumanChildCount = computed(
-  () => childrenDetail.value.filter((c) => c.requires_human).length,
+  () => props.issue.requires_human_child_count,
+);
+// AC #2: only Epic cards surface the rollup chip. Non-Epic parents
+// (rare, but supported by the data model) get the count emitted on
+// their payload too — they just don't render it.
+const showRequiresHumanChildrenChip = computed(
+  () => isEpic.value && requiresHumanChildCount.value > 0,
 );
 
 function onParentClick(e: MouseEvent): void {
@@ -94,9 +103,9 @@ function onParentClick(e: MouseEvent): void {
         {{ childrenDetail.length }} {{ childrenLabel }}
       </span>
       <span
-        v-if="requiresHumanChildCount > 0"
+        v-if="showRequiresHumanChildrenChip"
         class="requires-human-children-chip"
-        :title="`${requiresHumanChildCount} ${childrenLabel.slice(0, -1)}${requiresHumanChildCount === 1 ? '' : 's'} require human action`"
+        :title="`${requiresHumanChildCount} ${requiresHumanChildCount === 1 ? 'phase needs' : 'phases need'} human action`"
         data-test="requires-human-children-chip"
       >👤 {{ requiresHumanChildCount }}</span>
       <span
