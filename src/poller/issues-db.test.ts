@@ -350,6 +350,66 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
   );
 
   it.skipIf(!handle)(
+    "defaults conflict_on to [] on a pre-v7 row missing the field",
+    async () => {
+      // Pre-v7 row — JSONB has no `conflict_on` key. effectiveConflictOn
+      // iterates `issue.conflict_on` directly; if the loader doesn't
+      // default the field, the poller crashes with
+      // "TypeError: issue.conflict_on is not iterable" on every tick
+      // that calls listDispatchableYamls.
+      const v6 = {
+        schema_version: 6,
+        tracker: "memory",
+        id: "DX-V6",
+        external_id: "",
+        parent_id: null,
+        children: [],
+        dispatch: null,
+        status: "ToDo",
+        type: "Feature",
+        title: "v6",
+        description: "",
+        priority: 3,
+        position: null,
+        triage: {
+          expires_at: "",
+          reassess_hint: "",
+          last_status: "",
+          last_explain: "",
+          ice: { total: 0, i: 0, c: 0, e: 0 },
+          history: [],
+        },
+        ac: [],
+        comments: [],
+        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+        blocked: null,
+        waiting_on: null,
+        requires_human: null,
+        assigned_agent: null,
+        history: [],
+        // conflict_on intentionally absent — pre-v7 shape
+      };
+      const contentHash = sha256(canonicalize(v6));
+      await handle!.pool.query(
+        `INSERT INTO issues (repo_name, data, content_hash, mirror_updated_at)
+         VALUES ($1, $2::jsonb, $3, now())`,
+        [REPO, JSON.stringify(v6), contentHash],
+      );
+
+      const loaded = await dbSelectIssueById(REPO, "DX-V6");
+      expect(loaded).not.toBeNull();
+      expect(loaded!.conflict_on).toEqual([]);
+      // Bug-class assertion: must be iterable. Crash mode was
+      // "for (const entry of issue.conflict_on)" against undefined.
+      expect(() => {
+        for (const _ of loaded!.conflict_on) {
+          void _;
+        }
+      }).not.toThrow();
+    },
+  );
+
+  it.skipIf(!handle)(
     "passes through _malformed rows untouched",
     async () => {
       const malformed = { id: "DX-M", _malformed: true, raw: "garbage" };

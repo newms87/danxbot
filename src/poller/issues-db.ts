@@ -96,6 +96,7 @@ function normalizeLoadedIssue(raw: unknown): Issue {
   if (!Array.isArray(obj.comments)) obj.comments = [];
   if (!Array.isArray(obj.history)) obj.history = [];
   if (!Array.isArray(obj.ac)) obj.ac = [];
+  if (!Array.isArray(obj.conflict_on)) obj.conflict_on = [];
   if (obj.waiting_on === undefined) obj.waiting_on = null;
   if (obj.blocked === undefined) obj.blocked = null;
   if (obj.requires_human === undefined) obj.requires_human = null;
