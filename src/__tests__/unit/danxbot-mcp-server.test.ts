@@ -3,6 +3,13 @@
  *
  * Tests the stdio JSON-RPC protocol handling and danxbot_complete tool.
  * Spawns the real server script as a child process to test the full protocol.
+ *
+ * DX-310: all per-`it()` testTimeouts and the inner `sendMessage`
+ * deadline were raised (most to 30s) because every test in this file
+ * cold-spawns `npx tsx serverScript`, and under parallel pool
+ * contention the original 5-15s deadlines slipped. The vitest config
+ * pool cap (`pool: "forks"`, `maxForks: 4`) handles the contention
+ * side; these in-file bumps are the test-body half of the same fix.
  */
 
 import {
@@ -27,6 +34,14 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "../../..");
 const tsxBin = resolve(projectRoot, "node_modules/.bin/tsx");
 const serverScript = resolve(projectRoot, "src/mcp/danxbot-server.ts");
+
+// DX-310: every test in this file cold-spawns `npx tsx serverScript`
+// inside `beforeEach`. Under the default vitest pool, parallel suites
+// oversubscribed CPU and the original 5-15s per-`it()` deadlines
+// slipped. 30s is generous enough to absorb worst-case contention
+// (~3-5s cold-start handshake) while still failing fast on a genuine
+// hang. Pair with `pool: "forks"` + `maxForks: 4` in vitest.config.ts.
+const TEST_TIMEOUT_MS = 30_000;
 
 /** Simple HTTP capture server that records stop requests */
 function createStopServer(): Promise<{
@@ -72,7 +87,13 @@ function sendMessage(
   message: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Timeout waiting for response")), 5_000);
+    // DX-310: 5s deadline raced the JSON-RPC roundtrip when this file
+    // ran in parallel with other subprocess-spawning suites under the
+    // default vitest pool. 30s is generous enough to absorb worst-case
+    // contention (`tsx serverScript` cold-start + stdio handshake)
+    // without masking a real hang — the per-`it()` testTimeout below
+    // still trips first if the test is genuinely stuck.
+    const timer = setTimeout(() => reject(new Error("Timeout waiting for response")), 30_000);
 
     let buffer = "";
     const onData = (data: Buffer) => {
@@ -132,7 +153,7 @@ describe("danxbot MCP server", () => {
     expect(result.capabilities).toBeDefined();
     expect((result.capabilities as Record<string, unknown>).tools).toBeDefined();
     expect(result.serverInfo).toMatchObject({ name: "danxbot" });
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("lists danxbot_complete tool via tools/list", async () => {
     // Initialize first
@@ -156,7 +177,7 @@ describe("danxbot MCP server", () => {
     expect(result.tools[0].name).toBe("danxbot_complete");
     expect(result.tools[0].description).toBeTruthy();
     expect(result.tools[0].inputSchema).toBeDefined();
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("calls danxbot_complete and POSTs to stop URL", async () => {
     await sendMessage(proc, {
@@ -186,7 +207,7 @@ describe("danxbot MCP server", () => {
     expect(stopServer.requests).toHaveLength(1);
     expect(stopServer.requests[0].status).toBe("completed");
     expect(stopServer.requests[0].summary).toBe("All tasks finished.");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("returns error for unknown tool", async () => {
     await sendMessage(proc, {
@@ -205,7 +226,7 @@ describe("danxbot MCP server", () => {
 
     expect(response.error).toBeDefined();
     expect((response.error as { message: string }).message).toContain("Unknown tool");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("responds to ping with empty result", async () => {
     const response = await sendMessage(proc, {
@@ -217,7 +238,7 @@ describe("danxbot MCP server", () => {
 
     expect(response.error).toBeUndefined();
     expect(response.result).toEqual({});
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("returns method-not-found for truly unknown methods", async () => {
     const response = await sendMessage(proc, {
@@ -229,7 +250,7 @@ describe("danxbot MCP server", () => {
 
     expect(response.error).toBeDefined();
     expect((response.error as { code: number }).code).toBe(-32601);
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("calls danxbot_complete with status failed and POSTs correctly", async () => {
     await sendMessage(proc, {
@@ -257,7 +278,7 @@ describe("danxbot MCP server", () => {
     expect(stopServer.requests).toHaveLength(1);
     expect(stopServer.requests[0].status).toBe("failed");
     expect(stopServer.requests[0].summary).toBe("Encountered fatal error.");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("danxbot MCP server — issue tools", () => {
@@ -377,7 +398,7 @@ describe("danxbot MCP server — issue tools", () => {
       expect.arrayContaining(["danxbot_complete", "danx_issue_create"]),
     );
     expect(names).not.toContain("danxbot_slack_reply");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("hides danx_issue_create when its URL is absent", async () => {
     proc = spawnIssueServer(stopServer.url, undefined);
@@ -405,7 +426,7 @@ describe("danxbot MCP server — issue tools", () => {
     };
     const names = result.tools.map((t) => t.name);
     expect(names).not.toContain("danx_issue_create");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("calls danx_issue_create → POSTs to create URL → forwards worker JSON", async () => {
     proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
@@ -443,7 +464,7 @@ describe("danxbot MCP server — issue tools", () => {
       external_id: "mem-42",
     });
     expect(issueServer.createRequests[0].body).toEqual({ filename: "draft" });
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("forwards a worker non-2xx as a JSON-RPC error", async () => {
     proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
@@ -472,7 +493,7 @@ describe("danxbot MCP server — issue tools", () => {
     });
     expect(response.error).toBeDefined();
     expect((response.error as { message: string }).message).toContain("500");
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("returns created:false body verbatim on 200 response (validation failure)", async () => {
     proc = spawnIssueServer(stopServer.url, issueServer.createUrl);
@@ -509,7 +530,7 @@ describe("danxbot MCP server — issue tools", () => {
       created: false,
       errors: ["missing required field: title"],
     });
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 
   it("rejects danx_issue_create when called without DANXBOT_ISSUE_CREATE_URL", async () => {
     proc = spawnIssueServer(stopServer.url, undefined);
@@ -542,7 +563,7 @@ describe("danxbot MCP server — issue tools", () => {
     expect((response.error as { message: string }).message).toContain(
       "DANXBOT_ISSUE_CREATE_URL",
     );
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
@@ -691,7 +712,7 @@ describe("danxbot MCP server — DX-242 DB fallback (real pg)", () => {
         await pool.end();
       }
     },
-    20_000,
+    TEST_TIMEOUT_MS,
   );
 });
 
@@ -798,7 +819,7 @@ describe("danxbot MCP server — DX-242 fallback chain", () => {
     } finally {
       proc.kill("SIGTERM");
     }
-  }, 15_000);
+  }, TEST_TIMEOUT_MS);
 
   it("fails loud when no fallback paths are configured (worker down + no fallback context)", async () => {
     const proc = spawn(tsxBin, [serverScript], {
@@ -848,7 +869,7 @@ describe("danxbot MCP server — DX-242 fallback chain", () => {
     } finally {
       proc.kill("SIGTERM");
     }
-  }, 15_000);
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("danxbot MCP server — startup error", () => {
@@ -864,7 +885,7 @@ describe("danxbot MCP server — startup error", () => {
     });
 
     expect(exitCode).toBe(1);
-  }, 10_000);
+  }, TEST_TIMEOUT_MS);
 });
 
 describe("danxbot MCP server — stop API failure", () => {
@@ -915,5 +936,5 @@ describe("danxbot MCP server — stop API failure", () => {
       proc.kill("SIGTERM");
       await errorServer.close();
     }
-  }, 15_000);
+  }, TEST_TIMEOUT_MS);
 });

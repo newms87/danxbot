@@ -267,14 +267,24 @@ describe("probeMcpServer", () => {
     // it has executed `writeFileSync(pidFile, ...)` (DX-317 — failure shape
     // ENOENT on the pid file). 3s is empirically sufficient for node -e to
     // load + dump a string under any load this repo's suite produces.
+    // DX-310 also raised this deadline (originally to 2s) for the same
+    // root cause; DX-317's 3s strictly supersedes that bump.
     const pidFile = join(tempDir, "hang.pid");
+    const start = Date.now();
     const result = await probeMcpServer(
       "silent",
       configFor(pidMarkerHangServer(pidFile)),
       3_000,
     );
+    const elapsed = Date.now() - start;
 
     expect(result.ok).toBe(false);
+    // DX-310: pin the "probe is timely" semantic the 500ms deadline
+    // originally encoded — the probe MUST return within ~3x the
+    // deadline (kill grace + reap) even with the bumped deadline.
+    // Without this, a future bug where the probe waits indefinitely
+    // for child exit would pass under the more lenient 2s deadline.
+    expect(elapsed).toBeLessThan(6_000);
 
     const fs = await import("node:fs");
     // Poll for the pid file in case the filesystem write hasn't flushed yet —

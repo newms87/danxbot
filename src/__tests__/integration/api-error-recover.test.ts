@@ -144,9 +144,15 @@ function captureServerPort(): number {
 }
 
 /** Poll the capture server until a request matching `pred` lands or timeout. */
+// DX-310: bumped from 12s to 25s (and the per-call sites from 15s to 30s)
+// because this file's it.each() variant runs three back-to-back agent
+// spawns under contention with other subprocess-heavy suites; the
+// third iteration's recover-handler POST consistently slipped past the
+// old 15s under default-pool parallelism. The per-`it()` 30s
+// testTimeout still trips first on a genuine hang.
 function waitForRequest(
   pred: (r: { method: string; path: string; body: string }) => boolean,
-  timeoutMs = 12_000,
+  timeoutMs = 25_000,
 ): Promise<{ method: string; path: string; body: string }> {
   return new Promise((resolveP, rejectP) => {
     const deadline = setTimeout(() => {
@@ -287,11 +293,13 @@ describe("Integration: API-error auto-recover pipeline (DX-261)", () => {
     });
 
     // Wait for the recover handler's POST to land on the capture server.
-    // 12s budget covers watcher poll (5s) + detector confirmation (5s)
-    // + handler awaits + HTTP roundtrip.
+    // DX-310: 30s budget (was 15s) absorbs cold-spawn `tsx fake-claude`
+    // handshake under parallel pool contention; watcher poll (5s) +
+    // detector confirmation (5s) + handler awaits + HTTP roundtrip
+    // still complete in <10s on an idle host.
     const resumeReq = await waitForRequest(
       (r) => r.method === "POST" && r.path === "/api/resume",
-      15_000,
+      30_000,
     );
 
     // Body shape — the chain-stamping fields the dashboard reads on the
@@ -332,7 +340,7 @@ describe("Integration: API-error auto-recover pipeline (DX-261)", () => {
 
       const resumeReq = await waitForRequest(
         (r) => r.method === "POST" && r.path === "/api/resume",
-        15_000,
+        30_000,
       );
       const body = JSON.parse(resumeReq.body);
 
