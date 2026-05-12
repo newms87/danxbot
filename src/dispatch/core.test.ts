@@ -1076,6 +1076,82 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
     expect(opts.dispatch).toEqual(meta);
   });
 
+  it("DX-296: dispatchKind plumbs from DispatchInput → spawnAgent options on the initial spawn (route reads it via getActiveJob.dispatchKind)", async () => {
+    // The route's lifecycle decision keys off `AgentJob.dispatchKind`,
+    // which is stamped at construction time by `runSpawnPreflight` from
+    // `SpawnAgentOptions.dispatchKind`. A regression that drops the
+    // value anywhere in the chain (DispatchInput → core → spawnAgent →
+    // job) would silently demote prep dispatches to work-mode and
+    // break the entire 2-tick separate-mode protocol.
+    await dispatch({
+      repo: testRepo,
+      task: "prep then work",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      dispatchKind: "prep",
+    });
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    const opts = mockSpawnAgent.mock.calls[0][0] as {
+      dispatchKind: "prep" | "work" | undefined;
+    };
+    expect(opts.dispatchKind).toBe("prep");
+  });
+
+  it("DX-296: dispatchKind=undefined is preserved as undefined to spawnAgent (non-multi-agent-pick callers — Slack, ideator, external launches)", async () => {
+    await dispatch({
+      repo: testRepo,
+      task: "non-prep dispatch",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      // dispatchKind omitted — Slack/ideator/external paths.
+    });
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(1);
+    const opts = mockSpawnAgent.mock.calls[0][0] as {
+      dispatchKind: "prep" | "work" | undefined;
+    };
+    expect(opts.dispatchKind).toBeUndefined();
+  });
+
+  it("DX-296: dispatchKind survives stall-recovery respawn (the route still needs the discriminator after a respawn — `getActiveJob` reads from the same module-scoped registry)", async () => {
+    // The respawn path forwards `dispatchKind` unconditionally because
+    // the route reads it from the same `activeJobs` slot. A respawn
+    // that dropped the field would leave the route's `getActiveJob(
+    // dispatchId)?.dispatchKind` returning undefined → defensive
+    // keep-running on `ok` even when the dispatch was prep-only →
+    // separate-mode broken on the very first stall recovery.
+    mockedConfig.isHost = true;
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("initial"));
+    mockSpawnAgent.mockResolvedValueOnce(makeStallReadyJob("respawn"));
+
+    await dispatch({
+      repo: testRepo,
+      task: "prep dispatch with stall",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      statusUrl: "https://forwarder.example/status",
+      apiToken: "tok-stall",
+      dispatchKind: "prep",
+    });
+
+    expect(capturedStallOpts).toHaveLength(1);
+    await capturedStallOpts[0].onStall();
+
+    expect(mockSpawnAgent).toHaveBeenCalledTimes(2);
+    const initialOpts = mockSpawnAgent.mock.calls[0][0] as {
+      dispatchKind: "prep" | "work" | undefined;
+    };
+    const respawnOpts = mockSpawnAgent.mock.calls[1][0] as {
+      dispatchKind: "prep" | "work" | undefined;
+    };
+    expect(initialOpts.dispatchKind).toBe("prep");
+    expect(respawnOpts.dispatchKind).toBe("prep");
+  });
+
   it("does NOT pass dispatch on stall-recovery respawn — only the initial spawn records the dispatch row", async () => {
     // Stall-recovery respawns reuse the same dispatchId in `activeJobs`
     // and must NOT create a second row for the same conceptual run. Forgetting

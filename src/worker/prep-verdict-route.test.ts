@@ -79,8 +79,11 @@ function makeDispatch(over: Partial<Dispatch> = {}): Dispatch {
   };
 }
 
-/** Build a minimal AgentJob stub. The route only uses `stop` + `prepVerdict`. */
-function makeJobStub() {
+/**
+ * Build a minimal AgentJob stub. The route uses `stop`, `prepVerdict`,
+ * and (DX-296) `dispatchKind` for the verdict=ok lifecycle decision.
+ */
+function makeJobStub(dispatchKind?: "prep" | "work") {
   const stop = vi.fn(async () => undefined);
   const job = {
     id: "dispatch-1",
@@ -94,6 +97,7 @@ function makeJobStub() {
       cache_creation_input_tokens: 0,
     },
     recoverCount: 0,
+    dispatchKind,
     stop,
   } as unknown as AgentJob;
   return { job, stop };
@@ -225,8 +229,8 @@ describe("handlePrepVerdict — ok verdict", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("combined mode → does NOT call job.stop; agent continues into work", async () => {
-    const { job, stop } = makeJobStub();
+  it("dispatchKind=work → does NOT call job.stop; agent continues into /danx-next", async () => {
+    const { job, stop } = makeJobStub("work");
     const req = createMockReqWithBody("POST", {
       verdict: "ok",
       reason: "no conflicts",
@@ -235,7 +239,6 @@ describe("handlePrepVerdict — ok verdict", () => {
     await handlePrepVerdict(req, res, "dispatch-1", repo, {
       getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
       getJob: vi.fn().mockReturnValue(job),
-      getMode: vi.fn().mockReturnValue("combined"),
     });
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody());
@@ -245,8 +248,8 @@ describe("handlePrepVerdict — ok verdict", () => {
     expect(job.prepVerdict).toEqual({ verdict: "ok", reason: "no conflicts" });
   });
 
-  it("separate mode → calls job.stop('completed', ...)", async () => {
-    const { job, stop } = makeJobStub();
+  it("dispatchKind=prep → calls job.stop('completed', ...) so the next tick can dispatch the work pass", async () => {
+    const { job, stop } = makeJobStub("prep");
     const req = createMockReqWithBody("POST", {
       verdict: "ok",
       reason: "no conflicts",
@@ -255,14 +258,36 @@ describe("handlePrepVerdict — ok verdict", () => {
     await handlePrepVerdict(req, res, "dispatch-1", repo, {
       getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
       getJob: vi.fn().mockReturnValue(job),
-      getMode: vi.fn().mockReturnValue("separate"),
     });
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody()).dispatchTerminal).toBe("completed");
     expect(stop).toHaveBeenCalledWith(
       "completed",
-      expect.stringMatching(/prep ok \(separate mode\)/),
+      expect.stringMatching(/prep ok \(prep-only dispatch\)/),
     );
+  });
+
+  it("dispatchKind=undefined (non-multi-agent-pick caller) → defensive keep-running on ok", async () => {
+    // Slack / ideator / external /api/launch paths leave dispatchKind
+    // unset. Those callers never INVOKE `/danx-prep`, so a verdict=ok
+    // arriving on one is a misconfiguration, not a normal path. Route
+    // must not finalize the dispatch — that would silently kill a
+    // non-prep run. Defense in depth; the route also log.warns the
+    // misconfig (not asserted here — covered by logger interaction
+    // tests separately).
+    const { job, stop } = makeJobStub(undefined);
+    const req = createMockReqWithBody("POST", {
+      verdict: "ok",
+      reason: "no conflicts",
+    });
+    const res = createMockRes();
+    await handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+      getJob: vi.fn().mockReturnValue(job),
+    });
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody()).dispatchTerminal).toBeUndefined();
+    expect(stop).not.toHaveBeenCalled();
   });
 });
 
@@ -700,7 +725,6 @@ describe("handlePrepVerdict — prepVerdict stash on AgentJob", () => {
     await handlePrepVerdict(req, res, "dispatch-1", repo, {
       getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
       getJob: vi.fn().mockReturnValue(undefined),
-      getMode: vi.fn().mockReturnValue("combined"),
     });
     // No throw, side-effect applied where applicable, response 200.
     expect(res._getStatusCode()).toBe(200);

@@ -1227,10 +1227,10 @@ describe("picker single-flight mutex (DX-305)", () => {
       runPicker: picker,
     });
 
-    const directFn = vi.fn().mockResolvedValue({ dispatched: 3, conflictBlocked: 0 });
+    const directFn = vi.fn().mockResolvedValue({ dispatched: 3 });
     const guarded = await runWithPickerMutex(repo.name, directFn);
 
-    expect(guarded).toEqual({ ran: true, value: { dispatched: 3, conflictBlocked: 0 } });
+    expect(guarded).toEqual({ ran: true, value: { dispatched: 3 } });
     expect(directFn).toHaveBeenCalledTimes(1);
 
     // Mutex released — a subsequent reconcile poke fires the registered picker.

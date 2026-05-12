@@ -123,6 +123,12 @@ export async function runSpawnPreflight(
     // zero default keeps the type-system invariant intact for any
     // mocked-runtime-fork paths that bypass that overwrite.
     recoverCount: 0,
+    // DX-296 — stamped BEFORE the agent spawns so the prep-verdict
+    // route's `getActiveJob(dispatchId)?.dispatchKind` lookup is
+    // race-free. The agent's first MCP call could otherwise land
+    // before any post-spawn picker code had a chance to stamp the
+    // field.
+    dispatchKind: options.dispatchKind,
   };
 
   const env = buildCleanEnv(options.env);

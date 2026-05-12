@@ -42,6 +42,7 @@ import {
   terminateWithGrace,
   type AgentJob,
 } from "../agent/launcher.js";
+import type { DispatchKind } from "../agent/agent-types.js";
 import type { YamlPairedWrite } from "../agent/paired-host-pid-write.js";
 import { TerminalOutputWatcher } from "../agent/terminal-output-watcher.js";
 import { StallDetector } from "../agent/stall-detector.js";
@@ -456,6 +457,15 @@ export interface DispatchInput {
    * direct launches.
    */
   parentRecoverId?: string | null;
+  /**
+   * DX-296 — see `AgentJob.dispatchKind` / `DispatchKind`. The
+   * multi-agent picker (`src/poller/multi-agent-pick.ts`) sets this
+   * on every dispatch spawned for a card; every other caller
+   * (Slack, ideator, external `/api/launch`) leaves it undefined so
+   * the prep-verdict route never accidentally short-circuits a
+   * non-prep dispatch.
+   */
+  dispatchKind?: DispatchKind;
 }
 
 export interface DispatchResult {
@@ -730,6 +740,10 @@ async function runResolved(
           workerPort: recoverCtx.workerPort,
           repoLocalPath: recoverCtx.repoLocalPath,
         },
+        // DX-296 — pass through on initial AND respawn so stall-recovery
+        // respawns don't lose the discriminator (the route still reads
+        // it from `getActiveJob` after a respawn).
+        dispatchKind: input.dispatchKind,
         // Per-dispatch MCP settings path (DX-207). On the initial spawn
         // this lands on the row via `startDispatchTracking` →
         // `insertDispatch`. On respawn `dispatch` is undefined →

@@ -96,7 +96,7 @@ function makeDispatch(over: Partial<Dispatch> = {}): Dispatch {
   };
 }
 
-function makeJobStub() {
+function makeJobStub(dispatchKind?: "prep" | "work") {
   const stop = vi.fn(async () => undefined);
   const job = {
     id: "dispatch-1",
@@ -110,6 +110,7 @@ function makeJobStub() {
       cache_creation_input_tokens: 0,
     },
     recoverCount: 0,
+    dispatchKind,
     stop,
   } as unknown as AgentJob;
   return { job, stop };
@@ -141,7 +142,7 @@ interface Harness {
   url: (dispatchId: string) => string;
   setStop: (fn: ReturnType<typeof vi.fn>) => void;
   setBroken: ReturnType<typeof vi.fn>;
-  setMode: (mode: "combined" | "separate") => void;
+  setDispatchKind: (kind: "prep" | "work") => void;
   close: () => Promise<void>;
 }
 
@@ -154,8 +155,12 @@ async function startHarness(): Promise<Harness> {
     issuePrefix: "DX",
   });
   const setBroken = vi.fn(async () => ({}) as never);
-  let mode: "combined" | "separate" = "combined";
-  const { job, stop } = makeJobStub();
+  // DX-296 — route's ok-branch decision now keys off
+  // `AgentJob.dispatchKind`, not the per-repo prepMode setting.
+  // Default to "work" so legacy assertions ("ok keeps the dispatch
+  // running") stay green; tests that need the prep-only branch flip
+  // it via setDispatchKind.
+  const { job, stop } = makeJobStub("work");
   // Allow tests to swap the stop spy without rebuilding the server.
   let currentStop: ReturnType<typeof vi.fn> = stop;
 
@@ -178,7 +183,6 @@ async function startHarness(): Promise<Harness> {
             return job;
           },
           setBroken: setBroken as unknown as typeof import("../../settings-file.js").setAgentBroken,
-          getMode: () => mode,
         });
         return;
       }
@@ -199,8 +203,8 @@ async function startHarness(): Promise<Harness> {
       currentStop = fn;
     },
     setBroken,
-    setMode: (m) => {
-      mode = m;
+    setDispatchKind: (kind) => {
+      (job as unknown as { dispatchKind: "prep" | "work" }).dispatchKind = kind;
     },
     close: async () => {
       await new Promise<void>((r) => server.close(() => r()));
@@ -293,11 +297,11 @@ describe("prep-verdict round-trip — MCP client → worker route", () => {
     );
   });
 
-  it("ok in combined mode: agent continues — no job.stop", async () => {
+  it("ok with dispatchKind=work: agent continues — no job.stop (combined-mode dispatch OR separate-mode self-claim work pass)", async () => {
     writeIssue(h.root, "DX-100");
     const stop = vi.fn(async () => undefined);
     h.setStop(stop);
-    h.setMode("combined");
+    h.setDispatchKind("work");
 
     await callDanxbotPrepVerdict(
       { verdict: "ok", reason: "no conflicts" },
@@ -307,11 +311,11 @@ describe("prep-verdict round-trip — MCP client → worker route", () => {
     expect(stop).not.toHaveBeenCalled();
   });
 
-  it("ok in separate mode: dispatch ends as completed", async () => {
+  it("ok with dispatchKind=prep: dispatch ends as completed (separate-mode prep-only first pass)", async () => {
     writeIssue(h.root, "DX-100");
     const stop = vi.fn(async () => undefined);
     h.setStop(stop);
-    h.setMode("separate");
+    h.setDispatchKind("prep");
 
     await callDanxbotPrepVerdict(
       { verdict: "ok", reason: "no conflicts" },
@@ -320,7 +324,7 @@ describe("prep-verdict round-trip — MCP client → worker route", () => {
 
     expect(stop).toHaveBeenCalledWith(
       "completed",
-      expect.stringMatching(/prep ok \(separate mode\)/),
+      expect.stringMatching(/prep ok \(prep-only dispatch\)/),
     );
   });
 

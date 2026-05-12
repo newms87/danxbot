@@ -1,43 +1,59 @@
 /**
  * Multi-agent pick + dispatch loop (DX-200 / multi-worker dispatch
- * epic DX-158 Phase 5).
+ * epic DX-158 Phase 5; rewired by DX-291 Phase 5 / DX-296).
  *
- * Glues together every Phase 1-4 deliverable into the per-tick path
- * the poller calls when its repo has at least one configured agent:
+ * Glues together every roster + worktree-validate + persona deliverable
+ * into the per-tick path the poller calls when its repo has at least
+ * one configured agent:
  *
  *   1. Read the agent roster from `<repo>/.danxbot/settings.json`
  *      (`readAgents`).
- *   2. Resolve the busy set (`busyAgents` — Phase 1's DB lookup).
+ *   2. Resolve the busy set (`busyAgents` — DB lookup).
  *   3. Resolve the per-card claim map (`assignedCards`).
- *   4. Resolve the in-progress sibling list (already in hand —
- *      `listInProgressYamls` ran upstream).
- *   5. Loop until either no free agent qualifies OR no unclaimed card
+ *   4. Loop until either no free agent qualifies OR no unclaimed card
  *      remains:
  *      a. `pickFreeAgent` — first eligible agent by name.
  *      b. `pickCardForAgent` — first unclaimed (or self-claimed) card.
- *      c. If at least one OTHER agent is in-progress AND
- *         `agentDefaults.conflictCheckEnabled !== false`, spawn a
- *         conflict-check dispatch (Phase 5's
- *         `runConflictCheck`). Conservative: any failure → treat as
- *         conflict.
- *      d. On conflict: stamp `blocked` on the candidate's YAML with
- *         `by: [<overlapping-id>]` and skip — the poller will not
- *         dispatch the card this tick. Operator can clear via the
- *         dashboard.
- *      e. On no-conflict: stamp `assigned_agent` on the candidate's
- *         YAML, then dispatch via `dispatchWithRecovery` (Phase 3's
- *         worktree-aware entry point that ALSO routes through Phase
- *         4's persona injection).
+ *      c. Pre-claim DB liveness guard.
+ *      d. Tracker dispatch lock acquire.
+ *      e. Stamp `assigned_agent` + `dispatch{}` on the candidate's
+ *         YAML.
+ *      f. Decide dispatch shape based on `getPrepMode(repo.localPath)`
+ *         and whether the card was already self-claimed by this agent
+ *         (DX-296):
+ *           - `combined` mode → ALWAYS dispatch combined shape
+ *             (`/danx-prep <id>` + `/danx-next <id>`); `dispatchKind:
+ *             "work"` so the prep-verdict route lets the agent
+ *             continue past `verdict: "ok"`.
+ *           - `separate` mode + fresh card (no pre-existing self-
+ *             claim) → dispatch prep-only shape (`/danx-prep <id>`);
+ *             `dispatchKind: "prep"` so the route stops on `verdict:
+ *             "ok"`. The next tick re-picks the card via the self-
+ *             claim branch (`assigned_agent` stays).
+ *           - `separate` mode + self-claim by THIS agent → dispatch
+ *             combined shape; `dispatchKind: "work"`. This is the
+ *             work-pass dispatch that follows the prep pass.
+ *      g. Dispatch via `dispatchWithRecovery` (worktree-aware entry
+ *         point that routes through persona injection).
+ *
+ * Why no in-picker conflict-check call anymore: the prep agent (Phase
+ * 4 / DX-295) runs the file-overlap reasoning DIRECTLY on the agent's
+ * worktree as the first step of every dispatch. The legacy
+ * `runConflictCheck` precursor and its `applyConflictVerdict` YAML
+ * stamp path are retired — `conflict_on[]` stamping is now done by
+ * the prep-verdict worker route (DX-294) when the agent emits
+ * `verdict: "conflict_on"`. The picker just dispatches and lets the
+ * verdict shape the outcome.
  *
  * Returns the count of successfully-dispatched agents on this tick (0
  * when no agent was eligible, no card was available, or every
- * candidate was conflict-blocked). The caller decides whether to
- * proceed with downstream legacy-flow logic or short-circuit.
+ * candidate hit a guard). The caller decides whether to proceed with
+ * downstream legacy-flow logic or short-circuit.
  *
  * Why a separate module: the per-tick orchestration in `index.ts` is
  * already long; isolating the multi-agent branch keeps the two paths
  * independently auditable. A repo with zero configured agents skips
- * this module entirely and behaves like Phase 4 / pre-Phase-5.
+ * this module entirely.
  *
  * Why no `state.teamRunning` mutation: the multi-agent branch
  * intentionally allows N concurrent dispatches per tick. Each
@@ -51,8 +67,6 @@ import { randomUUID } from "node:crypto";
 import { hostname as osHostname } from "node:os";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
-import { runConflictCheck } from "../dispatch/conflict-check.js";
-import { applyConflictVerdict } from "./apply-conflict-verdict.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
 import {
   buildLockHolderInfo,
@@ -68,11 +82,7 @@ import {
   quarantineAgent,
   quarantineCard,
 } from "../dispatch/quarantine.js";
-import {
-  assignedCards,
-  busyAgents,
-  liveDispatchIssueIds,
-} from "../agent/agent-locks.js";
+import { assignedCards, busyAgents } from "../agent/agent-locks.js";
 import { targetName } from "../config.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 // `createWorktreeManager` is intentionally imported lazily inside
@@ -83,12 +93,13 @@ import type { IssueTracker } from "../issue-tracker/interface.js";
 // Empty-roster repos pay zero cost; multi-agent integration tests
 // supply their own mock via `vi.mock("../agent/worktree-manager.js")`.
 import {
-  isConflictCheckEnabled,
+  getPrepMode,
   readAgents,
   type AgentRecordWithName,
 } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
+import type { DispatchKind } from "../agent/agent-types.js";
 import { pickCardForAgent, pickFreeAgent } from "./pick-agent.js";
 import {
   buildStartStamp,
@@ -124,12 +135,6 @@ export interface MultiAgentPickInput {
    */
   cards: readonly Issue[];
   /**
-   * Currently-in-progress siblings — input to the conflict-check
-   * spawn. The poller already computed this via `listInProgressYamls`
-   * earlier in the tick.
-   */
-  inProgress: readonly Issue[];
-  /**
    * Resolved tracker for this repo. The picker calls
    * `tryAcquireLock` BEFORE dispatching so a sibling worker (local
    * dev / production EC2) polling the same Trello card cannot
@@ -145,18 +150,12 @@ export interface MultiAgentPickInput {
 export interface MultiAgentPickResult {
   /** Count of dispatches successfully kicked off on this tick. */
   dispatched: number;
-  /**
-   * Count of (agent, card) pairs that were skipped because the
-   * conflict-check verdict was `ok: false`. Surfaced for the poller's
-   * log line.
-   */
-  conflictBlocked: number;
 }
 
 /**
  * Run the multi-agent pick + dispatch loop for one tick.
  *
- * No-op (returns `{dispatched: 0, conflictBlocked: 0}`) when:
+ * No-op (returns `{dispatched: 0}`) when:
  *   - `agents` map is empty (no roster).
  *   - No card is dispatchable.
  *   - No agent is free + in-schedule.
@@ -164,25 +163,47 @@ export interface MultiAgentPickResult {
  * Returns even when one or more dispatches failed to spawn — the
  * caller can re-tick on the next interval. Spawn failures are logged
  * and do not throw.
+ *
+ * **Per-tick prepMode read-once invariant:** `getPrepMode` is read
+ * exactly once at the top of the tick. Mid-tick mode flips
+ * (operator dashboard toggle landing while the loop is running) do
+ * NOT cause some cards in this tick to dispatch under combined-mode
+ * shape and others under separate-mode — every card in this tick
+ * sees the same mode.
+ *
+ * **Separate-mode crash recovery falls back to combined.** If a
+ * separate-mode prep-only dispatch crashes BEFORE emitting any
+ * verdict, the next tick re-pickup walks the self-claim branch and
+ * dispatches the COMBINED task body (kind=work) — so prep RE-RUNS as
+ * part of the work pass. Acceptable: the alternative would require a
+ * "did prep complete?" YAML field, which the description explicitly
+ * forbids ("Simpler state machine, no `prep_completed_at` field" —
+ * DX-291 phase 5). Cost is one extra prep run on a clean worktree
+ * (cheap by design).
  */
 export async function tryMultiAgentDispatch(
   input: MultiAgentPickInput,
 ): Promise<MultiAgentPickResult> {
-  const { repo, cards, inProgress, tracker, now } = input;
+  const { repo, cards, tracker, now } = input;
   const roster: AgentRecordWithName[] = readAgents(repo.localPath);
   if (roster.length === 0) {
     // No agents configured → caller falls through to the legacy
     // single-card dispatch path. NOT a no-op for the dispatch — the
     // single-card path still runs.
-    return { dispatched: 0, conflictBlocked: 0 };
+    return { dispatched: 0 };
   }
   if (cards.length === 0) {
-    return { dispatched: 0, conflictBlocked: 0 };
+    return { dispatched: 0 };
   }
 
   const busy = await busyAgents(repo.name);
   const assigned = await assignedCards(repo.name);
-  const conflictEnabled = isConflictCheckEnabled(repo.localPath);
+  // DX-296 — per-repo prep mode resolved ONCE per tick. Per-card
+  // dispatch shape decisions branch off this + the card's pre-existing
+  // `assigned_agent` so a separate-mode self-claim follow-up can use
+  // the combined shape (work pass) while the fresh first dispatch
+  // uses prep-only.
+  const prepMode = getPrepMode(repo.localPath);
 
   // Heal orphan/duplicate `assigned_agent` stamps BEFORE the picker loop.
   // Two failure modes the picker can't otherwise progress past:
@@ -233,7 +254,6 @@ export async function tryMultiAgentDispatch(
   // already cleared.
   const remainingCards = [...healedCards];
   let dispatched = 0;
-  let conflictBlocked = 0;
 
   // DX-306: tick-local set of agents to skip after a tracker error
   // (most commonly a Trello 429) on the lock-acquire path. Without this
@@ -341,74 +361,29 @@ export async function tryMultiAgentDispatch(
       }
     }
 
-    // Run the conflict-check precursor when other agents are
-    // working AND the operator hasn't disabled it.
-    //
-    // DX-262 follow-up — re-filter `inProgress` against the LIVE
-    // dispatches table right before the conflict-check spawn. The
-    // input list came from `listInProgressYamls` (status === "In
-    // Progress" — YAML truth) at the top of the tick; orphan YAMLs
-    // whose dispatch died outside the orderly completion path
-    // (worker OOM, operator DB cancel, broken-worktree sync abort,
-    // claude-auth fail) carry `In Progress` until reconcile resets
-    // them, which can be MANY ticks later. Without this filter the
-    // picker burns a conflict-check dispatch every tick against a
-    // ghost card. The filter also closes the slow-tick window where
-    // a sibling card moved Done between the top-of-tick read and the
-    // dispatch call. `liveDispatchIssueIds` is the cheap O(busy)
-    // query — no full table scan.
-    let liveInProgress: readonly Issue[] = inProgress;
-    if (inProgress.length > 0 && conflictEnabled) {
-      const liveIds = await liveDispatchIssueIds(repo.name);
-      liveInProgress = inProgress.filter((c) => liveIds.has(c.id));
-      if (liveInProgress.length < inProgress.length) {
-        const dropped = inProgress
-          .filter((c) => !liveIds.has(c.id))
-          .map((c) => c.id);
-        log.info(
-          `[${repo.name}] conflict-check: dropped ${dropped.length} stale in-progress YAML(s) with no live dispatch — ${dropped.join(", ")}`,
-        );
-      }
-    }
-    if (liveInProgress.length > 0 && conflictEnabled) {
-      const checkDispatchId = randomUUID();
-      const verdict = await runConflictCheck(
-        { repo, candidate: card, inProgress: liveInProgress },
-        { dispatch, dispatchId: checkDispatchId },
-      );
-      if (verdict.kind !== "ok") {
-        // v7 — conflict-check verdicts are PERSISTENTLY STAMPED on the
-        // candidate YAML so the next tick reads them from the DB and
-        // skips dispatch cheaply (no Sonnet call). Empty partner /
-        // wait_for arrays = transient skip (the conservativeTransient
-        // fallback inside runConflictCheck on timeout / malformed /
-        // spawn-fail). See DX-200 / DX-292↔DX-294 history: the cycle
-        // class came from auto-stamping waiting_on from a HEURISTIC
-        // file-overlap gate. v7 stamps from an EXPLICIT LLM verdict
-        // with rigorous gate + defensive cycle re-check below.
-        const stamped = await applyConflictVerdict(
-          repo,
-          card,
-          verdict,
-          liveInProgress,
-        );
-        if (stamped === "transient") {
-          log.warn(
-            `[${repo.name}] conflict-check skipped ${card.id} for ${agent.name} (will retry next tick): ${verdict.reason}`,
-          );
-        } else {
-          log.info(
-            `[${repo.name}] conflict-check stamped ${card.id} (${stamped}): ${verdict.reason}`,
-          );
-        }
-        remainingCards.splice(remainingCards.indexOf(card), 1);
-        conflictBlocked++;
-        continue;
-      }
-    }
+    // DX-296 — decide dispatch shape + kind BEFORE the YAML stamp so
+    // the in-memory `dispatchKind` discriminator is computed against
+    // the PRE-stamp `assigned_agent` (the YAML stamp below stamps it
+    // to `agent.name`, which would otherwise indistinguish "fresh
+    // claim this tick" from "self-claim follow-up tick" inside the
+    // route's lifecycle decision). Branch:
+    //   - combined mode → ALWAYS work; combined prompt shape.
+    //   - separate mode + pre-existing self-claim → work; combined
+    //     prompt shape (the work-pass dispatch follows the prep pass
+    //     run on the previous tick).
+    //   - separate mode + fresh card → prep; prep-only prompt shape.
+    const wasPreviouslyClaimedByThisAgent =
+      card.assigned_agent === agent.name;
+    const isPrepOnlyDispatch =
+      prepMode === "separate" && !wasPreviouslyClaimedByThisAgent;
+    const dispatchKind: DispatchKind = isPrepOnlyDispatch ? "prep" : "work";
 
     // Pre-generate the dispatch UUID + start stamp so the YAML carries
-    // the same id we hand to dispatch().
+    // the same id we hand to dispatch(). YAML's `dispatch.kind` stays
+    // `"work"` regardless — the YAML enum is for poller liveness +
+    // TTL, not for route flow control. The route reads
+    // `AgentJob.dispatchKind` from the live job for the ok-branch
+    // decision (DX-296).
     const dispatchId = randomUUID();
     const startStamp = buildStartStamp(dispatchId, "work", osHostname());
 
@@ -506,11 +481,18 @@ export async function tryMultiAgentDispatch(
       continue;
     }
 
-    // Pass the card id as the slash-command argument; the `danx-next` skill
-    // body owns the "edit the YAML, chokidar mirrors, call danxbot_complete"
-    // contract. Keeping the prompt minimal (persona + worktree + slash cmd +
-    // card id) trims static prose from every dispatch's system-prompt cache.
-    const task = `/danx-next ${stamped.id}`;
+    // DX-296 — task body branches on the dispatch shape:
+    //   - prep-only (separate mode, fresh card) → just `/danx-prep <id>`.
+    //     The skill emits a verdict; the route stops the dispatch on
+    //     `verdict: "ok"` because `dispatchKind === "prep"`.
+    //   - combined (combined mode, OR separate-mode self-claim follow-
+    //     up) → `/danx-prep <id>` followed by `/danx-next <id>`. The
+    //     route lets the dispatch run past `verdict: "ok"` because
+    //     `dispatchKind === "work"`, and the agent proceeds straight
+    //     into the work workflow in the same session.
+    const task = isPrepOnlyDispatch
+      ? `/danx-prep ${stamped.id}`
+      : `/danx-prep ${stamped.id}\n\n/danx-next ${stamped.id}`;
 
     try {
       await dispatchWithRecovery(
@@ -532,6 +514,12 @@ export async function tryMultiAgentDispatch(
           dispatchId,
           issueId: stamped.id,
           agent: { name: agent.name, bio: agent.bio },
+          // DX-296 — discriminator the prep-verdict route reads via
+          // `getActiveJob(dispatchId)?.dispatchKind` on every verdict
+          // POST. Stamped on `AgentJob` at construction time inside
+          // spawnAgent so it is race-free against the agent's first
+          // MCP call.
+          dispatchKind,
           // DX-241: dispatch() releases the tracker lock in its
           // onComplete chain (success + failure). Skipped for
           // locally-only cards (no external_id, no shared coordinate).
@@ -589,6 +577,29 @@ export async function tryMultiAgentDispatch(
               await clearDispatchAndWrite(repo.localPath, fresh);
             }
 
+            // DX-296 — branch the post-dispatch behaviour on the prep
+            // verdict + dispatch kind. The prep-verdict route already
+            // applied any YAML / settings side-effect for non-ok
+            // verdicts (`conflict_on[]` append, `Blocked` stamp,
+            // `agents.<name>.broken` stamp), so the picker MUST NOT
+            // run the card-progress check on those — the card was
+            // never expected to leave ToDo.
+            //
+            // Skip card-progress check when ANY of:
+            //   - prep verdict is non-ok (route already stamped the card).
+            //   - prep verdict is ok AND dispatchKind is "prep" (separate-
+            //     mode prep-only dispatch — work pass not yet started).
+            //
+            // Run the check otherwise (combined-mode work dispatch, or
+            // separate-mode self-claim work pass — both expect card
+            // progress). Skip when locally-only or recovery-mode (existing).
+            const verdict = job.prepVerdict;
+            const isPrepOnlyOk =
+              verdict?.verdict === "ok" && job.dispatchKind === "prep";
+            const isNonOkVerdict =
+              verdict !== undefined && verdict.verdict !== "ok";
+            const skipCardProgressForPrep = isPrepOnlyOk || isNonOkVerdict;
+
             // AC #4 of DX-219 — post-dispatch card-progress check +
             // CRITICAL_FAILURE halt ported into the multi-agent path.
             // Skip locally-only cards (no external_id, no tracker round-
@@ -603,7 +614,11 @@ export async function tryMultiAgentDispatch(
             // not card work) — the tracked card stays in ToDo by design
             // and writing CRITICAL_FAILURE would halt the poller for a
             // non-issue. See AgentJob.recoveryMode.
-            if (hasTrackerCoordinate(stamped) && !job.recoveryMode) {
+            if (
+              hasTrackerCoordinate(stamped) &&
+              !job.recoveryMode &&
+              !skipCardProgressForPrep
+            ) {
               await runPostDispatchProgressCheck({
                 repo,
                 cardId: stamped.external_id,
@@ -621,7 +636,16 @@ export async function tryMultiAgentDispatch(
             // counter — they are out-of-band branch hygiene, not card
             // work — so skip the post-dispatch failure accounting
             // entirely.
-            if (!job.recoveryMode) {
+            //
+            // DX-296 — also skip quarantine accounting on prep abort.
+            // The prep-verdict route already stamped
+            // `agents.<name>.broken` so the picker filters this agent
+            // out next tick; the card itself is innocent (the env was
+            // broken on the agent's worktree). Quarantining the card
+            // would punish a future healthy agent for an unrelated
+            // env failure.
+            const isPrepAbort = verdict?.verdict === "abort";
+            if (!job.recoveryMode && !isPrepAbort) {
               if (job.status === "completed") {
                 clearQuarantineForSuccess({
                   repoName: repo.name,
@@ -726,5 +750,5 @@ export async function tryMultiAgentDispatch(
     dispatched++;
   }
 
-  return { dispatched, conflictBlocked };
+  return { dispatched };
 }

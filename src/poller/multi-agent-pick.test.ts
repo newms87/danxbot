@@ -14,9 +14,6 @@ vi.mock("../dispatch/core.js", () => ({
 vi.mock("../dispatch/recovery-mode.js", () => ({
   dispatchWithRecovery: vi.fn(),
 }));
-vi.mock("../dispatch/conflict-check.js", () => ({
-  runConflictCheck: vi.fn(),
-}));
 // Stub the scheduler module so the multi-agent test doesn't drag in
 // the DB connection chain (`dashboard/dispatches-db.js` →
 // `db/connection.js` hard-requires DANXBOT_DB_*). The scheduler is the
@@ -81,7 +78,9 @@ vi.mock("./yaml-lifecycle.js", async () => {
     clearDispatchAndWrite: vi.fn(async (_p, issue) => ({
       ...issue,
       dispatch: null,
-      assigned_agent: null,
+      // assigned_agent stays — production preserves the stamp as
+      // durable audit + as the "self-claim" marker the picker reads
+      // on the next tick (see yaml-lifecycle.ts#clearDispatchAndWrite).
     })),
     loadLocal: vi.fn(async () => null),
     loadLocalFromDisk: vi.fn(() => null),
@@ -91,7 +90,6 @@ vi.mock("./yaml-lifecycle.js", async () => {
 
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
 import { renderLockComment } from "../issue-tracker/lock.js";
-import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
 import {
   guardLiveDispatchForCard,
@@ -100,9 +98,7 @@ import {
 import { _resetQuarantine } from "../dispatch/quarantine.js";
 import {
   clearDispatchAndWrite,
-  loadLocal,
   loadLocalFromDisk,
-  stampAssignedAgentAndWrite,
 } from "./yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
@@ -137,9 +133,15 @@ function fakeTracker(): IssueTracker {
 let tmpRepo: string;
 
 const mockedDispatchWithRecovery = vi.mocked(dispatchWithRecovery);
-const mockedRunConflictCheck = vi.mocked(runConflictCheck);
 
-function writeSettings(agents: Record<string, unknown>, conflictCheckEnabled?: boolean): void {
+interface WriteSettingsOptions {
+  prepMode?: "combined" | "separate";
+}
+
+function writeSettings(
+  agents: Record<string, unknown>,
+  opts: WriteSettingsOptions = {},
+): void {
   const settingsPath = join(tmpRepo, ".danxbot/settings.json");
   mkdirSync(join(tmpRepo, ".danxbot"), { recursive: true });
   const body: Record<string, unknown> = {
@@ -154,8 +156,8 @@ function writeSettings(agents: Record<string, unknown>, conflictCheckEnabled?: b
     agents,
     meta: { updatedAt: new Date().toISOString(), updatedBy: "worker" },
   };
-  if (conflictCheckEnabled !== undefined) {
-    body.agentDefaults = { conflictCheckEnabled };
+  if (opts.prepMode !== undefined) {
+    body.agentDefaults = { prepMode: opts.prepMode };
   }
   writeFileSync(settingsPath, JSON.stringify(body, null, 2));
 }
@@ -255,7 +257,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -278,7 +279,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards,
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -291,172 +291,6 @@ describe("tryMultiAgentDispatch", () => {
       expect(input.agent).toBeDefined();
       expect(worktree.agentName).toMatch(/^(alice|bob|charlie)$/);
     }
-  });
-
-  it("conflict-check ok=true → all candidates dispatched", async () => {
-    writeSettings({
-      alice: agentRecord("alice"),
-      bob: agentRecord("bob"),
-    });
-    // DX-262 follow-up — picker now intersects `inProgress` with the
-    // live-dispatch set before calling conflict-check. Tell the SQL
-    // handler that DX-99 has a live dispatch so the conflict-check
-    // path actually fires.
-    setAgentLocksQueryFn(async (sql) => {
-      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
-        return [{ issue_id: "DX-99" }] as never;
-      }
-      return [] as never;
-    });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-    mockedRunConflictCheck.mockResolvedValue({ kind: "ok", reason: "no overlap" });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [issue("DX-99", { status: "In Progress" })],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-    expect(result.dispatched).toBe(2);
-    expect(result.conflictBlocked).toBe(0);
-    expect(mockedRunConflictCheck).toHaveBeenCalledTimes(2);
-  });
-
-  it("conflict-check ok=false → candidate is blocked, NOT dispatched", async () => {
-    writeSettings({
-      alice: agentRecord("alice"),
-    });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-    mockedRunConflictCheck.mockResolvedValue({
-      kind: "conflict",
-      reason: "overlaps with launcher.ts",
-      partners: [{ id: "DX-141", reason: "shared launcher fn" }],
-    });
-
-    const yl = await import("./yaml-lifecycle.js");
-    vi.mocked(yl.loadLocal).mockResolvedValue(issue("DX-1"));
-
-    // DX-262 follow-up — picker only consults conflict-check when the
-    // YAML's in-progress status is backed by a LIVE dispatch row.
-    setAgentLocksQueryFn(async (sql) => {
-      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
-        return [{ issue_id: "DX-141" }] as never;
-      }
-      return [] as never;
-    });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1")],
-      inProgress: [issue("DX-141", { status: "In Progress" })],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-    expect(result.dispatched).toBe(0);
-    expect(result.conflictBlocked).toBe(1);
-    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
-    // Conflict-check rejection is a TRANSIENT per-tick gate. The
-    // overlap reason evaporates the moment the sibling leaves In
-    // Progress — picker re-evaluates next tick. Persisting via
-    // `waiting_on` (which clears only on TERMINAL deps) created stale
-    // stamps + cycles (DX-292 ↔ DX-294). Picker MUST NOT write to the
-    // YAML on conflict-check rejection.
-    expect(yl.writeIssue).not.toHaveBeenCalled();
-  });
-
-  it("DX-262 — stale in-progress YAML with no live dispatch is filtered out → conflict-check skipped, candidate dispatched", async () => {
-    // Orphan YAML left "In Progress" by a dispatch that died outside
-    // the orderly completion path (worker OOM, operator DB cancel,
-    // broken-worktree sync abort, claude-auth fail). The dispatches
-    // table has NO live row for DX-99 — without this filter the
-    // picker would burn a conflict-check triage every tick.
-    writeSettings({
-      alice: agentRecord("alice"),
-    });
-    // SQL handler returns empty for the live-issue-ids query →
-    // liveInProgress becomes empty → conflict-check skipped.
-    setAgentLocksQueryFn(async () => [] as never);
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1")],
-      inProgress: [issue("DX-99", { status: "In Progress" })],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-    expect(result.dispatched).toBe(1);
-    expect(result.conflictBlocked).toBe(0);
-    expect(mockedRunConflictCheck).not.toHaveBeenCalled();
-  });
-
-  it("DX-262 — partial overlap: only the live-dispatch in-progress card reaches conflict-check; stale one is dropped", async () => {
-    // Two YAMLs claim "In Progress" but only one has a live dispatch.
-    // Conflict-check sees ONLY the live one, not both.
-    writeSettings({
-      alice: agentRecord("alice"),
-    });
-    setAgentLocksQueryFn(async (sql) => {
-      if (sql.includes("FROM dispatches") && sql.includes("issue_id")) {
-        return [{ issue_id: "DX-50" }] as never;
-      }
-      return [] as never;
-    });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-    mockedRunConflictCheck.mockResolvedValue({ kind: "ok", reason: "no overlap" });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1")],
-      inProgress: [
-        issue("DX-50", { status: "In Progress" }),
-        issue("DX-99", { status: "In Progress" }),
-      ],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-    expect(result.dispatched).toBe(1);
-    expect(mockedRunConflictCheck).toHaveBeenCalledTimes(1);
-    const passedInProgress = mockedRunConflictCheck.mock.calls[0][0].inProgress;
-    expect(passedInProgress.map((c) => c.id)).toEqual(["DX-50"]);
-  });
-
-  it("conflictCheckEnabled=false → no triage spawn, all candidates dispatched", async () => {
-    writeSettings(
-      {
-        alice: agentRecord("alice"),
-        bob: agentRecord("bob"),
-        charlie: agentRecord("charlie"),
-      },
-      false,
-    );
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1"), issue("DX-2"), issue("DX-3")],
-      inProgress: [issue("DX-99", { status: "In Progress" })],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-    expect(result.dispatched).toBe(3);
-    expect(mockedRunConflictCheck).not.toHaveBeenCalled();
   });
 
   // DX-292 Phase 1 — broken agents are filtered out of the picker pool
@@ -482,7 +316,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -516,7 +349,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -544,7 +376,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -569,7 +400,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -615,7 +445,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -632,26 +461,13 @@ describe("tryMultiAgentDispatch", () => {
      * Regression for the poller-idle-with-ToDo-queue bug seen on
      * 2026-05-11. Before the fix, the catch block in
      * `tryMultiAgentDispatch` logged and continued, leaving the
-     * just-stamped `dispatch:` block on the YAML. The next tick's
-     * `listDispatchableYamls` filter rejected the card
-     * (`if (i.dispatch !== null) return false`), so failed dispatches
-     * accumulated until the entire ToDo queue was filtered out and the
-     * worker stalled with "No cards in ToDo" while cards were waiting.
-     *
-     * Contract: dispatch throws → loadLocal the just-stamped YAML →
-     * `clearDispatchAndWrite` invoked so subsequent ticks see a clean
-     * slate. `loadLocal` returns null in the default mock; this test
-     * overrides it to return an Issue with a non-null `dispatch{}` so
-     * the clear branch fires and we can assert against the call.
+     * just-stamped `dispatch:` block on the YAML.
      */
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockRejectedValueOnce(
       new Error("dispatch failed post-stamp"),
     );
     const lifecycle = await import("./yaml-lifecycle.js");
-    // DX-284: cleanup paths now read from DISK, not the DB-mirror,
-    // to dodge the awaitMirror lag that was orphaning pre-stamps.
-    // Mock the disk reader (sync, NOT async).
     vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
       ...issue("DX-1"),
       dispatch: {
@@ -669,7 +485,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -685,7 +500,6 @@ describe("tryMultiAgentDispatch", () => {
       alice: agentRecord("alice"),
       bob: agentRecord("bob"),
     });
-    // First call throws; subsequent succeeds.
     mockedDispatchWithRecovery
       .mockRejectedValueOnce(new Error("spawn failed"))
       .mockResolvedValue({ dispatchId: "did", job: {} as never });
@@ -693,12 +507,9 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
-    // First throw drops DX-1 from the working set; bob then picks
-    // DX-2 and succeeds.
     expect(result.dispatched).toBe(1);
     expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
   });
@@ -750,7 +561,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: heldLockTracker,
       now: NOW,
     });
@@ -771,7 +581,6 @@ describe("tryMultiAgentDispatch", () => {
     await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker,
       now: NOW,
     });
@@ -802,7 +611,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1"), issue("DX-2")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -815,11 +623,7 @@ describe("tryMultiAgentDispatch", () => {
 
   /**
    * AC #2 of DX-219 — pre-claim DB liveness guard. Ports
-   * `hasLiveDispatchForCard` (ISS-69) onto the multi-agent path. When a
-   * live PID dispatch already owns the card (host-mode claude that
-   * reparented to PID 1 after a worker restart), the picker MUST skip
-   * it. Without this port, the picker would double-claim and melt the
-   * working tree.
+   * `hasLiveDispatchForCard` (ISS-69) onto the multi-agent path.
    */
   it("AC #2: skips a card when guardLiveDispatchForCard reports a live PID — picker refuses to assign", async () => {
     writeSettings({ alice: agentRecord("alice") });
@@ -832,7 +636,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -857,7 +660,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -881,7 +683,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1", { external_id: "" })],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -892,9 +693,7 @@ describe("tryMultiAgentDispatch", () => {
 
   /**
    * AC #4 of DX-219 — post-dispatch card-progress check ported into
-   * the multi-agent onComplete chain. When the dispatch ends and the
-   * card is trello-tracked, the scheduler's check runs so an env-level
-   * stuck-card writes the CRITICAL_FAILURE flag.
+   * the multi-agent onComplete chain.
    */
   it("AC #4: wires runPostDispatchProgressCheck into dispatch.onComplete for trello-tracked cards", async () => {
     writeSettings({ alice: agentRecord("alice") });
@@ -907,15 +706,11 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
 
     expect(result.dispatched).toBe(1);
-    // Extract the onComplete passed to dispatch() and invoke it like
-    // the launcher would on agent termination. The mocked scheduler
-    // call should fire with the card's external_id + job metadata.
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
     expect(dispatchInput.onComplete).toBeDefined();
     await dispatchInput.onComplete!({
@@ -932,18 +727,6 @@ describe("tryMultiAgentDispatch", () => {
     expect(passed.jobSummary).toBe("ok");
   });
 
-  /**
-   * DX-290 (Event-Driven Worker Phase 4b.3) — the same hook MUST also
-   * fire when the dispatch ends with a failure status. AC #4 explicitly
-   * pins this: `recoverStuckCards is wired via … onComplete; test
-   * asserts the hook fires on a failed dispatch`. Without the assertion
-   * a future refactor that branches "skip check on failure" would slip
-   * past the happy-path coverage above. The previous in-poller
-   * `recoverStuckCards` ran specifically on failure to surface stuck
-   * cards to operators; the multi-agent equivalent is
-   * `runPostDispatchProgressCheck` writing CRITICAL_FAILURE when the
-   * card never moved out of ToDo — regardless of jobStatus.
-   */
   it("AC #4 (DX-290): runPostDispatchProgressCheck fires from dispatch.onComplete on a FAILED dispatch", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({
@@ -955,7 +738,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -964,9 +746,6 @@ describe("tryMultiAgentDispatch", () => {
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
     expect(dispatchInput.onComplete).toBeDefined();
 
-    // Simulate the launcher invoking onComplete with a failed status —
-    // mirrors the lifecycle stop signal the worker emits when the agent
-    // exits non-zero or is killed by the stall detector.
     await dispatchInput.onComplete!({
       id: "did-1",
       status: "failed",
@@ -982,22 +761,12 @@ describe("tryMultiAgentDispatch", () => {
   });
 
   it("AC #4: dispatch.onComplete runs BOTH the YAML dispatch{} cleanup AND the post-dispatch progress check in one invocation", async () => {
-    // Composite-behaviour test for the multi-agent onComplete chain.
-    // The handler must (a) clear the YAML's `dispatch{}` block via
-    // `clearDispatchAndWrite` when a stale block exists, AND (b) fire
-    // `runPostDispatchProgressCheck` for the trello-tracked card. A
-    // future refactor that drops either step would slip past the
-    // narrowly-scoped per-effect tests; this asserts they coexist.
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
       job: {} as never,
     });
     vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
-    // DX-284: cleanup now reads from disk via `loadLocalFromDisk`.
-    // Return a fresh issue carrying a stale dispatch block so the
-    // cleanup branch actually runs (default mock returns null →
-    // short-circuit).
     vi.mocked(loadLocalFromDisk).mockReturnValueOnce(
       issue("DX-1", {
         dispatch: {
@@ -1014,7 +783,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -1027,8 +795,6 @@ describe("tryMultiAgentDispatch", () => {
       summary: "ok",
     } as never);
 
-    // Both effects fire — the order they run in is not part of the
-    // contract (no shared state between them), but BOTH must run.
     expect(clearDispatchAndWrite).toHaveBeenCalledTimes(1);
     expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
     expect(vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0].cardId).toBe(
@@ -1046,7 +812,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -1073,7 +838,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1", { external_id: "" })],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -1091,12 +855,7 @@ describe("tryMultiAgentDispatch", () => {
 
   // Heal: orphan assigned_agent (agent name no longer in roster — agent
   // deleted via the settings-clobber race in DX-281, or removed without
-  // running the DX-283 cascade). pickCardForAgent treats those cards as
-  // owned-by-other-agent forever and the picker silently skips them. The
-  // heal pass at the top of tryMultiAgentDispatch clears the orphan claim
-  // (direct write — bypasses clearDispatchAndWrite which now preserves
-  // assigned_agent as durable audit) so the card becomes pickable on
-  // the same tick.
+  // running the DX-283 cascade).
   it("heals orphan assigned_agent (agent not in roster) → clears claim, dispatches card", async () => {
     writeSettings({ murphy: agentRecord("murphy") });
     mockedDispatchWithRecovery.mockResolvedValue({
@@ -1108,16 +867,10 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [orphanCard],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
 
-    // Heal does not route through clearDispatchAndWrite anymore (that
-    // function preserves assigned_agent now). Instead it writes the
-    // cleared shape directly via writeIssue. Assert on the dispatch
-    // outcome: card got picked up by murphy after the orphan stamp
-    // was released.
     expect(clearDispatchAndWrite).not.toHaveBeenCalled();
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
@@ -1127,10 +880,7 @@ describe("tryMultiAgentDispatch", () => {
 
   // Co-ownership retired: with `assigned_agent` as durable audit,
   // multiple ToDo cards can legitimately name the same agent (re-bounced
-  // cards, multi-phase work). The picker dispatches one per tick
-  // (`pickFreeAgent` skips agents that already dispatched this tick),
-  // so no double-spawn risk; other claimed cards wait for the next
-  // eligible tick.
+  // cards, multi-phase work).
   it("does NOT clear duplicate assigned_agent across open cards (durable audit allows multi-claim)", async () => {
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
@@ -1143,7 +893,6 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [a, b],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
@@ -1155,21 +904,12 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.issueId).toBe("DX-1");
   });
 
-  // DX-286 AC #1 — explicit end-state assertion: a dispatch() throw
-  // post-stamp leaves both fields null on disk, NOT the orphan
-  // pre-stamp state. The pre-existing test on line 557 asserts the
-  // call-shape; this complements by asserting the produced YAML state
-  // (via the clearDispatchAndWrite mock contract — the mock returns
-  // {dispatch: null, assigned_agent: null} so the post-state matches
-  // production behavior).
-  it("AC #1: dispatch() throw post-stamp → end-state YAML has dispatch=null AND assigned_agent=null", async () => {
+  it("AC #1: dispatch() throw post-stamp → end-state YAML has dispatch=null; assigned_agent stays as durable audit so the next tick self-claim path works", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockRejectedValueOnce(
       new Error("dispatch failed post-stamp"),
     );
     const lifecycle = await import("./yaml-lifecycle.js");
-    // The post-stamp disk view: assigned_agent + dispatch BOTH set
-    // (the picker just stamped them on lines 438 and 443).
     vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
       ...issue("DX-1"),
       assigned_agent: "alice",
@@ -1188,32 +928,26 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [issue("DX-1")],
-      inProgress: [],
       tracker: fakeTracker(),
       now: NOW,
     });
 
     expect(result.dispatched).toBe(0);
-    // Catch fired clearDispatchAndWrite — the function clears BOTH
-    // fields by contract (see yaml-lifecycle.ts:461-471). The mock
-    // factory at top of file mirrors that contract.
     expect(clearMock).toHaveBeenCalledTimes(1);
     const [, clearedIssue] = clearMock.mock.calls[0];
     expect(clearedIssue.id).toBe("DX-1");
-    // Post-state derived from the mock contract:
     const postState = await clearMock.mock.results[0].value;
     expect(postState.dispatch).toBeNull();
-    expect(postState.assigned_agent).toBeNull();
+    // assigned_agent preserved — the multi-agent picker's
+    // pickCardForAgent self-claim branch reads this on the next tick
+    // so the same agent re-picks the card without contention.
+    expect(postState.assigned_agent).toBe("alice");
   });
 
   /**
    * DX-306: a transient `tryAcquireLock` throw (e.g. Trello 429) drops
    * the agent from the picker's eligible pool for the rest of this
-   * tick. Pre-fix the same agent walks every remaining card, 429s on
-   * each, and burns Trello quota during the exact window the API is
-   * asking for backoff. The `lockResult.acquired === false` branch is
-   * a different concern (another holder owns the lock, NOT a tracker
-   * error) and MUST keep the agent eligible for other cards.
+   * tick.
    */
   describe("DX-306: per-tick agent skip on lock-acquire throw", () => {
     function trackerWithFlakyGetComments(
@@ -1251,16 +985,11 @@ describe("tryMultiAgentDispatch", () => {
     it("a 429 on card #1 removes the agent from this tick's pool — agent does NOT walk card #2", async () => {
       writeSettings({ dani: agentRecord("dani") });
       const cards = [issue("DX-1"), issue("DX-2")];
-      // First card's getComments throws (simulated 429); the second card
-      // would resolve cleanly IF the picker tried it. Pre-fix: agent
-      // walks both → 2 getComments calls. Post-fix: agent skipped after
-      // first throw → 1 getComments call.
       const tracker = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
 
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker,
         now: NOW,
       });
@@ -1276,10 +1005,6 @@ describe("tryMultiAgentDispatch", () => {
         murphy: agentRecord("murphy"),
       });
       const cards = [issue("DX-1"), issue("DX-2")];
-      // Only DX-1 throws. dani picks DX-1 (alphabetical), throws,
-      // dani is added to skipAgents. Next iteration: pickFreeAgent
-      // returns murphy (alphabetical second). murphy picks DX-2,
-      // getComments returns [], lock acquired, dispatch proceeds.
       const tracker = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
       mockedDispatchWithRecovery.mockResolvedValueOnce({
         ok: true,
@@ -1289,7 +1014,6 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker,
         now: NOW,
       });
@@ -1306,10 +1030,6 @@ describe("tryMultiAgentDispatch", () => {
         murphy: agentRecord("murphy"),
       });
       const cards = [issue("DX-1"), issue("DX-2"), issue("DX-3")];
-      // Both agents 429 on the first card they try. dani picks DX-1
-      // (alphabetical), throws → skipped. murphy picks DX-2, throws
-      // → skipped. Loop must exit (no eligible agent), not walk DX-3
-      // with either skipped agent.
       const tracker = trackerWithFlakyGetComments(
         new Set(["ext-DX-1", "ext-DX-2", "ext-DX-3"]),
       );
@@ -1317,14 +1037,11 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker,
         now: NOW,
       });
 
       expect(result.dispatched).toBe(0);
-      // Exactly 2 getComments calls — one per agent. NOT 6 (2 agents
-      // × 3 cards) which would indicate skipAgents wasn't filtering.
       expect(tracker.getCommentsCalls.length).toBe(2);
       expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
     });
@@ -1332,15 +1049,10 @@ describe("tryMultiAgentDispatch", () => {
     it("skipAgents is tick-local — an agent that threw on tick 1 dispatches normally on tick 2", async () => {
       writeSettings({ dani: agentRecord("dani") });
       const cards = [issue("DX-1")];
-      // Tick 1: tracker throws → dani skipped → 0 dispatches.
-      // Tick 2: same dani, fresh tracker that does NOT throw → dani
-      // must be eligible again (skipAgents lifetime is per-call, not
-      // persistent).
       const flaky = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
       const tick1 = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker: flaky,
         now: NOW,
       });
@@ -1354,7 +1066,6 @@ describe("tryMultiAgentDispatch", () => {
       const tick2 = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker: fresh,
         now: NOW,
       });
@@ -1366,11 +1077,6 @@ describe("tryMultiAgentDispatch", () => {
     it("the `lockResult.acquired === false` branch (other holder owns lock) keeps the agent eligible — agent retries card #2 unchanged", async () => {
       writeSettings({ dani: agentRecord("dani") });
       const cards = [issue("DX-1"), issue("DX-2")];
-      // Tracker returns a lock comment owned by ANOTHER worker for
-      // card #1 → tryAcquireLock returns {acquired: false}. Card #2
-      // has no lock comment → tryAcquireLock grants it. dani must
-      // attempt BOTH cards (this is the lock-held branch, NOT a
-      // tracker error).
       const otherWorkerLockText = renderLockComment(
         {
           holder: "other-worker",
@@ -1381,8 +1087,6 @@ describe("tryMultiAgentDispatch", () => {
           jsonlDir: "/tmp/other-jsonl",
           workspace: "issue-worker",
         },
-        // started a few minutes ago — well within the lock TTL so
-        // tryAcquireLock returns {acquired: false, existing: ...}.
         new Date(NOW.getTime() - 5 * 60_000).toISOString(),
       );
       const calls: string[] = [];
@@ -1424,28 +1128,17 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards,
-        inProgress: [],
         tracker,
         now: NOW,
       });
 
       expect(result.dispatched).toBe(1);
-      // Agent walked BOTH cards — DX-1 (lock held → skip card, agent
-      // stays eligible) then DX-2 (acquired, dispatched).
       expect(calls).toEqual(["ext-DX-1", "ext-DX-2"]);
     });
   });
 
   /**
-   * DX-221 AC #2 — per-agent + per-card quarantine. The picker MUST
-   * skip a quarantined agent (the agent failed recently) and a
-   * quarantined card (the card failed recently). Both cooldowns clear
-   * on a successful dispatch elsewhere. Wired by the picker's loop
-   * checks (`isAgentQuarantined` + `isCardQuarantined`) plus the
-   * onComplete callbacks. End-to-end onComplete behavior is covered
-   * by the helper-level tests in `src/dispatch/quarantine.test.ts` +
-   * `failure-escalation.test.ts`; this test pins the picker-skip
-   * branches the helper APIs would otherwise be exercised through.
+   * DX-221 AC #2 — per-agent + per-card quarantine.
    */
   describe("DX-221: quarantine gates", () => {
     it("a quarantined agent is skipped — dispatch does NOT fire", async () => {
@@ -1466,7 +1159,6 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
-        inProgress: [],
         tracker: fakeTracker(),
         now: NOW,
       });
@@ -1493,7 +1185,6 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
-        inProgress: [],
         tracker: fakeTracker(),
         now: NOW,
       });
@@ -1509,7 +1200,6 @@ describe("tryMultiAgentDispatch", () => {
         dispatchId: "did",
         job: {} as never,
       });
-      // Quarantine in the past — expired by the time the picker runs.
       quarantineAgent({
         repoName: "danxbot",
         agentName: "alice",
@@ -1521,12 +1211,407 @@ describe("tryMultiAgentDispatch", () => {
       const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
-        inProgress: [],
         tracker: fakeTracker(),
         now: NOW,
       });
 
       expect(result.dispatched).toBe(1);
+    });
+  });
+
+  /**
+   * DX-296 — prep dispatch shape selection. The picker decides
+   * dispatch-task body + `dispatchKind` based on (prepMode,
+   * pre-existing self-claim).
+   */
+  describe("DX-296: prep dispatch shape", () => {
+    it("combined mode (default): dispatches combined shape (`/danx-prep <id>` + `/danx-next <id>`) with dispatchKind=work", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.dispatchKind).toBe("work");
+    });
+
+    it("separate mode + fresh card (no self-claim): dispatches prep-only shape with dispatchKind=prep", async () => {
+      writeSettings({ alice: agentRecord("alice") }, { prepMode: "separate" });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(dispatchInput.task).toBe("/danx-prep DX-1");
+      expect(dispatchInput.dispatchKind).toBe("prep");
+    });
+
+    it("separate mode + self-claim by SAME agent (work pass): dispatches combined shape with dispatchKind=work", async () => {
+      // The card carries assigned_agent = "alice" before the pick —
+      // simulating tick N+1 after a prep-only dispatch on tick N
+      // cleared `dispatch{}` but left `assigned_agent`. The picker
+      // self-claims via pickCardForAgent's "self-claim allowed" branch.
+      writeSettings({ alice: agentRecord("alice") }, { prepMode: "separate" });
+      // The DB-side assigned-cards lookup must agree with the YAML
+      // shape so `pickCardForAgent` walks the self-claim branch.
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM issues")) {
+          return [{ id: "DX-1", assigned_agent: "alice" }] as never;
+        }
+        return [] as never;
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1", { assigned_agent: "alice" })],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.dispatchKind).toBe("work");
+    });
+
+    it("per-tick read-once invariant: prepMode is resolved ONCE at the top of the tick — every card in the tick sees the same mode (no mid-tick flap)", async () => {
+      // Two agents + two cards, both fresh. If `getPrepMode` were re-
+      // read per card and the operator's settings.json were rewritten
+      // mid-tick (via dashboard toggle), card #2 could end up
+      // dispatched with the wrong shape. Pin the once-per-tick read
+      // by mutating the settings file BETWEEN the first and second
+      // dispatchWithRecovery call (the picker mock fires
+      // synchronously inside the loop) — both dispatches must use
+      // the original mode.
+      writeSettings(
+        { alice: agentRecord("alice"), bob: agentRecord("bob") },
+        { prepMode: "separate" },
+      );
+
+      // First call rewrites settings.json to combined mode mid-tick.
+      // Second call lands after the rewrite. Without the read-once
+      // invariant, the second card's task body would be combined
+      // shape; with the invariant, it stays prep-only.
+      mockedDispatchWithRecovery
+        .mockImplementationOnce(async (_input) => {
+          writeSettings(
+            { alice: agentRecord("alice"), bob: agentRecord("bob") },
+            { prepMode: "combined" },
+          );
+          return { dispatchId: "did-1", job: {} as never };
+        })
+        .mockResolvedValueOnce({ dispatchId: "did-2", job: {} as never });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1"), issue("DX-2")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(2);
+      // BOTH dispatches use prep-only shape (the original separate
+      // mode), even though settings.json flipped to combined between
+      // them.
+      expect(mockedDispatchWithRecovery.mock.calls[0][0].task).toBe(
+        "/danx-prep DX-1",
+      );
+      expect(mockedDispatchWithRecovery.mock.calls[0][0].dispatchKind).toBe(
+        "prep",
+      );
+      expect(mockedDispatchWithRecovery.mock.calls[1][0].task).toBe(
+        "/danx-prep DX-2",
+      );
+      expect(mockedDispatchWithRecovery.mock.calls[1][0].dispatchKind).toBe(
+        "prep",
+      );
+    });
+
+    it("separate mode 2-tick flow: tick 1 dispatches prep, tick 2 dispatches work", async () => {
+      // Drives both ticks through tryMultiAgentDispatch back-to-back to
+      // confirm the protocol. Tick 1: fresh card, prep dispatch. Tick
+      // 2: same card now carries assigned_agent (the stamp survives
+      // the cleared `dispatch{}` block by design); picker self-claims
+      // and dispatches the work pass.
+      writeSettings({ alice: agentRecord("alice") }, { prepMode: "separate" });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      // Tick 1 — fresh card, no DB claim row yet.
+      const tick1Result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(tick1Result.dispatched).toBe(1);
+      const tick1Dispatch = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(tick1Dispatch.task).toBe("/danx-prep DX-1");
+      expect(tick1Dispatch.dispatchKind).toBe("prep");
+
+      // Tick 2 — assigned_agent stamp survived. The DB assignedCards
+      // query reflects the persisted claim from tick 1.
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM issues")) {
+          return [{ id: "DX-1", assigned_agent: "alice" }] as never;
+        }
+        return [] as never;
+      });
+
+      const tick2Result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1", { assigned_agent: "alice" })],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(tick2Result.dispatched).toBe(1);
+      // Second call to dispatchWithRecovery — index 1.
+      const tick2Dispatch = mockedDispatchWithRecovery.mock.calls[1][0];
+      expect(tick2Dispatch.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(tick2Dispatch.dispatchKind).toBe("work");
+    });
+  });
+
+  /**
+   * DX-296 — onComplete branching on `prepVerdict + dispatchKind`.
+   * The route already applied any YAML / settings side-effects for
+   * non-ok verdicts (`conflict_on[]` append, `Blocked` stamp,
+   * `agents.<name>.broken` stamp); the picker MUST NOT run the card-
+   * progress check on those (which would write CRITICAL_FAILURE for
+   * a card that was never expected to leave ToDo).
+   */
+  describe("DX-296: onComplete branches on prepVerdict + dispatchKind", () => {
+    it("verdict=ok + dispatchKind=work: runs runPostDispatchProgressCheck (combined-mode work dispatch behaves as a normal work dispatch)", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "completed",
+        summary: "ok",
+        prepVerdict: { verdict: "ok", reason: "no conflicts" },
+        dispatchKind: "work",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
+    });
+
+    it("verdict=ok + dispatchKind=prep: SKIPS runPostDispatchProgressCheck (separate-mode prep-only — work pass not yet started, so card MUST stay in ToDo)", async () => {
+      writeSettings({ alice: agentRecord("alice") }, { prepMode: "separate" });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "completed",
+        summary: "prep ok",
+        prepVerdict: { verdict: "ok", reason: "no conflicts" },
+        dispatchKind: "prep",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+    });
+
+    it("verdict=conflict_on: SKIPS runPostDispatchProgressCheck (route already stamped conflict_on[]; card was never expected to progress)", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "completed",
+        summary: "conflict",
+        prepVerdict: {
+          verdict: "conflict_on",
+          reason: "shared file",
+          conflict_with: ["DX-99"],
+        },
+        dispatchKind: "work",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+    });
+
+    it("verdict=blocked: SKIPS runPostDispatchProgressCheck (route already stamped status=Blocked + blocked record; card was never expected to progress)", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "completed",
+        summary: "blocked",
+        prepVerdict: { verdict: "blocked", reason: "spec ambiguous" },
+        dispatchKind: "work",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+    });
+
+    it("legacy path: failed dispatch with NO prepVerdict (agent crashed before calling the verdict tool) → BOTH runPostDispatchProgressCheck AND quarantine accounting fire", async () => {
+      // The DX-296 onComplete branching adds an `isPrepAbort` short-
+      // circuit that skips quarantine accounting on `verdict=abort`.
+      // It MUST NOT also short-circuit the legacy "agent crashed
+      // mid-dispatch" path — those failures still need quarantine
+      // (card + agent) so the picker doesn't hot-loop. Verdict ===
+      // undefined is the discriminator.
+      const { isAgentQuarantined, isCardQuarantined } = await import(
+        "../dispatch/quarantine.js"
+      );
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "failed",
+        summary: "agent crashed mid-dispatch",
+        // prepVerdict omitted — agent died before reaching the tool
+        dispatchKind: "work",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
+      expect(
+        isCardQuarantined({
+          repoName: "danxbot",
+          cardId: "DX-1",
+          now: NOW.getTime() + 1_000,
+        }),
+      ).toBe(true);
+      expect(
+        isAgentQuarantined({
+          repoName: "danxbot",
+          agentName: "alice",
+          now: NOW.getTime() + 1_000,
+        }),
+      ).toBe(true);
+    });
+
+    it("verdict=abort: SKIPS runPostDispatchProgressCheck AND skips card quarantine (env failure on agent's worktree, NOT card failure — quarantining the card would punish a future healthy agent)", async () => {
+      const { isCardQuarantined, isAgentQuarantined } = await import(
+        "../dispatch/quarantine.js"
+      );
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "failed",
+        summary: "abort",
+        prepVerdict: {
+          verdict: "abort",
+          reason: "Bash broken",
+          broken_details: { suggested_steps: ["ssh, fix PATH"] },
+        },
+        dispatchKind: "prep",
+      } as never);
+
+      expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+      // Neither the card nor the agent should be quarantined by the
+      // failure-accounting branch — the route's broken stamp already
+      // gates the agent at picker time.
+      expect(
+        isCardQuarantined({
+          repoName: "danxbot",
+          cardId: "DX-1",
+          now: NOW.getTime() + 1_000,
+        }),
+      ).toBe(false);
+      expect(
+        isAgentQuarantined({
+          repoName: "danxbot",
+          agentName: "alice",
+          now: NOW.getTime() + 1_000,
+        }),
+      ).toBe(false);
     });
   });
 });

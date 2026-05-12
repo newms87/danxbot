@@ -23,6 +23,27 @@ export interface AgentUsage {
   cache_creation_input_tokens: number;
 }
 
+/**
+ * DX-296 — discriminator the multi-agent picker stamps on every
+ * dispatch it spawns for an issue card. Threaded through
+ * `DispatchInput` → `SpawnAgentOptions` → `AgentJob`; read by the
+ * prep-verdict route to decide whether `verdict: "ok"` should
+ * terminate the dispatch or let it continue into `/danx-next`.
+ *
+ * Values:
+ *   - `"prep"` — separate-mode prep-only dispatch. Route stops on
+ *     `ok`; next tick self-claims and dispatches the work pass.
+ *   - `"work"` — combined dispatch (combined mode, OR separate-mode
+ *     self-claim work pass). Route lets the dispatch run past `ok`
+ *     so the agent proceeds into `/danx-next`.
+ *
+ * Undefined for every non-multi-agent-pick caller (Slack, ideator,
+ * external `/api/launch`, tests bypassing the picker). The route's
+ * `ok` branch defensively keeps the dispatch running on undefined
+ * so a misconfigured non-prep dispatch can't accidentally finalize.
+ */
+export type DispatchKind = "prep" | "work";
+
 export interface AgentJob {
   id: string;
   /**
@@ -198,6 +219,15 @@ export interface AgentJob {
    * dispatches set this only at apply time).
    */
   prepVerdict?: PrepVerdictPayload;
+  /**
+   * DX-296 — discriminator the picker stamps to tell the prep-verdict
+   * route what KIND of dispatch this is, independent of `prepMode`.
+   * See the `DispatchKind` type alias for the value semantics.
+   * Undefined on every non-multi-agent-pick dispatch (Slack, ideator,
+   * external `/api/launch`); those callers never invoke `/danx-prep`,
+   * so the verdict route is never called and the field stays unset.
+   */
+  dispatchKind?: DispatchKind;
 }
 
 export interface SpawnAgentOptions {
@@ -349,6 +379,14 @@ export interface SpawnAgentOptions {
    * `/api/resume`; every other caller leaves it `null`.
    */
   parentRecoverId?: string | null;
+  /**
+   * DX-296 — see `AgentJob.dispatchKind` for the contract. Plumbed
+   * through `dispatch()` → `spawnAgent` so the launcher can stamp the
+   * field on the constructed `AgentJob` BEFORE the agent's first turn
+   * (eliminates the race where `danxbot_prep_verdict` fires before
+   * the picker has had a chance to stamp post-spawn).
+   */
+  dispatchKind?: DispatchKind;
   /**
    * DX-260 — context the API-error recover handler needs to drive the
    * recover flow. Set by `dispatch()` for every spawn; absent for ad-

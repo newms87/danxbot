@@ -18,9 +18,14 @@
  *       - `abort` → `setAgentBroken(localPath, agentName, {reason,
  *         suggested_steps, set_at: now}, "worker")` so the picker
  *         skips this agent until cleared (DX-292's broken-state field).
- *   - dispatch lifecycle:
- *       - `ok` in combined mode → keep running.
- *       - `ok` in separate mode → `job.stop("completed", "prep ok")`.
+ *   - dispatch lifecycle (DX-296: gated by `job.dispatchKind`, NOT
+ *     repo-wide `prepMode`):
+ *       - `ok` + `dispatchKind === "work"` → keep running (agent
+ *         proceeds into `/danx-next`).
+ *       - `ok` + `dispatchKind === "prep"` → `job.stop("completed",
+ *         "prep ok (prep-only dispatch)")`.
+ *       - `ok` + `dispatchKind === undefined` → keep running
+ *         (defensive — see `decideDispatchLifecycle`).
  *       - `conflict_on` / `blocked` → `job.stop("completed", ...)`.
  *       - `abort` → `job.stop("failed", ...)`.
  *   - `job.prepVerdict` stash so the wrapping multi-agent-pick
@@ -63,7 +68,6 @@ import {
 import { issuePath } from "../poller/yaml-lifecycle.js";
 import {
   setAgentBroken,
-  getPrepMode,
   type AgentBrokenState,
 } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
@@ -75,15 +79,14 @@ const log = createLogger("worker-prep-verdict-route");
 
 /**
  * Injectable deps for unit testing. Production handler uses the
- * defaults — `getDispatchById`, `getActiveJob`, `setAgentBroken`,
- * `getPrepMode`, raw filesystem reads. Tests override each piece so
- * the route logic can be exercised against in-memory fixtures.
+ * defaults — `getDispatchById`, `getActiveJob`, `setAgentBroken`, raw
+ * filesystem reads. Tests override each piece so the route logic can
+ * be exercised against in-memory fixtures.
  */
 export interface PrepVerdictDeps {
   getDispatch?: typeof getDispatchById;
   getJob?: (id: string) => AgentJob | undefined;
   setBroken?: typeof setAgentBroken;
-  getMode?: typeof getPrepMode;
   /**
    * Wall-clock used to stamp `blocked.timestamp` + `broken.set_at`.
    * Defaults to `Date.now()`. Tests inject a frozen clock so
@@ -305,25 +308,55 @@ async function applyVerdictSideEffect(
 
 /**
  * Decide the dispatch lifecycle for the verdict. Calls `job.stop` for
- * every terminating verdict (and `ok` in separate mode); returns the
- * terminal status the ack body surfaces. `undefined` return value =
- * keep running (only `ok` in combined mode).
+ * every terminating verdict (and `ok` on prep-only dispatches);
+ * returns the terminal status the ack body surfaces. `undefined`
+ * return value = keep running (only `ok` on `dispatchKind: "work"`
+ * dispatches).
+ *
+ * DX-296 — branching is per-dispatch via `job.dispatchKind`, NOT the
+ * repo-wide `prepMode` setting. The picker stamps `dispatchKind` on
+ * every multi-agent-pick spawn:
+ *   - `combined` mode → always `"work"` → dispatch keeps running on
+ *     `ok`, agent proceeds to `/danx-next` in the same session.
+ *   - `separate` mode + fresh card → `"prep"` → dispatch stops on
+ *     `ok`, poller picks the card again next tick for the work pass.
+ *   - `separate` mode + self-claim → `"work"` → dispatch keeps
+ *     running on `ok`; this is the work-pass dispatch, the agent
+ *     proceeds to `/danx-next`.
+ *
+ * `dispatchKind === undefined` (every non-multi-agent-pick caller —
+ * Slack, ideator, external `/api/launch`, plus tests that bypass the
+ * picker) falls back to the conservative "keep running" branch on
+ * `ok` so a misconfigured prep dispatch can't accidentally finalize a
+ * non-prep dispatch. Non-multi-agent-pick callers don't have the
+ * prep-verdict tool advertised in the first place; the fallback is
+ * defense in depth.
  */
 async function decideDispatchLifecycle(
   payload: PrepVerdictPayload,
-  repo: RepoContext,
   job: AgentJob | undefined,
-  getMode: typeof getPrepMode,
+  dispatchId: string,
 ): Promise<"completed" | "failed" | undefined> {
   if (payload.verdict === "ok") {
-    const mode = getMode(repo.localPath);
-    if (mode === "combined") return undefined;
-    // separate mode → dispatch ends completed.
-    await job?.stop?.(
-      "completed",
-      `prep ok (separate mode): ${payload.reason}`,
-    );
-    return "completed";
+    if (job?.dispatchKind === "prep") {
+      await job.stop?.(
+        "completed",
+        `prep ok (prep-only dispatch): ${payload.reason}`,
+      );
+      return "completed";
+    }
+    if (job !== undefined && job.dispatchKind === undefined) {
+      // Misconfiguration tripwire — a verdict POST landed against a
+      // dispatch the multi-agent picker did NOT spawn (Slack /
+      // ideator / external `/api/launch` path). The defensive
+      // "keep running" choice prevents silently killing a non-prep
+      // dispatch, but the call is unexpected — log loudly so the
+      // operator can chase the misconfig.
+      log.warn(
+        `[Dispatch ${dispatchId}] prep verdict=ok arrived against a dispatch with dispatchKind=undefined — keeping the dispatch running, but this dispatch should not have been able to call danxbot_prep_verdict. Investigate the caller's workspace MCP setup.`,
+      );
+    }
+    return undefined;
   }
   // Every non-ok verdict terminates the dispatch. Mapping lives in
   // `mapTerminalVerdictToDispatchStatus` so the DB collapse rule is
@@ -353,7 +386,6 @@ export async function handlePrepVerdict(
   const getDispatch = deps.getDispatch ?? getDispatchById;
   const getJob = deps.getJob ?? getActiveJob;
   const setBroken = deps.setBroken ?? setAgentBroken;
-  const getMode = deps.getMode ?? getPrepMode;
   const now = deps.now ?? Date.now;
 
   let body: Record<string, unknown>;
@@ -434,7 +466,7 @@ export async function handlePrepVerdict(
     job.prepVerdict = payload;
   }
 
-  const terminal = await decideDispatchLifecycle(payload, repo, job, getMode);
+  const terminal = await decideDispatchLifecycle(payload, job, dispatchId);
   if (terminal) {
     ack.dispatchTerminal = terminal;
   }

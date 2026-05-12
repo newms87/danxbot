@@ -390,6 +390,36 @@ describe("spawnAgent", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("DX-296: stamps options.dispatchKind onto the constructed AgentJob (race-free contract — set BEFORE the agent's first MCP call)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-prep DX-1",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
+      dispatchKind: "prep",
+    });
+
+    expect(job.dispatchKind).toBe("prep");
+  });
+
+  it("DX-296: dispatchKind=undefined leaves AgentJob.dispatchKind undefined (Slack/ideator/external launches)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/something",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
+      // dispatchKind omitted
+    });
+
+    expect(job.dispatchKind).toBeUndefined();
+  });
+
   it("does NOT include --mcp-config when not set", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);
