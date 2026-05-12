@@ -11,7 +11,7 @@
  *
  * | Status                          | Sort                                                             |
  * |---------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → ICE total DESC (untriaged = +Inf) → priority DESC → updated_at ASC (FIFO) |
+ * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → ICE total DESC (untriaged = +Inf) → priority DESC → id numeric ASC (FIFO by creation) |
  * | In Progress, Done, Cancelled    | updated_at DESC                                                   |
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
@@ -107,6 +107,19 @@ const RECENCY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   "Cancelled",
 ]);
 
+/**
+ * Parse the numeric tail from an `<PREFIX>-N` id (e.g. `DX-264` → 264).
+ * Returns `null` for malformed input — callers fall back to a
+ * deterministic string compare. IDs are allocated monotonically so
+ * lower N = older card, which the FIFO tier exploits.
+ */
+function parseIdNumeric(id: string): number | null {
+  const m = /-(\d+)$/.exec(id);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Untriaged cards score as `+Infinity` so they top every triaged card. */
 function effectiveIce(issue: Issue): number {
   if (issue.triage.expires_at === "") return Number.POSITIVE_INFINITY;
@@ -196,10 +209,15 @@ export function sortInputsForStatus<T>(
     const priorityDelta = b.issue.priority - a.issue.priority;
     if (priorityDelta !== 0) return priorityDelta;
 
-    // FIFO: older mtime first.
-    if (a.updatedAtMs !== b.updatedAtMs) return a.updatedAtMs - b.updatedAtMs;
-    // Final stable tiebreak so two rows with identical mtime resolve
-    // deterministically across runs.
+    // FIFO by creation order — parse numeric N from `<PREFIX>-N` and
+    // sort ASC. IDs are allocated monotonically so the lower number is
+    // the older card. Replaces the prior `updated_at ASC` mtime tiebreak
+    // (operator-edit churn shouldn't shuffle the queue). Falls back to
+    // `localeCompare` when either id is malformed so a typo card still
+    // resolves deterministically.
+    const aN = parseIdNumeric(a.issue.id);
+    const bN = parseIdNumeric(b.issue.id);
+    if (aN !== null && bN !== null && aN !== bN) return aN - bN;
     return a.issue.id.localeCompare(b.issue.id);
   });
   return out.map((r) => r.payload);
