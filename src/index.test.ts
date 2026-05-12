@@ -113,12 +113,37 @@ let mockIsWorkerMode = false;
 let mockIsDashboardMode = true;
 let mockWorkerRepoName = "";
 let mockRepoContexts: typeof MOCK_REPO[] = [];
+// DX-325 — drives the `if (config.isHost)` guard on the systemd preflight
+// call site in startWorkerMode. Default `true` matches the prior behavior
+// (this test file's existing config mock had `runtime: "host"` only) and
+// reflects the worker's expected production runtime.
+let mockIsHost = true;
 
 vi.mock("./config.js", () => ({
-  get config() { return { runtime: "host" }; },
+  get config() { return { runtime: "host", isHost: mockIsHost }; },
   get isWorkerMode() { return mockIsWorkerMode; },
   get isDashboardMode() { return mockIsDashboardMode; },
   get workerRepoName() { return mockWorkerRepoName; },
+}));
+
+// DX-325: mock the systemd boot preflight so the test can assert on the
+// wiring without actually probing the host's systemd state. The actual
+// preflight has its own dedicated unit suite at
+// `src/agent/systemd-preflight.test.ts` covering every probe branch.
+const mockPreflightSystemdRun = vi
+  .fn<() => Promise<{ ok: boolean; reason?: string; summary?: string }>>()
+  .mockResolvedValue({ ok: true });
+class MockSystemdPreflightError extends Error {
+  readonly reason: string;
+  constructor(result: { reason: string; summary: string }) {
+    super(result.summary);
+    this.name = "SystemdPreflightError";
+    this.reason = result.reason;
+  }
+}
+vi.mock("./agent/systemd-preflight.js", () => ({
+  preflightSystemdRun: mockPreflightSystemdRun,
+  SystemdPreflightError: MockSystemdPreflightError,
 }));
 
 vi.mock("./repo-context.js", () => ({
@@ -207,6 +232,8 @@ beforeEach(() => {
   mockStartDashboard.mockResolvedValue(undefined);
   mockStartWorkerServer.mockResolvedValue(undefined);
   mockStartSlackListener.mockResolvedValue(undefined);
+  mockPreflightSystemdRun.mockResolvedValue({ ok: true });
+  mockIsHost = true;
 });
 
 // Helper: import index.ts (which runs main() immediately) and flush the full
@@ -257,6 +284,66 @@ describe("worker mode startup flow", { timeout: 15_000 }, () => {
     await importIndex();
 
     expect(mockStartWorkerServer).toHaveBeenCalledWith(MOCK_REPO);
+  });
+
+  // DX-325 — systemd scope preflight wiring (Phase 2 of DX-323).
+  // Each branch is asserted because a regression in `startWorkerMode`
+  // (missing guard, swallowed throw, wrong ordering) would silently
+  // boot the worker into the broken-env state the preflight was
+  // added to prevent.
+  describe("systemd-run boot preflight (DX-325)", () => {
+    it("calls preflightSystemdRun on host runtime", async () => {
+      mockIsHost = true;
+      await importIndex();
+
+      expect(mockPreflightSystemdRun).toHaveBeenCalledOnce();
+    });
+
+    it("runs the preflight BEFORE startWorkerServer + startPoller (refuses to accept dispatches when scope confinement is unavailable)", async () => {
+      mockIsHost = true;
+      await importIndex();
+
+      expect(mockPreflightSystemdRun).toHaveBeenCalledBefore(mockStartWorkerServer);
+      expect(mockPreflightSystemdRun).toHaveBeenCalledBefore(mockStartPoller);
+    });
+
+    it("skips the preflight on docker runtime (container boundary already confines the process tree)", async () => {
+      mockIsHost = false;
+      await importIndex();
+
+      expect(mockPreflightSystemdRun).not.toHaveBeenCalled();
+      // The worker still finishes booting — docker is unaffected.
+      expect(mockStartWorkerServer).toHaveBeenCalledOnce();
+    });
+
+    it("throws SystemdPreflightError when the preflight fails (worker refuses to boot)", async () => {
+      mockIsHost = true;
+      mockPreflightSystemdRun.mockResolvedValueOnce({
+        ok: false,
+        reason: "systemd-run-missing",
+        summary: "systemd-run --user --version not on PATH",
+      });
+
+      // main() catches the error and calls process.exit(1). Replace
+      // exit with a no-op spy that records the call — throwing here
+      // would lift to an unhandled rejection because main()'s
+      // .catch() is fire-and-forget.
+      const exitSpy = vi
+        .spyOn(process, "exit")
+        .mockImplementation((() => undefined) as never);
+
+      await importIndex();
+
+      expect(mockPreflightSystemdRun).toHaveBeenCalledOnce();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      // Preflight failure → worker boot aborts → these subsequent
+      // boot steps never run. Pinning each individually so a future
+      // refactor that swallows the throw is caught.
+      expect(mockStartWorkerServer).not.toHaveBeenCalled();
+      expect(mockStartPoller).not.toHaveBeenCalled();
+
+      exitSpy.mockRestore();
+    });
   });
 
   it("calls initPlatformPool with repo.db before starting the worker server", async () => {

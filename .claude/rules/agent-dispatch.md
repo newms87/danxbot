@@ -38,19 +38,26 @@ Worker hostname: `workerHost(name) = danxbot-worker-<name>` (compose `container_
 
 **Router is strict allowlist.** Unknown path or method → `{"error":"Not found"}` 404. No SPA fallback except `GET /` serving `index.html`. Prevents the regression where `POST /api/launch` returned SPA HTML 200.
 
-## The Single Fork Principle
+## The Single Fork Principle — scope-confined on host (DX-323 / DX-325)
 
-Every dispatch spawns EXACTLY ONE claude process. Runtime auto-detected from `/.dockerenv` (container → docker; host → host); runtime is never set via env var. Mode only changes the spawn shape — everything downstream is identical.
+Every dispatch spawns EXACTLY ONE `claude` process. Runtime auto-detected from `/.dockerenv` (container → docker; host → host); never set via env var. Mode only changes the spawn shape — everything downstream is identical.
 
-| Concern | Docker | Host |
-|---|---|---|
-| Spawn | `spawn("claude", ["-p", taggedPrompt, ...])` headless | `wt.exe` opens Windows Terminal tab; bash script runs `script -q -f -c "claude <flags> -- <firstMessage>"` interactive |
-| User-visible | Nothing | Live TUI |
-| Prompt | `-p` argv | Positional arg after `--` |
-| Monitoring / StallDetector / LaravelForwarder / Heartbeat / Usage / `danxbot_complete` | Identical (SessionLogWatcher → JSONL) |
-| Cancel | SIGTERM `job.process` | SIGTERM tracked PID (claude inside terminal) |
+**Production routing** is two states, not three. `dispatch()` (`src/dispatch/core.ts`) defaults `openTerminal: config.isHost`, so the launcher's `if (options.openTerminal)` branch is `true` on host and `false` in docker. Result: host production ALWAYS reaches `terminal.ts#buildDispatchScript` (interactive TUI inside `script -q -f`); docker production ALWAYS reaches `spawn-docker-mode.ts` (headless `claude -p`). The third row in the table below — "Host headless" — exists only because the `spawn-docker-mode.ts` host wrap is defense-in-depth for direct `spawnAgent()` callers (tests, future non-TUI host paths); no production code reaches it today. The "Host mode MUST be interactive" rule (see below) bans `claude -p` in production host runtime; the headless wrap is test-only and does not violate that contract because production never routes there.
 
-ONE fork, ONE process, ONE JSONL, ONE watcher. Adding a second spawn / observer / monitoring path = STOP, you're unwinding this contract.
+**Host runtime confines every dispatch in a per-dispatch transient systemd user-scope unit.** The cgroup is `danxbot-dispatch-<dispatchId>.scope`; backgrounded grandchildren (`yes > /dev/null &`, double-forks, daemons the dispatched agent's Bash tool spawns) inherit the scope so the whole tree is one kill target. Boot preflight (`src/agent/systemd-preflight.ts`) refuses to start the worker on host if `systemctl --user is-system-running` is offline or `systemd-run --user --version` does not run — there is no naked-spawn fallback. Docker runtime SKIPS the scope wrapper because the container boundary is already the cgroup that confines the tree.
+
+| Concern | Docker (production) | Host TUI (production) | Host headless (test-only) |
+|---|---|---|---|
+| Outer process | `spawn("claude", ["-p", taggedPrompt, ...])` | `wt.exe` → bash → `script -q -f -c "systemd-run --user --scope --unit danxbot-dispatch-<id> --quiet --collect -- claude <flags> -- <firstMessage>"` | `spawn("systemd-run", ["--user", "--scope", "--unit", "danxbot-dispatch-<id>", "--quiet", "--collect", "--", "claude", "-p", taggedPrompt, ...])` |
+| Cgroup boundary | container | per-dispatch scope unit | per-dispatch scope unit |
+| User-visible | Nothing | Live TUI | Nothing |
+| Prompt | `-p` argv | Positional arg after `--` | `-p` argv (test path only — production never reaches this) |
+| `DANXBOT_DISPATCH_SCOPE` env | NOT set (no real scope unit in the container) | `danxbot-dispatch-<id>` | `danxbot-dispatch-<id>` |
+| Monitoring / StallDetector / LaravelForwarder / Heartbeat / Usage / `danxbot_complete` | Identical (SessionLogWatcher → JSONL) | Identical | Identical |
+| Cancel (Phase 2, current) | SIGTERM `job.handle.pid` | SIGTERM tracked PID — `script` cascades through pty | SIGTERM `job.handle.pid` — systemd-run forwards to its scope's children |
+| Cancel (Phase 3, future) | unchanged | `systemctl --user stop danxbot-dispatch-<id>.scope` | `systemctl --user stop danxbot-dispatch-<id>.scope` |
+
+ONE fork, ONE process tree (cgroup-confined on host), ONE JSONL, ONE watcher. Adding a second spawn / observer / monitoring path = STOP, you're unwinding this contract. The pure helper that builds the systemd-run argv lives at `src/agent/scope.ts#buildSystemdRunArgs`; its unit test pins the canonical arg order including `--collect` (auto-cleanup of completed scope units).
 
 ## SessionLogWatcher — the only monitoring mechanism
 

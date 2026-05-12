@@ -12,8 +12,10 @@ import { spawn } from "node:child_process";
 import { writeFileSync, chmodSync, openSync, closeSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { config } from "./config.js";
 import { createLogger } from "./logger.js";
 import { bashSingleQuote } from "./agent/claude-invocation.js";
+import { buildSystemdRunArgs } from "./agent/scope.js";
 
 const log = createLogger("terminal");
 
@@ -135,14 +137,27 @@ export function buildDispatchScript(
   // variadic flag landed last in the argv. See Trello card `kwZOGOrQ` for
   // the full bisection + repro. Docker mode uses `-p firstMessage` instead
   // of a positional, so this separator is host-mode-only.
-  const claudeArgvLiteral = [
-    "claude",
-    ...options.flags,
-    "--",
-    options.firstMessage,
-  ]
-    .map(bashSingleQuote)
-    .join(" ");
+  //
+  // DX-325: on host runtime we wrap the claude invocation under
+  // `systemd-run --user --scope --unit danxbot-dispatch-<id>` so
+  // backgrounded grandchildren join the cgroup and the whole tree is a
+  // single kill target. Boot preflight (`systemd-preflight.ts`) has
+  // already proven the binary works; no fallback. Note: the `--` that
+  // separates claude's flags from firstMessage is preserved INSIDE
+  // systemd-run's payload — each `--` is consumed by its owning
+  // program's option parser, so chaining is safe.
+  const claudeTail = [...options.flags, "--", options.firstMessage];
+  const argvTokens = config.isHost
+    ? [
+        "systemd-run",
+        ...buildSystemdRunArgs({
+          dispatchId: options.jobId,
+          claudePath: "claude",
+          claudeArgs: claudeTail,
+        }),
+      ]
+    : ["claude", ...claudeTail];
+  const claudeArgvLiteral = argvTokens.map(bashSingleQuote).join(" ");
   const quotedStatusUrl = bashSingleQuote(options.statusUrl || "");
   const quotedApiToken = bashSingleQuote(options.apiToken);
   const quotedTerminalLog = bashSingleQuote(options.terminalLogPath);

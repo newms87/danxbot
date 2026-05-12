@@ -25,6 +25,7 @@ import {
   chmodSync,
   rmSync,
   existsSync,
+  readFileSync,
 } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { mkdtempSync } from "node:fs";
@@ -160,6 +161,39 @@ function createClaudeWrapper(binDir: string): void {
   chmodSync(wrapperPath, 0o755);
 }
 
+/**
+ * Create a shell wrapper script named `systemd-run` that captures its
+ * argv to $SYSTEMD_RUN_ARGV_FILE (one element per line) then execs the
+ * inner command after the POSIX `--` separator.
+ *
+ * Used by the scope-wrapper test to verify the launcher passes the
+ * canonical argv (`--user --scope --unit danxbot-dispatch-<id> --quiet
+ * --collect --`) without actually running real systemd — the test
+ * environment may not have a user systemd instance available (CI,
+ * docker-based runners), so this shim stands in.
+ */
+function createSystemdRunShim(binDir: string): void {
+  const wrapperPath = join(binDir, "systemd-run");
+  writeFileSync(
+    wrapperPath,
+    `#!/bin/bash
+# DX-325 dispatch-pipeline test shim. NOT a real systemd-run.
+if [[ -n "$SYSTEMD_RUN_ARGV_FILE" ]]; then
+  printf '%s\\n' "$@" > "$SYSTEMD_RUN_ARGV_FILE"
+fi
+# Walk argv to the POSIX -- separator, then exec what follows.
+while [[ $# -gt 0 && "$1" != "--" ]]; do shift; done
+if [[ $# -eq 0 ]]; then
+  echo "systemd-run shim: no -- separator in argv" >&2
+  exit 64
+fi
+shift  # consume the --
+exec "$@"
+`,
+  );
+  chmodSync(wrapperPath, 0o755);
+}
+
 /** Predicate: is this a PUT with the given status in the body? */
 function isStatusPut(status: string) {
   return (r: { method: string; body: string }) => {
@@ -266,6 +300,7 @@ beforeEach(async () => {
   fakeBinDir = join(tempDir, "bin");
   mkdirSync(fakeBinDir);
   createClaudeWrapper(fakeBinDir);
+  createSystemdRunShim(fakeBinDir);
 
   testState.reposBase = join(tempDir, "repos");
   repoDir = join(testState.reposBase, "test-repo");
@@ -499,6 +534,152 @@ describe("Integration: dispatch pipeline", () => {
 
       const eventPosts = captureServer.getRequestsByPath("/events");
       expect(eventPosts.length).toBeGreaterThanOrEqual(1);
+    }, 20_000);
+  });
+
+  describe("systemd scope wrapper (DX-325 / DX-323)", () => {
+    it("on host runtime, the headless spawn argv begins with `systemd-run --user --scope --unit danxbot-dispatch-<jobId> --quiet --collect --`", async () => {
+      // Pin the canonical wrapper for the headless spawn path. Without
+      // the per-dispatch scope unit, backgrounded grandchildren (`yes >
+      // /dev/null &`, double-forks) reparent to PID 1 and outlive the
+      // dispatch — the prod incident class DX-323 fixes. The host pre-
+      // flight (`systemd-preflight.ts`) makes the dispatcher refuse to
+      // boot without `systemd-run --user --version`; this test pins the
+      // shape that goes into that real `systemd-run`.
+      mockConfig.isHost = true;
+      const argvFile = join(tempDir, "systemd-run-argv.txt");
+      const env = {
+        ...fakeClasudeEnv(),
+        SYSTEMD_RUN_ARGV_FILE: argvFile,
+      };
+
+      const job = await new Promise<AgentJob>((resolve, reject) => {
+        spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 10_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          onComplete: resolve,
+          env,
+        }).catch(reject);
+      });
+
+      expect(job.status).toBe("completed");
+
+      // Shim captured one argv element per line.
+      const captured = readFileSync(argvFile, "utf-8")
+        .split("\n")
+        .filter((s) => s.length > 0);
+      expect(captured.slice(0, 6)).toEqual([
+        "--user",
+        "--scope",
+        "--unit",
+        `danxbot-dispatch-${job.id}`,
+        "--quiet",
+        "--collect",
+      ]);
+      // `--` separator is mandatory — without it, `--unit <name>`'s
+      // value would parse incorrectly if a future option becomes
+      // variadic.
+      expect(captured[6]).toBe("--");
+      // The inner command is the claude wrapper.
+      expect(captured[7]).toBe("claude");
+    }, 20_000);
+
+    it("on docker runtime, the headless spawn is NOT wrapped — container boundary is the cgroup", async () => {
+      // Anti-goal in DX-325: docker worker mode is UNCHANGED. The
+      // container PID namespace already confines the dispatched
+      // process tree; wrapping inside the container would require a
+      // user systemd instance that intentionally is not present in
+      // the worker image.
+      mockConfig.isHost = false;
+      const argvFile = join(tempDir, "systemd-run-argv-docker.txt");
+      const env = {
+        ...fakeClasudeEnv(),
+        SYSTEMD_RUN_ARGV_FILE: argvFile,
+      };
+
+      const job = await new Promise<AgentJob>((resolve, reject) => {
+        spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 10_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          onComplete: resolve,
+          env,
+        }).catch(reject);
+      });
+
+      expect(job.status).toBe("completed");
+      // The shim was never invoked → no capture file.
+      expect(existsSync(argvFile)).toBe(false);
+    }, 20_000);
+
+    it("on host runtime, dispatched agent env carries DANXBOT_DISPATCH_SCOPE=danxbot-dispatch-<jobId> (children + observers identify their owning scope without parsing argv)", async () => {
+      // Host-runtime invariant: the env var names a REAL scope unit
+      // that `systemctl --user status` can address. Phase 3 wires the
+      // reaper to read this var.
+      mockConfig.isHost = true;
+      const envFile = join(tempDir, "captured-env.txt");
+      const argvFile = join(tempDir, "systemd-run-argv-host-env.txt");
+      const env = {
+        ...fakeClasudeEnv(),
+        FAKE_CLAUDE_ENV_CAPTURE_FILE: envFile,
+        SYSTEMD_RUN_ARGV_FILE: argvFile,
+      };
+
+      const job = await new Promise<AgentJob>((resolve, reject) => {
+        spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 10_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          onComplete: resolve,
+          env,
+        }).catch(reject);
+      });
+
+      expect(job.status).toBe("completed");
+      const captured = readFileSync(envFile, "utf-8");
+      expect(captured).toContain(
+        `DANXBOT_DISPATCH_SCOPE=danxbot-dispatch-${job.id}`,
+      );
+    }, 20_000);
+
+    it("on docker runtime, DANXBOT_DISPATCH_SCOPE is NOT set (no scope unit exists in the container)", async () => {
+      // Setting the var in docker would mislead future consumers (the
+      // reaper, ops tooling) that read it as proof of scope existence.
+      // Container PID namespace is the cgroup boundary; there is no
+      // per-dispatch systemd unit to address.
+      mockConfig.isHost = false;
+      const envFile = join(tempDir, "captured-env-docker.txt");
+      const env = {
+        ...fakeClasudeEnv(),
+        FAKE_CLAUDE_ENV_CAPTURE_FILE: envFile,
+      };
+
+      const job = await new Promise<AgentJob>((resolve, reject) => {
+        spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 10_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          onComplete: resolve,
+          env,
+        }).catch(reject);
+      });
+
+      expect(job.status).toBe("completed");
+      const captured = readFileSync(envFile, "utf-8");
+      expect(captured).not.toMatch(/^DANXBOT_DISPATCH_SCOPE=/m);
     }, 20_000);
   });
 

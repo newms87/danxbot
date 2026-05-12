@@ -15,9 +15,11 @@
  */
 
 import { spawn } from "node:child_process";
+import { config } from "../config.js";
 import { setupProcessHandlers } from "./process-utils.js";
 import { createDockerHandle } from "./agent-handle.js";
 import { putStatus } from "./agent-status.js";
+import { buildSystemdRunArgs } from "./scope.js";
 import type { AgentJob } from "./agent-types.js";
 
 export interface SpawnDockerModeOptions {
@@ -50,7 +52,31 @@ export function spawnDockerMode(opts: SpawnDockerModeOptions): void {
     onComplete,
   } = opts;
 
-  const child = spawn("claude", [...flags, "-p", firstMessage], {
+  // DX-325: defense-in-depth scope wrap for direct `spawnAgent()`
+  // callers on host runtime (tests, future non-TUI host paths). The
+  // PRODUCTION host path never reaches here — `dispatch()` defaults
+  // `openTerminal: config.isHost`, so on host the launcher routes to
+  // `runHostModeFork` → `terminal.ts#buildDispatchScript` (which has
+  // its own scope wrap). Docker production reaches this function with
+  // `config.isHost === false` and stays naked because the container
+  // boundary is already the cgroup. Boot preflight
+  // (`systemd-preflight.ts`) has already proven `systemd-run --user
+  // --version` runs on host; there is no naked-spawn fallback.
+  // See `.claude/rules/agent-dispatch.md` "Single Fork Principle" for
+  // the production-vs-test path map.
+  const claudeArgs = [...flags, "-p", firstMessage];
+  const [bin, args] = config.isHost
+    ? [
+        "systemd-run",
+        buildSystemdRunArgs({
+          dispatchId: job.id,
+          claudePath: "claude",
+          claudeArgs,
+        }),
+      ]
+    : ["claude", claudeArgs];
+
+  const child = spawn(bin, args, {
     env,
     stdio: ["ignore", "ignore", "pipe"],
     cwd: agentCwd,

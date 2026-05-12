@@ -145,6 +145,21 @@ const writeDelayMs = parseInt(process.env.FAKE_CLAUDE_WRITE_DELAY_MS || "50", 10
 const exitCode = parseInt(process.env.FAKE_CLAUDE_EXIT_CODE || "0", 10);
 const lingerMs = parseInt(process.env.FAKE_CLAUDE_LINGER_MS || "3000", 10);
 
+// DX-325 test instrumentation. When set, fake-claude dumps the env vars
+// the dispatched process inherited (one KEY=VALUE per line) to this
+// file before doing anything else. Tests reading the file can assert
+// that the launcher injected `DANXBOT_DISPATCH_SCOPE` into the spawn
+// env without parsing argv or having to inspect a live systemd unit.
+const envCaptureFile = process.env.FAKE_CLAUDE_ENV_CAPTURE_FILE;
+if (envCaptureFile) {
+  const dump = Object.entries(process.env)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("\n");
+  // Synchronous; runs before any JSONL writes so the test never
+  // races a partial dump.
+  writeFileSync(envCaptureFile, dump);
+}
+
 // Create session directory and file
 mkdirSync(sessionDir, { recursive: true });
 const sessionId = randomUUID();

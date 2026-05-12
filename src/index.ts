@@ -61,6 +61,10 @@ import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
 import { replayPrepVerdictQueue } from "./worker/replay-prep-verdict-queue.js";
 import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
+import {
+  preflightSystemdRun,
+  SystemdPreflightError,
+} from "./agent/systemd-preflight.js";
 
 const log = createLogger("startup");
 
@@ -138,6 +142,20 @@ async function startWorkerMode(): Promise<void> {
 
   // Fail-loud assert canonical path; see src/agent/portable-path.ts.
   ensurePortableRepoPath(repo.localPath, repo.hostPath);
+
+  // DX-325: host-mode dispatches wrap every claude spawn in a
+  // `systemd-run --user --scope` unit (DX-323). Boot fails loud if the
+  // user systemd instance is offline or systemd-run is unavailable —
+  // every dispatch on this worker depends on it. Docker workers are
+  // already cgroup-confined by the container boundary and skip the
+  // check; see `.claude/rules/agent-dispatch.md` "Single Fork Principle".
+  if (config.isHost) {
+    const result = await preflightSystemdRun();
+    if (!result.ok) {
+      throw new SystemdPreflightError(result);
+    }
+    log.info(`[${repo.name}] systemd-run preflight OK — host dispatches will be scope-confined`);
+  }
 
   // Sync `.danxbot/settings.json` display section from RepoContext on
   // every worker boot. Creates the file on first boot AND refreshes

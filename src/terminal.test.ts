@@ -140,8 +140,25 @@ describe("buildDispatchScript", () => {
       ],
     });
     const content = readFileSync(scriptPath, "utf-8");
+    // DX-325: on host runtime the inner `claude` is wrapped under
+    // `systemd-run --user --scope --unit danxbot-dispatch-<id> --quiet
+    // --collect --`. The claude argv (flags + `--` + firstMessage)
+    // sits after that prefix unchanged.
+    expect(content).toMatch(
+      /CLAUDE_ARGV=\('systemd-run' '--user' '--scope' '--unit' 'danxbot-dispatch-test-job-id' '--quiet' '--collect' '--' 'claude' '--dangerously-skip-permissions' '--verbose' '--mcp-config' '\/tmp\/mcp\/settings\.json'/,
+    );
+  });
+
+  // DX-325: scope-confinement contract. The whole tree (script -> systemd-run
+  // -> claude -> any backgrounded grandchild) joins the per-dispatch cgroup
+  // unit. Phase 3 retires the tracked-PID SIGTERM in favor of `systemctl
+  // --user stop danxbot-dispatch-<id>.scope`; this Phase pins the unit name
+  // the next phase will address.
+  it("wraps the claude invocation under `systemd-run --user --scope --unit danxbot-dispatch-<jobId> --quiet --collect --` on host", () => {
+    const scriptPath = buildScript({ jobId: "scope-pin-job-id" });
+    const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain(
-      "CLAUDE_ARGV=('claude' '--dangerously-skip-permissions' '--verbose' '--mcp-config' '/tmp/mcp/settings.json'",
+      "'systemd-run' '--user' '--scope' '--unit' 'danxbot-dispatch-scope-pin-job-id' '--quiet' '--collect' '--' 'claude'",
     );
   });
 

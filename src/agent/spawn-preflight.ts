@@ -28,6 +28,10 @@ import {
   preflightProjectsDir,
   ProjectsDirError,
 } from "./projects-dir-preflight.js";
+import {
+  DANXBOT_DISPATCH_SCOPE_ENV,
+  scopeUnitName,
+} from "./scope.js";
 import type { AgentJob, SpawnAgentOptions } from "./agent-types.js";
 
 const log = createLogger("spawn-preflight");
@@ -132,6 +136,16 @@ export async function runSpawnPreflight(
   };
 
   const env = buildCleanEnv(options.env);
+  // DX-325: dispatched agents + their children + external observers read
+  // this env var to identify their owning systemd scope unit without
+  // parsing argv. ONLY set on host runtime — docker workers run inside
+  // the container's PID namespace and have no per-dispatch scope unit;
+  // injecting a name that does not resolve to a real `systemctl --user
+  // list-units` entry would mislead future consumers (the reaper, ops
+  // tooling) that read this var as proof of scope existence.
+  if (config.isHost) {
+    env[DANXBOT_DISPATCH_SCOPE_ENV] = scopeUnitName(jobId);
+  }
 
   // Single builder — docker and host paths share the exact flags + firstMessage.
   // Runtime only decides whether firstMessage is appended via `-p` (docker
