@@ -391,6 +391,122 @@ describe("sortIssuesForStatus — position tier (DX-264 — operator manual orde
   });
 });
 
+describe("sortIssuesForStatus — epic phase-order tier", () => {
+  function mkEpic(id: string, children: string[]): Issue {
+    const e = mkIssue({ id });
+    (e as Issue).type = "Epic";
+    e.children = children;
+    return e;
+  }
+
+  it("two untriaged phase cards of same Epic sort by children[] index ASC", () => {
+    const phase2 = mkIssue({ id: "ISS-12", untriaged: true, parentId: "ISS-1" });
+    const phase1 = mkIssue({ id: "ISS-11", untriaged: true, parentId: "ISS-1" });
+    const epic = mkEpic("ISS-1", ["ISS-11", "ISS-12"]);
+    const byId = new Map<string, Issue>([
+      [epic.id, epic],
+      [phase1.id, phase1],
+      [phase2.id, phase2],
+    ]);
+    // phase2 has older mtime so FIFO would put it first — phase-order must override.
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: phase2, mtime: 100 },
+        { issue: phase1, mtime: 500 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-11", "ISS-12"]);
+  });
+
+  it("operator `position` still wins over epic phase-order", () => {
+    const phase1 = mkIssue({ id: "ISS-11", untriaged: true, parentId: "ISS-1" });
+    const phase2 = mkIssue({ id: "ISS-12", untriaged: true, parentId: "ISS-1", position: 0 });
+    const epic = mkEpic("ISS-1", ["ISS-11", "ISS-12"]);
+    const byId = new Map<string, Issue>([
+      [epic.id, epic],
+      [phase1.id, phase1],
+      [phase2.id, phase2],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: phase1, mtime: 100 },
+        { issue: phase2, mtime: 500 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    // ISS-12 has position=0 → wins despite later children[] index + later mtime.
+    expect(ids(out)).toEqual(["ISS-12", "ISS-11"]);
+  });
+
+  it("phase-order tier does NOT activate across different epic parents (falls through to ICE/FIFO)", () => {
+    const a = mkIssue({ id: "ISS-11", untriaged: true, parentId: "ISS-1" });
+    const b = mkIssue({ id: "ISS-21", untriaged: true, parentId: "ISS-2" });
+    const epicA = mkEpic("ISS-1", ["ISS-11"]);
+    const epicB = mkEpic("ISS-2", ["ISS-21"]);
+    const byId = new Map<string, Issue>([
+      [epicA.id, epicA],
+      [epicB.id, epicB],
+      [a.id, a],
+      [b.id, b],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: b, mtime: 100 },
+        { issue: a, mtime: 500 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    // Different parents → phase-order not used → FIFO: older mtime first.
+    expect(ids(out)).toEqual(["ISS-21", "ISS-11"]);
+  });
+
+  it("phase-order tier does NOT activate when parent is not type:Epic", () => {
+    const child2 = mkIssue({ id: "ISS-12", untriaged: true, parentId: "ISS-1" });
+    const child1 = mkIssue({ id: "ISS-11", untriaged: true, parentId: "ISS-1" });
+    const parent = mkIssue({ id: "ISS-1" }); // type defaults to Feature
+    parent.children = ["ISS-11", "ISS-12"];
+    const byId = new Map<string, Issue>([
+      [parent.id, parent],
+      [child1.id, child1],
+      [child2.id, child2],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: child2, mtime: 100 },
+        { issue: child1, mtime: 500 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    // Non-Epic parent → phase-order skipped → FIFO: older mtime first.
+    expect(ids(out)).toEqual(["ISS-12", "ISS-11"]);
+  });
+
+  it("phase missing from epic children[] sorts AFTER a present sibling (defensive)", () => {
+    const orphan = mkIssue({ id: "ISS-99", untriaged: true, parentId: "ISS-1" });
+    const phase1 = mkIssue({ id: "ISS-11", untriaged: true, parentId: "ISS-1" });
+    const epic = mkEpic("ISS-1", ["ISS-11"]); // ISS-99 missing from children[]
+    const byId = new Map<string, Issue>([
+      [epic.id, epic],
+      [phase1.id, phase1],
+      [orphan.id, orphan],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: orphan, mtime: 100 },
+        { issue: phase1, mtime: 500 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-11", "ISS-99"]);
+  });
+});
+
 describe("sortIssuesForStatus — recency bucket", () => {
   it("In Progress sorts by updated_at DESC, ignores priority + ICE", () => {
     const a = mkIssue({ id: "ISS-1", status: "In Progress", priority: 1.0, iceTotal: 1 });

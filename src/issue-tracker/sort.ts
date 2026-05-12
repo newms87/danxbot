@@ -11,7 +11,7 @@
  *
  * | Status                          | Sort                                                             |
  * |---------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → ICE total DESC (untriaged = +Inf) → priority DESC → updated_at ASC (FIFO) |
+ * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → ICE total DESC (untriaged = +Inf) → priority DESC → updated_at ASC (FIFO) |
  * | In Progress, Done, Cancelled    | updated_at DESC                                                   |
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
@@ -161,6 +161,30 @@ export function sortInputsForStatus<T>(
     if (aPos !== null && bPos === null) return -1;
     if (aPos === null && bPos !== null) return 1;
     if (aPos !== null && bPos !== null && aPos !== bPos) return aPos - bPos;
+
+    // Epic phase-order tier — when two cards share the same `parent_id`
+    // and the parent is `type: "Epic"`, dispatch them in the order they
+    // appear in the epic's `children[]` array. Phases of an epic are
+    // authored as an ordered sequence; the default expectation is that
+    // Phase 1 ships before Phase 2 even when neither phase stamped
+    // `waiting_on` on the next. Operator `position` (above) still wins,
+    // so a manual reorder can override declared phase order.
+    if (
+      a.issue.parent_id !== null &&
+      a.issue.parent_id === b.issue.parent_id
+    ) {
+      const parent = byId.get(a.issue.parent_id);
+      if (parent && parent.type === "Epic") {
+        const aIdx = parent.children.indexOf(a.issue.id);
+        const bIdx = parent.children.indexOf(b.issue.id);
+        // Both present → lower index first. One missing → present wins
+        // (defensive; an epic with a phase missing from children[] is
+        // already a workflow violation but we still order deterministically).
+        if (aIdx !== -1 && bIdx === -1) return -1;
+        if (aIdx === -1 && bIdx !== -1) return 1;
+        if (aIdx !== -1 && bIdx !== -1 && aIdx !== bIdx) return aIdx - bIdx;
+      }
+    }
 
     // Both untriaged → both score +Infinity → iceDelta is NaN. Fall
     // through to priority + FIFO tiebreaks. A finite delta or
