@@ -125,6 +125,7 @@ export async function handlePostAgent(
     capabilities: f.capabilities,
     schedule: f.schedule,
     enabled: f.enabled,
+    broken: null,
     created_at: now,
     updated_at: now,
   };

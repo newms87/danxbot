@@ -453,6 +453,71 @@ describe("tryMultiAgentDispatch", () => {
     expect(mockedRunConflictCheck).not.toHaveBeenCalled();
   });
 
+  // DX-292 Phase 1 — broken agents are filtered out of the picker pool
+  // by `pickFreeAgent`. End-to-end check on the orchestrator: a broken
+  // alice + healthy bob in the same roster ends with bob dispatching
+  // (alice would have been alphabetically first but is filtered out).
+  it("DX-292: skips an agent whose broken !== null; healthy peer dispatches", async () => {
+    writeSettings({
+      alice: agentRecord("alice", {
+        broken: {
+          reason: "Worktree rebase aborted",
+          suggested_steps: ["cd <worktree>", "git rebase --abort"],
+          set_at: "2026-05-12T03:00:00Z",
+        },
+      }),
+      bob: agentRecord("bob"),
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+    expect(mockedDispatchWithRecovery.mock.calls[0][1].agentName).toBe("bob");
+  });
+
+  it("DX-292: returns 0 dispatched when every agent is broken (no fallback)", async () => {
+    writeSettings({
+      alice: agentRecord("alice", {
+        broken: {
+          reason: "Stale worktree",
+          suggested_steps: [],
+          set_at: "2026-05-12T03:00:00Z",
+        },
+      }),
+      bob: agentRecord("bob", {
+        broken: {
+          reason: "Auth missing",
+          suggested_steps: [],
+          set_at: "2026-05-12T03:01:00Z",
+        },
+      }),
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1"), issue("DX-2")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+  });
+
   it("agent already in busy set → not picked", async () => {
     writeSettings({
       alice: agentRecord("alice"),

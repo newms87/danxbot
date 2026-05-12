@@ -28,6 +28,7 @@ function agent(
     capabilities: ["issue-worker"],
     schedule: alwaysOpenSchedule(),
     enabled: true,
+    broken: null,
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -134,6 +135,87 @@ describe("pickFreeAgent", () => {
   it("returns null on an empty roster", () => {
     const out = pickFreeAgent({ roster: [], busy: new Set(), now: NOW });
     expect(out).toBeNull();
+  });
+
+  // DX-292 Phase 1 — broken agents are excluded from the pickable pool
+  // by the same gate that filters busy/disabled/wrong-capability. The
+  // operator clears `broken` via the dashboard (set to null) and the
+  // agent returns to the pool on the next tick.
+  describe("DX-292: broken-agent exclusion", () => {
+    const brokenRecord = {
+      reason: "Worktree rebase aborted on conflict.",
+      suggested_steps: ["cd <worktree>", "git rebase --abort"],
+      set_at: "2026-05-12T03:00:00Z",
+    };
+
+    it("skips an agent whose broken !== null", () => {
+      const roster = [
+        agent("alice", { broken: brokenRecord }),
+        agent("bob"),
+      ];
+      const out = pickFreeAgent({ roster, busy: new Set(), now: NOW });
+      expect(out?.name).toBe("bob");
+    });
+
+    it("returns null when every agent is broken", () => {
+      const roster = [
+        agent("alice", { broken: brokenRecord }),
+        agent("bob", { broken: brokenRecord }),
+      ];
+      const out = pickFreeAgent({ roster, busy: new Set(), now: NOW });
+      expect(out).toBeNull();
+    });
+
+    it("clearing broken (broken = null) returns the agent to the eligible pool", () => {
+      // Sanity: broken-alice → bob picked.
+      const tickBroken = pickFreeAgent({
+        roster: [agent("alice", { broken: brokenRecord }), agent("bob")],
+        busy: new Set(),
+        now: NOW,
+      });
+      expect(tickBroken?.name).toBe("bob");
+
+      // After clear: alice (alphabetical first) picked again.
+      const tickHealed = pickFreeAgent({
+        roster: [agent("alice", { broken: null }), agent("bob")],
+        busy: new Set(),
+        now: NOW,
+      });
+      expect(tickHealed?.name).toBe("alice");
+    });
+
+    it("disabled + broken — still skipped (enabled gate fires first, ordering invariant)", () => {
+      // A disabled AND broken agent must be filtered out regardless of
+      // which gate runs first. Pinned so a future refactor that flips
+      // the cheapest-first order can't accidentally let a disabled
+      // broken agent slip through.
+      const roster = [
+        agent("alice", { enabled: false, broken: brokenRecord }),
+        agent("bob"),
+      ];
+      const out = pickFreeAgent({ roster, busy: new Set(), now: NOW });
+      expect(out?.name).toBe("bob");
+    });
+
+    it("broken takes precedence over busy/schedule when filtering (early return — picker never evaluates downstream)", () => {
+      // Broken-alice is ALSO in busy + off-hours. The order of filters
+      // is an implementation detail, but the user-observable behavior is
+      // identical: she is not picked. This test guards against a future
+      // refactor that accidentally re-orders the gates such that an
+      // off-hours broken agent slips through.
+      const closedSchedule = alwaysOpenSchedule();
+      closedSchedule.mon = [];
+      const roster = [
+        agent("alice", { broken: brokenRecord, schedule: closedSchedule }),
+        agent("bob"),
+      ];
+      const out = pickFreeAgent({
+        roster,
+        busy: new Set(["alice"]),
+        now: NOW,
+      });
+      expect(out?.name).toBe("bob");
+    });
   });
 });
 

@@ -30,17 +30,27 @@
  * if operators report load-imbalance complaints.
  */
 
-import type { AgentRecordWithName } from "../settings-file.js";
+import { isAgentBroken, type AgentRecordWithName } from "../settings-file.js";
 import {
   isAgentInSchedule,
   type ScheduleCheckAgent,
 } from "../agent/agent-schedule.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import { createLogger } from "../logger.js";
+
+const log = createLogger("pick-agent");
 
 export interface PickFreeAgentInput {
   roster: readonly AgentRecordWithName[];
   busy: ReadonlySet<string>;
   now: Date;
+  /**
+   * Repo name used for the debug-log prefix on a broken-skip. Optional
+   * so existing tests that don't care about the log line don't have to
+   * thread the value through. Production callers (`tryMultiAgentDispatch`)
+   * should always pass it so operator log scans surface the right repo.
+   */
+  repoName?: string;
 }
 
 /**
@@ -50,9 +60,12 @@ export interface PickFreeAgentInput {
  *   1. `enabled === true` (operator paused agents are always skipped).
  *   2. `capabilities` includes `"issue-worker"` (Slack-only or
  *      api-only agents don't process cards).
- *   3. `isAgentInSchedule(agent, now)` — the agent's tz + per-day
- *      windows say it's working hours.
+ *   3. `broken === null` (DX-292 — a prep dispatch that ended in
+ *      `abort` marks the agent unrecoverable; the operator clears the
+ *      field via the dashboard once the worktree is healthy again).
  *   4. NOT in `busy` — no in-flight dispatch on this repo.
+ *   5. `isAgentInSchedule(agent, now)` — the agent's tz + per-day
+ *      windows say it's working hours.
  *
  * Tiebreak: when multiple agents pass, return the one whose `name`
  * sorts first (lexicographic). Stable across ticks; tests can assert
@@ -61,18 +74,39 @@ export interface PickFreeAgentInput {
 export function pickFreeAgent(
   input: PickFreeAgentInput,
 ): AgentRecordWithName | null {
-  const { roster, busy, now } = input;
+  const { roster, busy, now, repoName } = input;
   // Filter chain ordered cheapest-first:
   //   1. enabled flag (object property read)
   //   2. capability membership (3-element array contains)
   //   3. busy set (Set.has — O(1))
-  //   4. schedule check (Intl.DateTimeFormat allocation + parse)
+  //   4. broken state (object property read — DX-292)
+  //   5. schedule check (Intl.DateTimeFormat allocation + parse)
   // The Intl call is the expensive predicate; running it last lets a
-  // disabled / busy / wrong-capability agent skip it entirely.
+  // disabled / busy / wrong-capability / broken agent skip it entirely.
+  // Busy is filtered BEFORE broken so an agent that's both broken AND
+  // mid-dispatch does NOT emit the broken-skip log line every tick —
+  // the underlying problem is one of two, and the busy-skip path is
+  // silent so log volume scales with the broken set, not busy×broken.
   const candidates = roster.filter((a) => {
     if (!a.enabled) return false;
     if (!a.capabilities.includes("issue-worker")) return false;
     if (busy.has(a.name)) return false;
+    if (isAgentBroken(a)) {
+      // The reason can be long (operator-facing prose); slice to keep
+      // the log line scannable. `set_at` lets operators correlate to
+      // the prep dispatch that flagged the worktree. `log.debug` (not
+      // `info`) — operators paging through worker logs for an
+      // operational concern can opt in via `LOG_LEVEL=debug`; default
+      // log volume stays clean while broken-state lingers.
+      const reason = a.broken?.reason ?? "";
+      const prefix = repoName ? `[${repoName}] ` : "";
+      log.debug(
+        `${prefix}pick: skipping agent ${a.name} — broken (set_at=${
+          a.broken?.set_at ?? ""
+        }, reason=${reason.slice(0, 80)})`,
+      );
+      return false;
+    }
     const checkInput: ScheduleCheckAgent = {
       enabled: a.enabled,
       schedule: a.schedule,

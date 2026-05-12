@@ -16,6 +16,8 @@ import {
   buildDisplayFromContext,
   defaultSettings,
   getIssuePollerPickupPrefix,
+  getPrepMode,
+  isAgentBroken,
   isConflictCheckEnabled,
   isFeatureEnabled,
   isTrelloSyncOverrideDisabled,
@@ -24,11 +26,13 @@ import {
   mutateAgents,
   readAgents,
   readSettings,
+  setAgentBroken,
   settingsFilePath,
   settingsLockPath,
   syncSettingsFileOnBoot,
   watchSettingsFile,
   writeSettings,
+  type AgentBrokenState,
   type AgentRecord,
   type Settings,
 } from "./settings-file.js";
@@ -1068,6 +1072,7 @@ describe("settings-file", () => {
           sun: [],
         },
         enabled: true,
+        broken: null,
         created_at: "2026-05-08T12:00:00Z",
         updated_at: "2026-05-08T12:00:00Z",
         ...over,
@@ -1357,6 +1362,355 @@ describe("settings-file", () => {
   });
 
   // ============================================================
+  // DX-292 Phase 1 — agentDefaults.prepMode + agents.<name>.broken
+  // ============================================================
+
+  describe("DX-292: agentDefaults.prepMode", () => {
+    it("defaults to 'combined' when the field is missing from disk", () => {
+      // No file at all → defaultSettings()
+      expect(getPrepMode(localPath)).toBe("combined");
+
+      // Field present but prepMode missing → still combined.
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agentDefaults: { conflictCheckEnabled: false },
+          meta: { updatedAt: "2026-05-08T12:00:00Z", updatedBy: "worker" },
+        }),
+      );
+      expect(getPrepMode(localPath)).toBe("combined");
+    });
+
+    it("round-trips 'separate' through writeSettings without clobbering conflictCheckEnabled", async () => {
+      // Seed with conflictCheckEnabled=false so the prepMode-only patch
+      // must NOT reset it to the default.
+      await writeSettings(localPath, {
+        agentDefaults: { conflictCheckEnabled: false },
+        writtenBy: "dashboard:test",
+      });
+
+      await writeSettings(localPath, {
+        agentDefaults: { prepMode: "separate" },
+        writtenBy: "dashboard:test",
+      });
+
+      const s = readSettings(localPath);
+      expect(s.agentDefaults?.prepMode).toBe("separate");
+      // Sibling field preserved across the partial patch.
+      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+      // Reader observes the round-tripped value.
+      expect(getPrepMode(localPath)).toBe("separate");
+    });
+
+    it("normalizes unknown prepMode values back to 'combined' (drop-on-fail)", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agentDefaults: { prepMode: "wat" },
+          meta: { updatedAt: "2026-05-08T12:00:00Z", updatedBy: "worker" },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agentDefaults?.prepMode).toBe("combined");
+      expect(getPrepMode(localPath)).toBe("combined");
+    });
+
+    it("getPrepMode degrades to 'combined' on corrupt JSON (never throws)", () => {
+      writeFileSync(settingsFilePath(localPath), "not json");
+      expect(getPrepMode(localPath)).toBe("combined");
+    });
+
+    it("defaultSettings().agentDefaults.prepMode === 'combined' (direct invariant pin)", () => {
+      // Direct schema-default pin so a future bump (e.g. flipping to
+      // "separate" by mistake) fails loudly here instead of changing
+      // production behavior silently.
+      expect(defaultSettings().agentDefaults?.prepMode).toBe("combined");
+    });
+
+    it("setting prepMode then mutateAgents preserves it across the mutation", async () => {
+      await writeSettings(localPath, {
+        agentDefaults: { prepMode: "separate" },
+        writtenBy: "dashboard:test",
+      });
+
+      // A mutateAgents call (agents-only patch) must not stomp the
+      // agentDefaults block.
+      await mutateAgents(
+        localPath,
+        (current) => current,
+        "dashboard:test",
+      );
+
+      expect(getPrepMode(localPath)).toBe("separate");
+    });
+  });
+
+  describe("DX-292: agents.<name>.broken field", () => {
+    function validAgent(over?: Partial<AgentRecord>): AgentRecord {
+      return {
+        type: "agent",
+        bio: "Default test bio.",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          always_on: false,
+          mon: ["09:00-17:00"],
+          tue: [],
+          wed: [],
+          thu: [],
+          fri: [],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        broken: null,
+        created_at: "2026-05-08T12:00:00Z",
+        updated_at: "2026-05-08T12:00:00Z",
+        ...over,
+      };
+    }
+
+    function brokenValue(): AgentBrokenState {
+      return {
+        reason: "Worktree rebase aborted on conflict.",
+        suggested_steps: [
+          "cd <worktree>",
+          "git rebase --abort",
+          "git fetch origin",
+        ],
+        set_at: "2026-05-12T03:00:00Z",
+      };
+    }
+
+    it("agent records read from a file with no broken field default to broken: null", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toBeNull();
+    });
+
+    it("round-trips a broken {reason, suggested_steps, set_at} record on disk", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      await setAgentBroken(localPath, "alice", brokenValue(), "dashboard:test");
+
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toEqual(brokenValue());
+
+      const arr = readAgents(localPath);
+      expect(arr).toHaveLength(1);
+      expect(arr[0].broken).toEqual(brokenValue());
+      expect(isAgentBroken(arr[0])).toBe(true);
+    });
+
+    it("clearing broken (setAgentBroken(..., null)) returns the agent to broken: null", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent({ broken: brokenValue() }) },
+        writtenBy: "dashboard:test",
+      });
+      // Pre-condition: stored on disk.
+      expect(readSettings(localPath).agents?.alice.broken).toEqual(brokenValue());
+
+      await setAgentBroken(localPath, "alice", null, "dashboard:test");
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toBeNull();
+      expect(isAgentBroken(s.agents!.alice)).toBe(false);
+    });
+
+    it("isAgentBroken returns true only when broken !== null", () => {
+      expect(isAgentBroken({ broken: null })).toBe(false);
+      expect(isAgentBroken({ broken: brokenValue() })).toBe(true);
+    });
+
+    it("setAgentBroken rejects malformed shapes fail-loud (TypeError, no write)", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+
+      // Non-object scalars (string / number) — exercises the
+      // `typeof broken !== "object"` branch in validateBrokenInput.
+      await expect(
+        setAgentBroken(localPath, "alice", "abc" as never, "dashboard:test"),
+      ).rejects.toThrow(TypeError);
+      await expect(
+        setAgentBroken(localPath, "alice", 42 as never, "dashboard:test"),
+      ).rejects.toThrow(TypeError);
+
+      // Missing reason
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          { suggested_steps: [], set_at: "2026-05-12T00:00:00Z" } as never,
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+
+      // Empty reason
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          { reason: "", suggested_steps: [], set_at: "2026-05-12T00:00:00Z" },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+
+      // Missing set_at
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          { reason: "x", suggested_steps: [] } as never,
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+
+      // suggested_steps not an array
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: "step" as never,
+            set_at: "2026-05-12T00:00:00Z",
+          },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+
+      // suggested_steps contains a non-string
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: ["ok", 42 as never],
+            set_at: "2026-05-12T00:00:00Z",
+          },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+
+      // None of the failed writes mutated disk.
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toBeNull();
+    });
+
+    it("setAgentBroken throws when the agent name is unknown (no silent no-op)", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      await expect(
+        setAgentBroken(localPath, "ghost", brokenValue(), "dashboard:test"),
+      ).rejects.toThrow(/not found/);
+    });
+
+    it("setAgentBroken bumps the agent's updated_at on each call", async () => {
+      const seeded = "2026-01-01T00:00:00.000Z";
+      await writeSettings(localPath, {
+        agents: {
+          alice: validAgent({ created_at: seeded, updated_at: seeded }),
+        },
+        writtenBy: "dashboard:test",
+      });
+      expect(readSettings(localPath).agents?.alice.updated_at).toBe(seeded);
+
+      await setAgentBroken(localPath, "alice", brokenValue(), "dashboard:test");
+      const after = readSettings(localPath).agents?.alice.updated_at;
+      expect(after).not.toBe(seeded);
+      // Cheap sanity: post-write stamp must parse + sort strictly after
+      // the seeded one.
+      expect(new Date(after ?? "").getTime()).toBeGreaterThan(
+        new Date(seeded).getTime(),
+      );
+    });
+
+    it("malformed broken on disk normalizes to null on read (fail-soft) without dropping the whole agent", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              broken: { reason: "", suggested_steps: [], set_at: "x" },
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      // Whole agent record kept; broken degraded to null.
+      expect(Object.keys(s.agents ?? {})).toEqual(["alice"]);
+      expect(s.agents?.alice.broken).toBeNull();
+    });
+
+    it("broken survives an unrelated overrides patch (writer-merge invariant)", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent({ broken: brokenValue() }) },
+        writtenBy: "dashboard:test",
+      });
+
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        writtenBy: "dashboard:test",
+      });
+
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toEqual(brokenValue());
+    });
+  });
+
+  // ============================================================
   // mutateAgents — DX-160 Phase 2
   //
   // Atomic per-agent mutator. Acquires the per-file lock before reading
@@ -1382,6 +1736,7 @@ describe("settings-file", () => {
           sun: [],
         },
         enabled: true,
+        broken: null,
         created_at: "2026-05-08T12:00:00Z",
         updated_at: "2026-05-08T12:00:00Z",
         ...over,
