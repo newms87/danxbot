@@ -7,8 +7,8 @@ Canonical spec for how danxbot launches a Claude Code agent (Trello card / Slack
 Every dispatch runs with `cwd = <repo>/.danxbot/workspaces/<name>/`. Contents:
 
 - `.mcp.json` (per-workspace + `--strict-mcp-config` → only this workspace's MCP servers visible; danxbot infra server merged at spawn time)
-- `workspace.yml`, `CLAUDE.md`, `.claude/settings.json`
-- `.claude/skills/` + `.claude/rules/` — mirrored verbatim every tick from `src/poller/inject/workspaces/<name>/.claude/` by `injectDanxWorkspaces`
+- `workspace.yml`, `CLAUDE.md`, `.claude/settings.json` (enables `danxbot@newms-plugins`)
+- Static rules + skills resolve via the `danxbot@newms-plugins` plugin (enabled in `.claude/settings.json`). Workspace `.claude/{rules,skills}/` contains ONLY per-repo rendered files — the inject pipeline no longer ships static rules or skills (epic DX-269 retired that surface).
 - `.claude/rules/danx-repo-{config,overview,workflow}.md` + `danx-tools.md` — rendered fresh from `RepoContext` every tick by `renderPerRepoFilesIntoWorkspaces`, duplicated per workspace so cwd-relative `Read .claude/rules/...` resolves locally without ancestor walk
 - `.claude/tools/` — copied from `<repo>/.danxbot/config/tools/`
 
@@ -164,7 +164,7 @@ Mechanical pre-edit check for `src/terminal.ts` / any WT-launching bash:
 
 Contract + invariants:
 - `src/critical-failure.ts` header — format, ownership, invariants.
-- `src/poller/inject/rules/danx-halt-flag.md` — operator-facing half; ships into every connected repo so dispatched agents know when to signal `critical_failure` vs `failed`.
+- `danxbot:halt-flag` plugin skill — operator-facing half; dispatched agents load it to decide when to signal `critical_failure` vs `failed`.
 - In-situ comments: `src/worker/dispatch.ts` (handleStop), `src/poller/index.ts` (halt gate + `checkCardProgressedOrHalt`), `src/worker/health.ts` (halted status precedence), `src/worker/critical-failure-route.ts` (idempotent clear).
 
 Re-read those headers before editing — the feature exists because prod burned ~$1K in a day on 40 re-dispatches against a stuck card.

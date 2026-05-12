@@ -35,7 +35,7 @@ Auto-loaded rules + skills. Trigger the right one BEFORE editing.
 | Before any git op | `dev:git-discipline` |
 | Before any kill signal | `base:process-kill` |
 | Before any Agent / Task subagent dispatch | `base:sub-agent-delegation` |
-| Before EnterPlanMode, before checking off AC, before phase complete | `pipeline:planning-discipline` |
+| Before EnterPlanMode, before checking off AC, before phase complete | `pipeline:pipe-plan` |
 
 ## `@thehammer/danx-issue-mcp` — danxbot owns this package
 
@@ -171,7 +171,7 @@ Full contract — what to do, what NOT to do, the forbidden-patterns table, the 
 
 ### Triggers
 
-Skills are injected into each connected repo by the poller (gitignored, `danx-*` prefix). The inject step is authoritative — files removed from `src/poller/inject/` are pruned from consuming repos on the next poll tick.
+Skills live in the `danxbot@newms-plugins` plugin (`~/web/claude-plugins/danxbot/skills/`). Every dispatched workspace's `.claude/settings.json` enables the plugin with `autoUpdate: true`, so plugin edits propagate to dispatched workers without any inject ceremony.
 
 | Skill | Purpose |
 |---|---|
@@ -212,4 +212,4 @@ IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interfac
 
 ### Card Workflow (Orchestrator)
 
-**Before touching any issue YAML — load `danxbot:issue-card-workflow` skill via the Skill tool.** Skill is authoritative: epic creation MUST ship phase cards same turn (`children: []` on epic = never acceptable); pickup → In Progress → TDD → quality gates (Test Reviewer + Code Reviewer subagents in parallel) → commit → Done with retro → `danxbot_complete`. Action items + `status: Blocked` are LAST RESORT (see `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-next/SKILL.md` Step 1.5). Validator subagent only for agent/SDK changes.
+**Before touching any issue YAML — load `danxbot:issue-card-workflow` skill via the Skill tool.** Skill is authoritative: epic creation MUST ship phase cards same turn (`children: []` on epic = never acceptable); pickup → In Progress → TDD → quality gates (Test Reviewer + Code Reviewer subagents in parallel) → commit → Done with retro → `danxbot_complete`. Action items + `status: Blocked` are LAST RESORT (see `danxbot:danx-next` skill Step 1.5). Validator subagent only for agent/SDK changes.
