@@ -64,7 +64,7 @@ import {
   findByExternalId,
   loadLocal,
 } from "../poller/yaml-lifecycle.js";
-import { checkYamlDispatchLiveness } from "../poller/dispatch-liveness-yaml.js";
+import { buildReattachPlan, type ReattachPlan } from "./reattach-planner.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
@@ -285,6 +285,71 @@ export function bootScheduler(args: {
 }
 
 /**
+ * Walk the repo's `open/` YAML dir and return every issue whose
+ * `dispatch{}` block is non-null. Per-entry parse failures are logged
+ * and skipped so one corrupt file can't halt the boot phase — the
+ * orchestration contract `bootRehydrate` carried before DX-320 stays
+ * intact. Returns `[]` when the dir is missing (fresh repo / pre-init
+ * worker boot).
+ */
+async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
+  const openDir = resolve(repo.localPath, ".danxbot", "issues", "open");
+  if (!existsSync(openDir)) return [];
+  const issues: Issue[] = [];
+  for (const entry of readdirSync(openDir)) {
+    if (!entry.endsWith(".yml")) continue;
+    const stem = entry.slice(0, -".yml".length);
+    try {
+      const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
+      if (issue && issue.dispatch !== null) issues.push(issue);
+    } catch (err) {
+      log.warn(
+        `[${repo.name}] bootRehydrate: skipping ${entry}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  return issues;
+}
+
+/**
+ * Apply the {@link buildReattachPlan} verdict — log alive entries and
+ * fire `clearDispatchAndWrite` for each cleared one. Fire-and-forget on
+ * write errors so a single failing entry can't halt the boot phase;
+ * each failure logs in place.
+ *
+ * `buildReattachPlan` filters `dispatch === null` (see planner source),
+ * so `issue.dispatch` is non-null in both buckets here — the `!` is
+ * load-bearing on that invariant.
+ */
+function applyReattachPlan(repo: RepoContext, plan: ReattachPlan): void {
+  for (const issue of plan.alive) {
+    log.info(
+      `[${repo.name}] bootRehydrate: ${issue.id} alive (pid=${issue.dispatch!.pid}, dispatch=${issue.dispatch!.id}) — left in place`,
+    );
+  }
+  for (const issue of plan.cleared) {
+    log.warn(
+      `[${repo.name}] bootRehydrate: clearing ${issue.id} (dispatch=${issue.dispatch!.id})`,
+    );
+    try {
+      void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
+        log.warn(
+          `[${repo.name}] bootRehydrate: clearDispatch mirror ack failed for ${issue.id}`,
+          err,
+        ),
+      );
+    } catch (err) {
+      log.error(
+        `[${repo.name}] bootRehydrate: clearDispatch failed for ${issue.id}`,
+        err,
+      );
+    }
+  }
+}
+
+/**
  * Boot-rehydrate — Phase 5 of Event-Driven Worker (DX-220).
  *
  * Consolidates every "on worker boot, walk on-disk state and re-arm
@@ -294,13 +359,13 @@ export function bootScheduler(args: {
  *
  * What runs:
  *
- *   1. **Dead-dispatch clearing.** Walks every open YAML; for each
- *      with a non-null `dispatch{}` block, derives a liveness verdict
- *      via `checkYamlDispatchLiveness`. Verdict `alive` is left in
- *      place (the per-dispatch TTL timer + heartbeat tick own it from
- *      here); `dead-pid` / `dead-ttl` / `cross-host` clear the
- *      `dispatch` field via `clearDispatchAndWrite` so the scheduler
- *      can re-offer the slot.
+ *   1. **Dead-dispatch clearing.** `loadDispatchedIssues` walks every
+ *      open YAML; `buildReattachPlan` partitions the result into
+ *      `{alive, cleared}` via `checkYamlDispatchLiveness`;
+ *      `applyReattachPlan` leaves alive entries in place and fires
+ *      `clearDispatchAndWrite` for each cleared entry so the scheduler
+ *      can re-offer the slot. The planner is the pure-fn seam restored
+ *      in DX-320 (was inlined here pre-DX-320).
  *   2. **TTL timer re-arm.** Reads non-terminal dispatches from the
  *      `dispatches` table; for each with an alive PID + non-null
  *      `issueId`, arms a fresh TTL timer via `scanAndArmTtlTimers`.
@@ -335,67 +400,14 @@ export async function bootRehydrate(args: {
     localPath: repo.localPath,
     issuePrefix: repo.issuePrefix,
   };
-
-  // Step 1 — clear dead-dispatch records from open YAMLs.
-  let alive = 0;
-  let cleared = 0;
-  const openDir = resolve(repo.localPath, ".danxbot", "issues", "open");
-  if (existsSync(openDir)) {
-    const issues: Issue[] = [];
-    for (const entry of readdirSync(openDir)) {
-      if (!entry.endsWith(".yml")) continue;
-      const stem = entry.slice(0, -".yml".length);
-      try {
-        const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
-        if (issue && issue.dispatch !== null) {
-          issues.push(issue);
-        }
-      } catch (err) {
-        log.warn(
-          `[${repo.name}] bootRehydrate: skipping ${entry}: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
-
-    if (issues.length > 0) {
-      const livenessDeps = {
-        currentHost: osHostname(),
-        now: Date.now(),
-        isPidAlive,
-      };
-      for (const issue of issues) {
-        if (issue.dispatch === null) continue;
-        const verdict = checkYamlDispatchLiveness(issue.dispatch, livenessDeps);
-        if (verdict.kind === "alive") {
-          alive += 1;
-          log.info(
-            `[${repo.name}] bootRehydrate: ${issue.id} alive (pid=${issue.dispatch.pid}, dispatch=${issue.dispatch.id}) — left in place`,
-          );
-        } else {
-          cleared += 1;
-          log.warn(
-            `[${repo.name}] bootRehydrate: clearing ${issue.id} (verdict=${verdict.kind}, dispatch=${issue.dispatch.id})`,
-          );
-          try {
-            void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
-              log.warn(
-                `[${repo.name}] bootRehydrate: clearDispatch mirror ack failed for ${issue.id}`,
-                err,
-              ),
-            );
-          } catch (err) {
-            log.error(
-              `[${repo.name}] bootRehydrate: clearDispatch failed for ${issue.id}`,
-              err,
-            );
-          }
-        }
-      }
-    }
-  }
-
+  // Step 1 — partition dispatched YAMLs via the pure planner seam.
+  const issues = await loadDispatchedIssues(repo);
+  const plan = buildReattachPlan(issues, {
+    currentHost: osHostname(),
+    now: Date.now(),
+    isPidAlive,
+  });
+  applyReattachPlan(repo, plan);
   // Step 2 — arm TTL timers from DB non-terminal dispatches.
   const ttlScan = await scanAndArmTtlTimers({
     repo: reconcileRepo,
@@ -403,17 +415,12 @@ export async function bootRehydrate(args: {
     deps: ttlTimerDeps,
     findNonTerminalDispatches,
   });
-
-  // Step 3 — arm triage timers from open YAMLs. Idempotent with the
-  // parallel call inside `bootScheduler`; arming the same (repo, card)
-  // replaces any prior timer cleanly.
+  // Step 3 — arm triage timers from open YAMLs.
   scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
-
   log.info(
-    `[${repo.name}] bootRehydrate: alive=${alive} cleared=${cleared} ttl-armed=${ttlScan.armed} ttl-skipped=${ttlScan.skipped}`,
+    `[${repo.name}] bootRehydrate: alive=${plan.alive.length} cleared=${plan.cleared.length} ttl-armed=${ttlScan.armed} ttl-skipped=${ttlScan.skipped}`,
   );
-
-  return { alive, cleared, ttlArmed: ttlScan.armed };
+  return { alive: plan.alive.length, cleared: plan.cleared.length, ttlArmed: ttlScan.armed };
 }
 
 /**

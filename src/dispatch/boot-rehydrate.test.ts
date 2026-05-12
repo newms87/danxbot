@@ -288,6 +288,46 @@ describe("bootRehydrate", () => {
     expect(result.cleared).toBe(0);
   });
 
+  it("clearDispatchAndWrite rejection on one cleared issue is swallowed — bootRehydrate still resolves with correct counts", async () => {
+    writeFileSync(resolve(openDir, "DX-1.yml"), "");
+    writeFileSync(resolve(openDir, "DX-2.yml"), "");
+    const realHostname = (await import("node:os")).hostname();
+    const deadA = makeIssueWithDispatch({
+      id: "DX-1",
+      pid: 200,
+      host: realHostname,
+      startedAt: new Date().toISOString(),
+      ttlSeconds: 7200,
+    });
+    const deadB = makeIssueWithDispatch({
+      id: "DX-2",
+      pid: 300,
+      host: realHostname,
+      startedAt: new Date().toISOString(),
+      ttlSeconds: 7200,
+    });
+    loadLocalMock.mockImplementation(async (_root: string, stem: string) => {
+      if (stem === "DX-1") return deadA;
+      if (stem === "DX-2") return deadB;
+      return null;
+    });
+    isPidAliveMock.mockReturnValue(false);
+    clearDispatchAndWriteMock.mockImplementation((_root: string, issue: Issue) => {
+      if (issue.id === "DX-1") return Promise.reject(new Error("mirror ack failed"));
+      return Promise.resolve(issue);
+    });
+
+    const result = await bootRehydrate({
+      repo: makeRepo(tmpRoot),
+      reconcile: dummyReconcile as never,
+      ttlMs: 7_200_000,
+      ttlTimerDeps: dummyTtlDeps as never,
+    });
+
+    expect(result.cleared).toBe(2);
+    expect(clearDispatchAndWriteMock).toHaveBeenCalledTimes(2);
+  });
+
   it("missing open dir is a no-op for Step 1 but Step 2 + 3 still run", async () => {
     rmSync(openDir, { recursive: true, force: true });
     scanTtlMock.mockResolvedValue({ armed: 2, skipped: 0 });
