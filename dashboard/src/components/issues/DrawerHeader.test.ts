@@ -60,6 +60,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
   } as unknown as IssueDetail;
 }
@@ -193,5 +194,77 @@ describe("DrawerHeader title editor", () => {
       "conflict",
     );
     expect(w.emitted("update:issue")).toBeUndefined();
+  });
+});
+
+// DX-267 — Epic drawer header surfaces the count of children whose
+// `requires_human != null`. Reads `issue.requires_human_child_count`
+// (backend-computed); live updates flow through the SSE `issue:updated`
+// pipeline which reprojects the IssueDetail and resets the prop.
+describe("DrawerHeader requires_human rollup (DX-267)", () => {
+  it("does NOT render the children rollup line on non-Epic cards (even with count > 0)", () => {
+    const w = mountHeader(
+      makeDetail({
+        type: "Feature",
+        requires_human_child_count: 2,
+      }),
+    );
+    expect(w.find('[data-test="drawer-rh-children-line"]').exists()).toBe(
+      false,
+    );
+  });
+
+  it("does NOT render the children rollup line on Epics when count = 0", () => {
+    const w = mountHeader(
+      makeDetail({
+        type: "Epic",
+        requires_human_child_count: 0,
+      }),
+    );
+    expect(w.find('[data-test="drawer-rh-children-line"]').exists()).toBe(
+      false,
+    );
+  });
+
+  it("renders 'N phases need human action' on Epics with count > 1", () => {
+    const w = mountHeader(
+      makeDetail({
+        type: "Epic",
+        requires_human_child_count: 3,
+      }),
+    );
+    const line = w.get('[data-test="drawer-rh-children-line"]');
+    expect(line.text()).toContain("3 phases need human action");
+  });
+
+  it("uses singular '1 phase needs human action' on Epics with count = 1", () => {
+    const w = mountHeader(
+      makeDetail({
+        type: "Epic",
+        requires_human_child_count: 1,
+      }),
+    );
+    const line = w.get('[data-test="drawer-rh-children-line"]');
+    expect(line.text()).toContain("1 phase needs human action");
+  });
+
+  it("re-renders the count when the prop updates (live update path)", async () => {
+    const w = mountHeader(
+      makeDetail({
+        type: "Epic",
+        requires_human_child_count: 0,
+      }),
+    );
+    expect(w.find('[data-test="drawer-rh-children-line"]').exists()).toBe(
+      false,
+    );
+
+    await w.setProps({
+      issue: makeDetail({ type: "Epic", requires_human_child_count: 2 }),
+    });
+
+    expect(
+      w.get('[data-test="drawer-rh-children-line"]').text(),
+    ).toContain("2 phases need human action");
   });
 });

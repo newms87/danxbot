@@ -131,13 +131,33 @@ export interface IssueListItem {
    * mutates this; mutations go through `PATCH /api/issues/:id`.
    */
   requires_human: RequiresHuman | null;
+  /**
+   * DX-267 — count of this card's children whose `requires_human != null`.
+   * Computed on every projection from `children_detail`; emitted on every
+   * list item (Epic and non-Epic). Zero for cards with no children. The
+   * SPA's `IssueCard.vue` gates an Epic-level rollup chip on this count;
+   * the drawer header on Epics renders "<N> phase(s) need human action".
+   * Missing children (orphaned id references) do not count — their
+   * `requires_human` boolean is forced to `false` upstream so the rollup
+   * does not over-report. Computed, not persisted — the YAML never carries
+   * this field; the watcher mirrors only the underlying `requires_human`
+   * record on each child.
+   */
+  requires_human_child_count: number;
 }
 
-/** Full Issue plus the mirror-write timestamp (ms), creation time (ms), and a serialized YAML rendering of the current state. */
+/**
+ * Full Issue plus the mirror-write timestamp (ms), creation time (ms),
+ * a serialized YAML rendering of the current state, and the DX-267
+ * rollup count of children whose `requires_human != null`. Same field
+ * name as on `IssueListItem` so the SPA can read it identically on the
+ * drawer header (DrawerHeader.vue) and the board card (IssueCard.vue).
+ */
 export type IssueDetail = Issue & {
   updated_at: number;
   created_at: number;
   raw_yaml: string;
+  requires_human_child_count: number;
 };
 
 export { deriveCreatedAt } from "./issue-created-at.js";
@@ -269,6 +289,9 @@ function toListItem(
     position: issue.position,
     assigned_agent: issue.assigned_agent,
     requires_human: issue.requires_human,
+    requires_human_child_count: childrenDetail.filter(
+      (c) => c.requires_human,
+    ).length,
   };
 }
 
@@ -424,12 +447,37 @@ export async function readIssueDetail(
   // durable audit trail — `raw_yaml` below still serializes from the
   // unprojected issue, so a developer inspecting the raw YAML through
   // the dashboard sees the original link.
+  // Union `waiting_on.by` (effective-resolution deps) + `children`
+  // (DX-267 rollup count) into ONE SELECT so a Blocked Epic whose
+  // `waiting_on.by` overlaps its phase `children` doesn't fan out into
+  // two round-trips that both fetch the same rows. The set-union also
+  // dedupes the overlapping ids before the SELECT touches the DB.
+  const idsToFetch = new Set<string>();
+  if (raw.issue.waiting_on !== null) {
+    for (const id of raw.issue.waiting_on.by) idsToFetch.add(id);
+  }
+  for (const cid of raw.issue.children) idsToFetch.add(cid);
+
   let waiting_on = raw.issue.waiting_on;
-  if (waiting_on !== null) {
-    const deps = await dbSelectIssuesByIds(repoName, waiting_on.by);
+  let requires_human_child_count = 0;
+  if (idsToFetch.size > 0) {
+    const rows = await dbSelectIssuesByIds(repoName, [...idsToFetch]);
     const byId = new Map<string, Issue>();
-    for (const d of deps) byId.set(d.id, d);
-    waiting_on = effectiveWaitingOn(raw.issue, byId);
+    for (const r of rows) byId.set(r.id, r);
+    if (waiting_on !== null) {
+      waiting_on = effectiveWaitingOn(raw.issue, byId);
+    }
+    // DX-267 — count phase children whose YAML carries a structured
+    // `requires_human` record. Missing children (orphaned id references)
+    // are absent from `byId` and excluded — matches the `IssueListItem`
+    // projection's "missing ⟹ false" semantics. Loose `!= null` catches
+    // both `null` and the rare malformed row whose `requires_human`
+    // field is `undefined` (mirror passes `_malformed: true` rows
+    // through; defense-in-depth so the rollup doesn't inflate).
+    requires_human_child_count = raw.issue.children.filter((cid) => {
+      const child = byId.get(cid);
+      return child !== undefined && child.requires_human != null;
+    }).length;
   }
   return {
     ...raw.issue,
@@ -437,6 +485,7 @@ export async function readIssueDetail(
     updated_at: raw.mtimeMs,
     created_at: deriveCreatedAt(raw.issue.external_id, raw.mtimeMs),
     raw_yaml: serializeIssue(raw.issue),
+    requires_human_child_count,
   };
 }
 

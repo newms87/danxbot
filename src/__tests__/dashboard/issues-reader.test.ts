@@ -176,6 +176,9 @@ const SQL_LIST_ISSUE_HISTORY = normalizeSql(
      ORDER BY changed_at ASC, id ASC
      LIMIT $3`,
 );
+const SQL_SELECT_ISSUES_BY_IDS = normalizeSql(
+  `SELECT data FROM issues WHERE repo_name = $1 AND id = ANY($2::text[])`,
+);
 
 beforeEach(() => {
   mockIssues.length = 0;
@@ -209,6 +212,16 @@ beforeEach(() => {
           data: r.issue,
           mirror_updated_at: new Date(r.mirrorUpdatedAtMs),
         })) as never;
+    }
+
+    // dbSelectIssuesByIds — readIssueDetail uses this for waiting_on.by
+    // deps + (DX-267) for counting children with requires_human != null.
+    if (norm === SQL_SELECT_ISSUES_BY_IDS) {
+      const [repoName, ids] = p as [string, string[]];
+      const idSet = new Set(ids);
+      return mockIssues
+        .filter((r) => r.repoName === repoName && idSet.has(r.issue.id))
+        .map((r) => ({ data: r.issue })) as never;
     }
 
     // dbListIssueHistory
@@ -334,6 +347,7 @@ describe("listIssues", () => {
       position: null,
       assigned_agent: null,
       requires_human: null,
+      requires_human_child_count: 0,
     });
   });
 
@@ -424,6 +438,203 @@ describe("listIssues", () => {
     );
     const items = await listIssues(repo);
     expect(items[0].requires_human).toEqual(parentReq);
+  });
+
+  // DX-267 — Epic-level rollup of `requires_human` across `children[]`.
+  // Emitted as `requires_human_child_count` on every list item (Epic +
+  // non-Epic) so the SPA's IssueCard chip and DrawerHeader text can read
+  // a precomputed number instead of scanning `children_detail` inline.
+  // Missing children must not be counted (they have no real requires_human
+  // record — `children_detail` already projects them as `requires_human:
+  // false`, defense-in-depth: assert the count drops missing rows).
+  describe("requires_human_child_count rollup (DX-267)", () => {
+    const reqHuman = {
+      reason: "Need vendor portal access",
+      steps: ["Grant access"],
+      set_by: "agent" as const,
+      set_at: "2026-05-11T00:00:00Z",
+    };
+
+    it("emits 0 on cards with no children", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({ id: "ISS-1", type: "Feature", children: [] }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      expect(items[0].requires_human_child_count).toBe(0);
+    });
+
+    it("emits 0 when no children are flagged", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-10",
+          type: "Epic",
+          children: ["ISS-11", "ISS-12"],
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-11",
+          type: "Feature",
+          parent_id: "ISS-10",
+          requires_human: null,
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-12",
+          type: "Feature",
+          parent_id: "ISS-10",
+          requires_human: null,
+        }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      const epic = items.find((i) => i.id === "ISS-10")!;
+      expect(epic.requires_human_child_count).toBe(0);
+    });
+
+    it("emits N when N of M children are flagged (mixed)", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-20",
+          type: "Epic",
+          children: ["ISS-21", "ISS-22", "ISS-23"],
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-21",
+          parent_id: "ISS-20",
+          requires_human: reqHuman,
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-22",
+          parent_id: "ISS-20",
+          requires_human: null,
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-23",
+          parent_id: "ISS-20",
+          requires_human: reqHuman,
+        }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      const epic = items.find((i) => i.id === "ISS-20")!;
+      expect(epic.requires_human_child_count).toBe(2);
+    });
+
+    it("emits the full child count when every child is flagged", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-30",
+          type: "Epic",
+          children: ["ISS-31", "ISS-32"],
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-31",
+          parent_id: "ISS-30",
+          requires_human: reqHuman,
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-32",
+          parent_id: "ISS-30",
+          requires_human: reqHuman,
+        }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      const epic = items.find((i) => i.id === "ISS-30")!;
+      expect(epic.requires_human_child_count).toBe(2);
+    });
+
+    it("does NOT count missing children (orphaned references) as flagged", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-40",
+          type: "Epic",
+          // ISS-41 / ISS-42 are referenced but never written.
+          children: ["ISS-41", "ISS-42"],
+        }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      const epic = items.find((i) => i.id === "ISS-40")!;
+      expect(epic.requires_human_child_count).toBe(0);
+    });
+
+    it("emits the field on non-Epic parents too (computed, not Epic-gated)", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-50",
+          // type stays default Feature — non-Epic parent with sub-cards.
+          children: ["ISS-51"],
+        }),
+        1_700_000_000_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-51",
+          parent_id: "ISS-50",
+          requires_human: reqHuman,
+        }),
+        1_700_000_000_000,
+      );
+      const items = await listIssues(repo);
+      const parent = items.find((i) => i.id === "ISS-50")!;
+      expect(parent.type).not.toBe("Epic");
+      expect(parent.requires_human_child_count).toBe(1);
+    });
   });
 
   // DX-164 Phase 6: assigned_agent threads through the projection so the
@@ -1217,6 +1428,200 @@ describe("readIssueDetail", () => {
       mirrorUpdatedAtMs: 1_000,
     });
     expect(await readIssueDetail(repo, "ISS-50")).toBeNull();
+  });
+
+  // DX-267 — readIssueDetail emits requires_human_child_count so the
+  // drawer header on Epics can render the "<N> phase(s) need human
+  // action" line without a second round-trip or a SPA-side scan.
+  describe("requires_human_child_count (DX-267)", () => {
+    const reqHuman = {
+      reason: "Need vendor portal access",
+      steps: ["Grant access"],
+      set_by: "agent" as const,
+      set_at: "2026-05-11T00:00:00Z",
+    };
+
+    it("emits 0 on cards with no children", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({ id: "ISS-1", children: [] }),
+        1_000,
+      );
+      const detail = await readIssueDetail(repo, "ISS-1");
+      expect(detail!.requires_human_child_count).toBe(0);
+    });
+
+    it("counts only children whose requires_human is non-null", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-10",
+          type: "Epic",
+          children: ["ISS-11", "ISS-12", "ISS-13"],
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-11",
+          parent_id: "ISS-10",
+          requires_human: reqHuman,
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-12",
+          parent_id: "ISS-10",
+          requires_human: null,
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-13",
+          parent_id: "ISS-10",
+          requires_human: reqHuman,
+        }),
+        1_000,
+      );
+      const detail = await readIssueDetail(repo, "ISS-10");
+      expect(detail!.requires_human_child_count).toBe(2);
+    });
+
+    it("treats missing children as 0 contribution (orphaned refs)", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-20",
+          type: "Epic",
+          // ISS-21 / ISS-22 never written.
+          children: ["ISS-21", "ISS-22"],
+        }),
+        1_000,
+      );
+      const detail = await readIssueDetail(repo, "ISS-20");
+      expect(detail!.requires_human_child_count).toBe(0);
+    });
+
+    // The parent epic itself may carry `requires_human != null` (e.g. an
+    // epic flagged for vendor-portal access at the epic level). That self
+    // flag is surfaced separately on `detail.requires_human` — it MUST
+    // NOT roll up into the children count or the operator sees "1 phase
+    // needs human action" on an epic whose phases are all clean.
+    it("does NOT count the parent's own requires_human in the child rollup", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-30",
+          type: "Epic",
+          children: ["ISS-31"],
+          requires_human: reqHuman, // parent itself is flagged.
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-31",
+          parent_id: "ISS-30",
+          requires_human: null, // child is clean.
+        }),
+        1_000,
+      );
+      const detail = await readIssueDetail(repo, "ISS-30");
+      expect(detail!.requires_human).toEqual(reqHuman);
+      expect(detail!.requires_human_child_count).toBe(0);
+    });
+
+    // Done / Cancelled children with `requires_human != null` are still
+    // operator-actionable — the closed status doesn't strip the flag —
+    // so they MUST stay counted. Pins the contract against a future
+    // status-based filter regression.
+    it("counts Done / Cancelled children whose requires_human is non-null", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-40",
+          type: "Epic",
+          children: ["ISS-41", "ISS-42"],
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "closed",
+        emptyIssue({
+          id: "ISS-41",
+          parent_id: "ISS-40",
+          status: "Done",
+          requires_human: reqHuman,
+        }),
+        1_000,
+      );
+      writeIssue(
+        repo,
+        "closed",
+        emptyIssue({
+          id: "ISS-42",
+          parent_id: "ISS-40",
+          status: "Cancelled",
+          requires_human: reqHuman,
+        }),
+        1_000,
+      );
+      const detail = await readIssueDetail(repo, "ISS-40");
+      expect(detail!.requires_human_child_count).toBe(2);
+    });
+
+    // The mirror stamps `_malformed: true` on rows whose YAML failed to
+    // parse. `dbSelectIssuesByIds` passes those rows through untouched
+    // (the consumer is responsible for skipping). Our filter uses loose
+    // `!= null` so an `undefined` requires_human field on a malformed
+    // row does NOT inflate the count.
+    it("does NOT inflate the count when a child row is _malformed", async () => {
+      const repo = setupRepo();
+      writeIssue(
+        repo,
+        "open",
+        emptyIssue({
+          id: "ISS-50",
+          type: "Epic",
+          children: ["ISS-51"],
+        }),
+        1_000,
+      );
+      // Seed a malformed child row directly, skipping `emptyIssue`'s
+      // normalization (mirror writers stamp this shape on parse errors).
+      mockIssues.push({
+        repoName: basename(repo),
+        issue: {
+          id: "ISS-51",
+          _malformed: true,
+          raw: "garbage bytes",
+        } as unknown as Issue,
+        mirrorUpdatedAtMs: 1_000,
+      });
+      const detail = await readIssueDetail(repo, "ISS-50");
+      expect(detail!.requires_human_child_count).toBe(0);
+    });
   });
 });
 

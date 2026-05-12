@@ -39,6 +39,7 @@ import { isPidAlive } from "./agent/host-pid.js";
 import { hostname as osHostname } from "node:os";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
 import { syncSettingsFileOnBoot } from "./settings-file.js";
+import { watchRepoEnvFile } from "./dashboard/repo-env-writer.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
 import { reapOrphans } from "./worker/process-scan.js";
 import { ensurePortableRepoPath } from "./agent/portable-path.js";
@@ -131,6 +132,33 @@ async function startWorkerMode(): Promise<void> {
   // `overrides` are preserved across restarts. See
   // `.claude/rules/settings-file.md`.
   await syncSettingsFileOnBoot(repo, config.runtime);
+
+  // DX-303: Watch `<repo>/.danxbot/.env` for credential rotations from
+  // the dashboard's PATCH /api/agents/:repo/trello-credentials route
+  // (or hand-edits from the operator). The worker's cached
+  // `repoContexts[0]` reference is captured at boot and threaded into
+  // ~20 downstream consumers (issues mirror, dispatch path, MCP
+  // injection, reattach), so swapping the reference live would require
+  // invalidating every cached copy across the worker — a parallel
+  // refactor the DX-303 AC explicitly allows skipping. The watcher
+  // logs a clear "restart required" line so the operator knows to
+  // recycle the worker; the PATCH route's response carries
+  // `restartRequired: true` to surface the same hint on the dashboard.
+  // Full live-reload can ship as a follow-up card once the consumer-
+  // side fan-out is stable enough to swap the cached context safely.
+  // The handle registers itself with `unwatchAllRepoEnvFiles`, which
+  // the shutdown path drains on SIGTERM — no per-handle stashing needed.
+  watchRepoEnvFile({
+    localPath: repo.localPath,
+    onChange: (localPath) => {
+      log.warn(
+        `[${repo.name}] .env at ${localPath}/.danxbot/.env changed — ` +
+          `restart this worker to pick up the new credentials. The worker's ` +
+          `cached RepoContext does NOT reload from disk; dispatched agents ` +
+          `continue using the old secrets until restart.`,
+      );
+    },
+  });
 
   // Run the inject pipeline once at boot regardless of poller toggle.
   // Workspace fixtures, danx-* rules, skills, tools, and the mcp-servers/

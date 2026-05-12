@@ -4,6 +4,7 @@ import { stopRetentionCron } from "./dashboard/retention.js";
 import { clearJobCleanupIntervals } from "./worker/dispatch.js";
 import { listActiveJobs } from "./dispatch/core.js";
 import { unwatchAllSettingsFiles } from "./dispatch/scheduler.js";
+import { unwatchAllRepoEnvFiles } from "./dashboard/repo-env-writer.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 
@@ -55,6 +56,10 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // Phase 4b.2 (DX-289). Drain every per-repo settings.json chokidar
   // watcher so handles don't outlive the worker on SIGTERM.
   await unwatchAllSettingsFiles();
+
+  // DX-303 — drain every per-repo `.env` chokidar watcher for the same
+  // shutdown-cleanliness reason as settings.json above.
+  await unwatchAllRepoEnvFiles();
 
   // Close database connection pools
   await closePool();
