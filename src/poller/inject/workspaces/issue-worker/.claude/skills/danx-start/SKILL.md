@@ -5,7 +5,7 @@ description: Process all ToDo issue YAMLs sequentially using the autonomous work
 
 # Danx Start Team
 
-Process every YAML at `<repo>/.danxbot/issues/open/` whose `status: ToDo` using the workflow from `/danx-next`.
+Process every YAML at `<worktree>/.danxbot/issues/open/` whose `status: ToDo` using the workflow from `/danx-next`.
 
 ## Resume self-check (read first, every dispatch — ISS-135)
 
@@ -49,7 +49,7 @@ re-fire the loop after the dispatch is logically over.
 
 ## Steps
 
-1. Glob `<repo>/.danxbot/issues/open/*.yml`. Filter where `status: "ToDo"`.
+1. Glob `<worktree>/.danxbot/issues/open/*.yml`. Filter where `status: "ToDo"`.
 2. Empty → report "No cards to process" and stop.
 3. Report how many cards are queued + list their titles.
 4. For each YAML, invoke the `/danx-next` workflow (Steps 1-11 from that skill) using the YAML's path + `id`. The first step inside `/danx-next` is the same Resume self-check above — terminal-state cards short-circuit there. Step 10 handles Blocked moves, Step 10b handles Waiting On moves.

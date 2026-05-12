@@ -33,16 +33,14 @@
  * the prepend, recovery just supplies a different task body.
  */
 
-import { join } from "node:path";
-
 /**
- * The slim persona shape — name + bio. The worktree path is derived
- * from `repo.localPath + agent.name`, NOT carried on the persona object,
- * so a future change to the worktree layout (different parent dir,
- * shared worktree pool, etc.) needs editing only this file. Keeping
- * the persona shape as small as possible also lets the dispatch
- * surface accept either a full `AgentRecordWithName` (which has these
- * two fields plus more) or a hand-rolled object in tests.
+ * The slim persona shape — name + bio. The worktree path is supplied
+ * separately (by the dispatch layer via `agentWorktreePath()`) so this
+ * module never duplicates path construction. A single producer
+ * eliminates the class of bug where persona advertised one spelling
+ * (via `repo.localPath` symlink) and the task body advertised another
+ * (via `manager.worktreePath` / `repo.hostPath`), tripping Claude's
+ * read-before-edit gate on identical inodes.
  */
 export interface PersonaContext {
   /**
@@ -90,17 +88,21 @@ const RESERVED_BIO_SUBSTRINGS = [
  *
  *   <bio markdown>
  *
- *   Your worktree: <repo>/.danxbot/worktrees/<name>/
+ *   Your worktree: <absolute worktree path>
  *   Your branch: <name>
+ *
+ *   IMPORTANT: every absolute path in the task body below — issue YAMLs,
+ *   scripts, anything you Edit or Write — is anchored under that exact
+ *   worktree string. Use it verbatim. Do not rewrite it through
+ *   `repos/<name>` symlinks or any other alias.
  *
  * Returns a string with a trailing blank line so callers can
  * concatenate the task body directly without worrying about spacing.
  *
- * Worktree path layout MUST stay byte-identical to
- * `WorktreeManager.worktreePath` in `src/agent/worktree-manager.ts` —
- * the agent reads this path from the prompt and uses it as `cd <path>`
- * to land in its own worktree. Drift here makes the agent cd into
- * nowhere.
+ * `worktreePath` MUST come from `agentWorktreePath()` in
+ * `src/agent/worktree-manager.ts` — the single producer. Drift would
+ * let the agent Read at one spelling and fail Edit at another (Claude's
+ * read-before-edit gate keys on the literal path string).
  *
  * Throws if `agent.bio` contains a reserved persona-trailer substring
  * (`Your worktree:`, `Your branch:`, `You are `) — see
@@ -110,7 +112,7 @@ const RESERVED_BIO_SUBSTRINGS = [
  * is the defense-in-depth gate.
  */
 export function buildPersonaPrefix(opts: {
-  repo: { localPath: string };
+  worktreePath: string;
   agent: PersonaContext;
 }): string {
   for (const reserved of RESERVED_BIO_SUBSTRINGS) {
@@ -120,16 +122,23 @@ export function buildPersonaPrefix(opts: {
       );
     }
   }
-  const worktreePath = join(
-    opts.repo.localPath,
-    ".danxbot",
-    "worktrees",
-    opts.agent.name,
-  );
+  // `Your worktree:` + `Your branch:` MUST remain the final two lines
+  // of the block — the dispatched-agent SKILL Step 7a routes on them
+  // sitting as a trailing pair. The path-aliasing anchor therefore goes
+  // BEFORE the trailer pair, after the bio.
   return (
     `You are ${opts.agent.name}.\n\n` +
     `${opts.agent.bio}\n\n` +
-    `Your worktree: ${worktreePath}\n` +
+    `IMPORTANT — path discipline: every absolute path in the task body ` +
+    `below (issue YAMLs, scripts, anything you Edit or Write) is anchored ` +
+    `under the \`Your worktree:\` string two lines down. Use that string ` +
+    `verbatim. Do not rewrite it through \`repos/<name>\` symlinks or any ` +
+    `other alias — Claude's read-before-edit gate keys on the literal path ` +
+    `string, so an aliased spelling fails even when both spellings resolve ` +
+    `to the same file. The worktree-guard PreToolUse hook rejects writes ` +
+    `whose literal prefix is not under \`Your worktree:\` for the same ` +
+    `reason.\n\n` +
+    `Your worktree: ${opts.worktreePath}\n` +
     `Your branch: ${opts.agent.name}\n\n`
   );
 }
@@ -143,9 +152,12 @@ export function buildPersonaPrefix(opts: {
  */
 export function prependPersona(opts: {
   prompt: string;
-  repo: { localPath: string };
+  worktreePath: string;
   agent: PersonaContext | undefined;
 }): string {
   if (!opts.agent) return opts.prompt;
-  return buildPersonaPrefix({ repo: opts.repo, agent: opts.agent }) + opts.prompt;
+  return (
+    buildPersonaPrefix({ worktreePath: opts.worktreePath, agent: opts.agent }) +
+    opts.prompt
+  );
 }

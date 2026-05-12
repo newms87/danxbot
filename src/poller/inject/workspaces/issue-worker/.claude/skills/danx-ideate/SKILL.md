@@ -57,9 +57,9 @@ re-fire the loop after the dispatch is logically over.
    - Updates the Feature Inventory with current status of features.
    - ICE-scores every non-Complete feature.
    - Brainstorms + prioritizes new feature ideas.
-   - Checks `<repo>/.danxbot/issues/open/*.yml` for duplicates (search by title / keywords).
+   - Checks `<worktree>/.danxbot/issues/open/*.yml` for duplicates (search by title / keywords).
    - Generates 3-5 prioritized feature drafts.
-   - For each draft, writes a YAML at `<repo>/.danxbot/issues/open/<filename>.yml` with:
+   - For each draft, writes a YAML at `<worktree>/.danxbot/issues/open/<filename>.yml` with:
      - `id: ""` (worker assigns the next `<PREFIX>-N` — drafts with non-empty `id` are REJECTED)
      - `parent_id: null`
      - `children: []`

@@ -280,14 +280,31 @@ function assertAgentName(agentName: string): void {
   }
 }
 
+/**
+ * Single source of truth for the agent worktree path string. Both the
+ * `WorktreeManager.worktreePath` method and `buildPersonaPrefix`
+ * (`src/agent/persona.ts`) route through this helper so the persona
+ * block, the task body, and the worktree-guard hook all advertise the
+ * IDENTICAL string (DX-309 follow-up). Drift between producers used to
+ * let the agent Read at one spelling then fail Edit at another because
+ * Claude's read-before-edit gate keys on the literal path string.
+ *
+ * Uses `hostPath` (canonical, non-symlinked) — never `localPath`, which
+ * on a host whose `repos/<name>` is a symlink would produce a second
+ * spelling of the same inode.
+ */
+export function agentWorktreePath(hostPath: string, agentName: string): string {
+  assertAgentName(agentName);
+  return join(hostPath, ".danxbot", "worktrees", agentName);
+}
+
 /** Construct a manager. Defaults to the real git runner. */
 export function createWorktreeManager(
   runner: GitRunner = defaultGitRunner,
 ): WorktreeManager {
   return {
     worktreePath(ctx, agentName) {
-      assertAgentName(agentName);
-      return join(ctx.hostPath, ".danxbot", "worktrees", agentName);
+      return agentWorktreePath(ctx.hostPath, agentName);
     },
 
     async fetchOrigin(ctx) {

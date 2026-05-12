@@ -1,6 +1,7 @@
 ---
 name: danx-next
-description: Pull the top card from ToDo and run the full autonomous card processing workflow.
+description: Process the named ToDo card end-to-end — read, work, commit, finalize. One card per dispatch.
+argument-hint: <PREFIX>-N card id
 ---
 
 # Danx Next Card
@@ -48,12 +49,10 @@ during this dispatch must be disarmed (or have already fired and exited).
 Active loop + complete signal = workflow violation; the next resume will
 re-fire the loop after the dispatch is logically over.
 
-The dispatch prompt told you the YAML path:
+The card id is the slash-command argument — `/danx-next <PREFIX>-N`. The persona block names your worktree path (`Your worktree: <absolute path>`). The YAML path is:
 
 ```
-Edit <repo>/.danxbot/issues/open/<id>.yml directly with the Edit / Write tools.
-The watcher mirrors changes to the database automatically; the poller's
-per-tick mirror pushes them to the tracker. Call danxbot_complete when done.
+<worktree>/.danxbot/issues/open/<PREFIX>-N.yml
 ```
 
 That YAML is the source of truth for the card. The poller pre-hydrated it from the tracker before this dispatch ran. You read and edit the YAML in place with `Edit` / `Write` — you do NOT make tracker calls and there is no separate "save" verb. The chokidar watcher in the worker (`src/db/issues-mirror.ts`) catches every file change and mirrors it to Postgres; the poller's per-tick outbound mirror pushes the YAML to the tracker (~30-60s latency). When you call `danxbot_complete`, the worker fires an immediate post-completion tracker push so the dashboard sees terminal state without waiting for the next tick.
@@ -136,9 +135,15 @@ This step is read-only against your worktree's existing work — if `git status`
 
 ## Step 1 — Read the YAML
 
-`Read <repo>/.danxbot/issues/open/<id>.yml`. The dispatch prompt has the absolute path.
+The card id is the slash-command argument (`/danx-next <PREFIX>-N` — the persona block above gives you the worktree path). Compute the YAML path:
 
-The YAML carries `status: ToDo` at this point — the poller picked it up and hydrated it. Your first edit is to flip `status: ToDo` → `status: In Progress`. That's how you "claim" the card — the watcher mirrors the change immediately to the DB and the next poller tick pushes it to the tracker.
+```
+<your worktree>/.danxbot/issues/open/<PREFIX>-N.yml
+```
+
+`Read` that file. The poller pre-hydrated it; `status: ToDo` is expected. Edit the YAML directly with `Edit` / `Write` — the chokidar watcher mirrors every change to the DB and the per-tick mirror pushes to the tracker. There is no save verb.
+
+Your first edit: flip `status: ToDo` → `status: In Progress` and save. That's how you "claim" the card. When you finish (any terminal state — Done / Cancelled / Blocked or `requires_human` set), call `danxbot_complete({status, summary})` — that triggers the worker's post-completion auto-sync (file move + tracker push). Status `failed` for card-specific failures, `critical_failure` for environment-level breakage (see `.claude/rules/danx-halt-flag.md`).
 
 If the YAML's `status` is already `In Progress`, treat this as resumption — skip the flip + save and proceed.
 
@@ -253,14 +258,14 @@ state. ANY of these conditions means the epic is already split — DO NOT
 re-split, DO NOT call `danx_issue_create`:
 
 1. **Card's `children: []` is non-empty.** The epic is fully linked. Read
-   each child YAML at `<repo>/.danxbot/issues/open/<child-id>.yml`,
+   each child YAML at `<worktree>/.danxbot/issues/open/<child-id>.yml`,
    identify the first one with `status: ToDo` (or `In Progress` if you're
    resuming), and treat THAT phase as the work to do. Re-read its YAML
    and restart this workflow at Step 1 using the phase card.
 2. **Card's `type: Epic` AND `children: []` is empty.** The epic was
    created without going through `danx_issue_create` (or by a human on
    the tracker UI) — phase cards may already exist in
-   `<repo>/.danxbot/issues/open/` but lack the `parent_id` linkage.
+   `<worktree>/.danxbot/issues/open/` but lack the `parent_id` linkage.
    **Invoke the `danx-epic-link` skill via the Skill tool**. It scans
    open issues, identifies this epic's phase children, sets `parent_id`
    on each phase YAML, and sets `children[]` on this epic. After it
@@ -269,7 +274,7 @@ re-split, DO NOT call `danx_issue_create`:
    matches and you proceed to the first phase).
 3. **Card's `type` is NOT Epic but other YAMLs reference it as their
    parent.** Run `Grep` for `parent_id: "<this.id>"` across
-   `<repo>/.danxbot/issues/open/`. Any matches means this card is
+   `<worktree>/.danxbot/issues/open/`. Any matches means this card is
    actually an epic that lost its `Epic` label. Promote it: set
    `type: Epic`, populate `children[]` from the matched YAMLs (sorted
    by `Phase N:` like `danx-epic-link` does), save. Then jump back to
@@ -290,7 +295,7 @@ If you decide NOT to split, skip ahead to Step 4.
 ### Step 3.2 — Perform the split
 
 1. Edit the parent YAML: set `type: Epic`. Keep `status: In Progress` — the epic stays open while phases work. Append a comment summarizing the split (no `id` field). Don't fill `children[]` yet — you don't have the phase ids until after `danx_issue_create` returns. Save.
-2. For each phase, write a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml` (filename can be the kebab-case slug; `.yml` suffix optional in the create call — both forms accepted) with every required field populated. Use this template (`<DRAFT_TEMPLATE>`):
+2. For each phase, write a draft YAML at `<worktree>/.danxbot/issues/open/<slug>.yml` (filename can be the kebab-case slug; `.yml` suffix optional in the create call — both forms accepted) with every required field populated. Use this template (`<DRAFT_TEMPLATE>`):
    - `schema_version: 3`
    - `tracker: <same as parent>`
    - `id: ""` (worker assigns the next `<PREFIX>-N`)
@@ -314,7 +319,7 @@ If you decide NOT to split, skip ahead to Step 4.
    - **Skip this stamping ONLY when phases are genuinely independent** (different domains, no shared state, can ship in any order). Default is sequential — explain in a comment on the epic if you skip.
 6. Restart this workflow at Step 1 using the first phase card's YAML.
 
-The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<repo>/.danxbot/issues/open/`. The poller picks it up on the next tick.
+The epic stays at `status: In Progress` until ALL phase cards are Done — then the final phase agent (or you, if no more phases) flips the epic to `Done` and saves it. After a phase completes, the next phase card lives in `<worktree>/.danxbot/issues/open/`. The poller picks it up on the next tick.
 
 ---
 
@@ -415,7 +420,7 @@ Before deciding Done vs Blocked, **inspect the actual state of every AC item in 
 
 Mechanical procedure:
 
-1. Re-read `<repo>/.danxbot/issues/open/<id>.yml`.
+1. Re-read `<worktree>/.danxbot/issues/open/<id>.yml`.
 2. Count `ac` entries where `checked === false`.
 3. **Zero unchecked** → Step 9 (Done).
 4. **One or more unchecked** → run the **Step 1.5 fix-it-yourself check**
@@ -566,7 +571,7 @@ creating a loop:
 
 1. List every id you intend to put in `by[]`. Call them the
    prospective blockers.
-2. For each prospective blocker B, read `<repo>/.danxbot/issues/open/B.yml`.
+2. For each prospective blocker B, read `<worktree>/.danxbot/issues/open/B.yml`.
    Inspect B's own `waiting_on.by[]`. Recurse into each of those.
 3. If THIS card's id appears anywhere in the transitive walk →
    **CYCLE**. STOP. Do NOT stamp `waiting_on`. Either:
@@ -588,16 +593,16 @@ audit is the load-bearing prevention.
    least one concrete `<PREFIX>-N` id describing the unblock work:
    1. **Phase siblings via the parent epic.** If this card has
       `parent_id`, read that epic's `children[]` and check each phase
-      YAML at `<repo>/.danxbot/issues/open/<child-id>.yml`. The blocker
+      YAML at `<worktree>/.danxbot/issues/open/<child-id>.yml`. The blocker
       is usually a phase that ships first.
    2. **Open issues by topic.** `Grep` and `Read` across
-      `<repo>/.danxbot/issues/open/*.yml` for cards covering the
+      `<worktree>/.danxbot/issues/open/*.yml` for cards covering the
       prerequisite work — ToDo, In Progress, Blocked, or Action Items
       all qualify (the poller imports all of them on every tick).
    3. **In Progress queue.** Cards already being worked on may be the
       blocker.
 2. **No existing card describes the unblock work?** You MUST create one.
-   Build a draft YAML at `<repo>/.danxbot/issues/open/<slug>.yml`
+   Build a draft YAML at `<worktree>/.danxbot/issues/open/<slug>.yml`
    describing exactly what needs to happen to unblock, then call
    `danx_issue_create({filename: "<slug>"})`. Pick the right status:
    - Work an autonomous agent can do → `status: "ToDo"`. The poller
@@ -684,7 +689,7 @@ trail.
 ### Procedure
 
 1. **Confirm the partner is open and active.** Read each partner card's
-   YAML at `<repo>/.danxbot/issues/open/<id>.yml`. The partner must be
+   YAML at `<worktree>/.danxbot/issues/open/<id>.yml`. The partner must be
    `status: "In Progress"` or `"ToDo"` (a closed partner can't conflict
    — its work is done). If the partner card doesn't exist or is
    closed, this is not a conflict situation.

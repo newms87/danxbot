@@ -10,7 +10,7 @@ You triage **ONE** card per dispatch. No orchestrator, no sub-agents. You:
 
 1. `mcp__danx-issue__danx_issue_get({id: "<PREFIX>-N"})` — load the YAML and learn its filesystem path.
 2. Decide per `status` (Review / Blocked / Waiting On) — apply the per-status decision tree below.
-3. Edit the YAML's `triage{}` block (always) + `status` / `blocked` fields when the decision is terminal, using the `Edit` tool directly on `<repo>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.
+3. Edit the YAML's `triage{}` block (always) + `status` / `blocked` fields when the decision is terminal, using the `Edit` tool directly on `<worktree>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.
 4. Re-read the file with `Read` to confirm the edit landed and the YAML parses (look for the new `triage.expires_at` value).
 5. `danxbot_complete({status: "completed", summary: "..."})` — signal done.
 
@@ -61,7 +61,7 @@ either based on what's already in your tool list.
 
 DX-157 retired the agent-facing save tool entirely. **Write through
 `Edit` / `Write` directly on the YAML at
-`<repo>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.** The chokidar
+`<worktree>/.danxbot/issues/{open,closed}/<PREFIX>-N.yml`.** The chokidar
 watcher catches every file change and mirrors it to Postgres; the
 poller's per-tick mirror pushes to the tracker. There is no save verb
 to call.
@@ -267,7 +267,7 @@ One comment per triage. Don't append more than one comment per dispatch.
 
 When verifying the agent against the live wiring:
 
-1. Pick one card per in-scope status and dispatch the agent (`/api/launch` with `workspace: "issue-worker"`, `task: "Triage card <PREFIX>-N using the danx-triage-card skill."`).
+1. Pick one card per in-scope status and dispatch the agent (`/api/launch` with `workspace: "issue-worker"`, `task: "/danx-triage-card <PREFIX>-N"`).
 2. After dispatch finishes (`status: completed`), re-read the YAML:
    - `triage.expires_at` is a future ISO 8601 timestamp (within ±30s of `now + status_ttl`).
    - `triage.history[]` gained exactly one new entry with matching `expires_at`, `status`, `explain`.

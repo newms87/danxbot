@@ -4,7 +4,29 @@ This directory is the dispatched cwd for the danxbot poller. Operational rules,
 skills, and tools live in `.claude/`. The danxbot MCP server is infrastructure
 injected at dispatch time; any additional MCP servers (e.g. playwright) are
 declared in `.mcp.json` and resolved from overlay placeholders. There is no
-tracker MCP — issues are local YAMLs at `<repo>/.danxbot/issues/open/`.
+tracker MCP — issues are local YAMLs at `<worktree>/.danxbot/issues/open/`.
+
+## Path placeholder convention — `<worktree>`
+
+Every absolute path in the rules and skills shipped to this workspace uses
+`<worktree>` as the placeholder for the agent's persistent worktree dir. Its
+literal value lands in your dispatch prompt's persona block on the line
+`Your worktree: <absolute path>`. Use that exact string for every Read /
+Edit / Write / Bash absolute path you produce.
+
+Do NOT substitute `<worktree>` with `<repo>/.danxbot/worktrees/<name>` or
+walk through `repos/<name>` symlinks — Claude's read-before-edit gate keys
+on the literal path string, so an aliased spelling that resolves to the
+same inode still fails because the gate sees a different string than the
+one you Read from. The worktree-guard PreToolUse hook
+(`DANX_AGENT_WORKTREE`) also rejects writes whose literal prefix is not
+under your worktree; aliased spellings can trip it depending on which
+symlinks resolve where.
+
+Issue YAMLs live at `<worktree>/.danxbot/issues/{open,closed}/<id>.yml` —
+the `<worktree>/.danxbot/issues` subtree is a symlink back to the main
+clone so every agent shares one canonical issue store, but you always
+address it via your worktree path.
 
 ## Skill triggers (invoke via Skill tool)
 

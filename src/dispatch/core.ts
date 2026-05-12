@@ -38,6 +38,7 @@ import type { RepoContext } from "../types.js";
 import {
   spawnAgent,
   buildCompletionInstruction,
+  shouldAppendCompletionInstruction,
   terminateWithGrace,
   type AgentJob,
 } from "../agent/launcher.js";
@@ -62,6 +63,7 @@ import {
   type StagedFileInput,
 } from "./staged-files.js";
 import { prependPersona, type PersonaContext } from "../agent/persona.js";
+import { agentWorktreePath } from "../agent/worktree-manager.js";
 import { releaseLock } from "../issue-tracker/lock.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
 import {
@@ -608,7 +610,9 @@ async function runResolved(
     repoLocalPath: string;
   },
 ): Promise<DispatchResult> {
-  const taskWithInstruction = input.task + buildCompletionInstruction();
+  const taskWithInstruction = shouldAppendCompletionInstruction(input.task)
+    ? input.task + buildCompletionInstruction()
+    : input.task;
   let resumeCount = 0;
 
   // DX-241: state shared across all respawns for one dispatch.
@@ -863,9 +867,14 @@ async function runResolved(
 
           // Use the original task (not taskWithInstruction) as the base so the
           // completion instruction appears exactly once, followed by the stall note.
+          // Skip the footer for `/danx-*` slash-command bodies — their skills
+          // own the completion contract (see shouldAppendCompletionInstruction).
+          const completionFooter = shouldAppendCompletionInstruction(input.task)
+            ? buildCompletionInstruction()
+            : "";
           const nudgePrompt =
             input.task +
-            buildCompletionInstruction() +
+            completionFooter +
             `\n\n---\nNOTE: Your previous session appeared to stall after receiving ` +
             `a tool result (resume ${resumeCount}/${MAX_STALL_RESUMES}). ` +
             `Continue your work from where it was left off.`;
@@ -1185,7 +1194,9 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   //     agent-bound card inherits the persona without explicit wiring.
   const personaTask = prependPersona({
     prompt: input.task,
-    repo: input.repo,
+    worktreePath: input.agent
+      ? agentWorktreePath(input.repo.hostPath, input.agent.name)
+      : "",
     agent: input.agent,
   });
   const inputWithPersona =

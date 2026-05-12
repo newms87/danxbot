@@ -36,7 +36,7 @@ old dep-chain field) to `waiting_on`.
 ## Step 1 — Identify candidate phase cards
 
 1. The orchestrator's dispatch prompt has the epic's YAML path. Read it.
-2. List `<repo>/.danxbot/issues/open/*.yml`.
+2. List `<worktree>/.danxbot/issues/open/*.yml`.
 3. For each open issue (excluding the epic itself), read the YAML and
    extract `id`, `parent_id`, `title`, `type`.
 4. Build a candidate set:
@@ -81,7 +81,7 @@ after this skill returns. Order matters.
 
 For each candidate phase YAML, in the order from Step 2:
 
-1. `Read <repo>/.danxbot/issues/open/<phase-id>.yml`
+1. `Read <worktree>/.danxbot/issues/open/<phase-id>.yml`
 2. `Edit` the YAML: set `parent_id: "<epic-id>"`. Touch nothing else
    (don't change `status`, `description`, `ac[]`, etc.).
 3. Append a comment to `comments[]` (no `id` field):
@@ -126,7 +126,7 @@ stamp `waiting_on.by` on every phase except the first:
 
 For each phase YAML at index `i >= 1` in the ordered `children[]`:
 
-1. `Read <repo>/.danxbot/issues/open/<phase-id>.yml`.
+1. `Read <worktree>/.danxbot/issues/open/<phase-id>.yml`.
 2. Edit: set `waiting_on: {reason: "Waits for <prev-phase-id> (<prev-phase-title>) to complete.", timestamp: "<current ISO>", by: ["<children[i-1]>"]}`.
 3. The watcher mirrors the change automatically.
 
