@@ -975,3 +975,123 @@ describe("handlePatchIssue — HTTP route", () => {
     expect(JSON.parse(res._getBody()).error).toMatch(/issue_prefix|config\.yml/);
   });
 });
+
+describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
+  it("accepts conflict_on full-array replace and round-trips", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      {
+        conflict_on: [
+          { id: "DX-9", reason: "scheduler.ts collision" },
+          { id: "DX-11", reason: "shared header" },
+        ],
+      },
+      "alice",
+    );
+    expect(issue.conflict_on).toHaveLength(2);
+    expect(issue.conflict_on[0]).toEqual({
+      id: "DX-9",
+      reason: "scheduler.ts collision",
+    });
+    const onDisk = parseYamlText(
+      readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
+    ) as { conflict_on: unknown[] };
+    expect(onDisk.conflict_on).toHaveLength(2);
+  });
+
+  it("clears all conflict entries with []", async () => {
+    writeFixture(
+      makeIssue({
+        conflict_on: [{ id: "DX-9", reason: "old" }],
+      }),
+      "open",
+    );
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { conflict_on: [] },
+      "alice",
+    );
+    expect(issue.conflict_on).toHaveLength(0);
+  });
+
+  it("rejects conflict_on with invalid id shape (not <PREFIX>-N)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { conflict_on: [{ id: "not-an-id", reason: "x" }] } as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects conflict_on entry with empty reason", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { conflict_on: [{ id: "DX-9", reason: "" }] } as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects duplicate ids in conflict_on", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        {
+          conflict_on: [
+            { id: "DX-9", reason: "a" },
+            { id: "DX-9", reason: "b" },
+          ],
+        } as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("blocked: null + status: ToDo clears self-block (dashboard Clear button)", async () => {
+    writeFixture(
+      makeIssue({
+        status: "Blocked",
+        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+      }),
+      "open",
+    );
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { blocked: null, status: "ToDo" } as IssuePatch,
+      "alice",
+    );
+    expect(issue.blocked).toBeNull();
+    expect(issue.status).toBe("ToDo");
+  });
+
+  it("rejects blocked patch with a non-null value (agent-only territory)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { blocked: { reason: "fake", timestamp: "2026-05-12T00:00:00Z" } } as unknown as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+});

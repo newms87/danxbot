@@ -81,6 +81,7 @@ export type {
   IssueHistoryEvent,
   WaitingOn,
   Blocked,
+  ConflictOnEntry,
   RequiresHuman,
 } from "@backend/issue-tracker/interface.js";
 export type {

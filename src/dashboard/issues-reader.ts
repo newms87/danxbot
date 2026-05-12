@@ -1,4 +1,6 @@
 import type {
+  Blocked,
+  ConflictOnEntry,
   Issue,
   IssueStatus,
   IssueType,
@@ -17,6 +19,7 @@ import {
 import { repoNameFromPath } from "../poller/repo-name.js";
 import { createLogger } from "../logger.js";
 import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
+import { effectiveConflictOn } from "../issue/effective-conflict-on.js";
 
 const log = createLogger("issues-reader");
 
@@ -144,6 +147,31 @@ export interface IssueListItem {
    * record on each child.
    */
   requires_human_child_count: number;
+  /**
+   * Self-block record (DX-309). `null` when the card itself can proceed;
+   * full record when the card is parked at `status: "Blocked"`. Surfaced
+   * so the board's BLOCKED pill can render without a detail fetch.
+   * Invariant: `status === "Blocked" ⟺ blocked !== null` (worker enforces
+   * both directions on every write). Optional on the type for backward
+   * compat with pre-DX-309 test fixtures; server always emits.
+   */
+  blocked?: Blocked | null;
+  /**
+   * Mutual-exclusion entries declared on THIS card (DX-309). Full passthrough
+   * of `Issue.conflict_on[]`. Surfaced on the list item so the board's
+   * CONFLICT pill renders without a detail fetch. Optional for test fixture
+   * back-compat; server always emits.
+   */
+  conflict_on?: ConflictOnEntry[];
+  /**
+   * Count of conflict partners CURRENTLY blocking this card's dispatch —
+   * forward (this card's `conflict_on[]` points at an In Progress partner)
+   * + reverse (some OTHER open In Progress card has THIS card in its
+   * `conflict_on[]`). Drives the CONFLICT N pill tooltip + the "active
+   * conflict" visual state. `0` when `conflict_on` is non-empty but every
+   * partner is terminal (audit-only). Optional for fixture back-compat.
+   */
+  conflict_on_active_count?: number;
 }
 
 /**
@@ -158,6 +186,28 @@ export type IssueDetail = Issue & {
   created_at: number;
   raw_yaml: string;
   requires_human_child_count: number;
+  /**
+   * Partner summary lookup for dispatch-gate render (DX-309). Includes:
+   *  - every id in `waiting_on.by[]` (with effective resolution applied)
+   *  - every id in `conflict_on[]`
+   *  - every OTHER open card that names THIS card in its `conflict_on[]`
+   *    AND is currently In Progress (reverse-conflict partner)
+   * Each entry is the minimal info the drawer needs to render the partner
+   * chip — `status` for the badge, `title` for the tooltip. Missing partners
+   * (id resolves to nothing) are omitted; the SPA falls back to a "<ID:
+   * unknown>" pill for those.
+   */
+  conflict_on_partners?: Record<string, { status: IssueStatus; title: string }>;
+  /**
+   * Reverse-conflict partner entries — OPEN cards that name THIS card in
+   * their `conflict_on[]` AND are currently In Progress. Mirrors the
+   * forward `Issue.conflict_on[]` shape (id + reason) so the drawer renders
+   * both directions identically. Empty when no reverse conflicts are
+   * active. The reverse direction is NOT visible on this card's YAML
+   * (declared on the OTHER card) — server pre-resolves so the SPA renders
+   * without a second fetch. Optional for test fixture back-compat.
+   */
+  conflict_on_reverse?: ConflictOnEntry[];
 };
 
 export { deriveCreatedAt } from "./issue-created-at.js";
@@ -220,6 +270,7 @@ function toRawIssue(row: DbIssueRow): RawIssue {
 function toListItem(
   raw: RawIssue,
   byId: Map<string, Issue>,
+  allOpen: readonly Issue[],
 ): IssueListItem {
   const { issue, mtimeMs } = raw;
   const childrenDetail: IssueListChild[] = issue.children
@@ -292,6 +343,12 @@ function toListItem(
     requires_human_child_count: childrenDetail.filter(
       (c) => c.requires_human,
     ).length,
+    blocked: issue.blocked,
+    conflict_on: issue.conflict_on.map((e) => ({ ...e })),
+    conflict_on_active_count: (() => {
+      const r = effectiveConflictOn(issue, allOpen);
+      return r.forward.length + r.reverse.length;
+    })(),
   };
 }
 
@@ -413,7 +470,8 @@ export async function listIssues(
     );
     for (const r of sorted) ordered.push(r);
   }
-  return ordered.map((r) => toListItem(r, byId));
+  const openIssues = openRaw.map((r) => r.issue);
+  return ordered.map((r) => toListItem(r, byId, openIssues));
 }
 
 /**
@@ -457,12 +515,36 @@ export async function readIssueDetail(
     for (const id of raw.issue.waiting_on.by) idsToFetch.add(id);
   }
   for (const cid of raw.issue.children) idsToFetch.add(cid);
+  // DX-309 — pre-fetch every conflict_on partner so the drawer can render
+  // partner status badges + reverse-conflict entries. Walk every OTHER open
+  // card's conflict_on[] to find the reverse direction; load that whole set
+  // (small in practice, ~6-20 open cards per repo).
+  for (const entry of raw.issue.conflict_on) idsToFetch.add(entry.id);
+  const openRows = await dbListAllIssues(repoName);
+  const openIssues: Issue[] = [];
+  for (const r of openRows) {
+    try {
+      const ri = toRawIssue(r);
+      if (!isClosed(ri.issue.status)) openIssues.push(ri.issue);
+    } catch {
+      // Skip rogue row — same defense-in-depth as listIssues.
+    }
+  }
+  for (const other of openIssues) {
+    if (other.id === raw.issue.id) continue;
+    for (const entry of other.conflict_on) {
+      if (entry.id === raw.issue.id) {
+        idsToFetch.add(other.id);
+        break;
+      }
+    }
+  }
 
   let waiting_on = raw.issue.waiting_on;
   let requires_human_child_count = 0;
+  const byId = new Map<string, Issue>();
   if (idsToFetch.size > 0) {
     const rows = await dbSelectIssuesByIds(repoName, [...idsToFetch]);
-    const byId = new Map<string, Issue>();
     for (const r of rows) byId.set(r.id, r);
     if (waiting_on !== null) {
       waiting_on = effectiveWaitingOn(raw.issue, byId);
@@ -479,6 +561,31 @@ export async function readIssueDetail(
       return child !== undefined && child.requires_human != null;
     }).length;
   }
+
+  // DX-309 — build partner summary + reverse-conflict list for the drawer.
+  const conflict_on_partners: Record<string, { status: IssueStatus; title: string }> = {};
+  const addPartner = (partnerId: string): void => {
+    if (conflict_on_partners[partnerId]) return;
+    const p = byId.get(partnerId);
+    if (!p) return;
+    conflict_on_partners[partnerId] = { status: p.status, title: p.title };
+  };
+  if (waiting_on !== null) {
+    for (const partnerId of waiting_on.by) addPartner(partnerId);
+  }
+  for (const entry of raw.issue.conflict_on) addPartner(entry.id);
+  const conflict_on_reverse: ConflictOnEntry[] = [];
+  for (const other of openIssues) {
+    if (other.id === raw.issue.id) continue;
+    for (const entry of other.conflict_on) {
+      if (entry.id === raw.issue.id) {
+        conflict_on_reverse.push({ id: other.id, reason: entry.reason });
+        addPartner(other.id);
+        break;
+      }
+    }
+  }
+
   return {
     ...raw.issue,
     waiting_on,
@@ -486,6 +593,8 @@ export async function readIssueDetail(
     created_at: deriveCreatedAt(raw.issue.external_id, raw.mtimeMs),
     raw_yaml: serializeIssue(raw.issue),
     requires_human_child_count,
+    conflict_on_partners,
+    conflict_on_reverse,
   };
 }
 

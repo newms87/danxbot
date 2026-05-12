@@ -201,3 +201,78 @@ describe("IssueCard — requires_human indicators", () => {
     expect(chip.text()).toBe("👤 1");
   });
 });
+
+describe("IssueCard — dispatch gate pills (DX-309)", () => {
+  it("renders no gate pills when every gate is empty", () => {
+    const w = mountCard(makeListItem());
+    expect(w.find("[data-test='blocked-pill']").exists()).toBe(false);
+    expect(w.find("[data-test='waiting-on-pill']").exists()).toBe(false);
+    expect(w.find("[data-test='conflict-pill']").exists()).toBe(false);
+  });
+
+  it("renders the BLOCKED pill (red) when issue.blocked != null", () => {
+    const w = mountCard(
+      makeListItem({
+        status: "Blocked",
+        blocked: { reason: "needs ops token", timestamp: "2026-05-12T00:00:00Z" },
+      }),
+    );
+    const pill = w.get("[data-test='blocked-pill']");
+    expect(pill.text()).toContain("BLOCKED");
+    expect(pill.attributes("title")).toBe("needs ops token");
+  });
+
+  it("renders the WAITING ON N pill (amber) with unresolved dep count", () => {
+    const w = mountCard(
+      makeListItem({
+        waiting_on: true,
+        waiting_on_reason: "needs P1 schema",
+        waiting_on_by: ["DX-5", "DX-7"],
+      }),
+    );
+    const pill = w.get("[data-test='waiting-on-pill']");
+    expect(pill.text()).toContain("WAITING ON 2");
+    expect(pill.attributes("title")).toContain("DX-5, DX-7");
+  });
+
+  it("renders the CONFLICT N pill (purple) when conflict_on_active_count > 0", () => {
+    const w = mountCard(
+      makeListItem({
+        conflict_on: [{ id: "DX-9", reason: "same file" }],
+        conflict_on_active_count: 1,
+      }),
+    );
+    const pill = w.get("[data-test='conflict-pill']");
+    expect(pill.text()).toContain("CONFLICT 1");
+    expect(pill.attributes("title")).toContain("1 active conflict");
+  });
+
+  it("renders the CONFLICT N pill in audit-only mode when active_count = 0 but entries exist", () => {
+    const w = mountCard(
+      makeListItem({
+        conflict_on: [{ id: "DX-9", reason: "historical" }],
+        conflict_on_active_count: 0,
+      }),
+    );
+    const pill = w.get("[data-test='conflict-pill']");
+    expect(pill.text()).toContain("CONFLICT 1");
+    expect(pill.classes()).toContain("gate-conflict-audit");
+  });
+
+  it("renders ALL three pills together when every gate is set", () => {
+    const w = mountCard(
+      makeListItem({
+        status: "Blocked",
+        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+        waiting_on: true,
+        waiting_on_reason: "y",
+        waiting_on_by: ["DX-3"],
+        conflict_on: [{ id: "DX-9", reason: "z" }],
+        conflict_on_active_count: 1,
+      }),
+    );
+    expect(w.find("[data-test='blocked-pill']").exists()).toBe(true);
+    expect(w.find("[data-test='waiting-on-pill']").exists()).toBe(true);
+    expect(w.find("[data-test='conflict-pill']").exists()).toBe(true);
+  });
+});

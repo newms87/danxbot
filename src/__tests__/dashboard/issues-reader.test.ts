@@ -349,6 +349,9 @@ describe("listIssues", () => {
       assigned_agent: null,
       requires_human: null,
       requires_human_child_count: 0,
+      blocked: null,
+      conflict_on: [],
+      conflict_on_active_count: 0,
     });
   });
 
@@ -1813,6 +1816,122 @@ describe("listIssues — scale guard", () => {
     await expect(listIssues(repo)).rejects.toThrow(
       /returned 5001 rows.*cap = 5000/,
     );
+  });
+});
+
+describe("conflict_on projection (DX-309)", () => {
+  it("listIssues: counts forward conflict (own conflict_on points at In Progress partner)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        status: "ToDo",
+        conflict_on: [{ id: "ISS-2", reason: "same file" }],
+      }),
+      1_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", status: "In Progress" }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const me = items.find((i) => i.id === "ISS-1")!;
+    expect(me.conflict_on).toEqual([{ id: "ISS-2", reason: "same file" }]);
+    expect(me.conflict_on_active_count).toBe(1);
+  });
+
+  it("listIssues: counts reverse conflict (OTHER In Progress card names THIS card)", async () => {
+    const repo = setupRepo();
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1", status: "ToDo" }), 1_000);
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-2",
+        status: "In Progress",
+        conflict_on: [{ id: "ISS-1", reason: "partner declares" }],
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const me = items.find((i) => i.id === "ISS-1")!;
+    expect(me.conflict_on).toEqual([]);
+    expect(me.conflict_on_active_count).toBe(1);
+  });
+
+  it("listIssues: terminal partner = audit-only (count 0)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        status: "ToDo",
+        conflict_on: [{ id: "ISS-2", reason: "historical" }],
+      }),
+      1_000,
+    );
+    writeIssue(repo, "closed", emptyIssue({ id: "ISS-2", status: "Done" }), 1_000);
+    const items = await listIssues(repo);
+    const me = items.find((i) => i.id === "ISS-1")!;
+    expect(me.conflict_on).toEqual([{ id: "ISS-2", reason: "historical" }]);
+    expect(me.conflict_on_active_count).toBe(0);
+  });
+
+  it("readIssueDetail: conflict_on_partners covers forward + reverse + waiting_on.by ids", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        status: "ToDo",
+        conflict_on: [{ id: "ISS-2", reason: "fwd" }],
+        waiting_on: {
+          reason: "needs ISS-3",
+          timestamp: "t",
+          by: ["ISS-3"],
+        },
+      }),
+      1_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-2", status: "In Progress", title: "fwd partner" }),
+      1_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-3", status: "ToDo", title: "dep partner" }),
+      1_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-4",
+        status: "In Progress",
+        title: "rev partner",
+        conflict_on: [{ id: "ISS-1", reason: "rev declared" }],
+      }),
+      1_000,
+    );
+    const detail = await readIssueDetail(repo, "ISS-1");
+    expect(detail).not.toBeNull();
+    expect(detail!.conflict_on_partners).toMatchObject({
+      "ISS-2": { status: "In Progress", title: "fwd partner" },
+      "ISS-3": { status: "ToDo", title: "dep partner" },
+      "ISS-4": { status: "In Progress", title: "rev partner" },
+    });
+    expect(detail!.conflict_on_reverse).toEqual([
+      { id: "ISS-4", reason: "rev declared" },
+    ]);
   });
 });
 

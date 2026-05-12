@@ -209,3 +209,119 @@ describe("OverviewTab description editor", () => {
     expect(w.emitted("update:issue")).toBeUndefined();
   });
 });
+
+describe("OverviewTab — Dispatch gates section (DX-309)", () => {
+  beforeEach(() => {
+    patchMock.mockReset();
+  });
+
+  it("hides the section iff every gate is empty", () => {
+    const w = mountTab();
+    expect(w.find('[data-test="dispatch-gates"]').exists()).toBe(false);
+  });
+
+  it("renders only the Blocked subsection when blocked is set", () => {
+    const w = mountTab(
+      makeDetail({
+        status: "Blocked",
+        blocked: { reason: "needs creds", timestamp: "2026-05-12T00:00:00Z" },
+      }),
+    );
+    expect(w.get('[data-test="gate-blocked"]').text()).toContain("needs creds");
+    expect(w.find('[data-test="gate-waiting"]').exists()).toBe(false);
+    expect(w.find('[data-test="gate-conflict"]').exists()).toBe(false);
+  });
+
+  it("Clear button on Blocked PATCHes blocked: null + status: ToDo", async () => {
+    patchMock.mockResolvedValue(
+      makeDetail({ status: "ToDo", blocked: null }) as never,
+    );
+    const w = mountTab(
+      makeDetail({
+        status: "Blocked",
+        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+      }),
+    );
+    await w.get('[data-test="clear-blocked"]').trigger("click");
+    await flushPromises();
+    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+      blocked: null,
+      status: "ToDo",
+    });
+    expect(w.emitted("update:issue")).toHaveLength(1);
+  });
+
+  it("renders Waiting-on subsection with partner chips and resolved status", () => {
+    const w = mountTab(
+      makeDetail({
+        waiting_on: {
+          reason: "phase 1 first",
+          timestamp: "2026-05-12T00:00:00Z",
+          by: ["DX-5"],
+        },
+        conflict_on_partners: {
+          "DX-5": { status: "In Progress", title: "Phase 1 schema" },
+        },
+      }),
+    );
+    const section = w.get('[data-test="gate-waiting"]');
+    expect(section.text()).toContain("phase 1 first");
+    expect(section.text()).toContain("DX-5");
+    expect(section.text()).toContain("In Progress");
+    expect(section.text()).toContain("Phase 1 schema");
+  });
+
+  it("renders Conflict subsection with forward entries + per-entry Clear button", async () => {
+    patchMock.mockResolvedValue(
+      makeDetail({ conflict_on: [] }) as never,
+    );
+    const w = mountTab(
+      makeDetail({
+        conflict_on: [{ id: "DX-9", reason: "scheduler.ts collision" }],
+        conflict_on_partners: {
+          "DX-9": { status: "In Progress", title: "Other work" },
+        },
+      }),
+    );
+    const section = w.get('[data-test="gate-conflict"]');
+    expect(section.text()).toContain("DX-9");
+    expect(section.text()).toContain("scheduler.ts collision");
+    await w.get('[data-test="clear-conflict-DX-9"]').trigger("click");
+    await flushPromises();
+    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+      conflict_on: [],
+    });
+  });
+
+  it("renders reverse-conflict entries from conflict_on_reverse", () => {
+    const w = mountTab(
+      makeDetail({
+        conflict_on_reverse: [{ id: "DX-9", reason: "partner declared" }],
+        conflict_on_partners: {
+          "DX-9": { status: "In Progress", title: "Partner work" },
+        },
+      }),
+    );
+    const section = w.get('[data-test="gate-conflict"]');
+    expect(section.text()).toContain("declared on partner");
+    expect(section.text()).toContain("DX-9");
+  });
+
+  it("renders all three subsections together when every gate is active", () => {
+    const w = mountTab(
+      makeDetail({
+        status: "Blocked",
+        blocked: { reason: "a", timestamp: "2026-05-12T00:00:00Z" },
+        waiting_on: {
+          reason: "b",
+          timestamp: "2026-05-12T00:00:00Z",
+          by: ["DX-2"],
+        },
+        conflict_on: [{ id: "DX-9", reason: "c" }],
+      }),
+    );
+    expect(w.find('[data-test="gate-blocked"]').exists()).toBe(true);
+    expect(w.find('[data-test="gate-waiting"]').exists()).toBe(true);
+    expect(w.find('[data-test="gate-conflict"]').exists()).toBe(true);
+  });
+});

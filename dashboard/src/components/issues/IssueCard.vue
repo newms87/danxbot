@@ -33,15 +33,36 @@ const emit = defineEmits<{
 }>();
 
 const isEpic = computed(() => props.issue.type === "Epic");
-const blocked = computed(() => props.issue.waiting_on);
-const blockedByIds = computed(() => props.issue.waiting_on_by ?? []);
-const blockedByCard = computed(
-  () => blocked.value && blockedByIds.value.length > 0,
+// DX-309 — three independent dispatch gates rendered as separate pills.
+// Legacy single-`blocked` (mapping to waiting_on) replaced by the trio.
+const selfBlocked = computed(() => props.issue.blocked);
+const waitingOn = computed(() => props.issue.waiting_on);
+const waitingOnIds = computed(() => props.issue.waiting_on_by ?? []);
+const conflictEntries = computed(() => props.issue.conflict_on ?? []);
+const conflictActiveCount = computed(
+  () => props.issue.conflict_on_active_count ?? 0,
 );
-const blockedLabel = computed(() => {
-  if (!blocked.value) return "";
-  if (blockedByCard.value) return `Blocked by ${blockedByIds.value.join(", ")}`;
-  return "Blocked";
+const hasAnyGate = computed(
+  () =>
+    selfBlocked.value !== null ||
+    waitingOn.value ||
+    conflictActiveCount.value > 0 ||
+    conflictEntries.value.length > 0,
+);
+const waitingOnTooltip = computed(() => {
+  if (!waitingOn.value) return undefined;
+  const reason = props.issue.waiting_on_reason ?? "";
+  return waitingOnIds.value.length > 0
+    ? `Waiting on ${waitingOnIds.value.join(", ")}${reason ? ` — ${reason}` : ""}`
+    : reason;
+});
+const conflictTooltip = computed(() => {
+  const entries = conflictEntries.value;
+  if (entries.length === 0 && conflictActiveCount.value === 0) return undefined;
+  const ids = entries.map((e) => e.id).join(", ");
+  const active = conflictActiveCount.value;
+  const head = active > 0 ? `${active} active conflict${active === 1 ? "" : "s"}` : `${entries.length} declared`;
+  return ids ? `${head} — ${ids}` : head;
 });
 const statusMeta = computed(() => COLUMN_ACCENTS[props.issue.status]);
 
@@ -84,7 +105,7 @@ function onParentClick(e: MouseEvent): void {
 <template>
   <button
     class="issue-card"
-    :class="{ epic: isEpic, blocked, 'blocked-by-card': blockedByCard, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
+    :class="{ epic: isEpic, 'self-blocked': selfBlocked, 'waiting-on': waitingOn && !selfBlocked, conflict: conflictActiveCount > 0 && !selfBlocked && !waitingOn, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
     type="button"
     :draggable="props.dragHandlers ? true : undefined"
     @click="emit('select', issue)"
@@ -114,18 +135,39 @@ function onParentClick(e: MouseEvent): void {
         :title="requiresHumanTooltip"
         data-test="requires-human-badge"
       >👤</span>
+      <span v-if="hasAnyGate" class="gates-wrap">
       <span
-        v-if="blocked"
-        class="blocked-badge"
-        :class="{ 'blocked-by-card': blockedByCard }"
-        :title="issue.waiting_on_reason ?? undefined"
+        v-if="selfBlocked"
+        class="gate-pill gate-blocked"
+        :title="selfBlocked.reason"
+        data-test="blocked-pill"
       >
-        <span class="blocked-glyph">{{ blockedByCard ? '⏸' : '⛔' }}</span>
-        {{ blockedLabel }}
+        <span class="gate-glyph">🔒</span>
+        BLOCKED
+      </span>
+      <span
+        v-if="waitingOn"
+        class="gate-pill gate-waiting"
+        :title="waitingOnTooltip"
+        data-test="waiting-on-pill"
+      >
+        <span class="gate-glyph">⏳</span>
+        WAITING ON {{ waitingOnIds.length }}
+      </span>
+      <span
+        v-if="conflictActiveCount > 0 || conflictEntries.length > 0"
+        class="gate-pill gate-conflict"
+        :class="{ 'gate-conflict-audit': conflictActiveCount === 0 }"
+        :title="conflictTooltip"
+        data-test="conflict-pill"
+      >
+        <span class="gate-glyph">⚡</span>
+        CONFLICT {{ conflictActiveCount > 0 ? conflictActiveCount : conflictEntries.length }}
+      </span>
       </span>
       <AgentBadge
         v-if="issue.assigned_agent"
-        :class="{ 'ml-auto': !blocked }"
+        :class="{ 'ml-auto': !hasAnyGate }"
         class="row-agent"
         :repo="props.repo"
         :agent-name="issue.assigned_agent"
@@ -185,11 +227,14 @@ function onParentClick(e: MouseEvent): void {
   border-color: rgb(99 102 241 / 0.35);
   border-left: 3px solid #6366f1;
 }
-.issue-card.blocked {
+.issue-card.self-blocked {
   border-left: 3px solid #ef4444;
 }
-.issue-card.blocked-by-card {
+.issue-card.waiting-on {
   border-left: 3px solid #f59e0b;
+}
+.issue-card.conflict {
+  border-left: 3px solid #a855f7;
 }
 .requires-human-badge {
   font-size: 12px;
@@ -222,11 +267,14 @@ function onParentClick(e: MouseEvent): void {
 .issue-card.scoped.epic {
   border-left: 3px solid #6366f1;
 }
-.issue-card.scoped.blocked {
+.issue-card.scoped.self-blocked {
   border-left: 3px solid #ef4444;
 }
-.issue-card.scoped.blocked-by-card {
+.issue-card.scoped.waiting-on {
   border-left: 3px solid #f59e0b;
+}
+.issue-card.scoped.conflict {
+  border-left: 3px solid #a855f7;
 }
 .issue-card.dimmed {
   opacity: 0.32;
@@ -278,19 +326,44 @@ function onParentClick(e: MouseEvent): void {
 .row-agent.ml-auto {
   margin-left: auto;
 }
-.blocked-badge {
+.gates-wrap {
   margin-left: auto;
-  font-size: 10px;
-  font-weight: 600;
-  color: #fca5a5;
   display: inline-flex;
   align-items: center;
   gap: 3px;
 }
-.blocked-badge.blocked-by-card {
+.gate-pill {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  cursor: help;
+}
+.gate-blocked {
+  background: rgb(239 68 68 / 0.15);
+  border: 1px solid rgb(239 68 68 / 0.4);
+  color: #fca5a5;
+}
+.gate-waiting {
+  background: rgb(245 158 11 / 0.12);
+  border: 1px solid rgb(245 158 11 / 0.35);
   color: #fcd34d;
 }
-.blocked-glyph {
+.gate-conflict {
+  background: rgb(168 85 247 / 0.14);
+  border: 1px solid rgb(168 85 247 / 0.4);
+  color: #d8b4fe;
+}
+.gate-conflict.gate-conflict-audit {
+  background: rgb(168 85 247 / 0.06);
+  border: 1px dashed rgb(168 85 247 / 0.3);
+  color: #c4b5fd;
+}
+.gate-glyph {
   font-size: 9px;
 }
 .title {

@@ -54,6 +54,8 @@ import {
 } from "../issue-tracker/yaml.js";
 import {
   ISSUE_STATUSES,
+  type Blocked,
+  type ConflictOnEntry,
   type Issue,
   type IssueAcItem,
   type IssueStatus,
@@ -117,6 +119,24 @@ export interface IssuePatch {
    * null — anything else is a 400).
    */
   position?: number | null;
+  /**
+   * Full array replace of `conflict_on[]` (DX-309). Validated entry by
+   * entry — every entry must be `{id: "<PREFIX>-N", reason: "<non-empty>"}`.
+   * Empty array clears all conflicts (audit + active alike). The dashboard
+   * drawer's per-entry "Clear" button sends a filtered copy of the prior
+   * list with the cleared entry removed.
+   */
+  conflict_on?: ConflictOnEntry[];
+  /**
+   * Self-block clear (DX-309). Only `null` is accepted — operator clears
+   * via the drawer's "Clear" button on the Blocked subsection. The
+   * `status: "Blocked" ⟺ blocked !== null` invariant is preserved by
+   * pairing the clear with `status: "ToDo"` (the dashboard sends both in
+   * one patch; the validator accepts both). Setting blocked to a record
+   * is reserved for the agent path — humans flip status, the auto-stamp
+   * in `applyValidatedPatch` synthesizes the record.
+   */
+  blocked?: null;
 }
 
 const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
@@ -128,6 +148,8 @@ const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "requires_human",
   "reopen",
   "position",
+  "conflict_on",
+  "blocked",
 ]);
 
 const REOPEN_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
@@ -365,6 +387,49 @@ function validatePatchShape(body: unknown): IssuePatch {
       patch.position = v;
     }
   }
+  if ("conflict_on" in raw) {
+    if (!Array.isArray(raw.conflict_on)) {
+      throw new IssuePatchError(400, {
+        error: "conflict_on must be a list",
+      });
+    }
+    const entries: ConflictOnEntry[] = [];
+    const seenIds = new Set<string>();
+    for (let i = 0; i < raw.conflict_on.length; i++) {
+      const e = raw.conflict_on[i] as Record<string, unknown>;
+      if (!e || typeof e !== "object" || Array.isArray(e)) {
+        throw new IssuePatchError(400, {
+          error: `conflict_on[${i}] must be a mapping`,
+        });
+      }
+      if (typeof e.id !== "string" || !/^[A-Z]{2,4}-\d+$/.test(e.id)) {
+        throw new IssuePatchError(400, {
+          error: `conflict_on[${i}].id must match <PREFIX>-N`,
+        });
+      }
+      if (typeof e.reason !== "string" || e.reason.length === 0) {
+        throw new IssuePatchError(400, {
+          error: `conflict_on[${i}].reason must be a non-empty string`,
+        });
+      }
+      if (seenIds.has(e.id)) {
+        throw new IssuePatchError(400, {
+          error: `conflict_on[${i}].id "${e.id}" duplicates an earlier entry`,
+        });
+      }
+      seenIds.add(e.id);
+      entries.push({ id: e.id, reason: e.reason });
+    }
+    patch.conflict_on = entries;
+  }
+  if ("blocked" in raw) {
+    if (raw.blocked !== null) {
+      throw new IssuePatchError(400, {
+        error: "blocked may only be patched to null (use status to flip)",
+      });
+    }
+    patch.blocked = null;
+  }
   return patch;
 }
 
@@ -479,6 +544,12 @@ function applyValidatedPatch(
   }
   if (patch.position !== undefined) {
     next.position = patch.position;
+  }
+  if (patch.conflict_on !== undefined) {
+    next.conflict_on = patch.conflict_on.map((e) => ({ ...e }));
+  }
+  if (patch.blocked !== undefined) {
+    next.blocked = patch.blocked;
   }
 
   // Operator action (dashboard drag, manual status patch) overrides the
