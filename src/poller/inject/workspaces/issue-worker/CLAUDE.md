@@ -32,14 +32,25 @@ address it via your worktree path.
 
 | Trigger | Skill |
 |---|---|
-| About to set `status: "Blocked"`, populate `blocked: {reason, ...}`, append `## Blocked` comment, OR call `danxbot_complete({status: "failed", ...})` with operator-must-X framing | `issue-blocker` (8-item gating checklist; refuses the move if any item fails) |
+| About to set `status: "Blocked"`, populate `blocked: {reason, ...}`, append `## Blocked` comment, OR call `danxbot_complete({status: "failed", ...})` with operator-must-X framing | `danxbot:issue-blocker` (8-item gating checklist; refuses the move if any item fails) |
+| About to mark a card Blocked because of "pre-existing flaky test," "manual UI smoke," or "post-`danxbot_complete` self-derived state" | `danxbot:no-false-blockers` (the three patterns with programmatic substitutes) |
+| Picking up any card whose `status: Blocked` or `waiting_on` is non-null | `danxbot:unblock` |
+
+DX-272 moved the operational rules + skills that used to live under
+`.claude/rules/danx-*.md` and `.claude/skills/{danx-*,issue-blocker}/`
+into the `danxbot@newms-plugins` plugin. The plugin auto-installs in
+every dispatched session via the workspace `.claude/settings.json`
+`enabledPlugins` entry, so loading by `<plugin>:<skill>` form is
+equivalent to (and faster than) reading the old inject paths. The
+inject pipeline no longer ships those files; the per-tick prune
+deletes any stale copy.
 
 ## Tools you have for "operator-only-looking" verification
 
 Before moving a card to Blocked because of "manual UI smoke," "pre-existing
-flaky test," or "post-save behavior I can't observe," read
-`.claude/rules/danx-no-false-blockers.md`. None of those are valid
-blockers; programmatic substitutes exist for each.
+flaky test," or "post-save behavior I can't observe," invoke the
+`danxbot:no-false-blockers` skill. None of those are valid blockers;
+programmatic substitutes exist for each.
 
 - **Dashboard auth** (host-mode dispatch): persistent bearer token at
   `~/.config/danxbot/dashboard-token` (read with `cat`). Use against

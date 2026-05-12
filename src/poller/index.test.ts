@@ -1916,6 +1916,205 @@ language: node
     expect(String(errCalls[0][0])).toMatch(/EACCES/);
   });
 
+  // DX-272: the sibling `pruneRetiredWorkspaceFiles` helper deletes
+  // retired NON-`danx-*`-prefixed inject artifacts that the prefix-
+  // scoped scrubber cannot reach. Specifically — `issue-worker/.claude/
+  // skills/issue-blocker/` (a directory whose name lacks the `danx-`
+  // prefix). The fixture places the stale dir at the target AND seeds
+  // an operator-authored sibling (`my-custom-skill/`) that MUST survive
+  // the prune; the tombstone is an explicit allowlist, not a prefix
+  // match.
+  it("injectDanxWorkspaces prunes retired non-prefixed workspace files (DX-272 issue-blocker tombstone)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const issueWorkerSource = `${workspacesSource}/issue-worker`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const issueWorkerTargetRoot = `${workspacesTargetRoot}/issue-worker`;
+    const issueWorkerTargetSkillsDir = `${issueWorkerTargetRoot}/.claude/skills`;
+    const retiredSkillDir = `${issueWorkerTargetSkillsDir}/issue-blocker`;
+    const operatorSkillDir = `${issueWorkerTargetSkillsDir}/my-custom-skill`;
+
+    const sourceDirSuffixes = [issueWorkerSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      issueWorkerTargetRoot,
+      `${issueWorkerTargetRoot}/.claude`,
+      issueWorkerTargetSkillsDir,
+      retiredSkillDir,
+      operatorSkillDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["issue-worker"];
+      // Inject source has no static rules/skills any more (DX-272
+      // retired them in favor of the danxbot plugin), so the tombstone
+      // is the ONLY signal that prunes the stale dir.
+      if (path.endsWith(issueWorkerSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return ["issue-worker"];
+      if (path === issueWorkerTargetRoot) return [".claude"];
+      if (path === `${issueWorkerTargetRoot}/.claude`) return ["skills"];
+      if (path === issueWorkerTargetSkillsDir)
+        return ["issue-blocker", "my-custom-skill"];
+      if (path === retiredSkillDir) return [];
+      if (path === operatorSkillDir) return [];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: issue-worker\ndescription: issue-worker\n";
+      return "";
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    const rmPaths = mockRmSync.mock.calls.map((c: unknown[]) => c[0] as string);
+    expect(rmPaths).toContain(retiredSkillDir);
+    expect(rmPaths).not.toContain(operatorSkillDir);
+  });
+
+  // DX-272 + DX-149: `pruneRetiredWorkspaceFiles` is a sibling of the
+  // prefix scrubber; an `rm` failure there must follow the same
+  // log+swallow contract so the worker process survives one bad tick.
+  // Without this test, a future refactor that wraps the new helper in
+  // its own try/catch would silently revert the DX-149 invariant.
+  it("injectDanxWorkspaces rm failure during retired-files prune is logged + swallowed (DX-149 parity for DX-272)", async () => {
+    const workspacesSource = "src/poller/inject/workspaces";
+    const issueWorkerSource = `${workspacesSource}/issue-worker`;
+    const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
+    const issueWorkerTargetRoot = `${workspacesTargetRoot}/issue-worker`;
+    const issueWorkerTargetSkillsDir = `${issueWorkerTargetRoot}/.claude/skills`;
+    const retiredSkillDir = `${issueWorkerTargetSkillsDir}/issue-blocker`;
+
+    const sourceDirSuffixes = [issueWorkerSource];
+    const targetDirExact = new Set<string>([
+      workspacesTargetRoot,
+      issueWorkerTargetRoot,
+      `${issueWorkerTargetRoot}/.claude`,
+      issueWorkerTargetSkillsDir,
+      retiredSkillDir,
+    ]);
+
+    mockExistsSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return false;
+      if (path.includes(".danxbot/config")) return true;
+      if (path.endsWith("config.yml")) return true;
+      if (path.endsWith("overview.md")) return true;
+      if (path.endsWith("workflow.md")) return true;
+      if (path.endsWith("trello.yml")) return true;
+      if (
+        path.includes("inject/rules") ||
+        path.includes("inject/tools") ||
+        path.includes("inject/skills")
+      ) {
+        return true;
+      }
+      if (
+        path.endsWith(workspacesSource) ||
+        path.includes(`${workspacesSource}/`)
+      ) {
+        return true;
+      }
+      if (
+        path === workspacesTargetRoot ||
+        path.startsWith(`${workspacesTargetRoot}/`)
+      ) {
+        return true;
+      }
+      return false;
+    });
+
+    mockReaddirSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return [];
+      if (path.endsWith("/inject/rules")) return [];
+      if (path.endsWith("/inject/tools")) return [];
+      if (path.endsWith("/inject/skills")) return [];
+      if (path.endsWith(workspacesSource)) return ["issue-worker"];
+      if (path.endsWith(issueWorkerSource)) return ["workspace.yml"];
+      if (path === workspacesTargetRoot) return ["issue-worker"];
+      if (path === issueWorkerTargetRoot) return [".claude"];
+      if (path === `${issueWorkerTargetRoot}/.claude`) return ["skills"];
+      if (path === issueWorkerTargetSkillsDir) return ["issue-blocker"];
+      if (path === retiredSkillDir) return [];
+      return [];
+    });
+
+    mockStatSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") {
+        return { isDirectory: () => false };
+      }
+      const isDir =
+        targetDirExact.has(path) ||
+        sourceDirSuffixes.some((suffix) => path.endsWith(suffix));
+      return { isDirectory: () => isDir };
+    });
+
+    mockReadFileSync.mockImplementation((path: unknown) => {
+      if (typeof path !== "string") return "";
+      if (path.endsWith("config.yml")) return FAKE_CONFIG_YML;
+      if (path.endsWith("workspace.yml"))
+        return "name: issue-worker\ndescription: issue-worker\n";
+      return "";
+    });
+
+    mockRmSync.mockImplementation((path: unknown) => {
+      if (path === retiredSkillDir) {
+        throw new Error("EACCES: permission denied");
+      }
+    });
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    const errCalls = mockLogger.error.mock.calls.filter((c) =>
+      String(c[0]).includes("_poll crashed"),
+    );
+    expect(errCalls).toHaveLength(1);
+    expect(String(errCalls[0][0])).toMatch(/EACCES/);
+  });
+
   // Symmetric DX-149 update for `scrubRepoRootDanxArtifacts`. Pre-DX-149
   // an rm failure here propagated out of `poll()`; post-DX-149 the
   // `_poll` top-level catch logs+swallows so the worker process

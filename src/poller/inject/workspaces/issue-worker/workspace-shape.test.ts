@@ -1,34 +1,28 @@
 /**
- * Regression test for the Phase 4 cutover of the tracker-agnostic-agents
- * epic. Phase 4 dropped the trello MCP server entry from this workspace's
- * `.mcp.json` and rewrote every SKILL.md to use the YAML + danx_issue_*
- * flow instead of `mcp__trello__*` calls.
+ * Regression tests for the issue-worker workspace SOURCE — i.e. what
+ * `injectDanxWorkspaces` mirrors into every connected repo's
+ * `<repo>/.danxbot/workspaces/issue-worker/`. The dispatched agent's cwd
+ * is the target of that mirror, so pinning the source IS pinning the
+ * runtime shape.
  *
- * After Phase 4, NO `mcp__trello__*` reference may appear in any SKILL.md
- * here, and the workspace `.mcp.json` must not declare a `trello` MCP
- * server. A future agent reintroducing either would silently re-pollute
- * the agent's tool surface and break the tracker-agnostic guarantee.
+ * Two eras of invariants live here:
  *
- * Phase 3 of ISS-90 (Poller triage rework) added a `danx-issue` MCP server
- * entry — the YAML-first `@thehammer/danx-issue-mcp` package — so the
- * triage agent can call `mcp__danx-issue__danx_issue_get` /
- * `danx_issue_list` directly. DX-203 retired the server's tracker
- * dependency entirely: the only env var the server reads is
- * `DANX_REPO_ROOT`. The `DANX_TRACKER` / `TRELLO_API_KEY` /
- * `TRELLO_API_TOKEN` triple older versions injected is gone. DX-157
- * retired the agent-facing save tool — agents `Edit` / `Write` the
- * YAML directly and the chokidar watcher mirrors the change. The
- * tracker-agnostic guarantee is now structural — the YAML store IS the
- * agent's source of truth; the worker's poll loop owns the YAML →
- * Trello mirror asynchronously.
+ *   1. **Phase 4 of the tracker-agnostic-agents epic** — workspace's
+ *      `.mcp.json` MUST NOT declare a `trello` MCP server, MUST keep
+ *      `playwright` + `danx-issue`, and `workspace.yml` MUST pin the
+ *      placeholder contract `danx-issue` reads at dispatch time
+ *      (`DANX_REPO_ROOT` only — DX-203 retired tracker creds).
  *
- * This file lives alongside the workspace fixtures (not under `src/poller/`)
- * because `injectDanxWorkspaces` mirrors this directory verbatim into every
- * connected repo. The test must pin the SOURCE of the mirror so a violation
- * here is caught before any tick propagates the regression.
+ *   2. **Phase 3 of DX-269 (DX-272) — plugin consolidation cutover.**
+ *      Every retired inject file MUST be absent from this workspace's
+ *      `.claude/{rules,skills}/`. The 1:1 plugin equivalents under
+ *      `~/.claude/plugins/marketplaces/newms-plugins/danxbot/` are the
+ *      sole loader path for the migrated guidance. Pinning the absence
+ *      here catches a regression that resurrects the inject duplicate
+ *      before it propagates through `mirrorWorkspaceTree`.
  */
 import { describe, it, expect } from "vitest";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -97,183 +91,61 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
       expect(value).toMatch(/^\$\{[A-Z_]+\}$/);
     }
   });
+});
 
-  it("no SKILL.md mentions `mcp__trello__*` or the legacy `<!-- danxbot -->` marker", () => {
-    const skillsDir = resolve(HERE, ".claude/skills");
-    const skillFiles = collectSkillMd(skillsDir);
-    expect(skillFiles.length).toBeGreaterThan(0);
+describe("issue-worker workspace shape (DX-272 plugin-consolidation invariants)", () => {
+  // DX-272 retired 6 rules + 6 skills from the inject pipeline; the
+  // 1:1 plugin equivalents under
+  // `~/.claude/plugins/marketplaces/newms-plugins/danxbot/` are now
+  // the sole loader path. Pin the absence at the inject SOURCE — a
+  // regression that resurrects any of these files would propagate to
+  // every connected repo's workspace via `mirrorWorkspaceTree` before
+  // the sibling unit tests on the prune helpers caught it.
+  //
+  // `statSync(...).toBeUndefined()` is the strict "missing only" anchor.
+  // The inject mirror does not create empty subdirs, so accepting "empty
+  // dir" as a pass would let a `mkdir -p` + `.gitkeep` regression slip.
 
-    const offenses: string[] = [];
-    for (const file of skillFiles) {
-      const body = readFileSync(file, "utf-8");
-      if (/mcp__trello__/.test(body)) {
-        offenses.push(`${file}: contains mcp__trello__ reference`);
-      }
-      if (/<!--\s*danxbot/.test(body)) {
-        offenses.push(`${file}: contains <!-- danxbot --> marker reference`);
-      }
-    }
-    expect(offenses).toEqual([]);
-  });
+  const RETIRED_RULE_BASENAMES = [
+    "danx-comment-style.md",
+    "danx-halt-flag.md",
+    "danx-no-launch-worker.md",
+    "danx-no-false-blockers.md",
+    "danx-no-interactive.md",
+    "danx-requires-human.md",
+  ] as const;
 
-  // Phase 3 of ISS-90: ship the `danx-triage-card` skill in this workspace.
-  // The poller's Phase 4 work (ISS-94) dispatches it on every Review /
-  // Needs Help / Blocked card whose `triage.expires_at <= now`. Pinning the
-  // skill's presence + per-status TTL contract + ICE rubric scale + the
-  // reassess_hint constraint + the routing-precedence rule here means a
-  // future agent can't silently delete the skill, flip the TTL numbers,
-  // revert the ICE scale, or drop the `blocked != null FIRST` routing rule
-  // without a failing test. Each anchor below is a load-bearing AC from
-  // ISS-93.
-  it("`danx-triage-card/SKILL.md` ships with the per-status TTL contract + ICE rubric + decision enum", () => {
-    const path = resolve(
-      HERE,
-      ".claude/skills/danx-triage-card/SKILL.md",
-    );
-    const body = readFileSync(path, "utf-8");
+  const RETIRED_SKILL_DIR_BASENAMES = [
+    "danx-epic-link",
+    "danx-ideate",
+    "danx-next",
+    "danx-start",
+    "danx-triage-card",
+    "issue-blocker",
+  ] as const;
 
-    // AC #1 — skill body covers all 3 in-scope cards w/ correct TTL +
-    // decision logic.
-    expect(body).toMatch(/name:\s*danx-triage-card/);
-    expect(body).toMatch(/Review[^|]*\|\s*24h/);
-    expect(body).toMatch(/Blocked[^|]*\|\s*3h/);
-    expect(body).toMatch(/Waiting On[^|]*\|\s*1h/);
-    // Decision-outcome enum — every `triage.last_status` value the schema
-    // accepts must be documented somewhere in the body. A regression that
-    // deleted (e.g.) the Needs Help "Demote" path would slip past the TTL
-    // anchor alone.
-    for (const decision of [
-      "Keep",
-      "Cancel",
-      "Approve",
-      "Demote",
-      "Confirm-Block",
-      "Unblock",
-    ]) {
-      expect(body).toContain(decision);
-    }
-    // Routing-precedence rule — the agent MUST check `blocked != null`
-    // FIRST (worker forces status: ToDo on blocked cards, so a blocked
-    // card looks like a dispatchable work card on `status` alone).
-    expect(body).toMatch(/blocked\s*!=\s*null/);
+  it.each(RETIRED_RULE_BASENAMES)(
+    "retired inject rule `%s` is absent from .claude/rules/",
+    (name) => {
+      const path = resolve(HERE, ".claude/rules", name);
+      expect(statSync(path, { throwIfNoEntry: false })).toBeUndefined();
+    },
+  );
 
-    // AC #2 — ICE rubric on the **1–5** scale (NOT the legacy 1–10 from
-    // the bulk-triage skill). Schema's `triage.ice` validator caps each
-    // dimension at 5; a regression to 1–10 would fail the validator on
-    // every Review save. Body says `**1–5** scale` (em-dash, asterisks),
-    // so the regex must allow non-whitespace between `5` and `scale`.
-    expect(body).toMatch(/\*?\*?1[–-]5\*?\*?[^\n]{0,5}scale|1[–-]5\s*each/i);
-    // Product-max anchor — `1–125` (em-dash) appears literally.
-    expect(body).toMatch(/1[–-]125/);
-    // Formula anchor — `i × c × e` with the multiplication sign.
-    expect(body).toMatch(/i\s*[×x*]\s*c\s*[×x*]\s*e/i);
-
-    // AC #3 — reassess_hint contract: ≤120 chars, action-shaped. A
-    // regression that dropped the constraint would let the agent emit
-    // multi-paragraph hints that defeat the "≤30s rechecks" purpose.
-    expect(body).toMatch(/reassess_hint/);
-    expect(body).toMatch(/[≤<=]\s*120/);
-    expect(body).toMatch(/action.{0,5}shaped/i);
-
-    // AC #6 — Hard Gate audit reuses the `unblock` skill's
-    // misclassification logic. Both anchors must appear so a future
-    // refactor that drops the `unblock` reference fails the test.
-    expect(body).toMatch(/Hard Gate/);
-    expect(body).toMatch(/unblock\/SKILL\.md|misclassification/i);
-    // Rationalisation detector — the named phrase list is the operational
-    // anchor for distinguishing punted Needs Help from genuine ones.
-    // Pin one of the canonical phrases so the list survives editing.
-    expect(body).toMatch(/operator-driven verification|honest way to verify/);
-  });
-
-  // ISS-135 — both `danx-next` and `danx-start` MUST ship a "Resume
-  // self-check" section so a resumed agent that lands on a card whose
-  // prior session already finished (Done + every AC checked + retro
-  // filled) reads the YAML, recognises the terminal state, and calls
-  // danxbot_complete WITHOUT redoing any work. The May-7 incident
-  // showed an orphan-resumed agent re-dispatching `danxbot_complete`
-  // after the prior session had already shipped the work + commits.
-  // The contract ships in BOTH skills because either is the entry
-  // point depending on which slash command the resume prompt uses.
-  // `mirrorWorkspaceTree` copies these source files verbatim into
-  // every connected repo's `<repo>/.danxbot/workspaces/issue-worker/
-  // .claude/skills/`, so asserting on the source pins the rendered
-  // workspace shape too.
-  it("`danx-next/SKILL.md` and `danx-start/SKILL.md` ship the Resume self-check section (ISS-135)", () => {
-    const danxNext = readFileSync(
-      resolve(HERE, ".claude/skills/danx-next/SKILL.md"),
-      "utf-8",
-    );
-    expect(danxNext).toMatch(/Resume self-check/);
-    // Load-bearing instructions agents must read before doing work.
-    // Phrasing has drifted (e.g. "terminal state + checked ACs + filled
-    // retro" vs the original "status is terminal" / "every AC item is
-    // checked" / "retro is filled") but the LOAD-BEARING components must
-    // each surface — pin on the canonical noun phrases the SKILL's
-    // resume-gate body uses.
-    expect(danxNext).toMatch(/terminal state|status:\s*"?Done"?/i);
-    expect(danxNext).toMatch(/every AC verif|checked: true/i);
-    expect(danxNext).toMatch(/retro\.(good|bad).*non-empty|retro is filled/i);
-    expect(danxNext).toMatch(/danxbot_complete/);
-    expect(danxNext).toMatch(/Do not redo work/i);
-    // Verification mechanism the agent uses when status is non-
-    // terminal but commits already landed — pin so a future edit
-    // can't silently delete the `git log` step and keep only the
-    // heading. Without this, a regression that drops the commits-
-    // hash inspection passes the heading test alone.
-    expect(danxNext).toMatch(/git log/);
-    expect(danxNext).toMatch(/retro\.commits\[\]/);
-
-    const danxStart = readFileSync(
-      resolve(HERE, ".claude/skills/danx-start/SKILL.md"),
-      "utf-8",
-    );
-    expect(danxStart).toMatch(/Resume self-check/);
-    expect(danxStart).toMatch(/danxbot_complete/);
-    expect(danxStart).toMatch(/Do not redo work/i);
-  });
+  it.each(RETIRED_SKILL_DIR_BASENAMES)(
+    "retired inject skill dir `%s` is absent from .claude/skills/",
+    (name) => {
+      const path = resolve(HERE, ".claude/skills", name);
+      expect(statSync(path, { throwIfNoEntry: false })).toBeUndefined();
+    },
+  );
 
   // Phase 5 of ISS-90 (ISS-95): the legacy `danx-triage` redirect skill
-  // was deleted entirely. Pin its absence so a future agent does not
-  // resurrect the bulk-orchestrator path.
+  // was deleted entirely. Kept as a separate anchor so the historical
+  // regression target (bulk-orchestrator resurrection) stays visible
+  // even though DX-272's retire list now covers it too.
   it("the legacy `danx-triage` skill no longer ships in this workspace", () => {
     const path = resolve(HERE, ".claude/skills/danx-triage");
     expect(statSync(path, { throwIfNoEntry: false })).toBeUndefined();
   });
-
-  // Phase 3 of ISS-90: the skill body lives in BOTH the danxbot inject
-  // path AND the claude-plugins marketplace source. Drift between the two
-  // would cause subtle behavior differences depending on which path the
-  // agent loads from. Pin byte-identical content. Skipped if the
-  // claude-plugins repo is not mounted at the expected dev path (CI, prod
-  // deploys, anyone who hasn't cloned the marketplace locally).
-  it("`danx-triage-card/SKILL.md` matches the claude-plugins marketplace mirror byte-for-byte", () => {
-    const injectPath = resolve(
-      HERE,
-      ".claude/skills/danx-triage-card/SKILL.md",
-    );
-    const marketplacePath =
-      "/home/newms/web/claude-plugins/issue-worker/skills/danx-triage-card/SKILL.md";
-    if (!statSync(marketplacePath, { throwIfNoEntry: false })) {
-      // Marketplace not available (CI, fresh checkout) — skip rather than
-      // fail. The drift-prevention is dev-time-only by design.
-      return;
-    }
-    const injectBody = readFileSync(injectPath, "utf-8");
-    const marketplaceBody = readFileSync(marketplacePath, "utf-8");
-    expect(injectBody).toEqual(marketplaceBody);
-  });
 });
-
-function collectSkillMd(dir: string): string[] {
-  const out: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    const full = resolve(dir, entry);
-    if (statSync(full).isDirectory()) {
-      out.push(...collectSkillMd(full));
-    } else if (entry === "SKILL.md") {
-      out.push(full);
-    }
-  }
-  return out;
-}

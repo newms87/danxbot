@@ -1766,6 +1766,7 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
       resolve(injectWorkspacesDir, entry),
       workspaceDir,
     );
+    pruneRetiredWorkspaceFiles(entry, workspaceDir);
   }
 }
 
@@ -2001,6 +2002,87 @@ function pruneStaleDanxArtifactsInWorkspace(
     keepNames: (sub) =>
       sub === "rules" ? PER_REPO_RENDER_RULE_NAMES : EMPTY_NAME_SET,
   });
+}
+
+/**
+ * DX-272 (Phase 3 of the plugin-consolidation epic DX-269): non-prefixed
+ * retiree tombstone allowlist.
+ *
+ * `pruneStaleDanxArtifactsInWorkspace` only deletes entries whose name
+ * starts with `danx-` AND no longer ship from the inject source. Most
+ * retirees match both filters and are auto-cleaned. ONE outlier under
+ * `issue-worker/.claude/skills/issue-blocker/` lacks the `danx-` prefix,
+ * so the prefix-scoped scrubber walks past it and the stale plugin-
+ * duplicate sits in every connected repo's workspace dir forever.
+ *
+ * This helper carries an explicit per-workspace, per-subdir allowlist
+ * of retired names that the prefix scrubber CANNOT reach. Names are
+ * permanent tombstones — once retired, never unretired. If a plugin
+ * skill is ever re-introduced under one of these names, the entry is
+ * deleted from the map in the same commit that re-adds the file (or
+ * the prune fights the inject mirror on every tick).
+ *
+ * `danx-*`-prefixed retirees are NOT listed here on purpose — the
+ * sibling scrubber catches them via prefix the moment inject stops
+ * shipping them. Listing them would be dead code that drifts.
+ *
+ * Empty `rules`/`skills` sets are permitted extension points so a
+ * future retiree under a workspace that does not yet have any
+ * non-prefixed tombstones can be added with one line.
+ */
+type RetiredWorkspaceNames = Readonly<{
+  rules: ReadonlySet<string>;
+  skills: ReadonlySet<string>;
+}>;
+
+const RETIRED_WORKSPACE_ARTIFACT_NAMES: ReadonlyMap<
+  string,
+  RetiredWorkspaceNames
+> = new Map<string, RetiredWorkspaceNames>([
+  [
+    "issue-worker",
+    {
+      rules: new Set<string>(),
+      skills: new Set<string>(["issue-blocker"]),
+    },
+  ],
+]);
+
+/**
+ * Per-tick companion to `pruneStaleDanxArtifactsInWorkspace`. Walks the
+ * tombstone map and force-deletes any retired non-`danx-*` artifact
+ * sitting in the workspace's `.claude/{rules,skills}/`. Fail-loud per
+ * DX-149: an `rm` failure here means the dispatched agent will load
+ * dead plugin-duplicate config on the next dispatch — exactly the bug
+ * this helper exists to prevent. The `_poll` top-level catch
+ * logs+swallows process-wide, same convergence model as the sibling
+ * scrubber.
+ *
+ * Idempotent: a missing target subdir or a missing entry within it is
+ * a silent no-op (the second poll after a successful prune is a no-op
+ * because every `existsSync` short-circuits).
+ */
+function pruneRetiredWorkspaceFiles(
+  workspaceName: string,
+  workspaceTargetDir: string,
+): void {
+  const retired = RETIRED_WORKSPACE_ARTIFACT_NAMES.get(workspaceName);
+  if (!retired) return;
+  const claudeDir = resolve(workspaceTargetDir, ".claude");
+  const subdirs: ReadonlyArray<["rules" | "skills", ReadonlySet<string>]> = [
+    ["rules", retired.rules],
+    ["skills", retired.skills],
+  ];
+  for (const [sub, names] of subdirs) {
+    if (names.size === 0) continue;
+    const dir = resolve(claudeDir, sub);
+    if (!existsSync(dir)) continue;
+    for (const name of names) {
+      const path = resolve(dir, name);
+      if (!existsSync(path)) continue;
+      rmSync(path, { recursive: true, force: true });
+    }
+  }
 }
 
 /** Step 7: optional compose override -> repo-overrides/<name>-compose.yml. */

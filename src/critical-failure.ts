@@ -78,12 +78,16 @@
  * DISPATCHED-AGENT GUIDANCE
  * -------------------------
  * Agents running INSIDE a dispatched session (in a connected repo's cwd)
- * read `src/poller/inject/workspaces/issue-worker/.claude/rules/
- * danx-halt-flag.md` — that's the rule written FOR them, mirrored into
- * every connected repo's issue-worker workspace by the poller's inject
- * pipeline. It tells them when to signal `critical_failure` vs `failed`.
- * Don't duplicate that guidance here — this header is for agents editing
- * the HALT code itself, not for agents signaling into it.
+ * load the `danxbot:halt-flag` plugin skill (source:
+ * `~/web/claude-plugins/danxbot/skills/halt-flag/SKILL.md`,
+ * marketplace cache: `~/.claude/plugins/marketplaces/newms-plugins/
+ * danxbot/skills/halt-flag/SKILL.md`). It tells them when to signal
+ * `critical_failure` vs `failed`. Don't duplicate that guidance here —
+ * this header is for agents editing the HALT code itself, not for
+ * agents signaling into it. (Pre-DX-272 the rule shipped via the
+ * inject pipeline at `src/poller/inject/workspaces/issue-worker/.claude/
+ * rules/danx-halt-flag.md`; DX-272 deleted that file in favor of the
+ * plugin source.)
  */
 
 import {
