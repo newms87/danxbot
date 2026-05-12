@@ -21,10 +21,10 @@ import { spawnDockerMode } from "./spawn-docker-mode.js";
 import { runSpawnPreflight } from "./spawn-preflight.js";
 import { pairedWriteHostPid } from "./paired-host-pid-write.js";
 import { attachMonitoringStack } from "./attach-monitoring-stack.js";
+import { stopAgentTree } from "./job-stop.js";
 import {
   type AgentJob,
   type SpawnAgentOptions,
-  terminateWithGrace,
 } from "./agent-types.js";
 
 // Re-exported so the historical import surface
@@ -43,6 +43,7 @@ export {
   type SpawnAgentOptions,
   terminateWithGrace,
 } from "./agent-types.js";
+export { stopAgentTree } from "./job-stop.js";
 
 const log = createLogger("launcher");
 
@@ -178,13 +179,17 @@ export async function cancelJob(
   if (job.status !== "running") return;
   if (!job.handle) return;
 
-  log.info(`[Job ${job.id}] Cancel requested — sending SIGTERM`);
+  log.info(`[Job ${job.id}] Cancel requested`);
 
   job.status = "canceled";
   job.summary = "Agent was canceled by user request";
   job.completedAt = new Date();
 
-  await terminateWithGrace(job, 5_000);
+  // DX-326: route through the same helper job.stop uses so cancel +
+  // self-stop converge on one process-tree teardown contract. Host →
+  // `systemctl --user stop`; docker → SIGTERM-then-SIGKILL on the
+  // tracked PID. No kill(pid) call survives on the host cancel path.
+  await stopAgentTree({ job, scopeName: job.scopeName });
 
   // Awaited so dispatchTracker.finalize commits the cancelled-state row with
   // any drained JSONL totals BEFORE the external putStatus PUT. Without this

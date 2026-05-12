@@ -3,17 +3,14 @@
  *
  * Distinct from `cancelJob` (user-initiated): the agent invokes this via
  * `danxbot_complete` MCP -> worker `/api/stop/:jobId` HTTP -> `job.stop`.
- * Sends SIGTERM, waits 5 s, then SIGKILL if the kernel hasn't reaped the
- * process. Status is set BEFORE killing so the close/exit handler's
- * `job.status === "running"` guard sees the terminal state and early-returns
- * instead of overwriting the agent-supplied summary.
  *
- * The SIGTERM → 5 s → SIGKILL pattern intentionally mirrors
- * `terminateWithGrace` but is open-coded here — only this call site cares
- * whether exit fired during the grace window (via `processExited`), so it
- * can skip the SIGKILL when the kernel already reaped the process.
- * `terminateWithGrace` operates on `isAlive()` only and is correct for
- * `cancelJob` + stall recovery, which don't need that signal.
+ * Delegates the actual process-tree teardown to `stopAgentTree`
+ * (`src/agent/job-stop.ts`) — the single entry point that branches on
+ * `job.scopeName` between `systemctl --user stop` (host runtime, DX-326)
+ * and SIGTERM-then-SIGKILL on the tracked PID (docker runtime, container
+ * boundary IS the cgroup). Status is set BEFORE killing so the close /
+ * exit handler's `job.status === "running"` guard sees the terminal state
+ * and early-returns instead of overwriting the agent-supplied summary.
  *
  * Cleanup is awaited (via `job._cleanup ?? cleanup`) so the dispatch row's
  * final token totals land BEFORE the external `putStatus` PUT — see
@@ -24,6 +21,7 @@
 
 import { createLogger } from "../logger.js";
 import { putStatus } from "./agent-status.js";
+import { stopAgentTree } from "./job-stop.js";
 import type { CompleteStatus } from "../mcp/danxbot-server.js";
 import type { AgentJob } from "./agent-types.js";
 
@@ -76,7 +74,7 @@ export function buildJobStopHandler(
     if (job.status !== "running") return;
     if (!job.handle) return;
 
-    log.info(`[Job ${jobId}] Agent self-stop (${status}) — sending SIGTERM`);
+    log.info(`[Job ${jobId}] Agent self-stop (${status})`);
 
     // Set terminal status BEFORE killing to prevent the close handler from overriding it.
     // The `CompleteStatus` is collapsed to the narrower in-memory job
@@ -86,21 +84,13 @@ export function buildJobStopHandler(
     if (summary) job.summary = summary;
     job.completedAt = new Date();
 
-    // Register exit listener BEFORE kill to avoid missing a fast exit. Both
-    // runtimes converge on the handle's onExit — docker delegates to
-    // ChildProcess.once("close"), host delegates to the PID watcher.
-    let processExited = false;
-    job.handle.onExit(() => {
-      processExited = true;
-    });
-
-    job.handle.kill("SIGTERM");
-
-    await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-    if (!processExited && job.handle.isAlive()) {
-      log.info(`[Job ${jobId}] Still alive after 5s — sending SIGKILL`);
-      job.handle.kill("SIGKILL");
-    }
+    // DX-326: route every terminal stop through the single helper.
+    // Host (scopeName set) → `systemctl --user stop <scope>.scope` reaps
+    // the whole cgroup atomically (incl. backgrounded grandchildren).
+    // Docker (scopeName unset) → SIGTERM-then-SIGKILL on job.handle.pid,
+    // container boundary cascades to descendants. No kill(pid) call
+    // survives on the host stop path — see job-stop.ts.
+    await stopAgentTree({ job, scopeName: job.scopeName });
 
     // Use job._cleanup rather than the captured `cleanup` so any wrappers
     // registered after spawn (e.g. stall detection teardown from

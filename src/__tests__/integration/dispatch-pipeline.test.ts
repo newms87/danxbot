@@ -194,6 +194,32 @@ exec "$@"
   chmodSync(wrapperPath, 0o755);
 }
 
+/**
+ * Create a shell wrapper script named `systemctl` that captures its argv
+ * to $SYSTEMCTL_ARGV_FILE (one element per line) then exits 0.
+ *
+ * Used by the DX-326 cancel/stop tests to verify the new
+ * `stopAgentTree` helper invokes the canonical `--user stop
+ * <scope>.scope` command without needing real systemd available in
+ * the test runner.
+ */
+function createSystemctlShim(binDir: string): void {
+  const wrapperPath = join(binDir, "systemctl");
+  writeFileSync(
+    wrapperPath,
+    `#!/bin/bash
+# DX-326 dispatch-pipeline test shim. NOT a real systemctl.
+if [[ -n "$SYSTEMCTL_ARGV_FILE" ]]; then
+  printf '%s\\n' "$@" > "$SYSTEMCTL_ARGV_FILE"
+fi
+# Simulate a clean stop. Exit code matches \`systemctl --user stop\` on
+# a unit that transitioned to inactive cleanly.
+exit 0
+`,
+  );
+  chmodSync(wrapperPath, 0o755);
+}
+
 /** Predicate: is this a PUT with the given status in the body? */
 function isStatusPut(status: string) {
   return (r: { method: string; body: string }) => {
@@ -301,6 +327,7 @@ beforeEach(async () => {
   mkdirSync(fakeBinDir);
   createClaudeWrapper(fakeBinDir);
   createSystemdRunShim(fakeBinDir);
+  createSystemctlShim(fakeBinDir);
 
   testState.reposBase = join(tempDir, "repos");
   repoDir = join(testState.reposBase, "test-repo");
@@ -514,6 +541,136 @@ describe("Integration: dispatch pipeline", () => {
         .getRequestsByMethod("PUT")
         .find(isStatusPut("canceled"));
       expect(cancelPut).toBeDefined();
+    }, 20_000);
+
+    it("on host runtime, cancel invokes `systemctl --user stop danxbot-dispatch-<jobId>.scope` (DX-326)", async () => {
+      // Pin the Phase 3 stop path. Pre-DX-326, cancelJob SIGTERMed the
+      // tracked script-wrapper PID — backgrounded grandchildren reparented
+      // to PID 1 and survived. The new helper targets the cgroup atomically
+      // via systemctl; this test verifies the integration path through
+      // `cancelJob → stopAgentTree → spawn("systemctl", …)` without needing
+      // a real user systemd instance in the runner.
+      mockConfig.isHost = true;
+      const argvFile = join(tempDir, "systemctl-argv.txt");
+      // stopAgentTree spawns `systemctl` without an explicit env — it
+      // inherits process.env. Prepend the shim dir so the spawn resolves
+      // to our test double instead of the host's real systemctl.
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${fakeBinDir}:${savedPath ?? ""}`;
+      process.env.SYSTEMCTL_ARGV_FILE = argvFile;
+      try {
+        const job = await spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 30_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          env: fakeClasudeEnv({ scenario: "slow" }),
+        });
+
+        expect(job.status).toBe("running");
+        // DX-326 spawn-preflight stamps scopeName on the AgentJob so
+        // downstream callers (stopAgentTree, future reaper) never have to
+        // recompute it. Pin the stamped value here.
+        expect(job.scopeName).toBe(`danxbot-dispatch-${job.id}`);
+
+        await new Promise((r) => setTimeout(r, 500));
+        await cancelJob(job, "test-token");
+
+        expect(job.status).toBe("canceled");
+
+        const captured = readFileSync(argvFile, "utf-8")
+          .split("\n")
+          .filter((s) => s.length > 0);
+        expect(captured).toEqual([
+          "--user",
+          "stop",
+          `danxbot-dispatch-${job.id}.scope`,
+        ]);
+      } finally {
+        process.env.PATH = savedPath;
+        delete process.env.SYSTEMCTL_ARGV_FILE;
+      }
+    }, 20_000);
+
+    it("on host runtime, agent self-stop (`job.stop`) flows through the same `systemctl --user stop` path (DX-326)", async () => {
+      // Mirrors the cancel test but exercises the MCP-callback path:
+      // `danxbot_complete` → worker `/api/stop/<id>` → `job.stop` →
+      // `stopAgentTree` → `systemctl`. Single entry point, no parallel
+      // code paths — AC #4 of DX-326.
+      mockConfig.isHost = true;
+      const argvFile = join(tempDir, "systemctl-argv-jobstop.txt");
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${fakeBinDir}:${savedPath ?? ""}`;
+      process.env.SYSTEMCTL_ARGV_FILE = argvFile;
+      try {
+        const job = await spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 30_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          env: fakeClasudeEnv({ scenario: "slow" }),
+        });
+
+        await new Promise((r) => setTimeout(r, 500));
+        await job.stop("completed", "Integration test self-stop");
+
+        const captured = readFileSync(argvFile, "utf-8")
+          .split("\n")
+          .filter((s) => s.length > 0);
+        expect(captured).toEqual([
+          "--user",
+          "stop",
+          `danxbot-dispatch-${job.id}.scope`,
+        ]);
+        expect(job.status).toBe("completed");
+        expect(job.summary).toBe("Integration test self-stop");
+      } finally {
+        process.env.PATH = savedPath;
+        delete process.env.SYSTEMCTL_ARGV_FILE;
+      }
+    }, 20_000);
+
+    it("on docker runtime, cancel does NOT spawn systemctl — container boundary owns the cgroup (DX-326 anti-goal)", async () => {
+      // Docker worker mode is UNCHANGED. The container PID namespace
+      // already confines the dispatched process tree, so scope wrapping
+      // is bypassed at spawn time AND the stop path stays on the
+      // SIGTERM-then-SIGKILL handle.kill primitive. A regression that
+      // routed every dispatch through systemctl would break docker
+      // production where systemctl is intentionally absent.
+      mockConfig.isHost = false;
+      const argvFile = join(tempDir, "systemctl-argv-docker.txt");
+      const savedPath = process.env.PATH;
+      process.env.PATH = `${fakeBinDir}:${savedPath ?? ""}`;
+      process.env.SYSTEMCTL_ARGV_FILE = argvFile;
+      try {
+        const job = await spawnAgent({
+          prompt: "Integration test task",
+          repoName: "test-repo",
+          timeoutMs: 30_000,
+          cwd: join(repoDir, ".danxbot", "workspaces", "integration-test"),
+          statusUrl: captureServer.statusUrl,
+          apiToken: "test-token",
+          env: fakeClasudeEnv({ scenario: "slow" }),
+        });
+
+        // Docker spawn omits the scope wrap, so spawn-preflight leaves
+        // job.scopeName undefined — stopAgentTree's branch falls to the
+        // handle.kill path.
+        expect(job.scopeName).toBeUndefined();
+
+        await new Promise((r) => setTimeout(r, 500));
+        await cancelJob(job, "test-token");
+
+        expect(existsSync(argvFile)).toBe(false);
+        expect(job.status).toBe("canceled");
+      } finally {
+        process.env.PATH = savedPath;
+        delete process.env.SYSTEMCTL_ARGV_FILE;
+      }
     }, 20_000);
   });
 

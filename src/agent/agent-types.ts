@@ -204,6 +204,21 @@ export interface AgentJob {
     readonly overlay: Readonly<Record<string, string>>;
   };
   /**
+   * DX-326 — per-dispatch systemd scope unit name (no `.scope` suffix),
+   * stamped at spawn time when running on host runtime. Undefined on
+   * docker runtime (the container boundary is already the cgroup; no
+   * scope wrap, no scope unit).
+   *
+   * Read by `stopAgentTree` (`src/agent/job-stop.ts`) to target the
+   * cgroup atomically via `systemctl --user stop` so backgrounded
+   * grandchildren (`yes &`, double-forks, daemons the Bash tool spawns)
+   * die with the parent instead of reparenting to PID 1 — the prod
+   * incident class DX-262 motivated. Set in `spawn-preflight.ts`
+   * alongside the `DANXBOT_DISPATCH_SCOPE` env var the dispatched
+   * agent reads.
+   */
+  scopeName?: string;
+  /**
    * DX-294 — verdict the prep agent signaled via `danxbot_prep_verdict`.
    * Stamped by `handlePrepVerdict` so the wrapping multi-agent-pick
    * onComplete handler (Phase 5 of DX-291) can read the verdict's
@@ -422,25 +437,32 @@ export interface SpawnAgentOptions {
 }
 
 /**
- * Send SIGTERM, wait `graceMs`, then SIGKILL if the process is still alive.
- * The two-phase pattern gives the agent a chance to flush state (final
- * assistant message, usage totals) before forceful termination. Works
- * identically in docker and host mode via `job.handle` — the runtime
- * branch was decided once at spawn time. No-op when no handle is attached
- * (e.g. after cleanup).
+ * Send SIGTERM, wait `graceMs`, then SIGKILL if the process is still
+ * alive. Used by stall recovery (`dispatch/core.ts`) to tear down the
+ * pre-respawn job — the call site is exempted from the DX-326 systemctl
+ * route per the "Don't touch SessionLogWatcher/StallDetector code paths"
+ * anti-goal. Every OTHER terminal stop (cancelJob, agent self-stop) goes
+ * through `stopAgentTree` (`src/agent/job-stop.ts`), which delegates HERE
+ * for its docker branch — so this function is the single shared
+ * SIGTERM/grace/SIGKILL primitive. No-op when no handle is attached.
  *
- * Exported so callers outside the launcher (dispatch stall recovery, future
- * lifecycle tools) can drive termination without duplicating the runtime
- * fork — see `.claude/rules/agent-dispatch.md`, "Single Fork Principle".
+ * The `onExit` short-circuit skips SIGKILL when the kernel reaps the
+ * process during the grace window — `isAlive()` lags `close` by a tick
+ * in mock harnesses + some runtime shapes, so the explicit exit signal
+ * is the load-bearing check.
  */
 export async function terminateWithGrace(
   job: AgentJob,
   graceMs: number,
 ): Promise<void> {
   if (!job.handle) return;
+  let processExited = false;
+  job.handle.onExit(() => {
+    processExited = true;
+  });
   job.handle.kill("SIGTERM");
   await new Promise((resolve) => setTimeout(resolve, graceMs));
-  if (job.handle.isAlive()) {
+  if (!processExited && job.handle.isAlive()) {
     job.handle.kill("SIGKILL");
   }
 }

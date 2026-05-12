@@ -133,6 +133,13 @@ export async function runSpawnPreflight(
     // before any post-spawn picker code had a chance to stamp the
     // field.
     dispatchKind: options.dispatchKind,
+    // DX-326: stamp the scope unit name on host runtime so
+    // `stopAgentTree` (job.stop / cancelJob) targets the cgroup via
+    // `systemctl --user stop` instead of SIGTERMing the script-wrapper
+    // PID — backgrounded grandchildren live inside this scope, so
+    // signaling individual PIDs would re-introduce the DX-262 orphan
+    // class. Undefined on docker runtime (no scope wrap).
+    scopeName: config.isHost ? scopeUnitName(jobId) : undefined,
   };
 
   const env = buildCleanEnv(options.env);
@@ -143,8 +150,8 @@ export async function runSpawnPreflight(
   // injecting a name that does not resolve to a real `systemctl --user
   // list-units` entry would mislead future consumers (the reaper, ops
   // tooling) that read this var as proof of scope existence.
-  if (config.isHost) {
-    env[DANXBOT_DISPATCH_SCOPE_ENV] = scopeUnitName(jobId);
+  if (job.scopeName) {
+    env[DANXBOT_DISPATCH_SCOPE_ENV] = job.scopeName;
   }
 
   // Single builder — docker and host paths share the exact flags + firstMessage.
