@@ -42,9 +42,9 @@ describe("parsePositiveInt", () => {
 });
 
 describe("parseArgs", () => {
-  const baseEnv = { DANXBOT_REPO_ROOT: "/tmp/some/repo", DANXBOT_WORKER_PORT: "5563" };
+  const baseEnv = { DANXBOT_REPO_ROOT: "/tmp/some/repo" };
 
-  it("happy path: --query + --expect-skill from explicit flags, env for repo-root and worker-port", () => {
+  it("happy path: --query + --expect-skill from explicit flags, env for repo-root", () => {
     const args = parseArgs(
       ["--query", "hello", "--expect-skill", "dev:debugging"],
       baseEnv,
@@ -52,29 +52,31 @@ describe("parseArgs", () => {
     expect(args.query).toBe("hello");
     expect(args.expectSkill).toBe("dev:debugging");
     expect(args.workspace).toBe("skill-eval");
-    expect(args.workerPort).toBe(5563);
-    expect(args.repoName).toBe("danxbot");
     expect(args.workspaceCwd).toBe(
       "/tmp/some/repo/.danxbot/workspaces/skill-eval",
     );
   });
 
-  it("--workspace / --repo / --repo-root flags override env defaults", () => {
+  it("--workspace / --repo-root flags override env defaults", () => {
     const args = parseArgs(
       [
         "--query=q",
         "--expect-skill=dev:debugging",
         "--workspace=custom",
-        "--repo=other",
         "--repo-root=/srv/other",
       ],
       baseEnv,
     );
     expect(args.workspace).toBe("custom");
-    expect(args.repoName).toBe("other");
-    expect(args.workspaceCwd).toBe(
-      "/srv/other/.danxbot/workspaces/custom",
+    expect(args.workspaceCwd).toBe("/srv/other/.danxbot/workspaces/custom");
+  });
+
+  it("--workspace-cwd may be supplied directly with no --repo-root", () => {
+    const args = parseArgs(
+      ["--query=q", "--expect-skill=x", "--workspace-cwd=/abs/cwd"],
+      {},
     );
+    expect(args.workspaceCwd).toBe("/abs/cwd");
   });
 
   it("throws on missing --query", () => {
@@ -83,21 +85,10 @@ describe("parseArgs", () => {
   it("throws on missing --expect-skill", () => {
     expect(() => parseArgs(["--query=q"], baseEnv)).toThrow(/missing --expect-skill/);
   });
-  it("throws when neither --repo-root nor DANXBOT_REPO_ROOT is set", () => {
-    expect(() =>
-      parseArgs(
-        ["--query=q", "--expect-skill=x"],
-        { DANXBOT_WORKER_PORT: "5563" },
-      ),
-    ).toThrow(/missing --repo-root/);
-  });
-  it("throws when neither --worker-port nor DANXBOT_WORKER_PORT is set", () => {
-    expect(() =>
-      parseArgs(
-        ["--query=q", "--expect-skill=x"],
-        { DANXBOT_REPO_ROOT: "/tmp/r" },
-      ),
-    ).toThrow(/missing --worker-port/);
+  it("throws when neither --repo-root, env, nor --workspace-cwd is set", () => {
+    expect(() => parseArgs(["--query=q", "--expect-skill=x"], {})).toThrow(
+      /missing --repo-root/,
+    );
   });
   it("rejects malformed --timeout-ms (NaN trap)", () => {
     expect(() =>

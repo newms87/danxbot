@@ -52,11 +52,8 @@ export interface RunEvalSetArgs {
   readonly pluginSkill: string;
   readonly evalSetPath: string;
   readonly workspace: string;
-  readonly workerPort: number;
-  readonly repoName: string;
   readonly workspaceCwd: string;
   readonly timeoutMs: number;
-  readonly pollIntervalMs: number;
   readonly parallel: number;
   readonly seed: number;
   readonly runsPerQuery: number;
@@ -109,11 +106,8 @@ export function parseEvalSetArgs(
     pluginSkill,
     evalSetPath,
     workspace: common.workspace,
-    workerPort: common.workerPort,
-    repoName: common.repoName,
     workspaceCwd: common.workspaceCwd,
     timeoutMs: common.timeoutMs,
-    pollIntervalMs: common.pollIntervalMs,
     parallel: common.parallel,
     seed: common.seed,
     runsPerQuery: common.runsPerQuery,
@@ -253,11 +247,8 @@ export async function runEvalSetCore(
         query: item.query.query,
         expectSkill: args.pluginSkill,
         workspace: args.workspace,
-        workerPort: args.workerPort,
-        repoName: args.repoName,
         workspaceCwd: args.workspaceCwd,
         timeoutMs: args.timeoutMs,
-        pollIntervalMs: args.pollIntervalMs,
       });
       return { item, record: probeResultToRecord(item.runIdx, result) };
     } catch (err) {

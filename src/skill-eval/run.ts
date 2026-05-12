@@ -11,19 +11,19 @@
  *   - PASS/FAIL exit code translation
  *   - stdout/stderr formatting of the single probe verdict
  *
- * For eval-set runs (a JSON file of queries instead of a single
- * --query) use `run-eval-set.ts`. Both CLIs share `runProbe`.
+ * Transport: direct `claude -p` spawn inside the harness — no worker,
+ * no `/api/launch`. For eval-set runs (a JSON file of queries instead
+ * of a single --query) use `run-eval-set.ts`. Both CLIs share `runProbe`.
  *
  * Exit codes:
  *   0 — PASS
  *   1 — FAIL (skill not triggered)
- *   2 — runner error (worker unreachable, dispatch failure, JSONL missing)
+ *   2 — runner error (spawn failed, timeout, JSONL missing)
  */
 
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import {
-  DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_TIMEOUT_MS,
   parsePositiveInt as parsePositiveIntShared,
   pickArg,
@@ -35,14 +35,11 @@ export interface RunnerArgs {
   query: string;
   expectSkill: string;
   workspace: string;
-  workerPort: number;
-  repoName: string;
   workspaceCwd: string;
   timeoutMs: number;
-  pollIntervalMs: number;
 }
 
-export { DEFAULT_TIMEOUT_MS, DEFAULT_POLL_INTERVAL_MS, pickArg };
+export { DEFAULT_TIMEOUT_MS, pickArg };
 
 export class RunnerArgsError extends Error {}
 
@@ -79,44 +76,29 @@ export function parseArgs(
   }
 
   const workspace = pickArg(argv, "workspace") ?? "skill-eval";
-  const repoName = pickArg(argv, "repo") ?? "danxbot";
-  const portRaw =
-    pickArg(argv, "worker-port") ?? env.DANXBOT_WORKER_PORT ?? null;
-  if (!portRaw) {
-    throw new RunnerArgsError(
-      "missing --worker-port (no DANXBOT_WORKER_PORT env either)",
-    );
-  }
-  const workerPort = parsePositiveInt("worker-port", portRaw);
 
   const repoRoot = pickArg(argv, "repo-root") ?? env.DANXBOT_REPO_ROOT ?? null;
-  if (!repoRoot) {
+  const workspaceCwdExplicit = pickArg(argv, "workspace-cwd");
+  if (!workspaceCwdExplicit && !repoRoot) {
     throw new RunnerArgsError(
-      "missing --repo-root (no DANXBOT_REPO_ROOT env either) — supply the danxbot install dir",
+      "missing --repo-root (no DANXBOT_REPO_ROOT env either) — supply the danxbot install dir, or pass --workspace-cwd directly",
     );
   }
   const workspaceCwd =
-    pickArg(argv, "workspace-cwd") ??
-    resolve(repoRoot, ".danxbot", "workspaces", workspace);
+    workspaceCwdExplicit ??
+    resolve(repoRoot as string, ".danxbot", "workspaces", workspace);
 
   const timeoutMs = parsePositiveInt(
     "timeout-ms",
     pickArg(argv, "timeout-ms") ?? `${DEFAULT_TIMEOUT_MS}`,
-  );
-  const pollIntervalMs = parsePositiveInt(
-    "poll-interval-ms",
-    pickArg(argv, "poll-interval-ms") ?? `${DEFAULT_POLL_INTERVAL_MS}`,
   );
 
   return {
     query,
     expectSkill,
     workspace,
-    workerPort,
-    repoName,
     workspaceCwd,
     timeoutMs,
-    pollIntervalMs,
   };
 }
 
@@ -173,7 +155,9 @@ async function main(): Promise<number> {
     throw err;
   }
 
-  process.stderr.write(`Dispatch jobId=${result.jobId}; status=${result.finalStatus}\n`);
+  process.stderr.write(
+    `Probe jobId=${result.jobId}; exit=${result.exitCode ?? "killed"}\n`,
+  );
   // result.jsonlPath is guaranteed non-null when runProbe returns
   // successfully (it throws ProbeError otherwise).
   emitVerdict(result.verdict, result.jsonlPath as string, result.jobId);

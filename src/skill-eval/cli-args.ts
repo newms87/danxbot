@@ -5,16 +5,18 @@
  *
  * Every CLI in this package shares the same `--flag value` / `--flag=value`
  * parsing, the same strict integer validators, and the same common flag
- * surface (worker-port / repo-root / workspace / timeouts / parallel /
- * seed / pricing-model). Centralizing those here keeps the per-CLI
- * parsers small and the defaults in one place — adding a new CLI is
- * "parse common, then parse my unique flags".
+ * surface (repo-root / workspace / timeouts / parallel / seed /
+ * pricing-model). Centralizing those here keeps the per-CLI parsers
+ * small and the defaults in one place — adding a new CLI is "parse
+ * common, then parse my unique flags".
+ *
+ * Probe transport is direct `claude -p` spawn (see `probe.ts`); there
+ * is no worker port or repo-name in the common flag set anymore.
  */
 
 import { resolve } from "node:path";
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
-export const DEFAULT_POLL_INTERVAL_MS = 2_000;
 export const DEFAULT_PARALLEL = 3;
 export const DEFAULT_RUNS_PER_QUERY = 3;
 export const DEFAULT_SEED = 1;
@@ -94,13 +96,10 @@ export function parseNonNegativeInt(
  * live in the per-CLI parser.
  */
 export interface CommonRunFlags {
-  readonly workerPort: number;
   readonly repoRoot: string;
   readonly workspace: string;
-  readonly repoName: string;
   readonly workspaceCwd: string;
   readonly timeoutMs: number;
-  readonly pollIntervalMs: number;
   readonly parallel: number;
   readonly runsPerQuery: number;
   readonly seed: number;
@@ -110,23 +109,14 @@ export interface CommonRunFlags {
 /**
  * Parse the shared flag surface. Throws the caller's chosen `ErrorCtor`
  * on any rejection so the per-CLI catch block matches the per-CLI error
- * type. Missing `--worker-port` (with no `DANXBOT_WORKER_PORT` env) or
- * missing `--repo-root` (with no `DANXBOT_REPO_ROOT` env) is fatal —
- * both are required for any dispatch.
+ * type. Missing `--repo-root` (with no `DANXBOT_REPO_ROOT` env) is
+ * fatal — the workspace cwd cannot be derived without it.
  */
 export function parseCommonRunFlags(
   argv: readonly string[],
   env: NodeJS.ProcessEnv,
   ErrorCtor: new (message: string) => Error,
 ): CommonRunFlags {
-  const portRaw = pickArg(argv, "worker-port") ?? env.DANXBOT_WORKER_PORT ?? null;
-  if (!portRaw) {
-    throw new ErrorCtor(
-      "missing --worker-port (no DANXBOT_WORKER_PORT env either)",
-    );
-  }
-  const workerPort = parsePositiveInt("worker-port", portRaw, ErrorCtor);
-
   const repoRoot = pickArg(argv, "repo-root") ?? env.DANXBOT_REPO_ROOT ?? null;
   if (!repoRoot) {
     throw new ErrorCtor(
@@ -135,7 +125,6 @@ export function parseCommonRunFlags(
   }
 
   const workspace = pickArg(argv, "workspace") ?? "skill-eval";
-  const repoName = pickArg(argv, "repo") ?? "danxbot";
   const workspaceCwd =
     pickArg(argv, "workspace-cwd") ??
     resolve(repoRoot, ".danxbot", "workspaces", workspace);
@@ -143,11 +132,6 @@ export function parseCommonRunFlags(
   const timeoutMs = parsePositiveInt(
     "timeout-ms",
     pickArg(argv, "timeout-ms") ?? `${DEFAULT_TIMEOUT_MS}`,
-    ErrorCtor,
-  );
-  const pollIntervalMs = parsePositiveInt(
-    "poll-interval-ms",
-    pickArg(argv, "poll-interval-ms") ?? `${DEFAULT_POLL_INTERVAL_MS}`,
     ErrorCtor,
   );
   const parallel = parsePositiveInt(
@@ -169,13 +153,10 @@ export function parseCommonRunFlags(
     pickArg(argv, "pricing-model") ?? DEFAULT_PRICING_MODEL;
 
   return {
-    workerPort,
     repoRoot,
     workspace,
-    repoName,
     workspaceCwd,
     timeoutMs,
-    pollIntervalMs,
     parallel,
     runsPerQuery,
     seed,

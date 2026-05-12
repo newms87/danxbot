@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,7 +9,9 @@ import {
   jsonlDiscoveryMessage,
   ProbeError,
   runProbe,
+  sumUsageFromJsonl,
   type SessionDirResolver,
+  type SpawnFn,
 } from "./probe.js";
 
 describe("dispatchTagFor", () => {
@@ -100,13 +103,6 @@ describe("findJsonlByTag", () => {
   });
 
   it("defaults to deriveSessionDir when no resolver is passed", () => {
-    // Verify the overload exists (no-third-arg form) by calling against
-    // a random non-existent workspace cwd. We do NOT touch the
-    // operator's real `~/.claude/projects/` — production
-    // deriveSessionDir produces a path that won't exist for this cwd,
-    // so we expect either `dir-missing` (the typical case) or
-    // `no-files` (if the encoded path incidentally exists). Both prove
-    // the default resolver was consulted.
     const result = findJsonlByTag(
       join(probeRoot, "nonexistent-workspace"),
       "<!-- danxbot-dispatch:x -->",
@@ -151,11 +147,178 @@ describe("jsonlDiscoveryMessage", () => {
 });
 
 /**
- * `runProbe` end-to-end tests. We stub `fetch` via `vi.stubGlobal` so
- * `vi.unstubAllGlobals()` deterministically restores the original
- * between tests — saving + restoring manually leaks if a test throws
- * before the afterEach block runs. The session-dir resolver is
- * injected so we never touch `~/.claude/projects/`.
+ * `sumUsageFromJsonl` walks the JSONL body and sums usage across every
+ * assistant entry, deduping by `message.id`. The dedup contract is
+ * load-bearing: Claude Code stamps identical `message.usage` on every
+ * JSONL line carrying a content block from the same API response, so a
+ * multi-block turn (text + tool_use + thinking) would count 2-5× its
+ * real cost without it. See `.claude/rules/agent-dispatch.md`.
+ */
+describe("sumUsageFromJsonl", () => {
+  it("returns zero usage on empty body", () => {
+    expect(sumUsageFromJsonl("")).toEqual({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it("sums every assistant entry's usage when message.ids are distinct", () => {
+    const body =
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-a",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }) +
+      "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-b",
+          usage: {
+            input_tokens: 200,
+            output_tokens: 80,
+            cache_read_input_tokens: 30,
+            cache_creation_input_tokens: 10,
+          },
+        },
+      }) +
+      "\n";
+    expect(sumUsageFromJsonl(body)).toEqual({
+      inputTokens: 300,
+      outputTokens: 130,
+      cacheReadTokens: 30,
+      cacheCreationTokens: 10,
+    });
+  });
+
+  it("dedupes usage when multiple JSONL lines stamp the same message.id (the gpt-manager prod bug)", () => {
+    // Three lines, all stamped with the same message.id `msg-1` (the
+    // multi-block turn Claude Code emits). Without dedup the totals
+    // would triple.
+    const oneUsage = {
+      input_tokens: 100,
+      output_tokens: 200,
+      cache_read_input_tokens: 50,
+      cache_creation_input_tokens: 25,
+    };
+    const lines = [0, 1, 2].map(() =>
+      JSON.stringify({
+        type: "assistant",
+        message: { id: "msg-1", usage: oneUsage },
+      }),
+    );
+    const body = lines.join("\n") + "\n";
+    expect(sumUsageFromJsonl(body)).toEqual({
+      inputTokens: 100,
+      outputTokens: 200,
+      cacheReadTokens: 50,
+      cacheCreationTokens: 25,
+    });
+  });
+
+  it("keeps lines without message.id (defensive — never seen in real Claude output)", () => {
+    const body =
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          usage: {
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }) +
+      "\n";
+    expect(sumUsageFromJsonl(body)).toEqual({
+      inputTokens: 10,
+      outputTokens: 20,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+    });
+  });
+
+  it("skips non-assistant entries (user, system, tool_result)", () => {
+    const body =
+      JSON.stringify({
+        type: "user",
+        message: { content: "hello", usage: { input_tokens: 999 } },
+      }) +
+      "\n" +
+      JSON.stringify({
+        type: "system",
+        usage: { input_tokens: 999 },
+      }) +
+      "\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-real",
+          usage: {
+            input_tokens: 100,
+            output_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }) +
+      "\n";
+    expect(sumUsageFromJsonl(body).inputTokens).toBe(100);
+  });
+
+  it("skips unparseable lines without crashing the walk", () => {
+    const body =
+      "not json at all\n" +
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-1",
+          usage: {
+            input_tokens: 5,
+            output_tokens: 5,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }) +
+      "\n" +
+      "{also broken\n";
+    expect(sumUsageFromJsonl(body).inputTokens).toBe(5);
+  });
+
+  it("coerces string usage fields to numbers (drift-safe)", () => {
+    const body =
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          id: "msg-1",
+          usage: {
+            input_tokens: "42",
+            output_tokens: 10,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
+          },
+        },
+      }) + "\n";
+    expect(sumUsageFromJsonl(body).inputTokens).toBe(42);
+  });
+});
+
+/**
+ * `runProbe` end-to-end tests. We stub the `spawn` function so we can
+ * simulate exit codes, errors, and timeouts without launching a real
+ * claude subprocess. A fake ChildProcess emits `close` (success path)
+ * or `error` (spawn-failure path); the test writes the JSONL on disk
+ * BEFORE resolving close so discovery succeeds in the success path.
  */
 describe("runProbe", () => {
   let probeRoot: string;
@@ -170,7 +333,6 @@ describe("runProbe", () => {
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     rmSync(probeRoot, { recursive: true, force: true });
   });
 
@@ -179,281 +341,306 @@ describe("runProbe", () => {
       query: "test query",
       expectSkill: "dev:debugging",
       workspace: "skill-eval",
-      workerPort: 5563,
-      repoName: "danxbot",
       workspaceCwd: "/some/workspace/cwd",
       timeoutMs: 10_000,
-      pollIntervalMs: 1,
     };
   }
 
-  function stageFetch(opts: {
-    jobId: string;
-    statusBody: Record<string, unknown>;
-    launchStatus?: number;
-    statusStatusCode?: number;
-  }) {
-    const fetchMock = vi.fn(async (url: string) => {
-      if (url.endsWith("/api/launch")) {
-        return new Response(JSON.stringify({ job_id: opts.jobId }), {
-          status: opts.launchStatus ?? 200,
-        });
-      }
-      if (url.includes("/api/status/")) {
-        return new Response(JSON.stringify(opts.statusBody), {
-          status: opts.statusStatusCode ?? 200,
-        });
-      }
-      throw new Error(`unexpected fetch url: ${url}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    return fetchMock;
+  function makeFakeChild(): EventEmitter & {
+    kill: (signal?: NodeJS.Signals) => boolean;
+  } {
+    const child = new EventEmitter() as EventEmitter & {
+      kill: (signal?: NodeJS.Signals) => boolean;
+    };
+    child.kill = () => true;
+    return child;
   }
 
-  function writeJsonl(jobId: string, lines: object[]) {
-    const tag = `<!-- danxbot-dispatch:${jobId} -->`;
+  /**
+   * Build a SpawnFn stub whose `close` event fires AFTER a side effect
+   * lets us drop the matching JSONL on disk. The callback receives the
+   * dispatchTag the runner generated, so the JSONL can be written under
+   * the right name + with the tag inside.
+   */
+  function stubSpawn(opts: {
+    writeJsonl: (dispatchTag: string) => void;
+    exitCode?: number;
+    spawnThrows?: Error;
+    childErrorAfterSpawn?: Error;
+  }): SpawnFn {
+    const fn: unknown = vi.fn((_cmd: string, args: readonly string[]) => {
+      if (opts.spawnThrows) throw opts.spawnThrows;
+      const taggedPrompt = args[1] as string;
+      const match = taggedPrompt.match(/<!--\s*danxbot-dispatch:[^\s]+\s*-->/);
+      const dispatchTag = match ? match[0] : "";
+      const child = makeFakeChild();
+      setImmediate(() => {
+        if (opts.childErrorAfterSpawn) {
+          child.emit("error", opts.childErrorAfterSpawn);
+          return;
+        }
+        opts.writeJsonl(dispatchTag);
+        child.emit("close", opts.exitCode ?? 0);
+      });
+      return child as unknown as ReturnType<SpawnFn>;
+    });
+    return fn as SpawnFn;
+  }
+
+  function writeJsonlFor(dispatchTag: string, lines: object[]): void {
     const userEntry = {
       type: "user",
-      message: { role: "user", content: [{ type: "text", text: `${tag} test` }] },
+      message: { role: "user", content: [{ type: "text", text: `${dispatchTag} test` }] },
     };
     writeFileSync(
-      join(sessionDir, `${jobId}.jsonl`),
+      join(sessionDir, `session-${Date.now()}.jsonl`),
       [userEntry, ...lines].map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
   }
 
   it("returns a PASS verdict when JSONL shows the expected Skill before any text", async () => {
-    const jobId = "probe-pass-1";
-    stageFetch({
-      jobId,
-      statusBody: {
-        status: "completed",
-        input_tokens: 1234,
-        output_tokens: 567,
-        cache_read_input_tokens: 89,
-        cache_creation_input_tokens: 10,
+    const spawnFn = stubSpawn({
+      writeJsonl: (tag) => {
+        writeJsonlFor(tag, [
+          {
+            type: "assistant",
+            message: {
+              id: "msg-1",
+              role: "assistant",
+              content: [
+                { type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } },
+              ],
+              usage: {
+                input_tokens: 1234,
+                output_tokens: 567,
+                cache_read_input_tokens: 89,
+                cache_creation_input_tokens: 10,
+              },
+            },
+          },
+          {
+            type: "assistant",
+            message: {
+              id: "msg-2",
+              role: "assistant",
+              content: [{ type: "text", text: "done" }],
+              usage: {
+                input_tokens: 5,
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          },
+        ]);
       },
+      exitCode: 0,
     });
-    writeJsonl(jobId, [
-      {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [
-            { type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } },
-          ],
-        },
-      },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
-    ]);
-    const result = await runProbe(baseArgs(), resolver);
+    const result = await runProbe(baseArgs(), resolver, spawnFn);
     expect(result.verdict.pass).toBe(true);
-    expect(result.usage.inputTokens).toBe(1234);
-    expect(result.usage.outputTokens).toBe(567);
+    expect(result.exitCode).toBe(0);
+    expect(result.usage.inputTokens).toBe(1239);
+    expect(result.usage.outputTokens).toBe(568);
     expect(result.usage.cacheReadTokens).toBe(89);
     expect(result.usage.cacheCreationTokens).toBe(10);
-    expect(result.finalStatus).toBe("completed");
-    expect(result.jobId).toBe(jobId);
-    expect(result.dispatchTag).toBe(`<!-- danxbot-dispatch:${jobId} -->`);
-    expect(result.jsonlPath).toContain(`${jobId}.jsonl`);
+    expect(result.dispatchTag).toContain("<!-- danxbot-dispatch:");
+    expect(result.jsonlPath).toContain(".jsonl");
   });
 
   it("returns a FAIL verdict when the assistant produces text without invoking the expected Skill", async () => {
-    const jobId = "probe-fail-1";
-    stageFetch({
-      jobId,
-      statusBody: { status: "completed", input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-    });
-    writeJsonl(jobId, [
-      {
-        type: "assistant",
-        message: { role: "assistant", content: [{ type: "text", text: "Answering directly..." }] },
+    const spawnFn = stubSpawn({
+      writeJsonl: (tag) => {
+        writeJsonlFor(tag, [
+          {
+            type: "assistant",
+            message: {
+              id: "msg-1",
+              role: "assistant",
+              content: [{ type: "text", text: "Answering directly..." }],
+              usage: {
+                input_tokens: 100,
+                output_tokens: 200,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          },
+        ]);
       },
-    ]);
-    const result = await runProbe(baseArgs(), resolver);
+    });
+    const result = await runProbe(baseArgs(), resolver, spawnFn);
     expect(result.verdict.pass).toBe(false);
     expect(result.verdict.firstAssistantText).toContain("Answering directly");
   });
 
-  it("throws ProbeError(worker-unreachable) when /api/launch fetch rejects", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => {
-        throw new Error("ECONNREFUSED");
-      }),
-    );
-    await expect(runProbe(baseArgs(), resolver)).rejects.toMatchObject({
-      category: "worker-unreachable",
-    });
-  });
-
-  it("throws ProbeError(launch-failed) when /api/launch returns non-2xx", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("bad request", { status: 400 })),
-    );
-    await expect(runProbe(baseArgs(), resolver)).rejects.toMatchObject({
-      category: "launch-failed",
-    });
-  });
-
-  it("throws ProbeError(launch-failed) when /api/launch returns non-JSON", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response("not json", { status: 200 })),
-    );
-    await expect(runProbe(baseArgs(), resolver)).rejects.toMatchObject({
-      category: "launch-failed",
-    });
-  });
-
-  it("throws ProbeError(launch-failed) when /api/launch JSON is missing job_id", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        new Response(JSON.stringify({ unrelated: "field" }), { status: 200 }),
-      ),
-    );
-    await expect(runProbe(baseArgs(), resolver)).rejects.toMatchObject({
-      category: "launch-failed",
-    });
-  });
-
-  it("throws ProbeError(timeout) when status never reaches terminal", async () => {
-    let callCount = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/launch")) {
-          return new Response(JSON.stringify({ job_id: "stuck" }), { status: 200 });
-        }
-        callCount++;
-        return new Response(JSON.stringify({ status: "running" }), { status: 200 });
-      }),
-    );
-    await expect(
-      runProbe({ ...baseArgs(), timeoutMs: 10, pollIntervalMs: 1 }, resolver),
-    ).rejects.toMatchObject({ category: "timeout" });
-    expect(callCount).toBeGreaterThanOrEqual(1);
-  });
-
-  it("a 404 on /api/status terminates the poll with finalStatus='evicted' (NOT a silent 'completed')", async () => {
-    // The 404 branch used to return `"completed"` silently — that is a
-    // fail-quiet bug. The new contract surfaces a distinct `"evicted"`
-    // status so the report can tell the operator the dispatch was
-    // forgotten by the worker rather than reaching a real terminal.
-    const jobId = "probe-evicted";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/launch")) {
-          return new Response(JSON.stringify({ job_id: jobId }), { status: 200 });
-        }
-        return new Response("", { status: 404 });
-      }),
-    );
-    writeJsonl(jobId, [
-      {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [{ type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } }],
-        },
+  it("dedupes usage when Claude Code stamps the same message.id across two JSONL lines", async () => {
+    const spawnFn = stubSpawn({
+      writeJsonl: (tag) => {
+        // Two lines, identical message.id → dedup keeps one.
+        writeJsonlFor(tag, [
+          {
+            type: "assistant",
+            message: {
+              id: "msg-multi",
+              role: "assistant",
+              content: [{ type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } }],
+              usage: {
+                input_tokens: 500,
+                output_tokens: 100,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          },
+          {
+            type: "assistant",
+            message: {
+              id: "msg-multi",
+              role: "assistant",
+              content: [{ type: "text", text: "done" }],
+              usage: {
+                input_tokens: 500,
+                output_tokens: 100,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          },
+        ]);
       },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
-    ]);
-    const result = await runProbe(baseArgs(), resolver);
-    expect(result.finalStatus).toBe("evicted");
-    expect(result.usage.inputTokens).toBe(0);
+    });
+    const result = await runProbe(baseArgs(), resolver, spawnFn);
+    expect(result.usage.inputTokens).toBe(500);
+    expect(result.usage.outputTokens).toBe(100);
+  });
+
+  it("throws ProbeError(spawn-failed) when spawn itself throws synchronously", async () => {
+    const spawnFn: unknown = vi.fn(() => {
+      throw new Error("ENOENT: claude not found");
+    });
+    await expect(
+      runProbe(baseArgs(), resolver, spawnFn as SpawnFn),
+    ).rejects.toMatchObject({ category: "spawn-failed" });
+  });
+
+  it("throws ProbeError(spawn-failed) when the child emits 'error' (post-fork)", async () => {
+    const spawnFn = stubSpawn({
+      writeJsonl: () => {},
+      childErrorAfterSpawn: new Error("write EPIPE"),
+    });
+    await expect(runProbe(baseArgs(), resolver, spawnFn)).rejects.toMatchObject({
+      category: "spawn-failed",
+    });
+  });
+
+  it("throws ProbeError(timeout) when claude does not exit before timeoutMs", async () => {
+    // Child never emits 'close' — the runner's setTimeout fires first
+    // and rejects with category=timeout.
+    const spawnFn: unknown = vi.fn(() => {
+      const child = new EventEmitter() as EventEmitter & {
+        kill: (signal?: NodeJS.Signals) => boolean;
+      };
+      child.kill = () => true;
+      return child as unknown as ReturnType<SpawnFn>;
+    });
+    await expect(
+      runProbe({ ...baseArgs(), timeoutMs: 20 }, resolver, spawnFn as SpawnFn),
+    ).rejects.toMatchObject({ category: "timeout" });
   });
 
   it("throws ProbeError(jsonl-not-found) when the dispatch tag never lands in any JSONL", async () => {
-    const jobId = "probe-no-tag";
-    stageFetch({
-      jobId,
-      statusBody: { status: "completed", input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+    const spawnFn = stubSpawn({
+      writeJsonl: () => {
+        // Write a JSONL with a different tag so discovery returns
+        // `tag-not-in-any-file` instead of `no-files`.
+        writeFileSync(
+          join(sessionDir, "other.jsonl"),
+          JSON.stringify({
+            type: "user",
+            message: { content: "<!-- danxbot-dispatch:DIFFERENT --> hi" },
+          }) + "\n",
+        );
+      },
     });
-    writeFileSync(
-      join(sessionDir, "other.jsonl"),
-      JSON.stringify({
-        type: "user",
-        message: { content: "<!-- danxbot-dispatch:DIFFERENT --> hi" },
-      }) + "\n",
-    );
-    await expect(runProbe(baseArgs(), resolver)).rejects.toMatchObject({
+    await expect(runProbe(baseArgs(), resolver, spawnFn)).rejects.toMatchObject({
       category: "jsonl-not-found",
     });
   });
 
-  it("coerces a string `input_tokens` field to a number (defensive against status payload shape drift)", async () => {
-    const jobId = "probe-string-usage";
-    stageFetch({
-      jobId,
-      statusBody: {
-        status: "completed",
-        input_tokens: "42",
-        output_tokens: 10,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
+  it("propagates a non-zero exit code into ProbeResult.exitCode (failure still produces a verdict)", async () => {
+    const spawnFn = stubSpawn({
+      writeJsonl: (tag) => {
+        writeJsonlFor(tag, [
+          {
+            type: "assistant",
+            message: {
+              id: "msg-1",
+              role: "assistant",
+              content: [{ type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } }],
+              usage: {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+              },
+            },
+          },
+        ]);
       },
+      exitCode: 2,
     });
-    writeJsonl(jobId, [
-      {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [{ type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } }],
-        },
-      },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
-    ]);
-    const result = await runProbe(baseArgs(), resolver);
-    expect(result.usage.inputTokens).toBe(42);
+    const result = await runProbe(baseArgs(), resolver, spawnFn);
+    expect(result.exitCode).toBe(2);
+    expect(result.verdict.pass).toBe(true); // The JSONL still shows a Skill call → verdict is independent of exit code.
   });
 
-  it("retains the LAST observed usage across polls (does not zero on a late-evict 404)", async () => {
-    const jobId = "probe-late-evict";
-    let pollIdx = 0;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.endsWith("/api/launch")) {
-          return new Response(JSON.stringify({ job_id: jobId }), { status: 200 });
-        }
-        pollIdx++;
-        if (pollIdx === 1) {
-          return new Response(
-            JSON.stringify({
-              status: "running",
-              input_tokens: 500,
-              output_tokens: 100,
-              cache_read_input_tokens: 0,
-              cache_creation_input_tokens: 0,
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response("", { status: 404 });
-      }),
-    );
-
-    writeJsonl(jobId, [
-      {
-        type: "assistant",
-        message: {
-          role: "assistant",
-          content: [{ type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } }],
-        },
+  it("passes --strict-mcp-config + --mcp-config + --dangerously-skip-permissions to claude", async () => {
+    const captured: Array<{ cmd: string; argv: readonly string[]; opts: unknown }> = [];
+    const spawnFn: unknown = vi.fn(
+      (cmd: string, argv: readonly string[], opts: unknown) => {
+        captured.push({ cmd, argv, opts });
+        const tag =
+          (argv[1] as string).match(/<!--\s*danxbot-dispatch:[^\s]+\s*-->/)?.[0] ??
+          "";
+        const child = makeFakeChild();
+        setImmediate(() => {
+          writeJsonlFor(tag, [
+            {
+              type: "assistant",
+              message: {
+                id: "m",
+                role: "assistant",
+                content: [
+                  { type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } },
+                ],
+                usage: {
+                  input_tokens: 1,
+                  output_tokens: 0,
+                  cache_read_input_tokens: 0,
+                  cache_creation_input_tokens: 0,
+                },
+              },
+            },
+          ]);
+          child.emit("close", 0);
+        });
+        return child as unknown as ReturnType<SpawnFn>;
       },
-      { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }] } },
-    ]);
-
-    const result = await runProbe(baseArgs(), resolver);
-    expect(result.usage.inputTokens).toBe(500);
-    expect(result.usage.outputTokens).toBe(100);
-    // And the status reflects what the worker actually reported, not a
-    // silent "completed".
-    expect(result.finalStatus).toBe("evicted");
+    );
+    await runProbe(
+      { ...baseArgs(), workspaceCwd: "/custom/workspace/cwd" },
+      resolver,
+      spawnFn as SpawnFn,
+    );
+    expect(captured).toHaveLength(1);
+    expect(captured[0].cmd).toBe("claude");
+    expect(captured[0].argv).toContain("--strict-mcp-config");
+    expect(captured[0].argv).toContain("--mcp-config");
+    expect(captured[0].argv).toContain(".mcp.json");
+    expect(captured[0].argv).toContain("--dangerously-skip-permissions");
+    expect((captured[0].opts as { cwd: string }).cwd).toBe(
+      "/custom/workspace/cwd",
+    );
   });
 });
 

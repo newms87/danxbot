@@ -2,7 +2,6 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PARALLEL,
-  DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_PRICING_MODEL,
   DEFAULT_RUNS_PER_QUERY,
   DEFAULT_SEED,
@@ -54,30 +53,21 @@ describe("parseNonNegativeInt", () => {
 
 describe("parseCommonRunFlags", () => {
   const baseEnv = {
-    DANXBOT_WORKER_PORT: "5563",
     DANXBOT_REPO_ROOT: "/fake/repo",
   } as NodeJS.ProcessEnv;
 
   it("returns defaults for every optional flag", () => {
     const r = parseCommonRunFlags([], baseEnv, TestErr);
-    expect(r.workerPort).toBe(5563);
     expect(r.repoRoot).toBe("/fake/repo");
     expect(r.workspace).toBe("skill-eval");
-    expect(r.repoName).toBe("danxbot");
     expect(r.workspaceCwd).toBe(
       resolve("/fake/repo", ".danxbot", "workspaces", "skill-eval"),
     );
     expect(r.timeoutMs).toBe(DEFAULT_TIMEOUT_MS);
-    expect(r.pollIntervalMs).toBe(DEFAULT_POLL_INTERVAL_MS);
     expect(r.parallel).toBe(DEFAULT_PARALLEL);
     expect(r.runsPerQuery).toBe(DEFAULT_RUNS_PER_QUERY);
     expect(r.seed).toBe(DEFAULT_SEED);
     expect(r.pricingModel).toBe(DEFAULT_PRICING_MODEL);
-  });
-
-  it("honors --worker-port flag over env", () => {
-    const r = parseCommonRunFlags(["--worker-port", "9000"], baseEnv, TestErr);
-    expect(r.workerPort).toBe(9000);
   });
 
   it("honors --repo-root override", () => {
@@ -113,8 +103,6 @@ describe("parseCommonRunFlags", () => {
         "0",
         "--timeout-ms",
         "30000",
-        "--poll-interval-ms",
-        "500",
         "--pricing-model",
         "claude-opus-4-7",
       ],
@@ -125,20 +113,11 @@ describe("parseCommonRunFlags", () => {
     expect(r.runsPerQuery).toBe(5);
     expect(r.seed).toBe(0);
     expect(r.timeoutMs).toBe(30000);
-    expect(r.pollIntervalMs).toBe(500);
     expect(r.pricingModel).toBe("claude-opus-4-7");
   });
 
-  it("throws caller's ErrorCtor when --worker-port + env missing", () => {
-    expect(() =>
-      parseCommonRunFlags([], { DANXBOT_REPO_ROOT: "/fake/repo" }, TestErr),
-    ).toThrow(TestErr);
-  });
-
   it("throws caller's ErrorCtor when --repo-root + env missing", () => {
-    expect(() =>
-      parseCommonRunFlags([], { DANXBOT_WORKER_PORT: "5563" }, TestErr),
-    ).toThrow(TestErr);
+    expect(() => parseCommonRunFlags([], {}, TestErr)).toThrow(TestErr);
   });
 
   it("throws caller's ErrorCtor when --parallel is zero", () => {
@@ -148,7 +127,6 @@ describe("parseCommonRunFlags", () => {
   });
 
   it("propagates ErrorCtor to inner parsePositiveInt / parseNonNegativeInt", () => {
-    // --seed -1 should hit parseNonNegativeInt's reject path with TestErr.
     expect(() =>
       parseCommonRunFlags(["--seed", "-1"], baseEnv, TestErr),
     ).toThrow(TestErr);

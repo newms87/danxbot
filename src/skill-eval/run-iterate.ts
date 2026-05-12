@@ -23,7 +23,7 @@
  * processes or hitting Anthropic.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import type Anthropic from "@anthropic-ai/sdk";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -31,6 +31,10 @@ import { join, relative } from "node:path";
 import { promisify } from "node:util";
 import { config } from "../config.js";
 import { aggregateSide } from "./aggregate.js";
+import {
+  AnthropicAuthError,
+  createAnthropicClient,
+} from "./anthropic-client.js";
 import {
   isInvokedAsScript,
   parseCommonRunFlags,
@@ -85,17 +89,14 @@ export interface RunIterateArgs {
   readonly costCapUsd: number;
   readonly sourceRoot: string;
   readonly cacheRoot: string;
-  readonly workerPort: number;
   readonly repoRoot: string;
   readonly workspace: string;
-  readonly repoName: string;
   readonly workspaceCwd: string;
   readonly evalSetPath: string;
   readonly seed: number;
   readonly runsPerQuery: number;
   readonly parallel: number;
   readonly timeoutMs: number;
-  readonly pollIntervalMs: number;
   readonly pricingModel: string;
   readonly proposerModel?: string;
 }
@@ -150,17 +151,14 @@ export function parseIterateArgs(
     costCapUsd,
     sourceRoot,
     cacheRoot,
-    workerPort: common.workerPort,
     repoRoot: common.repoRoot,
     workspace: common.workspace,
-    repoName: common.repoName,
     workspaceCwd: common.workspaceCwd,
     evalSetPath,
     seed: common.seed,
     runsPerQuery: common.runsPerQuery,
     parallel: common.parallel,
     timeoutMs: common.timeoutMs,
-    pollIntervalMs: common.pollIntervalMs,
     pricingModel: common.pricingModel,
     proposerModel,
   };
@@ -264,11 +262,8 @@ function buildRunEvalSetCallback(args: BuildEvalSetCallbackArgs) {
         pluginSkill: args.cliArgs.pluginSkill,
         evalSetPath: args.cliArgs.evalSetPath,
         workspace: args.cliArgs.workspace,
-        workerPort: args.cliArgs.workerPort,
-        repoName: args.cliArgs.repoName,
         workspaceCwd: args.cliArgs.workspaceCwd,
         timeoutMs: args.cliArgs.timeoutMs,
-        pollIntervalMs: args.cliArgs.pollIntervalMs,
         parallel: args.cliArgs.parallel,
         seed: args.cliArgs.seed,
         runsPerQuery: args.cliArgs.runsPerQuery,
@@ -321,13 +316,13 @@ async function main(): Promise<number> {
     );
   }
 
-  const apiKey = config.anthropic.apiKey;
-  if (!apiKey) {
-    fail(
-      "ANTHROPIC_API_KEY is not configured — the proposer cannot run without it",
-    );
+  let anthropic: Anthropic;
+  try {
+    anthropic = createAnthropicClient(config.anthropic.apiKey);
+  } catch (e) {
+    if (e instanceof AnthropicAuthError) fail(e.message);
+    throw e;
   }
-  const anthropic = new Anthropic({ apiKey });
   const proposer = makeAnthropicProposer({
     client: anthropic,
     model: args.proposerModel,

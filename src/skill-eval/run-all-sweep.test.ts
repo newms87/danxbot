@@ -364,11 +364,8 @@ describe("runAllSweepCore", () => {
       evalSetsDir,
       repoRoot: "/fake/repo",
       workspace: "skill-eval",
-      workerPort: 5563,
-      repoName: "danxbot",
       workspaceCwd: "/fake/workspace",
       timeoutMs: 60000,
-      pollIntervalMs: 1000,
       parallel: 3,
       seed: 1,
       runsPerQuery: 3,
@@ -686,7 +683,7 @@ describe("runAllSweepCore", () => {
 });
 
 describe("parseSweepArgs", () => {
-  const baseEnv = { DANXBOT_WORKER_PORT: "5563", DANXBOT_REPO_ROOT: "/fake/repo" } as NodeJS.ProcessEnv;
+  const baseEnv = { DANXBOT_REPO_ROOT: "/fake/repo" } as NodeJS.ProcessEnv;
 
   it("defaults evalSetsDir to <repoRoot>/tests/skill-evals", () => {
     const args = parseSweepArgs([], baseEnv);
@@ -701,16 +698,8 @@ describe("parseSweepArgs", () => {
     expect(args.evalSetsDir).toBe("/custom/path");
   });
 
-  it("rejects missing worker port", () => {
-    expect(() => parseSweepArgs([], { DANXBOT_REPO_ROOT: "/fake/repo" })).toThrow(
-      RunAllSweepArgsError,
-    );
-  });
-
   it("rejects missing repo root", () => {
-    expect(() => parseSweepArgs([], { DANXBOT_WORKER_PORT: "5563" })).toThrow(
-      RunAllSweepArgsError,
-    );
+    expect(() => parseSweepArgs([], {})).toThrow(RunAllSweepArgsError);
   });
 
   it("forwards seed / runs-per-query / parallel overrides", () => {

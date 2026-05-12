@@ -19,7 +19,7 @@ function makeProbeResult(opts: {
   return {
     jobId,
     dispatchTag: `<!-- danxbot-dispatch:${jobId} -->`,
-    finalStatus: "completed",
+    exitCode: 0,
     jsonlPath: `/tmp/${jobId}.jsonl`,
     discovery: {
       reason: "found",
@@ -49,7 +49,6 @@ function makeProbeResult(opts: {
 describe("parseEvalSetArgs", () => {
   const baseEnv = {
     DANXBOT_REPO_ROOT: "/tmp/repo",
-    DANXBOT_WORKER_PORT: "5563",
   };
 
   it("happy path: positional plugin:skill argument", () => {
@@ -59,7 +58,6 @@ describe("parseEvalSetArgs", () => {
     expect(args.runsPerQuery).toBe(3);
     expect(args.seed).toBe(1);
     expect(args.workspace).toBe("skill-eval");
-    expect(args.repoName).toBe("danxbot");
     expect(args.workspaceCwd).toBe("/tmp/repo/.danxbot/workspaces/skill-eval");
   });
 
@@ -91,9 +89,7 @@ describe("parseEvalSetArgs", () => {
   });
 
   it("throws on missing DANXBOT_REPO_ROOT", () => {
-    expect(() =>
-      parseEvalSetArgs(["dev:debugging"], { DANXBOT_WORKER_PORT: "5563" }),
-    ).toThrow(/repo-root/);
+    expect(() => parseEvalSetArgs(["dev:debugging"], {})).toThrow(/repo-root/);
   });
 
   it("rejects --parallel=0 (must be ≥ 1)", () => {
@@ -143,11 +139,8 @@ describe("runEvalSetCore (with injected probe)", () => {
       pluginSkill: "dev:debugging",
       evalSetPath: "/tmp/eval-set.json",
       workspace: "skill-eval",
-      workerPort: 5563,
-      repoName: "danxbot",
       workspaceCwd: "/tmp/repo/.danxbot/workspaces/skill-eval",
       timeoutMs: 60_000,
-      pollIntervalMs: 1000,
       parallel: 3,
       seed: 1,
       runsPerQuery: 3,
@@ -324,7 +317,7 @@ describe("runEvalSetCore (with injected probe)", () => {
       return {
         jobId: "j",
         dispatchTag: "<!-- danxbot-dispatch:j -->",
-        finalStatus: "completed",
+        exitCode: 0,
         jsonlPath: "/tmp/j.jsonl",
         discovery: {
           reason: "found",
@@ -388,25 +381,20 @@ describe("runEvalSetCore (with injected probe)", () => {
     expect(result.markdown).toMatch(/test.*8/);
   });
 
-  it("threads ProbeArgs (workspace, repoName, workerPort, timeouts) into every probe call", async () => {
+  it("threads ProbeArgs (workspace, workspaceCwd, expectSkill, timeoutMs) into every probe call", async () => {
     const evalSet = buildEvalSet(4, 4);
     const probe = vi.fn(async (probeArgs: ProbeArgs) => {
       expect(probeArgs.workspace).toBe("custom-ws");
-      expect(probeArgs.workerPort).toBe(9999);
       expect(probeArgs.workspaceCwd).toBe("/srv/custom");
-      expect(probeArgs.repoName).toBe("custom-repo");
       expect(probeArgs.expectSkill).toBe("dev:debugging");
       expect(probeArgs.timeoutMs).toBe(60_000);
-      expect(probeArgs.pollIntervalMs).toBe(1000);
       return makeProbeResult({ pass: probeArgs.query.startsWith("pos-") });
     });
     await runEvalSetCore(
       {
         ...baseArgs(),
         workspace: "custom-ws",
-        workerPort: 9999,
         workspaceCwd: "/srv/custom",
-        repoName: "custom-repo",
       },
       evalSet,
       probe,

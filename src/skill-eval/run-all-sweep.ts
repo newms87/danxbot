@@ -64,11 +64,8 @@ export interface RunAllSweepArgs {
   readonly evalSetsDir: string;
   readonly repoRoot: string;
   readonly workspace: string;
-  readonly workerPort: number;
-  readonly repoName: string;
   readonly workspaceCwd: string;
   readonly timeoutMs: number;
-  readonly pollIntervalMs: number;
   readonly parallel: number;
   readonly seed: number;
   readonly runsPerQuery: number;
@@ -195,11 +192,8 @@ function buildRunEvalSetArgs(
     pluginSkill: d.pluginSkill,
     evalSetPath: d.evalSetPath,
     workspace: args.workspace,
-    workerPort: args.workerPort,
-    repoName: args.repoName,
     workspaceCwd: args.workspaceCwd,
     timeoutMs: args.timeoutMs,
-    pollIntervalMs: args.pollIntervalMs,
     parallel: args.parallel,
     seed: args.seed,
     runsPerQuery: args.runsPerQuery,
@@ -471,11 +465,8 @@ export function parseSweepArgs(
     evalSetsDir,
     repoRoot: common.repoRoot,
     workspace: common.workspace,
-    workerPort: common.workerPort,
-    repoName: common.repoName,
     workspaceCwd: common.workspaceCwd,
     timeoutMs: common.timeoutMs,
-    pollIntervalMs: common.pollIntervalMs,
     parallel: common.parallel,
     seed: common.seed,
     runsPerQuery: common.runsPerQuery,

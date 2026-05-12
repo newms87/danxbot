@@ -6,7 +6,7 @@ import {
   parseIterateArgs,
 } from "./run-iterate.js";
 
-const env = { DANXBOT_WORKER_PORT: "5567", DANXBOT_REPO_ROOT: "/repo" };
+const env = { DANXBOT_REPO_ROOT: "/repo" };
 
 describe("parseIterateArgs", () => {
   it("parses positional plugin:skill", () => {
@@ -20,20 +20,8 @@ describe("parseIterateArgs", () => {
     expect(() => parseIterateArgs([], env)).toThrow(RunIterateArgsError);
   });
 
-  it("requires DANXBOT_WORKER_PORT (env or flag)", () => {
-    expect(() =>
-      parseIterateArgs(["dev:debugging"], {
-        DANXBOT_REPO_ROOT: "/repo",
-      }),
-    ).toThrow(/worker-port/);
-  });
-
   it("requires DANXBOT_REPO_ROOT (env or flag)", () => {
-    expect(() =>
-      parseIterateArgs(["dev:debugging"], {
-        DANXBOT_WORKER_PORT: "5567",
-      }),
-    ).toThrow(/repo-root/);
+    expect(() => parseIterateArgs(["dev:debugging"], {})).toThrow(/repo-root/);
   });
 
   it("--max-iterations overrides default", () => {

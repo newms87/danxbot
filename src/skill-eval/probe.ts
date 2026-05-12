@@ -1,24 +1,32 @@
 /**
  * Single-probe primitive for the skill-eval harness.
  *
- * One probe = one POST to `/api/launch`, one poll loop until terminal,
- * one JSONL discovery + trigger evaluation. Returns a structured
- * `ProbeResult` with the verdict, usage tokens, dispatch metadata, and
- * the path to the produced JSONL.
+ * One probe = one `claude -p` child_process spawn, one wait for the
+ * subprocess to exit, one JSONL discovery + trigger evaluation. Returns
+ * a structured `ProbeResult` with the verdict, usage tokens, exit
+ * metadata, and the path to the produced JSONL.
  *
- * Pure interface: HTTP transport + filesystem reads happen here, but the
- * function returns ALL diagnostic data the caller needs without writing
- * to stdout / stderr / process.exit. Throws `ProbeError` (subclassed
- * by category) on transport failure so the caller can decide how to
- * surface it — single-query CLI exits non-zero; eval-set runner records
- * the failure as a "did-not-trigger" run and keeps going.
+ * Transport: direct subprocess spawn — no danxbot worker dependency,
+ * no `/api/launch`, no dispatches table row, no Windows Terminal tab.
+ * Eval-set runs are entirely transport-free now; a single iterate at
+ * `--parallel 8` opens 8 sibling claude subprocesses that all write
+ * native JSONL to `~/.claude/projects/<encoded-cwd>/` and exit. The
+ * harness reads back the JSONL the same way SessionLogWatcher does for
+ * real dispatches.
  *
- * The reusable orchestration this exposes is what the eval-set runner
- * calls 60+ times in a single sweep (20 queries × 3 runs). Side effects
- * are limited to one fetch + one polling loop + one filesystem scan per
- * call; no global state.
+ * Errors fall into two categories:
+ *   - `ProbeError` thrown for spawn / timeout / discovery failures —
+ *     the subprocess never produced a usable verdict.
+ *   - Returned `ProbeResult` with `verdict.pass: false` for cases where
+ *     the dispatch ran but the expected skill didn't trigger — that is
+ *     the FAIL outcome the harness measures, not an error.
+ *
+ * Side effects per call: one subprocess + one filesystem scan. No
+ * global state, no HTTP, no global mutable maps.
  */
 
+import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { deriveSessionDir } from "../agent/session-log-watcher.js";
@@ -27,12 +35,7 @@ import {
   type SkillTriggerVerdict,
 } from "./jsonl-parser.js";
 
-export type ProbeErrorCategory =
-  | "worker-unreachable"
-  | "launch-failed"
-  | "status-failed"
-  | "timeout"
-  | "jsonl-not-found";
+export type ProbeErrorCategory = "spawn-failed" | "timeout" | "jsonl-not-found";
 
 export class ProbeError extends Error {
   constructor(
@@ -47,11 +50,8 @@ export interface ProbeArgs {
   readonly query: string;
   readonly expectSkill: string;
   readonly workspace: string;
-  readonly workerPort: number;
-  readonly repoName: string;
   readonly workspaceCwd: string;
   readonly timeoutMs: number;
-  readonly pollIntervalMs: number;
 }
 
 export interface ProbeUsage {
@@ -87,25 +87,13 @@ export interface JsonlDiscovery {
 export interface ProbeResult {
   readonly jobId: string;
   readonly dispatchTag: string;
-  readonly finalStatus: string;
+  readonly exitCode: number | null;
   readonly jsonlPath: string | null;
   readonly discovery: JsonlDiscovery;
   readonly verdict: SkillTriggerVerdict;
   readonly usage: ProbeUsage;
   readonly elapsedMs: number;
 }
-
-const TERMINAL_STATUSES = new Set([
-  "completed",
-  "failed",
-  "canceled",
-  "cancelled",
-  "timeout",
-  "recovered",
-  "critical_failure",
-  "api_error_recover",
-  "api_error_failed",
-]);
 
 export function dispatchTagFor(jobId: string): string {
   return `<!-- danxbot-dispatch:${jobId} -->`;
@@ -191,11 +179,9 @@ export function findJsonlByTag(
 }
 
 /**
- * Coerce a raw `/api/status` body field to a non-negative integer. The
- * launcher always populates `input_tokens` / `output_tokens` / etc. as
- * numbers (zero when no usage has been seen yet), but defensive coercion
- * here means a status payload with `null` or a string number doesn't
- * crash the eval-set sweep mid-run.
+ * Coerce a raw JSONL `message.usage` field to a non-negative integer.
+ * Claude Code stamps numbers, but a malformed line shouldn't crash a
+ * 60-probe sweep mid-run.
  */
 function readUsageField(raw: unknown): number {
   if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) return raw;
@@ -206,118 +192,133 @@ function readUsageField(raw: unknown): number {
   return 0;
 }
 
-async function postLaunch(args: ProbeArgs): Promise<string> {
-  const url = `http://localhost:${args.workerPort}/api/launch`;
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        repo: args.repoName,
-        workspace: args.workspace,
-        task: args.query,
-        title: `skill-eval ${args.expectSkill}`,
-      }),
-    });
-  } catch (err) {
-    throw new ProbeError(
-      `worker unreachable at ${url}: ${(err as Error).message}`,
-      "worker-unreachable",
-    );
-  }
-  const text = await response.text();
-  if (!response.ok) {
-    throw new ProbeError(
-      `launch returned ${response.status}: ${text}`,
-      "launch-failed",
-    );
-  }
-  let body: { job_id?: string };
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new ProbeError(
-      `launch returned non-JSON body: ${text}`,
-      "launch-failed",
-    );
-  }
-  if (!body.job_id) {
-    throw new ProbeError(
-      `launch response missing job_id: ${text}`,
-      "launch-failed",
-    );
-  }
-  return body.job_id;
-}
-
-interface PollResult {
-  readonly finalStatus: string;
-  readonly usage: ProbeUsage;
-}
-
-async function pollUntilTerminal(
-  args: ProbeArgs,
-  jobId: string,
-): Promise<PollResult> {
-  const url = `http://localhost:${args.workerPort}/api/status/${jobId}`;
-  const deadline = Date.now() + args.timeoutMs;
-  // Hold the most recent successful usage so a late-evict 404 (job rolled
-  // out of the 1-hour grace window between two polls) doesn't lose us
-  // the cost data we already observed.
-  let lastUsage: ProbeUsage = {
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-  };
-
-  while (Date.now() < deadline) {
-    let response: Response;
+/**
+ * Sum `message.usage` across every assistant entry in a JSONL body,
+ * deduping by `message.id`. Claude Code stamps the same response-level
+ * `message.usage` on every JSONL line that holds a content block from
+ * the same API response — multi-block turns (text + tool_use + thinking)
+ * would otherwise count 2-5× their real cost. The dedup contract is
+ * documented in `.claude/rules/agent-dispatch.md` "Usage accumulation
+ * MUST dedupe by message.id"; reference impl is
+ * `src/dashboard/jsonl-reader.ts#parseJsonlContent` (same Set-per-call
+ * shape, identical contract).
+ *
+ * Entries with no `message.id` are kept (defensive — never seen in
+ * real Claude Code output) so a malformed line never silently zeroes
+ * billable usage.
+ */
+export function sumUsageFromJsonl(jsonlText: string): ProbeUsage {
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  const seenMessageIds = new Set<string>();
+  for (const line of jsonlText.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let raw: Record<string, unknown>;
     try {
-      response = await fetch(url);
-    } catch (err) {
-      throw new ProbeError(
-        `status poll failed: ${(err as Error).message}`,
-        "status-failed",
-      );
+      raw = JSON.parse(line);
+    } catch {
+      continue;
     }
-    if (response.status === 404) {
-      // job evicted from activeJobs after grace TTL — treat as terminal
-      // but tag with a distinct `"evicted"` status so the caller's report
-      // does NOT lie that the dispatch reached an explicit
-      // success/failure terminal. We may have already captured usage on
-      // an earlier 200; if not, lastUsage stays at zero. The JSONL on
-      // disk still carries the real outcome — discovery + parsing
-      // proceeds normally — but the report's status column tells the
-      // truth about what `/api/status` reported.
-      return { finalStatus: "evicted", usage: lastUsage };
+    if (raw.type !== "assistant") continue;
+    const message = raw.message as Record<string, unknown> | undefined;
+    if (!message) continue;
+    const usage = message.usage as Record<string, unknown> | undefined;
+    if (!usage) continue;
+    const messageId =
+      typeof message.id === "string" && message.id.length > 0
+        ? message.id
+        : null;
+    if (messageId) {
+      if (seenMessageIds.has(messageId)) continue;
+      seenMessageIds.add(messageId);
     }
-    if (!response.ok) {
-      const text = await response.text().catch(() => "<unreadable>");
-      throw new ProbeError(
-        `status returned ${response.status}: ${text}`,
-        "status-failed",
-      );
-    }
-    const body = (await response.json()) as Record<string, unknown>;
-    const status = typeof body.status === "string" ? body.status : "";
-    // Capture usage on every 200 so we always have the freshest snapshot.
-    lastUsage = {
-      inputTokens: readUsageField(body.input_tokens),
-      outputTokens: readUsageField(body.output_tokens),
-      cacheReadTokens: readUsageField(body.cache_read_input_tokens),
-      cacheCreationTokens: readUsageField(body.cache_creation_input_tokens),
-    };
-    if (status && TERMINAL_STATUSES.has(status)) {
-      return { finalStatus: status, usage: lastUsage };
-    }
-    await new Promise((r) => setTimeout(r, args.pollIntervalMs));
+    inputTokens += readUsageField(usage.input_tokens);
+    outputTokens += readUsageField(usage.output_tokens);
+    cacheReadTokens += readUsageField(usage.cache_read_input_tokens);
+    cacheCreationTokens += readUsageField(usage.cache_creation_input_tokens);
   }
-  throw new ProbeError(
-    `dispatch did not reach terminal status within ${args.timeoutMs}ms — jobId=${jobId}`,
-    "timeout",
-  );
+  return { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens };
+}
+
+/**
+ * Spawner type — injected by tests as a stub that produces a synthetic
+ * ChildProcess. Real callers leave it as the default `spawn` import.
+ * Signature matches `node:child_process#spawn`'s argv-first overload.
+ */
+export type SpawnFn = typeof spawn;
+
+interface SpawnResult {
+  readonly exitCode: number | null;
+}
+
+function spawnClaude(
+  args: ProbeArgs,
+  taggedPrompt: string,
+  spawnFn: SpawnFn,
+): Promise<SpawnResult> {
+  return new Promise<SpawnResult>((resolveSpawn, rejectSpawn) => {
+    let child: ChildProcess;
+    try {
+      child = spawnFn(
+        "claude",
+        [
+          "-p",
+          taggedPrompt,
+          "--strict-mcp-config",
+          "--mcp-config",
+          ".mcp.json",
+          "--dangerously-skip-permissions",
+        ],
+        {
+          cwd: args.workspaceCwd,
+          env: process.env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (err) {
+      rejectSpawn(
+        new ProbeError(
+          `claude spawn failed: ${(err as Error).message}`,
+          "spawn-failed",
+        ),
+      );
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      // SIGTERM the child; the close handler still fires with
+      // `code: null, signal: 'SIGTERM'` which we surface as a timeout.
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best-effort — if kill itself fails, the close handler will
+        // resolve eventually or the parent process exits.
+      }
+      rejectSpawn(
+        new ProbeError(
+          `claude did not exit within ${args.timeoutMs}ms`,
+          "timeout",
+        ),
+      );
+    }, args.timeoutMs);
+
+    child.once("error", (err) => {
+      clearTimeout(timer);
+      rejectSpawn(
+        new ProbeError(
+          `claude subprocess error: ${err.message}`,
+          "spawn-failed",
+        ),
+      );
+    });
+
+    child.once("close", (code) => {
+      clearTimeout(timer);
+      resolveSpawn({ exitCode: code });
+    });
+  });
 }
 
 /**
@@ -325,32 +326,25 @@ async function pollUntilTerminal(
  * is responsible for formatting + exit codes; this function neither
  * writes to stdout/stderr nor calls process.exit.
  *
- * Errors fall into two categories:
- *   - `ProbeError` thrown for transport + dispatch + timeout failures —
- *     the dispatch never produced a usable verdict.
- *   - Returned ProbeResult with `verdict.pass: false` for cases where
- *     the dispatch ran but the expected skill didn't trigger — that is
- *     the FAIL outcome the harness measures, not an error.
- *
- * The discovery-reason failure modes (dir-missing, no-files,
- * tag-not-in-any-file, unreadable-files) are returned via `discovery`
- * AND throw a `ProbeError` of category `jsonl-not-found` — they are
- * runner errors (the dispatch happened but the JSONL evidence is
- * missing), not skill-load FAILs.
+ * On a discovery failure (dir-missing, no-files, tag-not-in-any-file,
+ * unreadable-files) the function throws `ProbeError(jsonl-not-found)`
+ * carrying the operator-readable message — they are runner errors (the
+ * dispatch happened but the JSONL evidence is missing), not skill-load
+ * FAILs. On success the returned `ProbeResult.discovery` field carries
+ * the `reason: "found"` record for downstream diagnostics.
  */
 export async function runProbe(
   args: ProbeArgs,
   resolveSessionDir?: SessionDirResolver,
+  spawnFn: SpawnFn = spawn,
 ): Promise<ProbeResult> {
   const startMs = Date.now();
-  const jobId = await postLaunch(args);
+  const jobId = randomUUID();
   const dispatchTag = dispatchTagFor(jobId);
-  const { finalStatus, usage } = await pollUntilTerminal(args, jobId);
+  const taggedPrompt = `${dispatchTag} ${args.query}`;
+  const { exitCode } = await spawnClaude(args, taggedPrompt, spawnFn);
   const discovery = findJsonlByTag(args.workspaceCwd, dispatchTag, resolveSessionDir);
   if (discovery.reason !== "found" || !discovery.path) {
-    // The dispatch completed but we cannot evaluate the verdict — that
-    // is a runner error, not a skill-load FAIL. Surface category so the
-    // caller can decide whether to retry / continue / abort the sweep.
     throw new ProbeError(
       jsonlDiscoveryMessage(discovery, jobId, dispatchTag),
       "jsonl-not-found",
@@ -358,10 +352,11 @@ export async function runProbe(
   }
   const jsonl = readFileSync(discovery.path, "utf-8");
   const verdict = evaluateSkillTrigger(jsonl, dispatchTag, args.expectSkill);
+  const usage = sumUsageFromJsonl(jsonl);
   return {
     jobId,
     dispatchTag,
-    finalStatus,
+    exitCode,
     jsonlPath: discovery.path,
     discovery,
     verdict,
