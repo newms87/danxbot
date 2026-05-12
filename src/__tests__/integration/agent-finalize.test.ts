@@ -1,5 +1,5 @@
 /**
- * Integration tests for `src/poller/inject/scripts/agent-finalize.sh`.
+ * Integration tests for `src/inject/scripts/agent-finalize.sh`.
  *
  * The script is the agent's per-dispatch completion helper — it runs
  * inside an agent's persistent worktree at
@@ -44,12 +44,11 @@ const D = hasGit ? describe : describe.skip;
 // Resolve to the in-repo source script. Tests copy this into each
 // tmpdir's `.danxbot/scripts/` so the invocation matches the way the
 // script lands at runtime (the inject pipeline mirrors it there on
-// every poll tick — see `injectDanxbotScripts` in src/poller/index.ts).
+// every cron tick — see `injectDanxbotScripts` in src/inject/sync.ts).
 const SCRIPT_SOURCE = resolve(
   __dirname,
   "..",
   "..",
-  "poller",
   "inject",
   "scripts",
   "agent-finalize.sh",

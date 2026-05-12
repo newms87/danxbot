@@ -2,10 +2,10 @@
  * YAML-based dispatch liveness check (ISS-92, Phase 2 of the poller-triage
  * rework).
  *
- * Lives outside `src/poller/index.ts` so the test file imports it without
+ * Lives outside `src/cron/sync-and-audit.ts` so the test file imports it without
  * dragging in the poller's config-chain load (which hard-requires
  * `DANXBOT_DB_*` at module-import time and breaks standalone unit tests —
- * see `danx-repo-workflow.md` "Isolate pure helpers from src/poller/index.ts").
+ * see `danx-repo-workflow.md` "Isolate pure helpers from src/cron/sync-and-audit.ts").
  *
  * Pure: every input is supplied via `LivenessDeps` so tests can replay
  * arbitrary clock + hostname + isPidAlive states without monkey-patching

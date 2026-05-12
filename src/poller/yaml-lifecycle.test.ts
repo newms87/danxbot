@@ -337,7 +337,7 @@ describe("yaml-lifecycle", () => {
 
     it("DX-147: 'created' entry survives writeIssue + loadLocal round-trip without growing a second entry", async () => {
       // Hydrate is the SOLE entry point for the `created` event —
-      // bulk-sync's caller (`src/poller/index.ts#bulkSyncMissingYamls`)
+      // bulk-sync's caller (`src/cron/sync-and-audit.ts#bulkSyncMissingYamls`)
       // gates on `findByExternalId`, so a card with a local YAML never
       // re-enters hydrate. Verifying exactly-once means showing the
       // entry survives the round-trip path (write → parse) used by

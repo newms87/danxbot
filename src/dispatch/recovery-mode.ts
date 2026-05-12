@@ -198,7 +198,7 @@ export async function dispatchInRecoveryMode(
  * semantics. Importing `WorktreeError` as a runtime value would
  * eager-load `worktree-manager.ts`, whose top-level `promisify(
  * execFileCb)` call trips partial `node:child_process` mocks in
- * otherwise-unrelated tests (`src/poller/index.test.ts` etc.). The
+ * otherwise-unrelated tests (`src/cron/sync-and-audit.test.ts` etc.). The
  * type-only `WorktreeManager` import keeps this module load-time
  * clean. DX-291 P3+ replaces this throw with the prep-verdict path
  * that flips `agents.<name>.broken` so the operator can route via

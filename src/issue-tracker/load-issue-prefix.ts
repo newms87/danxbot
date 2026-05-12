@@ -11,7 +11,7 @@
  * `parseSimpleYaml`, and the constants in `./yaml.js`. Same
  * "isolate pure helpers from heavy modules" reasoning as the rule
  * `.claude/rules/danx-repo-workflow.md` § "Isolate Pure Helpers From
- * src/poller/index.ts" — `src/config.ts` is the env-heavy module to avoid.
+ * src/cron/sync-and-audit.ts" — `src/config.ts` is the env-heavy module to avoid.
  *
  * Behavior contract (Phase 4 of DX-99 — fail-loud, no fallback):
  *   - Field present + matches `ISSUE_PREFIX_SHAPE` → returned verbatim.

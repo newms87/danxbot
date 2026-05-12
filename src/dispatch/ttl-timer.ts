@@ -1,7 +1,7 @@
 /**
  * Per-dispatch TTL `setTimeout` — Phase 4b.2 of the Event-Driven Worker
  * epic (DX-289). Replaces the per-tick `evictDeadDispatches` walk in
- * `src/poller/index.ts` with an event-driven timer per dispatch.
+ * `src/cron/sync-and-audit.ts` with an event-driven timer per dispatch.
  *
  * Contract:
  *   - `armTtlTimer(args)` — schedule expiry for a dispatch's TTL. Called
@@ -40,6 +40,7 @@ import { createLogger } from "../logger.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import type { Dispatch } from "../dashboard/dispatches.js";
 
 const log = createLogger("ttl-timer");
 
@@ -148,6 +149,78 @@ export function _clearAllTtlTimers(): void {
     clearTimeout(entry.timer);
   }
   armed.clear();
+}
+
+/**
+ * Boot-rehydrate scan — Phase 5 of Event-Driven Worker (DX-220). Walks
+ * every non-terminal dispatch row for `repo.name` and arms a fresh TTL
+ * timer for each with an alive PID. The dispatch's heartbeat tick will
+ * re-arm on its next fire, so this scan only needs to cover the gap
+ * between worker boot and the first heartbeat tick.
+ *
+ * Skipped:
+ *   - Rows with `issueId === null` (Slack / external `/api/launch`
+ *     without a card-bound issue id — the TTL timer's expiry handler
+ *     would have nothing to clear).
+ *   - Rows with `hostPid === null` or `hostPid <= 0` (paired-write
+ *     incomplete OR legacy rows from pre-DX-140 — `reattachOrResolveDispatches`
+ *     marks these `failed` in the same boot pass).
+ *   - Rows whose PID is dead — `reattachOrResolveDispatches` handles
+ *     these by marking them `failed` and stamping `pidTerminatedAt`.
+ *     Arming a TTL timer for a known-dead PID would immediately fire
+ *     `handleExpiry` which races the reattach pass; we skip to keep
+ *     ownership of "PID is dead" inside the reattach path.
+ *
+ * Best-effort: a `findNonTerminalDispatches` failure logs warn-level
+ * and the scan returns without throwing — worker boot must not block
+ * on a transient DB hiccup.
+ */
+export async function scanAndArmTtlTimers(args: {
+  repo: ReconcileRepoContext;
+  ttlMs: number;
+  deps: TtlTimerDeps;
+  findNonTerminalDispatches: (repoName: string) => Promise<Dispatch[]>;
+}): Promise<{ armed: number; skipped: number }> {
+  const { repo, ttlMs, deps, findNonTerminalDispatches } = args;
+  let rows: Dispatch[];
+  try {
+    rows = await findNonTerminalDispatches(repo.name);
+  } catch (err) {
+    log.warn(
+      `[${repo.name}] ttl-timer boot-scan: findNonTerminalDispatches failed — skipping (${
+        err instanceof Error ? err.message : String(err)
+      })`,
+    );
+    return { armed: 0, skipped: 0 };
+  }
+
+  let armedCount = 0;
+  let skippedCount = 0;
+  for (const row of rows) {
+    if (row.issueId === null) {
+      skippedCount += 1;
+      continue;
+    }
+    if (row.hostPid === null || row.hostPid <= 0) {
+      skippedCount += 1;
+      continue;
+    }
+    if (!deps.isPidAlive(row.hostPid)) {
+      skippedCount += 1;
+      continue;
+    }
+    armTtlTimer({
+      dispatchId: row.id,
+      repo,
+      cardId: row.issueId,
+      pid: row.hostPid,
+      ttlMs,
+      deps,
+    });
+    armedCount += 1;
+  }
+
+  return { armed: armedCount, skipped: skippedCount };
 }
 
 /**

@@ -424,7 +424,7 @@ const invariantHealLog = createLogger("invariant-heal");
  * the named repo with default liveness deps and emits the log lines both
  * the boot and per-tick callers need. Extracted so the producer + the
  * format live in one file (DX-286 review feedback) — boot in
- * `src/index.ts` and per-tick in `src/poller/index.ts` both call this
+ * `src/index.ts` and per-tick in `src/cron/sync-and-audit.ts` both call this
  * with a `label` describing the trigger so log readers can tell them
  * apart.
  *

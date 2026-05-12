@@ -40,7 +40,7 @@ import {
   rmSync,
 } from "node:fs";
 import { resolve } from "node:path";
-import { createLogger } from "../../logger.js";
+import { createLogger } from "../logger.js";
 
 const log = createLogger("inject-root-mcp");
 

@@ -21,11 +21,16 @@ import {
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
 import { setCircuitLogger } from "./issue-tracker/circuit-breaker.js";
 import { createIssueTracker } from "./issue-tracker/index.js";
-import { bootScheduler, onReconcileResult } from "./dispatch/scheduler.js";
+import {
+  bootRehydrate,
+  bootScheduler,
+  onReconcileResult,
+} from "./dispatch/scheduler.js";
 import {
   listDispatchableYamls,
   listInProgressYamls,
 } from "./poller/local-issues.js";
+import { clearDispatchAndWrite, loadLocal } from "./poller/yaml-lifecycle.js";
 import { tryMultiAgentDispatch } from "./poller/multi-agent-pick.js";
 import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
@@ -37,7 +42,8 @@ import {
 } from "./poller/heal.js";
 import { isPidAlive } from "./agent/host-pid.js";
 import { hostname as osHostname } from "node:os";
-import { start as startPoller, syncRepoFiles } from "./poller/index.js";
+import { start as startCronSync } from "./cron/sync-and-audit.js";
+import { syncRepoFiles } from "./inject/sync.js";
 import {
   getIssuePollerPickupPrefix,
   syncSettingsFileOnBoot,
@@ -373,7 +379,7 @@ async function startWorkerMode(): Promise<void> {
   // genuinely mid-spawn (alive PID, within TTL, on this host). Runs AFTER
   // the mirror is up (so `writeIssue` awaitMirror resolves) and BEFORE
   // the poller dispatches its first tick. The same scan runs at the top
-  // of every poll tick (`src/poller/index.ts`) for ongoing self-heal.
+  // of every poll tick (`src/cron/sync-and-audit.ts`) for ongoing self-heal.
   await runInvariantHeal(repo, "boot");
 
   // DX-286 — boot pass for the OTHER direction of the invariant:
@@ -488,6 +494,25 @@ async function startWorkerMode(): Promise<void> {
   });
   setReconcileSchedulerHookForRepo(repo.name, onReconcileResult);
 
+  // Phase 5 (DX-220) — consolidated boot rehydrate. Clears dead-PID /
+  // cross-host / dead-TTL dispatch records from open YAMLs (replaces
+  // pre-Phase-5 `runStartupReattach`), arms a fresh TTL timer for
+  // every alive non-terminal dispatch in the DB, and runs the triage
+  // timer boot scan. Tolerates per-card failures internally; never
+  // throws past this call site. Runs AFTER `startIssuesMirror` (DB is
+  // consistent with disk) and BEFORE the cron's first tick.
+  await bootRehydrate({
+    repo,
+    reconcile: reconcileIssue,
+    ttlMs: 2 * 60 * 60 * 1000,
+    ttlTimerDeps: {
+      isPidAlive,
+      reconcile: reconcileIssue,
+      clearDispatch: clearDispatchAndWrite,
+      loadIssue: loadLocal,
+    },
+  });
+
   // DX-265: one-shot cleanup of legacy `Needs Approval` Trello list +
   // label (retired in DX-231; DX-234 left the fossils in place "for
   // the operator to remove by hand" — this is the automated
@@ -534,9 +559,12 @@ async function startWorkerMode(): Promise<void> {
     log.info(`[${repo.name}] Slack not configured`);
   }
 
-  // Start poller for this repo
-  await startPoller();
-  log.info(`[${repo.name}] Poller started`);
+  // Start the cron sync sweep for this repo (renamed from `startPoller`
+  // in Phase 5 / DX-220 — the per-minute body is now sync + audit only,
+  // dispatch decisions moved to the scheduler engine via DX-287's 4b
+  // chain).
+  await startCronSync();
+  log.info(`[${repo.name}] Cron sync started`);
 
   initShutdownHandlers({});
 

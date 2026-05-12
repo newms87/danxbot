@@ -39,7 +39,7 @@
  * wrapper; the only PID in the pair IS the claude process, kept as-is.
  *
  * Wired at boot in `src/index.ts` (after `reattachOrResolveDispatches`)
- * and per-tick in `src/poller/index.ts` (alongside `evictDeadDispatches`).
+ * and per-tick in `src/cron/sync-and-audit.ts` (alongside `evictDeadDispatches`).
  *
  * See DX-142 (Phase 3) + DX-139 (DB-as-registry epic) for the full design.
  */

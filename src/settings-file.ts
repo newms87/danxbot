@@ -882,7 +882,7 @@ export function isFeatureEnabled(ctx: RepoContext, feature: Feature): boolean {
  * non-empty string; returns `null` when the file is missing, the prefix
  * is unset / null / empty / non-string, or any read error occurs.
  *
- * The poller calls this on every tick (`src/poller/index.ts#_poll`) so
+ * The poller calls this on every tick (`src/cron/sync-and-audit.ts#_poll`) so
  * the test harness can write the prefix, run a fixture card through the
  * dispatch path in isolation, and clear the prefix on cleanup — all
  * without needing to drain or cancel pre-existing ToDo cards. Without

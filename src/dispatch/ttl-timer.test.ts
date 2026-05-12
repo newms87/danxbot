@@ -10,11 +10,13 @@ import {
   armTtlTimer,
   clearTtlTimer,
   rearmTtlTimer,
+  scanAndArmTtlTimers,
   _clearAllTtlTimers,
   _isTtlTimerArmed,
   _getTtlTimerArgs,
   type TtlTimerDeps,
 } from "./ttl-timer.js";
+import type { Dispatch } from "../dashboard/dispatches.js";
 import { createEmptyIssue } from "../issue-tracker/yaml.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
@@ -360,5 +362,73 @@ describe("ttl-timer", () => {
       expect(_isTtlTimerArmed("dispatch-1")).toBe(false);
       expect(_isTtlTimerArmed("dispatch-2")).toBe(false);
     });
+  });
+});
+
+describe("scanAndArmTtlTimers (DX-220 boot-rehydrate)", () => {
+  beforeEach(() => {
+    _clearAllTtlTimers();
+  });
+
+  it("arms TTL timer for alive non-terminal dispatch with issueId", async () => {
+    const dispatches: Dispatch[] = [
+      {
+        id: "dispatch-1",
+        issueId: "DX-1",
+        hostPid: 100,
+      } as Dispatch,
+    ];
+    const result = await scanAndArmTtlTimers({
+      repo: { name: "test-repo", localPath: "/tmp", issuePrefix: "DX" },
+      ttlMs: 7_200_000,
+      deps: {
+        isPidAlive: vi.fn().mockReturnValue(true),
+        reconcile: vi.fn(),
+        clearDispatch: vi.fn(),
+        loadIssue: vi.fn(),
+      },
+      findNonTerminalDispatches: vi.fn().mockResolvedValue(dispatches),
+    });
+    expect(result.armed).toBe(1);
+    expect(result.skipped).toBe(0);
+    expect(_isTtlTimerArmed("dispatch-1")).toBe(true);
+    _clearAllTtlTimers();
+  });
+
+  it("skips rows with null issueId, hostPid <= 0, or dead PID", async () => {
+    const dispatches: Dispatch[] = [
+      { id: "dispatch-a", issueId: null, hostPid: 100 } as Dispatch,
+      { id: "dispatch-b", issueId: "DX-1", hostPid: null } as Dispatch,
+      { id: "dispatch-c", issueId: "DX-2", hostPid: 0 } as Dispatch,
+      { id: "dispatch-d", issueId: "DX-3", hostPid: 999 } as Dispatch,
+    ];
+    const result = await scanAndArmTtlTimers({
+      repo: { name: "test-repo", localPath: "/tmp", issuePrefix: "DX" },
+      ttlMs: 7_200_000,
+      deps: {
+        isPidAlive: vi.fn().mockReturnValue(false),
+        reconcile: vi.fn(),
+        clearDispatch: vi.fn(),
+        loadIssue: vi.fn(),
+      },
+      findNonTerminalDispatches: vi.fn().mockResolvedValue(dispatches),
+    });
+    expect(result.armed).toBe(0);
+    expect(result.skipped).toBe(4);
+  });
+
+  it("returns {armed:0, skipped:0} when findNonTerminalDispatches rejects (best-effort)", async () => {
+    const result = await scanAndArmTtlTimers({
+      repo: { name: "test-repo", localPath: "/tmp", issuePrefix: "DX" },
+      ttlMs: 7_200_000,
+      deps: {
+        isPidAlive: vi.fn(),
+        reconcile: vi.fn(),
+        clearDispatch: vi.fn(),
+        loadIssue: vi.fn(),
+      },
+      findNonTerminalDispatches: vi.fn().mockRejectedValue(new Error("db down")),
+    });
+    expect(result).toEqual({ armed: 0, skipped: 0 });
   });
 });

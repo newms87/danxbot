@@ -3,12 +3,12 @@
  *
  * Lives in its own module (per `.claude/rules/danx-repo-workflow.md`) so it
  * can be unit-tested without pulling the env-var-heavy config chain that
- * `src/poller/index.ts` requires at import time.
+ * `src/cron/sync-and-audit.ts` requires at import time.
  *
  * Required-field reads throw on missing/empty values rather than masking
  * config bugs with silent `|| "unknown"` fallbacks ("Fallbacks Are Bugs —
  * Fail Loud, Never Fail Silent" per `.claude/rules/code-quality.md`). The
- * authoritative validator is `validateRepoConfig` in `src/poller/index.ts`,
+ * authoritative validator is `validateRepoConfig` in `src/cron/sync-and-audit.ts`,
  * which boot-time-checks the same fields; the throws here protect against
  * any future code path that bypasses boot validation (e.g., a runtime
  * settings flip that re-enables Trello with a half-edited config.yml).

@@ -329,7 +329,7 @@ import { flagPath, readFlag } from "../../critical-failure.js";
 import {
   poll,
   _resetForTesting as resetPollerState,
-} from "../../poller/index.js";
+} from "../../cron/sync-and-audit.js";
 import { CaptureServer } from "./helpers/capture-server.js";
 import { makeRepoContext } from "../helpers/fixtures.js";
 import type { RepoContext } from "../../types.js";

@@ -4,7 +4,7 @@
  *
  * Everything here is fs-only + tracker-only — no `config.js` import, no
  * logger, no env-var reads. Test files can import this module without
- * paying the env-validation tax that pulling `src/poller/index.ts` does
+ * paying the env-validation tax that pulling `src/cron/sync-and-audit.ts` does
  * (see `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers").
  *
  * Filesystem layout:
@@ -333,7 +333,7 @@ export async function hydrateFromRemote(
   // value (e.g. `tracker:trello`, `tracker:memory`) so the audit log
   // accurately attributes the source. `hydrateFromRemote` is the SOLE
   // entry point for the `created` event — the bulk-sync caller in
-  // `src/poller/index.ts#bulkSyncMissingYamls` skips cards that already
+  // `src/cron/sync-and-audit.ts#bulkSyncMissingYamls` skips cards that already
   // have a local YAML via `findByExternalId`, so this function only
   // ever runs against a tracker-born card with no prior local state.
   // Tracker implementations (`MemoryTracker`, `TrelloTracker`) always

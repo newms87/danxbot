@@ -17,7 +17,7 @@
  *    DESC + priority DESC + FIFO from `listDispatchableYamls`).
  *
  * Both helpers are pure — no DB queries, no filesystem reads. The
- * caller (`src/poller/index.ts`) builds `roster` from `readAgents(ctx)`,
+ * caller (`src/cron/sync-and-audit.ts`) builds `roster` from `readAgents(ctx)`,
  * `busy` from `busyAgents(repoName)`, and `assigned` from
  * `assignedCards(repoName)`. Pure helpers let tests cover every branch
  * with cheap fixture inputs and no env-loading config chain.

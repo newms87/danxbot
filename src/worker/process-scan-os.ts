@@ -37,7 +37,7 @@ import { readlinkSync } from "node:fs";
  * Implementation note: `child_process.execFile` is wrapped manually
  * instead of `promisify(execFile)` because the latter resolves the
  * `execFile` reference at module-load time. Other test suites
- * (`src/poller/index.test.ts`) `vi.mock("node:child_process", …)` to
+ * (`src/cron/sync-and-audit.test.ts`) `vi.mock("node:child_process", …)` to
  * override `spawn` while implicitly dropping every other export — the
  * top-level `promisify(execFile)` capture surfaced as `undefined` in
  * those suites and crashed import. Calling `execFile` lazily inside

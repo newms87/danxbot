@@ -38,7 +38,7 @@
  *
  *   4. **Post-dispatch card-progress check + CRITICAL_FAILURE halt.**
  *      `runPostDispatchProgressCheck` is the extracted form of
- *      `checkCardProgressedOrHalt` from `src/poller/index.ts`. The
+ *      `checkCardProgressedOrHalt` from `src/cron/sync-and-audit.ts`. The
  *      multi-agent picker wires it into the dispatch's `onComplete`
  *      callback; when the tracked card stayed in ToDo after the
  *      dispatch ended, the function writes `<repo>/.danxbot/CRITICAL_FAILURE`
@@ -51,12 +51,20 @@
  * `_resetSchedulerTrackers` in tests only.
  */
 
+import { existsSync, readdirSync } from "node:fs";
+import { resolve } from "node:path";
+import { hostname as osHostname } from "node:os";
 import { findNonTerminalDispatches } from "../dashboard/dispatches-db.js";
 import { isPidAlive } from "../agent/host-pid.js";
 import { writeFlag } from "../critical-failure.js";
 import { hasLiveDispatchForCard } from "../poller/live-dispatch-guard.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
-import { findByExternalId } from "../poller/yaml-lifecycle.js";
+import {
+  clearDispatchAndWrite,
+  findByExternalId,
+  loadLocal,
+} from "../poller/yaml-lifecycle.js";
+import { checkYamlDispatchLiveness } from "../poller/dispatch-liveness-yaml.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
@@ -65,6 +73,11 @@ import {
   scanAndArmTriageTimers,
   type ReconcileFn as TriageReconcileFn,
 } from "./triage-timer.js";
+import {
+  scanAndArmTtlTimers,
+  type TtlReconcileFn,
+  type TtlTimerDeps,
+} from "./ttl-timer.js";
 import { watchSettingsFile } from "../settings-file.js";
 import { createLogger } from "../logger.js";
 
@@ -269,6 +282,138 @@ export function bootScheduler(args: {
   log.info(
     `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered${runPicker ? " (picker wired)" : ""}${reconcile ? " (settings watch + triage boot-scan wired)" : ""}`,
   );
+}
+
+/**
+ * Boot-rehydrate — Phase 5 of Event-Driven Worker (DX-220).
+ *
+ * Consolidates every "on worker boot, walk on-disk state and re-arm
+ * the in-memory side" pass into one entry point. Replaces the
+ * pre-Phase-5 `runStartupReattach` from `src/cron/sync-and-audit.ts` and adds
+ * a fresh TTL-timer boot scan.
+ *
+ * What runs:
+ *
+ *   1. **Dead-dispatch clearing.** Walks every open YAML; for each
+ *      with a non-null `dispatch{}` block, derives a liveness verdict
+ *      via `checkYamlDispatchLiveness`. Verdict `alive` is left in
+ *      place (the per-dispatch TTL timer + heartbeat tick own it from
+ *      here); `dead-pid` / `dead-ttl` / `cross-host` clear the
+ *      `dispatch` field via `clearDispatchAndWrite` so the scheduler
+ *      can re-offer the slot.
+ *   2. **TTL timer re-arm.** Reads non-terminal dispatches from the
+ *      `dispatches` table; for each with an alive PID + non-null
+ *      `issueId`, arms a fresh TTL timer via `scanAndArmTtlTimers`.
+ *      The heartbeat tick re-arms on its next fire — the boot scan
+ *      bridges the gap.
+ *   3. **Triage timer re-arm.** `scanAndArmTriageTimers` walks every
+ *      open YAML and arms a triage `setTimeout` per card based on
+ *      `triage.expires_at`. Idempotent with the parallel call inside
+ *      `bootScheduler` — arming the same (repo, card) replaces the
+ *      prior timer cleanly.
+ *
+ * Must run AFTER `startIssuesMirror` (so the DB is consistent with
+ * disk) and BEFORE the cron's first tick (so reconcile sees a clean
+ * baseline). The boot order in `src/index.ts` is responsible for that
+ * sequencing.
+ *
+ * Cross-host verdicts on a local-only deploy are treated as cleared
+ * (matches the prior `runStartupReattach` contract). Tolerates
+ * malformed YAMLs (logs + skips) so a single corrupt file cannot halt
+ * the boot phase. Per-card / per-dispatch failures are isolated; the
+ * function never throws past its caller.
+ */
+export async function bootRehydrate(args: {
+  repo: RepoContext;
+  reconcile: TriageReconcileFn & TtlReconcileFn;
+  ttlMs: number;
+  ttlTimerDeps: TtlTimerDeps;
+}): Promise<{ alive: number; cleared: number; ttlArmed: number }> {
+  const { repo, reconcile, ttlMs, ttlTimerDeps } = args;
+  const reconcileRepo: ReconcileRepoContext = {
+    name: repo.name,
+    localPath: repo.localPath,
+    issuePrefix: repo.issuePrefix,
+  };
+
+  // Step 1 — clear dead-dispatch records from open YAMLs.
+  let alive = 0;
+  let cleared = 0;
+  const openDir = resolve(repo.localPath, ".danxbot", "issues", "open");
+  if (existsSync(openDir)) {
+    const issues: Issue[] = [];
+    for (const entry of readdirSync(openDir)) {
+      if (!entry.endsWith(".yml")) continue;
+      const stem = entry.slice(0, -".yml".length);
+      try {
+        const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
+        if (issue && issue.dispatch !== null) {
+          issues.push(issue);
+        }
+      } catch (err) {
+        log.warn(
+          `[${repo.name}] bootRehydrate: skipping ${entry}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+
+    if (issues.length > 0) {
+      const livenessDeps = {
+        currentHost: osHostname(),
+        now: Date.now(),
+        isPidAlive,
+      };
+      for (const issue of issues) {
+        if (issue.dispatch === null) continue;
+        const verdict = checkYamlDispatchLiveness(issue.dispatch, livenessDeps);
+        if (verdict.kind === "alive") {
+          alive += 1;
+          log.info(
+            `[${repo.name}] bootRehydrate: ${issue.id} alive (pid=${issue.dispatch.pid}, dispatch=${issue.dispatch.id}) — left in place`,
+          );
+        } else {
+          cleared += 1;
+          log.warn(
+            `[${repo.name}] bootRehydrate: clearing ${issue.id} (verdict=${verdict.kind}, dispatch=${issue.dispatch.id})`,
+          );
+          try {
+            void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
+              log.warn(
+                `[${repo.name}] bootRehydrate: clearDispatch mirror ack failed for ${issue.id}`,
+                err,
+              ),
+            );
+          } catch (err) {
+            log.error(
+              `[${repo.name}] bootRehydrate: clearDispatch failed for ${issue.id}`,
+              err,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // Step 2 — arm TTL timers from DB non-terminal dispatches.
+  const ttlScan = await scanAndArmTtlTimers({
+    repo: reconcileRepo,
+    ttlMs,
+    deps: ttlTimerDeps,
+    findNonTerminalDispatches,
+  });
+
+  // Step 3 — arm triage timers from open YAMLs. Idempotent with the
+  // parallel call inside `bootScheduler`; arming the same (repo, card)
+  // replaces any prior timer cleanly.
+  scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
+
+  log.info(
+    `[${repo.name}] bootRehydrate: alive=${alive} cleared=${cleared} ttl-armed=${ttlScan.armed} ttl-skipped=${ttlScan.skipped}`,
+  );
+
+  return { alive, cleared, ttlArmed: ttlScan.armed };
 }
 
 /**
@@ -532,7 +677,7 @@ export interface PostDispatchCheckInput {
  *   - No tracker registered for this repo (`bootScheduler` not called)
  *     — fail-open with a warning rather than a flag write.
  *
- * Extracted from `checkCardProgressedOrHalt` in `src/poller/index.ts`
+ * Extracted from `checkCardProgressedOrHalt` in `src/cron/sync-and-audit.ts`
  * and parameterized so the multi-agent picker can wire it into
  * `onComplete` without depending on `state.trackedCardId`. The
  * production safeguard the legacy `_poll` path had against

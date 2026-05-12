@@ -71,7 +71,7 @@ import type { IssueTracker } from "../issue-tracker/interface.js";
 // `tryMultiAgentDispatch` so the poller's heavy unit-test mock surface
 // (which partially-mocks `node:child_process` for the OS-spawn path)
 // doesn't choke on the worktree manager's module-load `promisify` call
-// when this module is statically imported by `src/poller/index.ts`.
+// when this module is statically imported by `src/cron/sync-and-audit.ts`.
 // Empty-roster repos pay zero cost; multi-agent integration tests
 // supply their own mock via `vi.mock("../agent/worktree-manager.js")`.
 import {

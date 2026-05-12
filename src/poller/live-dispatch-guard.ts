@@ -1,9 +1,9 @@
 /**
- * Pre-claim DB guard (ISS-69). Lives outside `src/poller/index.ts` so the
+ * Pre-claim DB guard (ISS-69). Lives outside `src/cron/sync-and-audit.ts` so the
  * test file can import it without dragging in the poller's config-chain
  * load (which hard-requires `DANXBOT_DB_*` at import time and breaks
  * standalone unit tests — see `danx-repo-workflow.md` "Isolate pure
- * helpers from src/poller/index.ts").
+ * helpers from src/cron/sync-and-audit.ts").
  *
  * Returns true when the dispatches table has a non-terminal row for
  * `cardId` whose worker `host_pid` is still alive — i.e. the prior

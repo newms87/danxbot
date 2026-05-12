@@ -67,8 +67,10 @@ vi.mock("./db/connection.js", () => ({
 }));
 
 const mockSyncRepoFiles = vi.fn();
-vi.mock("./poller/index.js", () => ({
+vi.mock("./cron/sync-and-audit.js", () => ({
   start: mockStartPoller,
+}));
+vi.mock("./inject/sync.js", () => ({
   syncRepoFiles: mockSyncRepoFiles,
 }));
 

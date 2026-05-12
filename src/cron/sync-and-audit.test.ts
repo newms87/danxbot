@@ -103,7 +103,7 @@ vi.mock("../repo-context.js", () => ({
   repoContexts: mockRepoContexts,
 }));
 
-vi.mock("./constants.js", () => ({
+vi.mock("../poller/constants.js", () => ({
   getReposBase: () => "/danxbot/repos",
   REVIEW_MIN_CARDS: 10,
   TEAM_PROMPT: "/danx-next",
@@ -385,7 +385,7 @@ const mockListTriageDueYamls = vi.fn(
   ): Promise<Issue[]> => [],
 );
 
-vi.mock("./local-issues.js", () => ({
+vi.mock("../poller/local-issues.js", () => ({
   listDispatchableYamls: (...args: unknown[]) =>
     mockListDispatchableYamls(...(args as [string, string?])),
   listInProgressYamls: (...args: unknown[]) =>
@@ -401,7 +401,7 @@ vi.mock("./local-issues.js", () => ({
 const mockRecomputeParentStatuses = vi
   .fn()
   .mockResolvedValue([] as unknown[]);
-vi.mock("./epic-status.js", () => ({
+vi.mock("../poller/epic-status.js", () => ({
   recomputeParentStatuses: (...args: unknown[]) =>
     mockRecomputeParentStatuses(...args),
   deriveStatus: () => null,
@@ -412,7 +412,7 @@ const mockClearDispatchAndWrite = vi.fn((...args: unknown[]) => {
   return { ...issue, dispatch: null };
 });
 
-vi.mock("./yaml-lifecycle.js", () => ({
+vi.mock("../poller/yaml-lifecycle.js", () => ({
   hydrateFromRemote: (...args: unknown[]) => mockHydrateFromRemote(...args),
   loadLocal: (...args: unknown[]) => mockLoadLocal(...args),
   findByExternalId: (...args: unknown[]) => mockFindByExternalId(...args),
@@ -436,7 +436,7 @@ vi.mock("./yaml-lifecycle.js", () => ({
 const mockHealLocalYamls = vi
   .fn()
   .mockReturnValue({ healed: [], errors: [] });
-vi.mock("./heal.js", () => ({
+vi.mock("../poller/heal.js", () => ({
   healLocalYamls: (...args: unknown[]) => mockHealLocalYamls(...args),
 }));
 
@@ -447,7 +447,7 @@ vi.mock("./heal.js", () => ({
 const mockHealExternalIds = vi
   .fn()
   .mockReturnValue({ healed: [], errors: [] });
-vi.mock("./heal-external-id.js", () => ({
+vi.mock("../poller/heal-external-id.js", () => ({
   healExternalIds: (...args: unknown[]) => mockHealExternalIds(...args),
 }));
 
@@ -483,7 +483,7 @@ vi.mock("../workspace/write-if-changed.js", () => ({
 const mockTryMultiAgentDispatch = vi
   .fn()
   .mockResolvedValue({ dispatched: 0, conflictBlocked: 0 });
-vi.mock("./multi-agent-pick.js", () => ({
+vi.mock("../poller/multi-agent-pick.js", () => ({
   tryMultiAgentDispatch: (...args: unknown[]) =>
     mockTryMultiAgentDispatch(...args),
 }));
@@ -538,9 +538,9 @@ import {
   poll,
   shutdown,
   start,
-  syncRepoFiles,
   _resetForTesting,
-} from "./index.js";
+} from "./sync-and-audit.js";
+import { syncRepoFiles } from "../inject/sync.js";
 
 function createFakeSpawnResult() {
   return { unref: vi.fn(), on: vi.fn() };
@@ -808,11 +808,11 @@ describe("poll", () => {
     // `bash .danxbot/scripts/agent-finalize.sh ...` from inside its
     // worktree at `<repo>/.danxbot/worktrees/<agent>/` to squash-merge
     // its branch onto origin/main. The inject pipeline mirrors the
-    // script source from `src/poller/inject/scripts/` into the
+    // script source from `src/inject/scripts/` into the
     // connected repo on every poll tick — same idempotent
     // writeIfChanged + chmod-exec contract `injectDanxWorkspaces`
     // uses for tools/.
-    const scriptSourceDir = "src/poller/inject/scripts";
+    const scriptSourceDir = "src/inject/scripts";
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
       if (path.includes(".danxbot/config")) return true;
@@ -873,7 +873,7 @@ describe("poll", () => {
   it("injectDanxbotScripts is a no-op when the inject scripts source dir is missing (DX-162)", () => {
     // Empty inject source — the function early-returns. The rest of
     // syncRepoFiles must keep working.
-    const scriptSourceDir = "src/poller/inject/scripts";
+    const scriptSourceDir = "src/inject/scripts";
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
       if (path.includes(".danxbot/config")) return true;
@@ -918,7 +918,7 @@ describe("poll", () => {
     // sibling target file. We only have one source file
     // (`agent-finalize.sh`) and assert NO delete tracking happens
     // for an unrelated `legacy.sh` we pretend exists at target.
-    const scriptSourceDir = "src/poller/inject/scripts";
+    const scriptSourceDir = "src/inject/scripts";
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
       if (path.includes(".danxbot/config")) return true;
@@ -971,7 +971,7 @@ describe("poll", () => {
   it("injectDanxbotScripts skips non-file entries (subdir) so a future grouping subdir does not chmod-execute as a script (DX-162)", () => {
     // readdir returns a regular file + a subdir. Only the file should
     // be copied + chmod'd. Pins the `isFile()` filter on the source loop.
-    const scriptSourceDir = "src/poller/inject/scripts";
+    const scriptSourceDir = "src/inject/scripts";
     mockExistsSync.mockImplementation((path: unknown) => {
       if (typeof path !== "string") return false;
       if (path.includes(".danxbot/config")) return true;
@@ -1091,7 +1091,7 @@ language: node
   });
 
   it("injectDanxWorkspaces mirrors a fixture tree, leaves orphans alone, and makes .sh helpers under tools/ executable", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const demoToolsSource = `${demoSource}/tools`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
@@ -1183,7 +1183,7 @@ language: node
   });
 
   it("injectDanxWorkspaces ignores non-directory entries at the workspaces root (the .gitkeep tombstone)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const gitkeepSource = `${workspacesSource}/.gitkeep`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
@@ -1267,7 +1267,7 @@ language: node
   });
 
   it("injectDanxWorkspaces removes the legacy alias symlink at workspaces/trello-worker (Phase 5 cleanup wiring)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const legacyPath = `${workspacesTargetRoot}/trello-worker`;
     const currentPath = `${workspacesTargetRoot}/issue-worker`;
@@ -1332,7 +1332,7 @@ language: node
   });
 
   it("injectDanxWorkspaces preserves a real directory at workspaces/trello-worker (operator-authored — never clobber)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const operatorPath = `${workspacesTargetRoot}/trello-worker`;
 
@@ -1403,7 +1403,7 @@ language: node
   // matching inject source. Operator-authored entries (no `danx-`
   // prefix) survive — exact symmetry with `scrubRepoRootDanxArtifacts`.
   it("injectDanxWorkspaces prunes stale danx-* files in workspace .claude/rules and .claude/skills (non-danx operator files survive)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const demoSourceRulesDir = `${demoSource}/.claude/rules`;
     const demoSourceSkillsDir = `${demoSource}/.claude/skills`;
@@ -1506,7 +1506,7 @@ language: node
   // the inject source must not be pruned. Without this guard the
   // prune would nuke every danx-* file on every tick.
   it("injectDanxWorkspaces does not prune a danx-* rule that still ships from inject source", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const demoSourceRulesDir = `${demoSource}/.claude/rules`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
@@ -1601,7 +1601,7 @@ language: node
   // file and re-write it (or worse — leave the workspace empty if a
   // future refactor changes ordering).
   it("injectDanxWorkspaces does not prune per-repo render filenames absent from inject source", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
@@ -1699,7 +1699,7 @@ language: node
   // against a future maintainer adding `tools/` to the prune scope
   // and silently nuking per-repo tool scripts.
   it("injectDanxWorkspaces does not prune danx-* entries from .claude/tools/ (out of scope)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
@@ -1794,7 +1794,7 @@ language: node
   // future regression that re-introduces the rethrow surfaces
   // immediately.
   it("injectDanxWorkspaces rm failure during prune is logged + swallowed (DX-149)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const demoSource = `${workspacesSource}/demo`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const demoTargetRoot = `${workspacesTargetRoot}/demo`;
@@ -1878,7 +1878,7 @@ language: node
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     const errCalls = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
+      String(c[0]).includes("_sync crashed"),
     );
     expect(errCalls).toHaveLength(1);
     expect(String(errCalls[0][0])).toMatch(/EACCES/);
@@ -1893,7 +1893,7 @@ language: node
   // the prune; the tombstone is an explicit allowlist, not a prefix
   // match.
   it("injectDanxWorkspaces prunes retired non-prefixed workspace files (DX-272 issue-blocker tombstone)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const issueWorkerSource = `${workspacesSource}/issue-worker`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const issueWorkerTargetRoot = `${workspacesTargetRoot}/issue-worker`;
@@ -1991,7 +1991,7 @@ language: node
   // Without this test, a future refactor that wraps the new helper in
   // its own try/catch would silently revert the DX-149 invariant.
   it("injectDanxWorkspaces rm failure during retired-files prune is logged + swallowed (DX-149 parity for DX-272)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const issueWorkerSource = `${workspacesSource}/issue-worker`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
     const issueWorkerTargetRoot = `${workspacesTargetRoot}/issue-worker`;
@@ -2077,7 +2077,7 @@ language: node
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     const errCalls = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
+      String(c[0]).includes("_sync crashed"),
     );
     expect(errCalls).toHaveLength(1);
     expect(String(errCalls[0][0])).toMatch(/EACCES/);
@@ -2089,7 +2089,7 @@ language: node
   // survives. Stale `danx-*` rules at `<repo>/.claude/` will retry on
   // the next tick — same convergence model as the tracker call wrap.
   it("scrubRepoRootDanxArtifacts rm failure is logged + swallowed (DX-149)", async () => {
-    const workspacesSource = "src/poller/inject/workspaces";
+    const workspacesSource = "src/inject/workspaces";
     const repoRootClaudeRulesDir = "/test/repos/test-repo/.claude/rules";
     const staleRepoRootRulePath = `${repoRootClaudeRulesDir}/danx-leftover.md`;
     const workspacesTargetRoot = "/test/repos/test-repo/.danxbot/workspaces";
@@ -2155,7 +2155,7 @@ language: node
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
     const errCalls = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
+      String(c[0]).includes("_sync crashed"),
     );
     expect(errCalls).toHaveLength(1);
     expect(String(errCalls[0][0])).toMatch(/EACCES/);
@@ -2264,7 +2264,7 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
     const crashLogs = mockLogger.error.mock.calls.filter((c) =>
-      String(c[0]).includes("_poll crashed"),
+      String(c[0]).includes("_sync crashed"),
     );
     expect(crashLogs).toHaveLength(1);
     expect(String(crashLogs[0][0])).toContain(
@@ -2695,287 +2695,6 @@ describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () 
   });
 });
 
-describe("runStartupReattach (ISS-92, Phase 2; DX-290 slimmed)", () => {
-  // DX-290 retired the in-memory `activeDispatches` mirror these tests
-  // used to inspect via `_getActiveDispatchesForTesting`. The boot
-  // reattach now only clears dead/cross-host/expired dispatches via
-  // `clearDispatchAndWrite`; alive dispatches are left in place for
-  // the per-dispatch TTL timer (`src/dispatch/ttl-timer.ts`) to track.
-  // Assertions key off `mockClearDispatchAndWrite` call counts +
-  // arguments, not in-memory map state.
-  let runStartupReattach: typeof import("./index.js").runStartupReattach;
-  let _resetForTesting: typeof import("./index.js")._resetForTesting;
-
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    const mod = await import("./index.js");
-    runStartupReattach = mod.runStartupReattach;
-    _resetForTesting = mod._resetForTesting;
-    _resetForTesting();
-    mockClearDispatchAndWrite.mockClear();
-    mockExistsSync.mockReturnValue(true);
-    mockReaddirSync.mockReturnValue([]);
-  });
-
-  function makeIssueWithDispatch(
-    id: string,
-    pid: number,
-    host: string,
-    kindOverride: "work" | "triage" = "work",
-  ): Issue {
-    const merged: Issue = {
-      schema_version: 7,
-      tracker: "memory",
-      id,
-      external_id: `ext-${id}`,
-      parent_id: null,
-      children: [],
-      dispatch: {
-        id: `did-${id}`,
-        pid,
-        host,
-        kind: kindOverride,
-        started_at: new Date(Date.now() - 30_000).toISOString(),
-        ttl_seconds: 7200,
-      },
-      status: "In Progress",
-      type: "Feature",
-      title: id,
-      description: "",
-      priority: 3.0,
-      position: null,
-      triage: {
-        expires_at: "",
-        reassess_hint: "",
-        last_status: "",
-        last_explain: "",
-        ice: { total: 0, i: 0, c: 0, e: 0 },
-        history: [],
-      },
-      ac: [],
-      comments: [],
-      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      blocked: null,
-      requires_human: null,
-      assigned_agent: null,
-      waiting_on: null,
-      conflict_on: [],
-      history: [],
-    };
-    if (merged.status === "Blocked" && merged.blocked === null) {
-      merged.blocked = {
-        reason: "test self-block",
-        timestamp: "2026-01-01T00:00:00.000Z",
-      };
-    }
-    return merged;
-  }
-
-  it("leaves same-host alive PIDs in place (no clear) — TTL timer takes over", async () => {
-    const { hostname: osHostname } = await import("node:os");
-    const host = osHostname();
-    const aliveIssue = makeIssueWithDispatch("ISS-1", 1234, host);
-
-    mockReaddirSync.mockReturnValue(["ISS-1.yml"]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => (id === "ISS-1" ? aliveIssue : null),
-    );
-    mockIsPidAlive.mockReturnValue(true);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
-  });
-
-  it("clears YAMLs whose PID is dead (same host, isPidAlive false)", async () => {
-    const { hostname: osHostname } = await import("node:os");
-    const host = osHostname();
-    const deadIssue = makeIssueWithDispatch("ISS-2", 9999, host);
-
-    mockReaddirSync.mockReturnValue(["ISS-2.yml"]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => (id === "ISS-2" ? deadIssue : null),
-    );
-    mockIsPidAlive.mockReturnValue(false);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockClearDispatchAndWrite).toHaveBeenCalledWith(
-      MOCK_REPO_CONTEXT.localPath,
-      deadIssue,
-    );
-  });
-
-  it("clears cross-host YAMLs (host mismatch) regardless of PID liveness", async () => {
-    const otherHost = "some-other-host-not-this-one";
-    const crossHostIssue = makeIssueWithDispatch("ISS-3", 1234, otherHost);
-
-    mockReaddirSync.mockReturnValue(["ISS-3.yml"]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => (id === "ISS-3" ? crossHostIssue : null),
-    );
-    // Even with isPidAlive: true, cross-host wins.
-    mockIsPidAlive.mockReturnValue(true);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockClearDispatchAndWrite).toHaveBeenCalledWith(
-      MOCK_REPO_CONTEXT.localPath,
-      crossHostIssue,
-    );
-  });
-
-  it("clears expired-TTL YAMLs (started_at + ttl_seconds < now) even when PID is alive", async () => {
-    const { hostname: osHostname } = await import("node:os");
-    const host = osHostname();
-    const expiredIssue: Issue = {
-      ...makeIssueWithDispatch("ISS-4", 1234, host),
-      dispatch: {
-        id: "did-ISS-4",
-        pid: 1234,
-        host,
-        kind: "work",
-        // Started 8000s ago, ttl 7200s → expired by 800s.
-        started_at: new Date(Date.now() - 8000 * 1000).toISOString(),
-        ttl_seconds: 7200,
-      },
-    };
-
-    mockReaddirSync.mockReturnValue(["ISS-4.yml"]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => (id === "ISS-4" ? expiredIssue : null),
-    );
-    mockIsPidAlive.mockReturnValue(true);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockClearDispatchAndWrite).toHaveBeenCalledTimes(1);
-  });
-
-  it("walks a mix of alive + dead + cross-host + expired in a single pass", async () => {
-    const { hostname: osHostname } = await import("node:os");
-    const host = osHostname();
-    const issues: Record<string, Issue> = {
-      "ISS-10": makeIssueWithDispatch("ISS-10", 1234, host), // alive
-      "ISS-11": makeIssueWithDispatch("ISS-11", 5678, host), // dead-pid
-      "ISS-12": makeIssueWithDispatch("ISS-12", 1234, "other-host"), // cross-host
-    };
-
-    mockReaddirSync.mockReturnValue([
-      "ISS-10.yml",
-      "ISS-11.yml",
-      "ISS-12.yml",
-    ]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => issues[id] ?? null,
-    );
-    mockIsPidAlive.mockImplementation((pid: number) => pid === 1234);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    // Two clears: ISS-11 (dead-pid) + ISS-12 (cross-host). ISS-10 alive
-    // stays in place.
-    expect(mockClearDispatchAndWrite).toHaveBeenCalledTimes(2);
-  });
-
-  it("ignores YAMLs whose dispatch is null (no work to do)", async () => {
-    const issueNoDispatch: Issue = {
-      ...makeIssueWithDispatch("ISS-99", 0, ""),
-      dispatch: null,
-    };
-    mockReaddirSync.mockReturnValue(["ISS-99.yml"]);
-    mockLoadLocal.mockImplementation(
-      (_repo: string, id: string) => (id === "ISS-99" ? issueNoDispatch : null),
-    );
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
-  });
-
-  it("is a no-op when the issues/open dir does not exist", async () => {
-    mockExistsSync.mockReturnValue(false);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    expect(mockReaddirSync).not.toHaveBeenCalled();
-  });
-});
-
-
-describe("runStartupReattach — corrupt-YAML tolerance (ISS-92; DX-290 slimmed)", () => {
-  let runStartupReattach: typeof import("./index.js").runStartupReattach;
-  let _resetForTesting: typeof import("./index.js")._resetForTesting;
-
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    const mod = await import("./index.js");
-    runStartupReattach = mod.runStartupReattach;
-    _resetForTesting = mod._resetForTesting;
-    _resetForTesting();
-    mockClearDispatchAndWrite.mockClear();
-    mockExistsSync.mockReturnValue(true);
-  });
-
-  it("logs + skips a corrupt YAML and continues processing siblings", async () => {
-    const { hostname: osHostname } = await import("node:os");
-    const host = osHostname();
-    const aliveIssue: Issue = {
-      schema_version: 7,
-      tracker: "memory",
-      id: "ISS-200",
-      external_id: "ext-200",
-      parent_id: null,
-      children: [],
-      dispatch: {
-        id: "did-good",
-        pid: 1234,
-        host,
-        kind: "work",
-        started_at: new Date(Date.now() - 30_000).toISOString(),
-        ttl_seconds: 7200,
-      },
-      status: "In Progress",
-      type: "Feature",
-      title: "Healthy",
-      description: "",
-      priority: 3.0,
-      position: null,
-      triage: {
-        expires_at: "",
-        reassess_hint: "",
-        last_status: "",
-        last_explain: "",
-        ice: { total: 0, i: 0, c: 0, e: 0 },
-        history: [],
-      },
-      ac: [],
-      comments: [],
-      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      blocked: null,
-      requires_human: null,
-      assigned_agent: null,
-      waiting_on: null,
-      conflict_on: [],
-      history: [],
-    };
-
-    mockReaddirSync.mockReturnValue(["ISS-201.yml", "ISS-200.yml"]);
-    mockLoadLocal.mockImplementation(async (_repo: string, id: string) => {
-      if (id === "ISS-201") throw new Error("Malformed YAML");
-      if (id === "ISS-200") return aliveIssue;
-      return null;
-    });
-    mockIsPidAlive.mockReturnValue(true);
-
-    await runStartupReattach(MOCK_REPO_CONTEXT);
-
-    // Healthy sibling alive → no clear. Corrupt YAML logged + skipped
-    // (planner can't decide without a parsed dispatch). Either way, no
-    // clear writes happen on this pass.
-    expect(mockClearDispatchAndWrite).not.toHaveBeenCalled();
-  });
-});
 
 /**
  * DX-290 (Event-Driven Worker Phase 4b.3) — zero-dispatch spy invariant.

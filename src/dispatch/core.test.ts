@@ -137,7 +137,7 @@ beforeEach(() => {
 });
 
 describe("dispatch() — slack-worker integration", () => {
-  // Copy the real `src/poller/inject/workspaces/slack-worker/` fixture
+  // Copy the real `src/inject/workspaces/slack-worker/` fixture
   // into a per-test tmpdir so the resolver walks actual slack-worker
   // files (workspace.yml + .mcp.json + CLAUDE.md + .claude/). This
   // validates the published workspace contract end-to-end without
@@ -149,7 +149,6 @@ describe("dispatch() — slack-worker integration", () => {
   const slackWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "slack-worker",
@@ -438,7 +437,6 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
   const issueWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "issue-worker",
@@ -710,8 +708,7 @@ describe("listActiveJobs()", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -756,8 +753,7 @@ describe("listActiveJobs()", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -846,8 +842,7 @@ describe("_drainPendingCleanupsForTesting", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -933,8 +928,7 @@ describe("_drainPendingCleanupsForTesting", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -989,7 +983,6 @@ describe("dispatch() — apiDispatchMeta wiring", () => {
   const slackWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "slack-worker",
@@ -1228,7 +1221,6 @@ describe("dispatch() — dispatchId override", () => {
   const slackWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "slack-worker",
@@ -1335,8 +1327,7 @@ describe("dispatch() — staged_files staging", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -1480,8 +1471,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
     const slackWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "slack-worker",
     );
@@ -1952,7 +1942,6 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
   const slackWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "slack-worker",
@@ -2080,8 +2069,7 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
     const issueWorkerSrc = resolve(
       __dirname,
       "..",
-      "poller",
-      "inject",
+    "inject",
       "workspaces",
       "issue-worker",
     );
@@ -2180,7 +2168,6 @@ describe("dispatch() — DX-242 fallback assembly", () => {
   const slackWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "slack-worker",
@@ -2324,7 +2311,6 @@ describe("dispatch() — TTL timer wiring (DX-289 / Phase 4b.2)", () => {
   const issueWorkerSrc = resolve(
     __dirname,
     "..",
-    "poller",
     "inject",
     "workspaces",
     "issue-worker",

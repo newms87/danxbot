@@ -221,7 +221,7 @@ import {
   _drainPendingCleanupsForTesting as drainPendingCleanupsForTesting,
   listActiveJobs,
 } from "../../dispatch/core.js";
-import { _resetForTesting as resetPollerState } from "../../poller/index.js";
+import { _resetForTesting as resetPollerState } from "../../cron/sync-and-audit.js";
 import {
   _resetForTesting as resetIssueRoute,
   _drainAsyncWorkForTesting as drainIssueRouteAsyncWork,
@@ -389,7 +389,7 @@ beforeEach(async () => {
   // Phase 4 dispatches resolve workspace `issue-worker`. The fixture
   // here is intentionally minimal — the dispatched fake-claude reads the
   // YAML path + URLs from env / --mcp-config, not from the workspace
-  // skill files. The skill content lives in src/poller/inject/.../ and
+  // skill files. The skill content lives in src/inject/.../ and
   // is covered by `workspace-shape.test.ts`.
   writeWorkspaceFixture("issue-worker");
 

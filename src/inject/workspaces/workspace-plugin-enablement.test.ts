@@ -7,7 +7,7 @@
  * `danxbot:requires-human`, `danxbot:slack-agent`, etc.) — the same
  * surface DX-272 retired from the inject pipeline.
  *
- * The test walks every workspace under `src/poller/inject/workspaces/`,
+ * The test walks every workspace under `src/inject/workspaces/`,
  * fails loud on:
  *   - a workspace dir missing `.claude/settings.json` (pre-DX-273
  *     board-chat shape — the file is now mandatory),

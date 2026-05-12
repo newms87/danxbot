@@ -7,7 +7,7 @@
  *
  * Callers:
  *   - HTTP `handleLaunch` / `handleResume` in `src/worker/dispatch.ts`
- *   - Trello poller (`src/poller/index.ts`)
+ *   - Trello poller (`src/cron/sync-and-audit.ts`)
  *   - Slack listener (`src/slack/listener.ts`)
  *
  * Every dispatch lands in a workspace — a directory at

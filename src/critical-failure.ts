@@ -22,12 +22,12 @@
  *      completed/failed; the halt signal lives in the flag file, not the
  *      job status).
  *   2. Post-dispatch-check: for `trigger: "trello"` dispatches, the
- *      poller's `onComplete` in `src/poller/index.ts` fetches the tracked
+ *      poller's `onComplete` in `src/cron/sync-and-audit.ts` fetches the tracked
  *      card's current list. If still in `todoListId`, writes the flag.
  *      Runs on BOTH success and failure paths — an agent reporting
  *      "completed" that didn't move the card is lying, still an env signal.
  *
- * - **Readers**: the poller's halt gate in `src/poller/index.ts::poll`,
+ * - **Readers**: the poller's halt gate in `src/cron/sync-and-audit.ts::poll`,
  *   `/health` via `src/worker/health.ts`, the dashboard's `/api/agents`
  *   snapshot via `src/dashboard/agents-list.ts::buildSnapshot`, and the
  *   clear endpoint.
@@ -85,7 +85,7 @@
  * `critical_failure` vs `failed`. Don't duplicate that guidance here —
  * this header is for agents editing the HALT code itself, not for
  * agents signaling into it. (Pre-DX-272 the rule shipped via the
- * inject pipeline at `src/poller/inject/workspaces/issue-worker/.claude/
+ * inject pipeline at `src/inject/workspaces/issue-worker/.claude/
  * rules/danx-halt-flag.md`; DX-272 deleted that file in favor of the
  * plugin source.)
  */

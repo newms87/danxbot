@@ -26,7 +26,7 @@ vi.mock("./restart-route.js", () => ({ handleRestart: vi.fn() }));
 // reason; without this the boot-seed test fails before any assertion
 // with a confusing required-env-var error (see
 // `.claude/rules/danx-repo-workflow.md` "Isolate Pure Helpers From
-// src/poller/index.ts").
+// src/cron/sync-and-audit.ts").
 vi.mock("./restage-route.js", () => ({ handleRestage: vi.fn() }));
 
 const mockSeedCooldown = vi

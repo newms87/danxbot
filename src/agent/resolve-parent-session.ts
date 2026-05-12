@@ -26,7 +26,7 @@ export type ResolveParentResult =
  *
  * Shared between:
  *   - `src/worker/dispatch.ts` `handleResume` — maps to HTTP status codes.
- *   - `src/poller/index.ts` orphan-resume check — maps to dispatch vs reset.
+ *   - `src/cron/sync-and-audit.ts` orphan-resume check — maps to dispatch vs reset.
  */
 export async function resolveParentSessionId(
   repoName: string,

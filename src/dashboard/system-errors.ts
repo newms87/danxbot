@@ -30,7 +30,8 @@ export type SystemErrorSource =
   | "worktree"
   | "stop-replay"
   | "orphan-reaper"
-  | "legacy-cleanup";
+  | "legacy-cleanup"
+  | "audit-drift";
 
 /**
  * `"info"` is the audit-trail channel: routine, non-actionable events

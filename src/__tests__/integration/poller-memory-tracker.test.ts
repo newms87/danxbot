@@ -255,7 +255,7 @@ vi.mock("../../issue-tracker/index.js", async () => {
 
 // --- Real imports ---
 
-import { poll, _resetForTesting } from "../../poller/index.js";
+import { poll, _resetForTesting } from "../../cron/sync-and-audit.js";
 import type { RepoContext } from "../../types.js";
 
 // --- Test fixtures ---

@@ -1,7 +1,7 @@
 /**
  * Per-card triage `setTimeout` — Phase 4b.2 of the Event-Driven Worker
  * epic (DX-289). Replaces the per-tick triage walk
- * (`tryTriageDispatch` over `listTriageDueYamls` in `src/poller/index.ts`)
+ * (`tryTriageDispatch` over `listTriageDueYamls` in `src/cron/sync-and-audit.ts`)
  * with an event-driven timer per card.
  *
  * Contract:
