@@ -671,7 +671,7 @@ export async function applyIssuePatch(
   });
   eventBus.publish({
     topic: "issue:updated",
-    data: { repo: repoName, id, issue: result.issue },
+    data: { repoName, id, issue: result.issue },
   });
   return result.issue;
 }

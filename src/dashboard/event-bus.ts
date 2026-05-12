@@ -73,27 +73,31 @@ export interface IssuePrefixChangedPayload {
 }
 
 /**
- * DX-236: emitted by `PATCH /api/issues/:id` after a successful write.
- * The dashboard's chokidar mirror runs in the worker container with a
- * 5s `awaitWriteFinish` debounce — without an optimistic in-process
- * publish the SPA wouldn't see the new state for several seconds. The
- * worker-side mirror still fires later and re-affirms the same shape
- * via the DB; subscribers MUST be idempotent against the second event.
+ * DX-226 + DX-236: emitted on every YAML state change so the Issues tab
+ * reflects card updates in <1s without polling.
  *
- * `issue` is the post-patch Issue exactly as written to disk (sourced
- * from the deserialized YAML, NOT a re-fetched DB row), so the SPA can
- * commit local state without a refetch round trip. `repo` and `id` are
- * lifted to the top level so subscribers can cheaply filter by repo
- * before deserializing the full issue payload.
+ * Two producers:
+ *   - `PATCH /api/issues/:id` (DX-236) — operator-driven optimistic write.
+ *   - chokidar `<repo>/.danxbot/issues/{open,closed}/*.yml` (DX-226) —
+ *     every other write source (agents, watcher mirror's read-your-
+ *     writes, `git pull`, hand edits), 50ms debounce per file id.
+ *
+ * Discriminated payload: the upsert variant carries the post-write
+ * `Issue` so the SPA projects to its `IssueListItem` row without a
+ * refetch round trip; the `removed: true` variant carries only `id` +
+ * `repoName` so the reducer can drop the row without reading the file
+ * (which is gone, by definition).
+ *
+ * Subscribers MUST be idempotent — chokidar's `awaitWriteFinish` debounce
+ * (5s) means the PATCH publisher's immediate event and the watcher's
+ * later catch-up event can both fire for the same logical write.
  */
-export interface IssueUpdatedPayload {
+export type IssueUpdatedPayload = {
   topic: "issue:updated";
-  data: {
-    repo: string;
-    id: string;
-    issue: Issue;
-  };
-}
+  data:
+    | { repoName: string; id: string; issue: Issue; removed?: false }
+    | { repoName: string; id: string; removed: true };
+};
 
 export type BusEvent =
   | DispatchCreatedPayload

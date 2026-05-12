@@ -1,9 +1,58 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
 import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
-import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../types";
+import {
+  createHydrationBuffer,
+  useStream,
+  type HydrationBuffer,
+  type StreamEvent,
+  type UseStreamReturn,
+} from "./useStream";
+import type {
+  Issue,
+  IssueDetail,
+  IssueListChild,
+  IssueListItem,
+  IssueStatus,
+} from "../types";
 
-const POLL_INTERVAL_MS = 30_000;
+/**
+ * Discriminated payload of the `issue:updated` SSE topic — mirrored from
+ * the backend's `IssueUpdatedPayload`. Re-declared here (not imported from
+ * `../types`) because the backend type uses the full `Issue` graph; this
+ * one matches the projection the reducer needs without dragging the
+ * backend's narrowing helpers in.
+ */
+type IssueUpdatedData =
+  | { repoName: string; id: string; issue: Issue; removed?: false }
+  | { repoName: string; id: string; removed: true };
+
+/** Type guard for the upsert variant. */
+function isUpsertEvent(
+  data: IssueUpdatedData,
+): data is { repoName: string; id: string; issue: Issue; removed?: false } {
+  return !("removed" in data) || data.removed !== true;
+}
+
+/**
+ * Single source of truth for parsing + shape-validating an `issue:updated`
+ * SSE event. Both the pure reducer (`applyIssueEvent`) and the composable's
+ * repo-filtered wrapper (`useIssues.applyEvent`) call this so the cast
+ * + null-guards live in one place. Returns `null` if the event is not
+ * `issue:updated`, has a non-object payload, or is missing required keys.
+ */
+function parseIssueEvent(event: StreamEvent): IssueUpdatedData | null {
+  if (event.topic !== "issue:updated") return null;
+  const data = event.data as IssueUpdatedData | null | undefined;
+  if (!data || typeof data !== "object" || typeof data.id !== "string") {
+    return null;
+  }
+  if ("removed" in data && data.removed === true) return data;
+  if (!("issue" in data) || !data.issue || typeof data.issue !== "object") {
+    return null;
+  }
+  return data;
+}
 
 export interface UseIssues {
   issues: Ref<IssueListItem[]>;
@@ -17,52 +66,172 @@ export interface UseIssues {
    * local state reverts to the prior status and the caller receives the
    * server error (also surfaced via the `error` ref).
    *
-   * The next REST poll (or eventual `issue:updated` SSE event) reconciles
-   * any server-side derived fields the optimistic update did not carry.
+   * The watcher-backed `issue:updated` SSE feed (DX-226) reconciles
+   * server-side derived fields the optimistic update did not carry
+   * within ~50ms of the YAML write.
    */
   moveIssueStatus: (id: string, toStatus: IssueStatus) => Promise<void>;
   /**
    * DX-264 — optimistically write a new `position` for a card (intra-
    * column reorder). The backend sort tier honors position ASC; the
-   * SPA does NOT re-sort locally (the next REST poll re-fetches the
-   * canonically sorted list). On PATCH failure the local position is
-   * reverted and `error` carries the server message.
+   * SPA does NOT re-sort locally (the post-write `issue:updated` SSE
+   * event re-affirms the canonically sorted list). On PATCH failure
+   * the local position is reverted and `error` carries the server
+   * message.
    */
   moveIssuePosition: (id: string, position: number | null) => Promise<void>;
   /**
    * Apply a server-confirmed Issue snapshot to local state — drops the
    * detail cache entry and merges the patchable fields into the matching
-   * IssueListItem so the board view reflects the change without waiting
-   * for the next 30s poll. Callers (the drawer's inline edit affordances)
-   * forward the post-PATCH issue here after every successful mutation.
+   * IssueListItem. Used by the drawer's inline edit affordances after
+   * every successful PATCH; the same projection runs inside the SSE
+   * reducer so optimistic + push paths produce identical state.
    */
   applyIssueUpdate: (updated: Issue) => void;
 }
 
 /**
- * Issues-tab state: REST hydrate on mount + on `repo` change, then poll
- * every 30s. SSE push could replace polling later — for now polling is
- * fine because the issue file changes happen on a ~60s poller cycle.
+ * Project a server-confirmed Issue into an IssueListItem row, preserving
+ * the IssueListItem-only fields (`children_detail`, `has_retro`,
+ * `created_at`) from the prior row. Shared between the drawer's
+ * `applyIssueUpdate` path and the SSE reducer so both produce the
+ * same projection.
+ */
+function mergeIntoListItem(
+  item: IssueListItem,
+  updated: Issue,
+): IssueListItem {
+  const acDone = updated.ac.filter((a) => a.checked).length;
+  return {
+    ...item,
+    title: updated.title,
+    description: updated.description,
+    status: updated.status,
+    type: updated.type,
+    priority: updated.priority,
+    position: updated.position,
+    parent_id: updated.parent_id,
+    children: [...updated.children],
+    ac_done: acDone,
+    ac_total: updated.ac.length,
+    comments_count: updated.comments.length,
+    waiting_on: updated.waiting_on !== null,
+    waiting_on_reason: updated.waiting_on?.reason ?? null,
+    waiting_on_by: updated.waiting_on?.by ?? [],
+    assigned_agent: updated.assigned_agent,
+    updated_at: Date.now(),
+  };
+}
+
+/**
+ * Build a brand-new IssueListItem from an Issue when the SSE feed
+ * reports an id we have not seen before (a watcher `add` for a freshly-
+ * created card). Computed projection fields the backend derives from
+ * cross-card walks (`children_detail`, `has_retro`,
+ * `requires_human_child_count`, `conflict_on_active_count`) are
+ * impossible to reconstruct from one Issue — they fill in to safe
+ * zero/empty defaults. The next REST hydrate (which carries the
+ * canonical backend projection) re-affirms the proper values.
+ */
+function projectIssueToListItem(
+  updated: Issue,
+  fallbackCreatedAt: number,
+): IssueListItem {
+  const acDone = updated.ac.filter((a) => a.checked).length;
+  return {
+    id: updated.id,
+    type: updated.type,
+    title: updated.title,
+    description: updated.description,
+    status: updated.status,
+    parent_id: updated.parent_id,
+    children: [...updated.children],
+    ac_total: updated.ac.length,
+    ac_done: acDone,
+    children_detail: [] as IssueListChild[],
+    waiting_on: updated.waiting_on !== null,
+    waiting_on_reason: updated.waiting_on?.reason ?? null,
+    waiting_on_by: updated.waiting_on?.by ?? [],
+    comments_count: updated.comments.length,
+    has_retro: false,
+    updated_at: fallbackCreatedAt,
+    created_at: fallbackCreatedAt,
+    priority: updated.priority,
+    position: updated.position,
+    assigned_agent: updated.assigned_agent,
+    requires_human: updated.requires_human,
+    requires_human_child_count: 0,
+    blocked: updated.blocked,
+    conflict_on: updated.conflict_on,
+    conflict_on_active_count: 0,
+  };
+}
+
+/**
+ * Single-event reducer over an IssueListItem[]. Three outcomes:
  *
- * Concurrency: each load() captures a monotonic `reqId`; only the latest
- * outstanding request is allowed to commit results. Repo-switch drops the
- * old timer + starts fresh, so repo flips don't double-fire near the
- * existing tick boundary.
+ *   - `removed: true` → drop the matching id (no-op if absent).
+ *   - upsert variant with a known id → merge via `mergeIntoListItem`.
+ *   - upsert variant with an unknown id → append a freshly-projected row.
+ *
+ * Returns the same array reference when the event causes no observable
+ * change (e.g. a `removed` for an id we don't have, or a wrong-repo
+ * filter caller-side that still reached this reducer). The wrapper
+ * upstream is expected to gate by repo BEFORE calling this — the
+ * `repo` filter is enforced at the subscription boundary, not here.
+ */
+export function applyIssueEvent(
+  state: IssueListItem[],
+  event: StreamEvent,
+): IssueListItem[] {
+  const data = parseIssueEvent(event);
+  if (!data) return state;
+  if (!isUpsertEvent(data)) {
+    const idx = state.findIndex((i) => i.id === data.id);
+    if (idx === -1) return state;
+    return [...state.slice(0, idx), ...state.slice(idx + 1)];
+  }
+  const idx = state.findIndex((i) => i.id === data.id);
+  if (idx === -1) {
+    return [...state, projectIssueToListItem(data.issue, Date.now())];
+  }
+  return [
+    ...state.slice(0, idx),
+    mergeIntoListItem(state[idx], data.issue),
+    ...state.slice(idx + 1),
+  ];
+}
+
+/**
+ * Issues-tab state: REST hydrate on mount / repo change, then push
+ * updates via the SSE `issue:updated` topic (DX-226). The 30s
+ * `setInterval` loop the original implementation used is retired —
+ * the dashboard's per-repo chokidar publishes within ~50ms of any
+ * YAML write so the polling cadence is no longer load-bearing.
+ *
+ * Concurrency: each REST hydrate captures a monotonic `reqId`; only
+ * the latest outstanding request commits results. Optimistic
+ * mutations (`moveIssueStatus` / `moveIssuePosition`) replay the
+ * pending status onto every fresh hydrate so a SSE upsert mid-flight
+ * doesn't snap back.
  */
 export function useIssues(repo: Ref<string>): UseIssues {
   const issues = ref<IssueListItem[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
 
-  let timer: ReturnType<typeof setInterval> | null = null;
   let cancelled = false;
   let currentReq = 0;
   const detailCache = new Map<string, IssueDetail>();
   // Optimistic `moveIssueStatus` mutations awaiting their PATCH to
-  // resolve. The 30s poll's `load()` would otherwise overwrite the
-  // optimistic state with the still-stale server snapshot — replay
-  // these onto every fresh REST commit so the column doesn't snap back.
+  // resolve. The SSE upsert (or a manual refresh) would otherwise
+  // overwrite the optimistic state with the still-stale server
+  // snapshot — replay these onto every fresh REST commit + every SSE
+  // event so the column doesn't snap back.
   const pendingMoves = new Map<string, IssueStatus>();
+
+  let stream: UseStreamReturn | null = null;
+  let buffer: HydrationBuffer<IssueListItem[]> | null = null;
 
   async function fetchDetail(id: string): Promise<IssueDetail> {
     const requestRepo = repo.value;
@@ -74,7 +243,40 @@ export function useIssues(repo: Ref<string>): UseIssues {
     return detail;
   }
 
-  async function load(): Promise<void> {
+  /**
+   * Apply one SSE event. Repo filter is enforced here so unrelated
+   * repos' events are dropped before they reach the pure reducer.
+   * Detail-cache invalidation runs ONLY when the reducer actually
+   * mutated state — a `removed: true` for an unknown id (or a
+   * no-op event) leaves the cache intact so a re-opened drawer
+   * remains instant.
+   */
+  function applyEvent(
+    state: IssueListItem[],
+    event: StreamEvent,
+  ): IssueListItem[] {
+    const data = parseIssueEvent(event);
+    if (!data || data.repoName !== repo.value) return state;
+
+    const next = applyIssueEvent(state, event);
+    if (next === state) return state;
+
+    // Real state change → drop the cached detail so the next drawer
+    // open re-fetches the post-mutation YAML. Deferred until after
+    // the reducer call so no-op events don't churn the cache.
+    detailCache.delete(`${repo.value}:${data.id}`);
+
+    // Replay pendingMoves so an in-flight optimistic status doesn't
+    // get clobbered by a SSE upsert that lands before the PATCH ack.
+    if (pendingMoves.size === 0) return next;
+    return next.map((i) => {
+      const pending = pendingMoves.get(i.id);
+      return pending && pending !== i.status ? { ...i, status: pending } : i;
+    });
+  }
+
+  async function hydrate(): Promise<void> {
+    if (!buffer) return;
     if (!repo.value) {
       issues.value = [];
       error.value = null;
@@ -84,26 +286,31 @@ export function useIssues(repo: Ref<string>): UseIssues {
     const requestRepo = repo.value;
     loading.value = true;
     try {
-      const result = await fetchIssues(requestRepo);
-      if (cancelled || reqId !== currentReq) return;
-      // Invalidate cached detail entries whose underlying file mtime has
-      // advanced. Keeps reopen-same-drawer instant while preventing stale
-      // detail from sticking around after the YAML changes.
-      for (const item of result) {
-        const cacheKey = `${requestRepo}:${item.id}`;
-        const cached = detailCache.get(cacheKey);
-        if (cached && cached.updated_at !== item.updated_at) {
-          detailCache.delete(cacheKey);
+      const next = await buffer.hydrate(async () => {
+        const result = await fetchIssues(requestRepo);
+        if (cancelled || reqId !== currentReq) return issues.value;
+        // Invalidate cached detail entries whose underlying mtime has
+        // advanced. Mirrors pre-DX-226 polling behavior: re-open same
+        // drawer is instant when the YAML is unchanged, fresh when
+        // the YAML has moved on.
+        for (const item of result) {
+          const cacheKey = `${requestRepo}:${item.id}`;
+          const cached = detailCache.get(cacheKey);
+          if (cached && cached.updated_at !== item.updated_at) {
+            detailCache.delete(cacheKey);
+          }
         }
-      }
-      issues.value = pendingMoves.size === 0
-        ? result
-        : result.map((i) => {
-            const pending = pendingMoves.get(i.id);
-            return pending && pending !== i.status
-              ? { ...i, status: pending }
-              : i;
-          });
+        return pendingMoves.size === 0
+          ? result
+          : result.map((i) => {
+              const pending = pendingMoves.get(i.id);
+              return pending && pending !== i.status
+                ? { ...i, status: pending }
+                : i;
+            });
+      }, applyEvent);
+      if (cancelled || reqId !== currentReq) return;
+      issues.value = next;
       error.value = null;
     } catch (err) {
       if (cancelled || reqId !== currentReq) return;
@@ -113,32 +320,35 @@ export function useIssues(repo: Ref<string>): UseIssues {
     }
   }
 
-  function startTimer(): void {
-    if (timer) clearInterval(timer);
-    timer = setInterval(() => { void load(); }, POLL_INTERVAL_MS);
+  function startStream(): void {
+    if (buffer) return;
+    if (!stream) stream = useStream();
+    buffer = createHydrationBuffer<IssueListItem[]>(stream, "issue:updated");
+    buffer.onLiveEvent((event) => {
+      issues.value = applyEvent(issues.value, event);
+    });
   }
 
-  function stopTimer(): void {
-    if (timer) {
-      clearInterval(timer);
-      timer = null;
-    }
+  function stopStream(): void {
+    buffer?.close();
+    buffer = null;
+    stream?.disconnect();
+    stream = null;
   }
 
   onMounted(() => {
-    void load();
-    startTimer();
+    startStream();
+    void hydrate();
   });
 
   watch(repo, () => {
     detailCache.clear();
-    void load();
-    startTimer();
+    void hydrate();
   });
 
   onBeforeUnmount(() => {
     cancelled = true;
-    stopTimer();
+    stopStream();
   });
 
   async function moveIssueStatus(
@@ -195,7 +405,6 @@ export function useIssues(repo: Ref<string>): UseIssues {
   function applyIssueUpdate(updated: Issue): void {
     const requestRepo = repo.value;
     if (!requestRepo) return;
-    // Invalidate the detail cache so the next drawer-open re-fetches.
     detailCache.delete(`${requestRepo}:${updated.id}`);
     const idx = issues.value.findIndex((i) => i.id === updated.id);
     if (idx === -1) return;
@@ -208,40 +417,10 @@ export function useIssues(repo: Ref<string>): UseIssues {
     issues,
     loading,
     error,
-    refresh: load,
+    refresh: hydrate,
     fetchDetail,
     moveIssueStatus,
     moveIssuePosition,
     applyIssueUpdate,
-  };
-}
-
-/**
- * Merge the patchable fields of a server-confirmed Issue into an existing
- * IssueListItem projection. Keeps board state consistent with the drawer's
- * just-completed edit without a full re-fetch. Fields the patch surface
- * cannot touch (`created_at`, `children_detail`, `has_retro`) are kept
- * verbatim from the prior projection — the 30s poll reconciles those.
- */
-function mergeIntoListItem(item: IssueListItem, updated: Issue): IssueListItem {
-  const acDone = updated.ac.filter((a) => a.checked).length;
-  return {
-    ...item,
-    title: updated.title,
-    description: updated.description,
-    status: updated.status,
-    type: updated.type,
-    priority: updated.priority,
-    position: updated.position,
-    parent_id: updated.parent_id,
-    children: [...updated.children],
-    ac_done: acDone,
-    ac_total: updated.ac.length,
-    comments_count: updated.comments.length,
-    waiting_on: updated.waiting_on !== null,
-    waiting_on_reason: updated.waiting_on?.reason ?? null,
-    waiting_on_by: updated.waiting_on?.by ?? [],
-    assigned_agent: updated.assigned_agent,
-    updated_at: Date.now(),
   };
 }

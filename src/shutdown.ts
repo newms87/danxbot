@@ -5,6 +5,7 @@ import { clearJobCleanupIntervals } from "./worker/dispatch.js";
 import { listActiveJobs } from "./dispatch/core.js";
 import { unwatchAllSettingsFiles } from "./dispatch/scheduler.js";
 import { unwatchAllRepoEnvFiles } from "./dashboard/repo-env-writer.js";
+import { stopAllIssuesWatchers } from "./dashboard/issues-watcher.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 
@@ -60,6 +61,12 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // DX-303 — drain every per-repo `.env` chokidar watcher for the same
   // shutdown-cleanliness reason as settings.json above.
   await unwatchAllRepoEnvFiles();
+
+  // DX-226 — drain the dashboard's per-repo issues-watcher chokidar
+  // instances so handles don't outlive the dashboard process on SIGTERM.
+  // No-op in worker mode (the registry is empty when only the worker is
+  // running — only `startDashboard` adds entries).
+  await stopAllIssuesWatchers();
 
   // Close database connection pools
   await closePool();

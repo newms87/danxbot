@@ -107,6 +107,67 @@ describe("EventBus — publish / subscribe", () => {
   });
 });
 
+describe("EventBus — typed issue:updated topic (DX-226)", () => {
+  it("delivers the upsert variant ({repoName, id, issue}) verbatim", () => {
+    const cb = vi.fn();
+    eventBus.subscribe("issue:updated", cb);
+    const evt: BusEvent = {
+      topic: "issue:updated",
+      data: {
+        repoName: "danxbot",
+        id: "DX-1",
+        // Minimal valid Issue stub — the bus does not validate the
+        // payload, just routes it. Subscribers project to IssueListItem.
+        issue: {
+          schema_version: 7,
+          tracker: "memory",
+          id: "DX-1",
+          external_id: "",
+          parent_id: null,
+          children: [],
+          dispatch: null,
+          status: "ToDo",
+          type: "Feature",
+          title: "Card 1",
+          description: "",
+          priority: 3,
+          position: null,
+          triage: {
+            expires_at: "",
+            reassess_hint: "",
+            last_status: "",
+            last_explain: "",
+            ice: { total: 0, i: 0, c: 0, e: 0 },
+            history: [],
+          },
+          ac: [],
+          comments: [],
+          history: [],
+          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+          waiting_on: null,
+          blocked: null,
+          requires_human: null,
+          conflict_on: [],
+          assigned_agent: null,
+        },
+      },
+    };
+    eventBus.publish(evt);
+    expect(cb).toHaveBeenCalledWith(evt);
+  });
+
+  it("delivers the removed variant ({repoName, id, removed: true}) verbatim", () => {
+    const cb = vi.fn();
+    eventBus.subscribe("issue:updated", cb);
+    const evt: BusEvent = {
+      topic: "issue:updated",
+      data: { repoName: "danxbot", id: "DX-9", removed: true },
+    };
+    eventBus.publish(evt);
+    expect(cb).toHaveBeenCalledWith(evt);
+  });
+});
+
 describe("EventBus — subscriberCount", () => {
   it("returns 0 for an unknown topic", () => {
     expect(eventBus.subscriberCount("dispatch:created")).toBe(0);

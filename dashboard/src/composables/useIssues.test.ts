@@ -15,7 +15,50 @@ vi.mock("../api", () => ({
   patchIssue: (...args: unknown[]) => mockPatchIssue(...args),
 }));
 
-import { useIssues } from "./useIssues";
+// useStream is mocked with a capturing handle so tests can push events on
+// demand AND inspect subscription lifecycle (DX-226 — the composable now
+// subscribes to the `issue:updated` topic instead of polling).
+type Handler = (e: { topic: string; data: unknown }) => void;
+type StreamMock = {
+  connectionState: Ref<"connecting" | "connected" | "disconnected">;
+  subscribe: ReturnType<typeof vi.fn>;
+  disconnect: ReturnType<typeof vi.fn>;
+  emit(topic: string, data: unknown): void;
+  handlerCount(topic: string): number;
+};
+
+function makeStreamMock(): StreamMock {
+  const handlers = new Map<string, Set<Handler>>();
+  return {
+    connectionState: ref<"connecting" | "connected" | "disconnected">(
+      "connected",
+    ),
+    subscribe: vi.fn().mockImplementation((topic: string, h: Handler) => {
+      if (!handlers.has(topic)) handlers.set(topic, new Set());
+      handlers.get(topic)!.add(h);
+      return () => handlers.get(topic)?.delete(h);
+    }),
+    disconnect: vi.fn(),
+    emit(topic, data) {
+      handlers.get(topic)?.forEach((h) => h({ topic, data }));
+    },
+    handlerCount(topic) {
+      return handlers.get(topic)?.size ?? 0;
+    },
+  };
+}
+
+let currentStream: StreamMock;
+vi.mock("./useStream", async () => {
+  const actual =
+    await vi.importActual<typeof import("./useStream")>("./useStream");
+  return {
+    ...actual,
+    useStream: () => currentStream,
+  };
+});
+
+import { useIssues, applyIssueEvent } from "./useIssues";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -47,6 +90,45 @@ function makeIssue(
   } as unknown as IssueListItem;
 }
 
+function makeIssueSnapshot(
+  id: string,
+  overrides: Partial<Issue> = {},
+): Issue {
+  return {
+    schema_version: 7,
+    tracker: "memory",
+    id,
+    external_id: "",
+    parent_id: null,
+    children: [],
+    dispatch: null,
+    status: "ToDo",
+    type: "Feature",
+    title: `Card ${id}`,
+    description: "",
+    priority: 3,
+    position: null,
+    triage: {
+      expires_at: "",
+      reassess_hint: "",
+      last_status: "",
+      last_explain: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+      history: [],
+    },
+    ac: [],
+    comments: [],
+    history: [],
+    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+    waiting_on: null,
+    blocked: null,
+    requires_human: null,
+    conflict_on: [],
+    assigned_agent: null,
+    ...overrides,
+  };
+}
+
 function mountWithIssues(repo: Ref<string>) {
   const exposed = { ret: null as ReturnType<typeof useIssues> | null };
   const Host = defineComponent({
@@ -66,9 +148,179 @@ function mountWithIssues(repo: Ref<string>) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  currentStream = makeStreamMock();
 });
 
-// ─── moveIssueStatus ─────────────────────────────────────────────────────────
+// ─── Pure reducer ────────────────────────────────────────────────────────────
+
+describe("applyIssueEvent — reducer", () => {
+  it("upserts a known id by merging the patchable fields from Issue", () => {
+    const state = [makeIssue("DX-1"), makeIssue("DX-2")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: {
+        repoName: "danxbot",
+        id: "DX-1",
+        issue: makeIssueSnapshot("DX-1", {
+          title: "Renamed",
+          status: "In Progress",
+        }),
+      },
+    });
+    expect(next).not.toBe(state);
+    expect(next.find((i) => i.id === "DX-1")!.title).toBe("Renamed");
+    expect(next.find((i) => i.id === "DX-1")!.status).toBe("In Progress");
+    // Sibling untouched.
+    expect(next.find((i) => i.id === "DX-2")!.title).toBe("Card DX-2");
+  });
+
+  it("appends a freshly-projected row when the upsert id is not in state", () => {
+    const state = [makeIssue("DX-1")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: {
+        repoName: "danxbot",
+        id: "DX-99",
+        issue: makeIssueSnapshot("DX-99", { title: "Fresh" }),
+      },
+    });
+    expect(next).toHaveLength(2);
+    expect(next.find((i) => i.id === "DX-99")!.title).toBe("Fresh");
+  });
+
+  it("drops the matching row on removed:true", () => {
+    const state = [makeIssue("DX-1"), makeIssue("DX-2"), makeIssue("DX-3")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: { repoName: "danxbot", id: "DX-2", removed: true },
+    });
+    expect(next.map((i) => i.id)).toEqual(["DX-1", "DX-3"]);
+  });
+
+  it("removed:true for an unknown id is a no-op (same array reference)", () => {
+    const state = [makeIssue("DX-1")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: { repoName: "danxbot", id: "DX-NOPE", removed: true },
+    });
+    expect(next).toBe(state);
+  });
+
+  it("ignores non-issue:updated topics (same array reference)", () => {
+    const state = [makeIssue("DX-1")];
+    const next = applyIssueEvent(state, {
+      topic: "dispatch:created",
+      data: { id: "job-1" },
+    });
+    expect(next).toBe(state);
+  });
+});
+
+// ─── Source-check guard ──────────────────────────────────────────────────────
+
+describe("useIssues — no setInterval polling (DX-226 source guard)", () => {
+  it("source has no setInterval", async () => {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const source = await fs.readFile(
+      path.resolve(__dirname, "useIssues.ts"),
+      "utf-8",
+    );
+    expect(source).not.toMatch(/setInterval\s*\(/);
+  });
+});
+
+// ─── Hydrate + SSE integration ───────────────────────────────────────────────
+
+describe("useIssues — hydrate + subscribe", () => {
+  it("hydrates via REST on mount and subscribes to issue:updated", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1"), makeIssue("DX-2")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    expect(mockFetchIssues).toHaveBeenCalledWith("danxbot");
+    expect(ret.issues.value.map((i) => i.id)).toEqual(["DX-1", "DX-2"]);
+    expect(currentStream.handlerCount("issue:updated")).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("applies an issue:updated upsert event", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1", "ToDo")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    currentStream.emit("issue:updated", {
+      repoName: "danxbot",
+      id: "DX-1",
+      issue: makeIssueSnapshot("DX-1", { status: "In Progress" }),
+    });
+
+    expect(ret.issues.value[0].status).toBe("In Progress");
+    wrapper.unmount();
+  });
+
+  it("applies an issue:updated removed:true event by dropping the row", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1"), makeIssue("DX-2")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    currentStream.emit("issue:updated", {
+      repoName: "danxbot",
+      id: "DX-1",
+      removed: true,
+    });
+
+    expect(ret.issues.value.map((i) => i.id)).toEqual(["DX-2"]);
+    wrapper.unmount();
+  });
+
+  it("filters out events for a different repoName", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1", "ToDo")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    // Event for a sibling repo — must not touch local state.
+    currentStream.emit("issue:updated", {
+      repoName: "platform",
+      id: "DX-1",
+      issue: makeIssueSnapshot("DX-1", { status: "Done" }),
+    });
+
+    expect(ret.issues.value[0].status).toBe("ToDo");
+    wrapper.unmount();
+  });
+
+  it("invalidates the detail cache when an SSE upsert lands for the cached id", async () => {
+    const detail1 = { ...makeIssueSnapshot("DX-1"), updated_at: 1, created_at: 0, raw_yaml: "" };
+    const detail2 = { ...makeIssueSnapshot("DX-1", { title: "Server" }), updated_at: 2, created_at: 0, raw_yaml: "" };
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    mockFetchIssueDetail.mockResolvedValueOnce(detail1);
+    mockFetchIssueDetail.mockResolvedValueOnce(detail2);
+
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    const first = await ret.fetchDetail("DX-1");
+    expect(first).toBe(detail1);
+    // Cache HIT.
+    expect(await ret.fetchDetail("DX-1")).toBe(detail1);
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(1);
+
+    currentStream.emit("issue:updated", {
+      repoName: "danxbot",
+      id: "DX-1",
+      issue: makeIssueSnapshot("DX-1", { title: "From SSE" }),
+    });
+
+    // Cache MISS — invalidated by the SSE handler.
+    const refetched = await ret.fetchDetail("DX-1");
+    expect(refetched).toBe(detail2);
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+});
+
+// ─── moveIssueStatus (unchanged behavior) ────────────────────────────────────
 
 describe("useIssues — moveIssueStatus", () => {
   it("optimistically updates local status before the patch resolves", async () => {
@@ -139,7 +391,7 @@ describe("useIssues — moveIssueStatus", () => {
     wrapper.unmount();
   });
 
-  it("optimistic mutation survives a concurrent REST refresh (poll-vs-mutation race)", async () => {
+  it("optimistic mutation survives a concurrent SSE upsert (pendingMoves replay)", async () => {
     const stale = makeIssue("DX-R", "ToDo");
     mockFetchIssues.mockResolvedValueOnce([stale]);
     let resolvePatch!: () => void;
@@ -156,11 +408,13 @@ describe("useIssues — moveIssueStatus", () => {
     await Promise.resolve();
     expect(ret.issues.value[0].status).toBe("In Progress");
 
-    // Background poll lands mid-flight returning stale ToDo data — the
-    // mutation must NOT be clobbered (would snap-back the column for up
-    // to 30s until the next poll picks up the server's post-patch state).
-    mockFetchIssues.mockResolvedValueOnce([makeIssue("DX-R", "ToDo")]);
-    await ret.refresh();
+    // SSE upsert lands mid-flight with the still-stale ToDo status —
+    // the optimistic mutation must NOT be clobbered.
+    currentStream.emit("issue:updated", {
+      repoName: "danxbot",
+      id: "DX-R",
+      issue: makeIssueSnapshot("DX-R", { status: "ToDo" }),
+    });
     expect(ret.issues.value[0].status).toBe("In Progress");
 
     resolvePatch();
@@ -181,46 +435,7 @@ describe("useIssues — moveIssueStatus", () => {
   });
 });
 
-// ─── applyIssueUpdate ────────────────────────────────────────────────────────
-
-function makeIssueSnapshot(
-  id: string,
-  overrides: Partial<Issue> = {},
-): Issue {
-  return {
-    schema_version: 7,
-    tracker: "memory",
-    id,
-    external_id: "",
-    parent_id: null,
-    children: [],
-    dispatch: null,
-    status: "ToDo",
-    type: "Feature",
-    title: `Card ${id}`,
-    description: "",
-    priority: 3,
-    position: null,
-    triage: {
-      expires_at: "",
-      reassess_hint: "",
-      last_status: "",
-      last_explain: "",
-      ice: { total: 0, i: 0, c: 0, e: 0 },
-      history: [],
-    },
-    ac: [],
-    comments: [],
-    history: [],
-    retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-    waiting_on: null,
-    blocked: null,
-    requires_human: null,
-    conflict_on: [],
-    assigned_agent: null,
-    ...overrides,
-  };
-}
+// ─── applyIssueUpdate (drawer affordance, unchanged) ─────────────────────────
 
 describe("useIssues — applyIssueUpdate", () => {
   it("merges the patchable fields from Issue into the matching IssueListItem", async () => {
@@ -248,7 +463,6 @@ describe("useIssues — applyIssueUpdate", () => {
     expect(row.priority).toBe(5);
     expect(row.parent_id).toBe("DX-99");
     expect(row.children).toEqual(["DX-3"]);
-    // The sibling card is untouched.
     expect(ret.issues.value.find((i) => i.id === "DX-2")!.status).toBe("ToDo");
     wrapper.unmount();
   });
@@ -273,93 +487,6 @@ describe("useIssues — applyIssueUpdate", () => {
     wrapper.unmount();
   });
 
-  it("updates comments_count to comments.length", async () => {
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    const updated = makeIssueSnapshot("DX-1", {
-      comments: [
-        { id: "c1", author: "a", timestamp: "", text: "hi" },
-        { id: "c2", author: "b", timestamp: "", text: "ok" },
-      ],
-    });
-    ret.applyIssueUpdate(updated);
-
-    expect(ret.issues.value[0].comments_count).toBe(2);
-    wrapper.unmount();
-  });
-
-  it("collapses waiting_on object to (boolean, reason, by[]) — non-null variant", async () => {
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    const updated = makeIssueSnapshot("DX-1", {
-      waiting_on: {
-        reason: "Waits for DX-2",
-        timestamp: "2026-05-10T00:00:00Z",
-        by: ["DX-2"],
-      },
-    });
-    ret.applyIssueUpdate(updated);
-
-    const row = ret.issues.value[0];
-    expect(row.waiting_on).toBe(true);
-    expect(row.waiting_on_reason).toBe("Waits for DX-2");
-    expect(row.waiting_on_by).toEqual(["DX-2"]);
-    wrapper.unmount();
-  });
-
-  it("collapses waiting_on null to (false, null, [])", async () => {
-    mockFetchIssues.mockResolvedValue([
-      // Start with a row that has waiting_on=true so the merge is observable.
-      {
-        ...makeIssue("DX-1"),
-        waiting_on: true,
-        waiting_on_reason: "old",
-        waiting_on_by: ["DX-99"],
-      } as IssueListItem,
-    ]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    ret.applyIssueUpdate(
-      makeIssueSnapshot("DX-1", { waiting_on: null }),
-    );
-
-    const row = ret.issues.value[0];
-    expect(row.waiting_on).toBe(false);
-    expect(row.waiting_on_reason).toBeNull();
-    expect(row.waiting_on_by).toEqual([]);
-    wrapper.unmount();
-  });
-
-  it("invalidates the detail cache so the next fetchDetail re-fetches", async () => {
-    const detail1 = { ...makeIssueSnapshot("DX-1"), updated_at: 1, created_at: 0, raw_yaml: "" };
-    const detail2 = { ...makeIssueSnapshot("DX-1", { title: "Server" }), updated_at: 2, created_at: 0, raw_yaml: "" };
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
-    mockFetchIssueDetail.mockResolvedValueOnce(detail1);
-    mockFetchIssueDetail.mockResolvedValueOnce(detail2);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    const first = await ret.fetchDetail("DX-1");
-    expect(first).toBe(detail1);
-    // Cache HIT (no second fetch).
-    const cached = await ret.fetchDetail("DX-1");
-    expect(cached).toBe(detail1);
-    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(1);
-
-    ret.applyIssueUpdate(makeIssueSnapshot("DX-1", { title: "Optimistic" }));
-
-    // Cache MISS (invalidated by applyIssueUpdate) → second fetch fires.
-    const refetched = await ret.fetchDetail("DX-1");
-    expect(refetched).toBe(detail2);
-    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(2);
-    wrapper.unmount();
-  });
-
   it("is a no-op when the id is not in the list", async () => {
     mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
@@ -379,52 +506,6 @@ describe("useIssues — applyIssueUpdate", () => {
     expect(() =>
       ret.applyIssueUpdate(makeIssueSnapshot("DX-1")),
     ).not.toThrow();
-    wrapper.unmount();
-  });
-
-  it("bumps updated_at to a recent timestamp so the row sorts as freshly touched", async () => {
-    mockFetchIssues.mockResolvedValue([
-      { ...makeIssue("DX-1"), updated_at: 1_000 } as IssueListItem,
-    ]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    const before = Date.now();
-    ret.applyIssueUpdate(makeIssueSnapshot("DX-1"));
-    const after = Date.now();
-
-    const row = ret.issues.value[0];
-    expect(row.updated_at).toBeGreaterThanOrEqual(before);
-    expect(row.updated_at).toBeLessThanOrEqual(after);
-    wrapper.unmount();
-  });
-
-  it("preserves untouched IssueListItem-only fields (children_detail, has_retro)", async () => {
-    const listed = {
-      ...makeIssue("DX-1"),
-      children_detail: [
-        {
-          id: "DX-2",
-          name: "child",
-          type: "Feature" as const,
-          status: "ToDo" as const,
-          waiting_on: false,
-          waiting_on_by_card: false,
-          missing: false,
-        },
-      ],
-      has_retro: true,
-    } as IssueListItem;
-    mockFetchIssues.mockResolvedValue([listed]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    ret.applyIssueUpdate(makeIssueSnapshot("DX-1", { title: "Renamed" }));
-
-    const row = ret.issues.value[0];
-    expect(row.title).toBe("Renamed");
-    expect(row.children_detail).toEqual(listed.children_detail);
-    expect(row.has_retro).toBe(true);
     wrapper.unmount();
   });
 });

@@ -22,6 +22,8 @@ import {
 } from "./chat-routes.js";
 import { handleStream } from "./stream-routes.js";
 import { startDbChangeDetector } from "./dispatch-stream.js";
+import { startIssuesWatcher } from "./issues-watcher.js";
+import { eventBus } from "./event-bus.js";
 import {
   handleLaunchProxy,
   handleResumeProxy,
@@ -662,6 +664,12 @@ export async function startDashboard(): Promise<void> {
   // Start the DB change detector that publishes dispatch:created and
   // dispatch:updated events to the EventBus for SSE subscribers.
   startDbChangeDetector();
+
+  // DX-226 — per-repo chokidar watcher on `.danxbot/issues/{open,closed}/`.
+  // Drives the Issues tab's `issue:updated` SSE feed so the SPA composable
+  // no longer polls every 30s. The shutdown handler (`src/shutdown.ts`)
+  // drains active watchers via `stopAllIssuesWatchers()` on SIGTERM.
+  await startIssuesWatcher(repos, eventBus);
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);

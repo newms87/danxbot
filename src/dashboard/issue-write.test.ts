@@ -819,7 +819,7 @@ describe("applyIssuePatch — SSE event emission", () => {
     expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
     const call = mockEventBusPublish.mock.calls[0][0];
     expect(call.topic).toBe("issue:updated");
-    expect(call.data.repo).toBe("danxbot");
+    expect(call.data.repoName).toBe("danxbot");
     expect(call.data.id).toBe("DX-1");
     expect(call.data.issue.title).toBe("Renamed");
   });
