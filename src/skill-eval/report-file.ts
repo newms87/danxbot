@@ -14,7 +14,7 @@
  * directly; the orchestrators call this from their `main()` only.
  */
 
-import { renameSync, statSync, writeFileSync } from "node:fs";
+import { renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface WriteEvalSetReportFileArgs {
@@ -45,11 +45,24 @@ export function writeEvalSetReportFile(
     );
   }
   const path = join(args.evalSetDir, "REPORT.md");
-  const tempPath = `${path}.tmp`;
+  // PID-suffix the temp path so two concurrent writers (e.g. Mode 4 sweep
+  // racing a Mode 2 single-sweep against the same eval-set) cannot collide
+  // mid-rename. The try/finally guarantees a partial write from a crashed
+  // `writeFileSync` (ENOSPC, EACCES) does not orphan a `.tmp` on disk.
+  const tempPath = `${path}.${process.pid}.tmp`;
   const trimmed = args.markdown.replace(/\s+$/, "");
   const content = `${trimmed}\n\n_Last run: ${args.runAt.toISOString()}_\n`;
-  writeFileSync(tempPath, content, "utf8");
-  renameSync(tempPath, path);
+  try {
+    writeFileSync(tempPath, content, "utf8");
+    renameSync(tempPath, path);
+  } catch (err) {
+    try {
+      unlinkSync(tempPath);
+    } catch {
+      // Best-effort cleanup; the original error is what the caller needs.
+    }
+    throw err;
+  }
   return { path, bytesWritten: Buffer.byteLength(content, "utf8") };
 }
 

@@ -1,4 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -83,6 +90,19 @@ describe("writeEvalSetReportFile", () => {
     expect(left).toEqual(["REPORT.md"]);
   });
 
+  it("ends the file with exactly one trailing newline (no double-newline tail)", () => {
+    // Prevents a regression where the footer grows a stray blank line that
+    // confuses dashboard MarkdownEditor / GFM renderers.
+    const result = writeEvalSetReportFile({
+      evalSetDir: tmp,
+      markdown: "# Skill-eval report\n\n**Overall: PASS**",
+      runAt: new Date("2026-05-12T05:45:00.000Z"),
+    });
+    const written = readFileSync(result.path, "utf8");
+    expect(written.endsWith("_\n")).toBe(true);
+    expect(written.endsWith("_\n\n")).toBe(false);
+  });
+
   it("returns the byte count of what landed on disk", () => {
     const md = "# Skill-eval report: dev:debugging\n\n**Overall: PASS**\n";
     const result = writeEvalSetReportFile({
@@ -94,7 +114,7 @@ describe("writeEvalSetReportFile", () => {
     expect(result.bytesWritten).toBe(Buffer.byteLength(written, "utf8"));
   });
 
-  it("throws when the eval-set directory does not exist (fail loud, not silent mkdir)", () => {
+  it("throws ENOENT when the eval-set directory does not exist (fail loud, not silent mkdir)", () => {
     const missing = join(tmp, "does-not-exist");
     expect(() =>
       writeEvalSetReportFile({
@@ -102,7 +122,22 @@ describe("writeEvalSetReportFile", () => {
         markdown: "# x\n",
         runAt: new Date(),
       }),
-    ).toThrow();
+    ).toThrow(/ENOENT|no such file or directory/);
+  });
+
+  it("throws 'is not a directory' when evalSetDir is a regular file (no silent overwrite)", () => {
+    // Cover the explicit `!isDirectory()` branch in report-file.ts:
+    // a path that exists but is a FILE must fail loud, not get treated as
+    // a writable dir for REPORT.md.
+    const filePath = join(tmp, "actually-a-file");
+    writeFileSync(filePath, "not a dir", "utf8");
+    expect(() =>
+      writeEvalSetReportFile({
+        evalSetDir: filePath,
+        markdown: "# x\n",
+        runAt: new Date(),
+      }),
+    ).toThrow(/is not a directory/);
   });
 });
 
@@ -165,5 +200,19 @@ describe("persistEvalSetReportWithLog", () => {
     const joined = chunks.join("");
     expect(joined).toContain("REPORT.md written:");
     expect(joined).toContain(result.path);
+  });
+
+  it("defaults the stderr param to process.stderr when omitted (single-arg call site)", () => {
+    // Locks the default-param contract — run-eval-set.ts and run-iterate.ts
+    // call this without a second arg in production. Regression would either
+    // throw or silently drop the announce log.
+    const evalSetPath = join(tmp, "eval-set.json");
+    const result = persistEvalSetReportWithLog({
+      evalSetPath,
+      markdown: "# x\n",
+      runAt: new Date("2026-05-12T05:45:00.000Z"),
+    });
+    expect(result.path).toBe(join(tmp, "REPORT.md"));
+    expect(existsSync(result.path)).toBe(true);
   });
 });

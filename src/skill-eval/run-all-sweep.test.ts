@@ -111,6 +111,27 @@ describe("discoverEvalSets", () => {
     expect(result[0].evalSetDir).toBe(dir);
     expect(result[0].evalSetPath).toBe(join(dir, "eval-set.json"));
   });
+
+  it("returns [] when the eval-sets dir itself does not exist (operator misconfig)", () => {
+    // Covers the early-return guard in discoverEvalSets — pointing the
+    // sweep at a typo'd `--eval-sets-dir` must NOT throw, just yield zero
+    // entries so runAllSweepCore exits 2 with the actionable "_No
+    // eval-sets discovered_" footer.
+    const missing = join(root, "no-such-dir");
+    expect(discoverEvalSets(missing)).toEqual([]);
+  });
+
+  it("skips directory names whose plugin or skill segment is empty after splitting", () => {
+    // Names like "-leading" (idx=0 → plugin="") and "trailing-" (last
+    // char hyphen → skill="") would otherwise produce a malformed
+    // ":<skill>" / "<plugin>:" pluginSkill. The guard at
+    // discoverEvalSets must reject both.
+    makeFakeEvalSetDir(root, "-leading");
+    makeFakeEvalSetDir(root, "trailing-");
+    makeFakeEvalSetDir(root, "dev-debugging");
+    const result = discoverEvalSets(root);
+    expect(result.map((e) => e.pluginSkill)).toEqual(["dev:debugging"]);
+  });
 });
 
 describe("renderSweepRollup", () => {
@@ -506,21 +527,29 @@ describe("runAllSweepCore", () => {
     expect(result.overallPass).toBe(false);
   });
 
-  it("returns exit code 2 when no eval-sets are discovered", async () => {
-    // evalSetsDir is empty
+  it("returns exit code 2 when no eval-sets are discovered, does NOT emit SWEEP.md", async () => {
+    // evalSetsDir is empty. SWEEP.md must NOT land in the (possibly
+    // operator-unauthored) target dir — empty discovery is a misconfig
+    // signal, not a result worth persisting.
     const runOne: SweepRunOneFn = vi.fn(async () => {
       throw new Error("should not be invoked");
     });
+    const writeSweepMarkdown = vi.fn(() => "/fake/SWEEP.md");
     const result = await runAllSweepCore(baseArgs(), {
       runOne,
       writeReport: () => ({ path: "/fake/REPORT.md", bytesWritten: 0 }),
-      writeSweepMarkdown: () => "/fake/SWEEP.md",
+      writeSweepMarkdown,
       now: () => 0,
     });
 
     expect(result.exitCode).toBe(2);
     expect(result.entries).toHaveLength(0);
     expect(runOne).not.toHaveBeenCalled();
+    expect(writeSweepMarkdown).not.toHaveBeenCalled();
+    expect(result.sweepReportPath).toBeUndefined();
+    // The rollup markdown still gets rendered so the CLI can announce
+    // "_No eval-sets discovered_" to stdout — verify the hint is present.
+    expect(result.rollupMarkdown).toContain("No eval-sets discovered");
   });
 
   it("records an ERROR entry when an eval-set throws — does NOT abort sweep", async () => {
