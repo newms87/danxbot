@@ -132,5 +132,5 @@ export const TEAM_PROMPT_RESUME = "/danx-next";
  * skill description carries the full per-status contract.
  */
 export const TRIAGE_CARD_PROMPT = (issueId: string): string =>
-  `Triage card ${issueId} using the danx-triage-card skill.`;
+  `/danx-triage-card ${issueId}`;
 

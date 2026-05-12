@@ -1040,11 +1040,9 @@ async function _poll(repo: RepoContext): Promise<void> {
     );
   }
 
-  const yamlPath = issuePath(repo.localPath, resolvedIssue.id, "open");
-  const task =
-    `${TEAM_PROMPT}\n\nEdit ${yamlPath} directly with the Edit / Write tools. ` +
-    `The watcher mirrors changes to the database automatically; the poller's ` +
-    `per-tick mirror pushes them to the tracker. Call danxbot_complete when done.`;
+  // Pass the card id as the slash-command argument; the `danx-next` skill
+  // owns the "edit YAML, chokidar mirrors, call danxbot_complete" contract.
+  const task = `${TEAM_PROMPT} ${resolvedIssue.id}`;
 
   // DX-242: legacy single-card unscoped dispatch DISABLED. The
   // multi-agent picker (DX-200) is the SOLE dispatcher. When the

@@ -109,8 +109,7 @@ vi.mock("./constants.js", () => ({
   TEAM_PROMPT: "/danx-next",
   TEAM_PROMPT_RESUME: "/danx-next",
   IDEATOR_PROMPT: "/danx-ideate",
-  TRIAGE_CARD_PROMPT: (id: string) =>
-    `Triage card ${id} using the danx-triage-card skill.`,
+  TRIAGE_CARD_PROMPT: (id: string) => `/danx-triage-card ${id}`,
 }));
 
 /**
@@ -4410,13 +4409,10 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
     const dispatchArg = mockDispatch.mock.calls[0][0] as { task: string };
-    expect(dispatchArg.task).toContain("/danx-next");
-    expect(dispatchArg.task).toContain(
-      "Edit /test/repos/test-repo/.danxbot/issues/open/ISS-FAKE.yml",
-    );
-    expect(dispatchArg.task).toContain(
-      "Call danxbot_complete when done.",
-    );
+    // Minimal prompt: /danx-next slash command + card id as the argument.
+    // The "edit the YAML, call danxbot_complete" contract lives in the
+    // danx-next SKILL.md body now (operator-prompt-slim rework, 2026-05-12).
+    expect(dispatchArg.task).toBe("/danx-next ISS-FAKE");
   });
 
   // ISS-135 â€” Fresh dispatch (non-resume) must NOT carry the resume
@@ -5769,9 +5765,7 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-    expect(mockDispatch.mock.calls[0][0].task).toBe(
-      "Triage card ISS-11 using the danx-triage-card skill.",
-    );
+    expect(mockDispatch.mock.calls[0][0].task).toBe("/danx-triage-card ISS-11");
   });
 
   it("dispatches triage for a Blocked card (blocked != null, worker forces status: ToDo)", async () => {
@@ -5795,9 +5789,7 @@ describe.skip("[DX-242 SKIP â€” DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] poll â
     await poll(MOCK_REPO_CONTEXT);
 
     expect(mockDispatch).toHaveBeenCalledTimes(1);
-    expect(mockDispatch.mock.calls[0][0].task).toBe(
-      "Triage card ISS-13 using the danx-triage-card skill.",
-    );
+    expect(mockDispatch.mock.calls[0][0].task).toBe("/danx-triage-card ISS-13");
   });
 
   it("triage dispatches use trigger=api so the post-dispatch CRITICAL_FAILURE check does not fire (trackedCardId remains null)", async () => {

@@ -33,7 +33,10 @@ import {
 // launcher.ts split (Trello g8NF9oat) but still belong to the launcher's
 // public contract.
 export { putStatus, startHeartbeat, stopHeartbeat } from "./agent-status.js";
-export { buildCompletionInstruction } from "./completion-instruction.js";
+export {
+  buildCompletionInstruction,
+  shouldAppendCompletionInstruction,
+} from "./completion-instruction.js";
 export {
   type AgentJob,
   type AgentUsage,

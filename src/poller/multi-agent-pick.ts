@@ -49,7 +49,6 @@
 
 import { randomUUID } from "node:crypto";
 import { hostname as osHostname } from "node:os";
-import { resolve } from "node:path";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
@@ -483,30 +482,11 @@ export async function tryMultiAgentDispatch(
       continue;
     }
 
-    // Build the per-card task body. Same shape as the legacy single-
-    // card path (TEAM_PROMPT + Edit instruction); the persona prefix
-    // is auto-injected by `dispatch()` before the agent reads the
-    // first turn.
-    //
-    // DX-309: agent-bound dispatches cwd into the agent's worktree,
-    // and the worktree-guard PreToolUse hook rejects file_path values
-    // outside `<worktree>`. Build yamlPath under the worktree so the
-    // literal Edit instruction passes the hook's string-prefix check;
-    // the write itself lands in main via the
-    // `<worktree>/.danxbot/issues` → main symlink provisioned by the
-    // worktree manager.
-    const worktreePath = manager.worktreePath(repo, agent.name);
-    const yamlPath = resolve(
-      worktreePath,
-      ".danxbot",
-      "issues",
-      "open",
-      `${stamped.id}.yml`,
-    );
-    const task =
-      `/danx-next\n\nEdit ${yamlPath} directly with the Edit / Write tools. ` +
-      `The watcher mirrors changes to the database automatically; the poller's ` +
-      `per-tick mirror pushes them to the tracker. Call danxbot_complete when done.`;
+    // Pass the card id as the slash-command argument; the `danx-next` skill
+    // body owns the "edit the YAML, chokidar mirrors, call danxbot_complete"
+    // contract. Keeping the prompt minimal (persona + worktree + slash cmd +
+    // card id) trims static prose from every dispatch's system-prompt cache.
+    const task = `/danx-next ${stamped.id}`;
 
     try {
       await dispatchWithRecovery(

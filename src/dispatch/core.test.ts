@@ -478,7 +478,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
   it("auto-injects DANX_REPO_ROOT into the danx-issue server's env (DX-203: tracker triple retired)", async () => {
     await dispatch({
       repo: issueRepo,
-      task: "Triage card ISS-1 using the danx-triage-card skill.",
+      task: "/danx-triage-card ISS-1",
       workspace: "issue-worker",
       overlay: {},
       apiDispatchMeta: DEFAULT_DISPATCH_META,
@@ -517,7 +517,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
 
     await dispatch({
       repo: issueRepo,
-      task: "Triage card ISS-1 using the danx-triage-card skill.",
+      task: "/danx-triage-card ISS-1",
       workspace: "issue-worker",
       overlay: {},
       apiDispatchMeta: DEFAULT_DISPATCH_META,
