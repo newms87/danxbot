@@ -3,14 +3,21 @@ name: skill-eval
 description: |
   Run skill-trigger probes against the local danxbot worker via host-mode
   interactive dispatch (never `claude -p` — bypasses Anthropic bugs #36570
-  and #556). Two modes: (1) one-shot — `/skill-eval --query "<prompt>"
+  and #556). Three modes: (1) one-shot — `/skill-eval --query "<prompt>"
   --expect-skill <plugin>:<skill>` returns a single PASS/FAIL + JSONL
   path; (2) eval-set — `/skill-eval <plugin>:<skill>` runs the JSON
   eval-set under `<repo>/tests/skill-evals/<plugin>-<skill>/eval-set.json`,
   3× per query (configurable), 60/40 train/test split with deterministic
-  seed, markdown report with per-failure forensics + cost. Exits 0 if
-  train AND test ≥ 95% else 1. Invoke when the operator types either form
-  OR asks for a one-shot trigger probe / full eval sweep.
+  seed, markdown report with per-failure forensics + cost; (3) iterate —
+  `/skill-eval <plugin>:<skill> --iterate` runs the propose-fix-retest
+  loop (default 5 iterations, hard-max 8, cost cap ~$2.55) — each
+  iteration asks Claude Haiku for a tighter SKILL.md description from
+  train failures only, commits + pushes the plugin source, pulls the
+  marketplace cache + sanity-checks propagation, re-runs the eval-set,
+  selects best by held-out test score, rolls back to best on regression.
+  Exits 0 on green / 1 otherwise. Invoke when the operator types any of
+  those three forms OR asks for a trigger probe / full eval sweep /
+  autonomous description tightening.
 ---
 
 # Skill-Eval — trigger regression harness
@@ -144,6 +151,96 @@ Constraints enforced by `validateEvalSet` in `src/skill-eval/eval-set.ts`:
 4. **Exit codes.** `0` for PASS, `1` for FAIL (accuracy below 95% on
    either side), `2` for runner errors (eval-set parse / not found,
    worker unreachable on every probe, etc.).
+
+## Mode 3 — propose-fix-retest iteration (`--iterate`)
+
+```
+/skill-eval <plugin>:<skill> --iterate
+   [--max-iterations N]   (default 5, hard-max 8)
+   [--cost-cap-usd X]     (default 2.55)
+   [--proposer-model M]   (default claude-haiku-4-5)
+   [--source-root <dir>]  (default ~/web/claude-plugins)
+   [--cache-root <dir>]   (default ~/.claude/plugins/marketplaces/newms-plugins)
+   (plus every Mode-2 flag: --parallel, --seed, etc.)
+```
+
+Mirrors Anthropic's skill-creator `run_loop` algorithm — but routes the
+eval-set step through this repo's host-mode dispatch (sidesteps the
+broken `claude -p` runner) and routes the description-edit step through
+Claude Haiku via the Anthropic SDK.
+
+### What the loop does
+
+1. **Run eval-set** against the current SKILL.md description.
+2. If train + test both ≥ 95%: **GREEN** — stop.
+3. If iteration count hits `--max-iterations`: **MAX-ITERATIONS** — stop.
+4. If accumulated cost + estimated next-iter cost > `--cost-cap-usd`:
+   **COST-CAP** — stop.
+5. **Propose** — ask Haiku for a tighter description, given the current
+   description + the TRAIN failures only (held-out test is the
+   overfitting defense — never shown to the proposer).
+6. **Apply** — `replaceDescription` writes the new description into the
+   source SKILL.md. `validateDiff` enforces that ONLY the frontmatter
+   `description:` field changed; body bytes + every other frontmatter
+   key are byte-identical.
+7. **Commit + push** the plugin source repo at `--source-root`
+   (default `~/web/claude-plugins`), one commit per iteration.
+8. **Reload-propagation sanity check** — `git pull --ff-only` the
+   marketplace cache repo at `--cache-root`, re-read the cached
+   SKILL.md, and assert the on-disk description matches what we just
+   pushed. Bail loudly on drift (the next iteration would otherwise
+   measure the OLD description).
+9. **Re-run eval-set**, loop.
+
+### Best-iteration selection + rollback
+
+The loop tracks the iteration with the highest held-out **test** score.
+If the FINAL iteration's test score is below that best, the loop
+performs one extra commit + push that restores the best iteration's
+description before exiting. The report's `Rolled back to iteration N`
+line surfaces this. If the rollback push itself fails (push rejected,
+marketplace pull conflict), the result carries `rollbackError` instead
+— operator must restore manually.
+
+### Cost + safety
+
+- 1 iteration ≈ 1 full eval-set (~$0.50) + 1 Haiku proposal (~$0.01) = ~$0.51.
+- 5 iterations ≈ ~$2.55 (default cost cap).
+- Hard-max iteration cap = 8 (`HARD_MAX_ITERATIONS` in `iterate.ts`) —
+  refuses to start if `--max-iterations` is set above this.
+- Description length cap = 5000 chars (`MAX_DESCRIPTION_LENGTH` in
+  `description-editor.ts`) — proposer responses exceeding the cap fail
+  loud rather than commit runaway growth.
+- Edit surface is enforced both in writer (`replaceDescription`) and
+  in policer (`validateDiff`) — body or non-description-key edits
+  abort the iteration.
+- Plugin commit + push is **destructive**: this loop will mutate your
+  `claude-plugins` repo. Confirm you have a clean working tree on the
+  branch you want to commit to BEFORE invoking.
+
+### What to do when this form is invoked
+
+1. **Parse the arguments.** First positional is `<plugin>:<skill>`.
+   `--iterate` is a flag (no value).
+2. **Run the runner.** Single Bash call:
+
+   ```bash
+   npx tsx <repo-root>/src/skill-eval/run-iterate.ts <plugin>:<skill>
+   ```
+
+   Pass `--max-iterations`, `--cost-cap-usd`, etc. only when the
+   operator asked for non-default values.
+
+3. **Surface the markdown report verbatim.** The runner writes:
+   - `# Skill-eval iterate report: <plugin>:<skill>`
+   - `**Status: <green|max-iterations|cost-cap|fatal-error>**`
+   - Best test accuracy + iteration index.
+   - Total cost (~$X estimated).
+   - Per-iteration table (train, test, cost, sha, status).
+   - `## Errors` block when a proposer / reload / edit failure
+     short-circuited the loop.
+
+4. **Exit codes.** `0` on green, `1` on every other terminal status.
 
 ## Architecture (read once)
 

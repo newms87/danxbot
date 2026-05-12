@@ -35,6 +35,7 @@ import {
 import {
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_TIMEOUT_MS,
+  parseNonNegativeInt as parseNonNegativeIntShared,
   parsePositiveInt as parsePositiveIntShared,
   pickArg,
 } from "./cli-args.js";
@@ -73,6 +74,14 @@ export interface RunEvalSetResult {
   readonly exitCode: 0 | 1;
   readonly markdown: string;
   readonly totalCostUsd: number;
+  /**
+   * Per-query verdicts split into the train/test halves. Exposed so the
+   * iteration orchestrator (`iterate.ts`) can extract train failures
+   * for the proposer without re-running the sweep — the held-out test
+   * verdicts are tracked separately for the best-iteration selection.
+   */
+  readonly trainVerdicts: readonly QueryVerdict[];
+  readonly testVerdicts: readonly QueryVerdict[];
 }
 
 export type ProbeFn = (args: ProbeArgs) => Promise<ProbeResult>;
@@ -144,13 +153,11 @@ export function parseEvalSetArgs(
     "runs-per-query",
     pickArg(argv, "runs-per-query") ?? `${DEFAULT_RUNS_PER_QUERY}`,
   );
-  const seedRaw = pickArg(argv, "seed") ?? `${DEFAULT_SEED}`;
-  if (!/^\d+$/.test(seedRaw.trim())) {
-    throw new RunEvalSetArgsError(
-      `invalid --seed: must be a non-negative integer (got "${seedRaw}")`,
-    );
-  }
-  const seed = Number(seedRaw);
+  const seed = parseNonNegativeIntShared(
+    "seed",
+    pickArg(argv, "seed") ?? `${DEFAULT_SEED}`,
+    RunEvalSetArgsError,
+  );
 
   const pricingModel =
     pickArg(argv, "pricing-model") ?? DEFAULT_PRICING_MODEL;
@@ -390,6 +397,8 @@ export async function runEvalSetCore(
     exitCode: overallPass ? 0 : 1,
     markdown,
     totalCostUsd,
+    trainVerdicts,
+    testVerdicts,
   };
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { aggregateSide } from "./aggregate.js";
 import type { EvalQuery } from "./eval-set.js";
 import type { ProbeArgs, ProbeResult } from "./probe.js";
 import { ProbeError } from "./probe.js";
@@ -169,6 +170,35 @@ describe("runEvalSetCore (with injected probe)", () => {
     expect(result.markdown).toMatch(/Overall: PASS/);
     // 20 queries × 3 runs = 60 probe invocations.
     expect(probe).toHaveBeenCalledTimes(60);
+  });
+
+  it("exposes trainVerdicts + testVerdicts shaped per the 60/40 split", async () => {
+    // 20 queries → train=12, test=8 (Math.round(0.6 * 20)=12). Verdicts
+    // must be populated, lengths must match the split, and per-verdict
+    // shape (correct flag, query reference, run records) must round-trip
+    // through aggregateSide for the iteration loop's failure extraction.
+    const evalSet = buildEvalSet(10, 10);
+    const probe = vi.fn(async (probeArgs: ProbeArgs) => {
+      // Half of positives miss → false negatives feed train failures.
+      const isPos = probeArgs.query.startsWith("pos-");
+      const fakeMiss = isPos && /[02468]$/.test(probeArgs.query);
+      return makeProbeResult({ pass: isPos && !fakeMiss });
+    });
+    const result = await runEvalSetCore(baseArgs(), evalSet, probe);
+    expect(result.trainVerdicts.length).toBe(12);
+    expect(result.testVerdicts.length).toBe(8);
+    // No overlap: every query appears in exactly one half.
+    const trainQueries = new Set(result.trainVerdicts.map((v) => v.query.query));
+    const testQueries = new Set(result.testVerdicts.map((v) => v.query.query));
+    for (const q of trainQueries) expect(testQueries.has(q)).toBe(false);
+    // Aggregator must compute non-trivial accuracy from the verdicts.
+    const trainAcc = aggregateSide("train", result.trainVerdicts).accuracy;
+    expect(trainAcc).toBeGreaterThanOrEqual(0);
+    expect(trainAcc).toBeLessThanOrEqual(1);
+    // At least one false-negative on the train side (the iteration
+    // loop's failure-extraction needs to find these).
+    const trainFailures = result.trainVerdicts.filter((v) => !v.correct);
+    expect(trainFailures.length).toBeGreaterThan(0);
   });
 
   it("returns exit 1 when accuracy is below the 95% threshold", async () => {

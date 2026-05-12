@@ -1,11 +1,12 @@
 /**
  * Shared CLI argument helpers for the skill-eval entry points
- * (`run.ts` single-query CLI + `run-eval-set.ts` eval-set CLI).
+ * (`run.ts` single-query CLI, `run-eval-set.ts` eval-set CLI,
+ * `run-iterate.ts` iteration loop CLI).
  *
- * Both CLIs need the same `--flag value` / `--flag=value` parsing and
- * the same strict positive-integer validator; putting the helpers in
- * either entry point creates a CLI-imports-CLI smell. Sibling module
- * keeps each CLI a pure entry point.
+ * All three CLIs need the same `--flag value` / `--flag=value` parsing
+ * and the same strict integer validators; putting the helpers in any one
+ * entry point creates a CLI-imports-CLI smell. Sibling module keeps each
+ * CLI a pure entry point.
  */
 
 export const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -46,6 +47,29 @@ export function parsePositiveInt(
   if (!Number.isFinite(n) || n <= 0) {
     throw new ErrorCtor(
       `invalid --${name}: must be a positive integer (got "${raw}")`,
+    );
+  }
+  return n;
+}
+
+/**
+ * Like `parsePositiveInt` but accepts 0. Used for `--seed` (0 is a
+ * legal RNG seed) where every other constraint is identical.
+ */
+export function parseNonNegativeInt(
+  name: string,
+  raw: string,
+  ErrorCtor: new (message: string) => Error = Error,
+): number {
+  if (!/^\d+$/.test(raw.trim())) {
+    throw new ErrorCtor(
+      `invalid --${name}: must be a non-negative integer (got "${raw}")`,
+    );
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new ErrorCtor(
+      `invalid --${name}: must be a non-negative integer (got "${raw}")`,
     );
   }
   return n;
