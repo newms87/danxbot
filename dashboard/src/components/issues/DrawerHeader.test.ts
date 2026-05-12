@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 import DrawerHeader from "./DrawerHeader.vue";
-import type { Issue, IssueDetail } from "../../types";
+import type { IssueDetail } from "../../types";
 
 vi.mock("../../api", () => ({
   patchIssue: vi.fn(),
@@ -29,7 +29,7 @@ const TypeBadgeStub = defineComponent({
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -41,6 +41,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Original Title",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -56,13 +57,14 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
     requires_human_child_count: 0,
     ...overrides,
-  } as unknown as IssueDetail;
+  };
 }
 
 function mountHeader(detail: IssueDetail = makeDetail()) {
@@ -103,7 +105,7 @@ describe("DrawerHeader title editor", () => {
   });
 
   it("Enter saves: calls patchIssue with the new title and emits update:issue", async () => {
-    const patched = makeDetail({ title: "New Title" }) as unknown as Issue;
+    const patched = makeDetail({ title: "New Title" });
     patchMock.mockResolvedValue(patched);
 
     const w = mountHeader();

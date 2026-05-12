@@ -18,7 +18,7 @@ const MarkdownEditorStub = {
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -30,6 +30,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Card",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -45,12 +46,14 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
-  } as unknown as IssueDetail;
+  };
 }
 
 function mountTab(detail: IssueDetail = makeDetail()) {
@@ -130,7 +133,7 @@ describe("CommentsTab", () => {
           text: "first thought",
         },
       ],
-    }) as unknown as Issue;
+    });
     resolvePatch(stamped);
     await flushPromises();
 
@@ -155,7 +158,7 @@ describe("CommentsTab", () => {
     await w.get('[data-test="comment-post"]').trigger("click");
     expect(w.find('[data-test="comment-pending"]').exists()).toBe(true);
 
-    resolvePatch(makeDetail({}) as unknown as Issue);
+    resolvePatch(makeDetail({}));
     await flushPromises();
     // Simulate the parent forwarding the server-stamped issue back.
     await w.setProps({
@@ -230,7 +233,7 @@ describe("CommentsTab", () => {
         },
       ],
     });
-    resolvePatch(postPatch as unknown as Issue);
+    resolvePatch(postPatch);
     await flushPromises();
     // Simulate the parent receiving the emit and forwarding the
     // post-PATCH issue back down.

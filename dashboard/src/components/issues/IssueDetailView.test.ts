@@ -40,7 +40,7 @@ const stubs = {
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -52,6 +52,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Card",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -67,12 +68,14 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
-  } as unknown as IssueDetail;
+  };
 }
 
 function mountView(issue: IssueDetail | null, loading = false) {
@@ -104,7 +107,7 @@ describe("IssueDetailView active-dispatch banner", () => {
       ttl_seconds: 3600,
     };
     const w = mountView(
-      makeDetail({ dispatch: dispatch as unknown as IssueDetail["dispatch"] }),
+      makeDetail({ dispatch }),
     );
     const banner = w.get('[data-test="active-dispatch-banner"]');
     expect(banner.text()).toContain("Agent is working on this card");

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { defineComponent, h } from "vue";
 import OverviewTab from "./OverviewTab.vue";
-import type { Issue, IssueDetail } from "../../types";
+import type { IssueDetail } from "../../types";
 
 vi.mock("../../api", () => ({
   patchIssue: vi.fn(),
@@ -41,7 +41,7 @@ const MarkdownEditorStub = defineComponent({
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -53,6 +53,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Card",
     description: "Original description body",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -68,12 +69,14 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
-  } as unknown as IssueDetail;
+  };
 }
 
 function mountTab(detail: IssueDetail = makeDetail()) {
@@ -118,7 +121,7 @@ describe("OverviewTab description editor", () => {
   it("Save calls patchIssue with the edited description and emits update:issue", async () => {
     const patched = makeDetail({
       description: "Rewritten body",
-    }) as unknown as Issue;
+    });
     patchMock.mockResolvedValue(patched);
 
     const w = mountTab();

@@ -26,7 +26,7 @@ function makeAc(): IssueAcItem[] {
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -38,6 +38,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Card 1",
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -53,12 +54,14 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",
+    requires_human_child_count: 0,
     ...overrides,
-  } as unknown as IssueDetail;
+  };
 }
 
 function mountACTab(detail: IssueDetail = makeDetail()) {
@@ -102,7 +105,7 @@ describe("ACTab", () => {
           { check_item_id: "id-3", title: "Third AC", checked: true },
         ],
       }),
-    } as unknown as Issue;
+    };
     patchMock.mockResolvedValue(patched);
 
     const w = mountACTab();
@@ -130,7 +133,7 @@ describe("ACTab", () => {
           { check_item_id: "id-3", title: "Third AC", checked: true },
         ],
       }),
-    } as unknown as Issue;
+    };
     patchMock.mockResolvedValue(patched);
 
     const w = mountACTab();
@@ -170,7 +173,7 @@ describe("ACTab", () => {
     expect(w.find('[data-test="ac-saving"]').exists()).toBe(true);
     resolvePatch({
       ...makeDetail({ ac: makeAc() }),
-    } as unknown as Issue);
+    });
     await flushPromises();
     expect(w.find('[data-test="ac-saving"]').exists()).toBe(false);
   });

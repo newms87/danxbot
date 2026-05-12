@@ -188,7 +188,7 @@ function makeIssueSnapshot(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id,
     external_id: "",
@@ -200,6 +200,7 @@ function makeIssueSnapshot(
     title: `Card ${id}`,
     description: "",
     priority: 3,
+    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -215,9 +216,10 @@ function makeIssueSnapshot(
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     assigned_agent: null,
     ...overrides,
-  } as unknown as Issue;
+  };
 }
 
 describe("useIssues — applyIssueUpdate", () => {
