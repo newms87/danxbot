@@ -81,6 +81,7 @@ description: |-
   P3 — Iteration loop + agent-driven description-fix flow (DX-278)
   P4 — Coverage expansion + per-skill reporting (DX-279)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

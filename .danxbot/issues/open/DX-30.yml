@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-30
 external_id: 69f134e0315c505ce97ab463
@@ -38,6 +38,7 @@ description: |-
 
   Filed as an action item from card #90 retro (`5qoyfsF0`).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -57,5 +58,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

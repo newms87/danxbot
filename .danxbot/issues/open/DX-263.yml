@@ -32,6 +32,7 @@ description: |-
 
   The `claude-plugins/danxbot` publish-step ownership gap is unrelated to dashboard card editing — filed as a standalone card sibling to this epic.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

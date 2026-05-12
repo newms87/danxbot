@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-34
 external_id: 69efca7f3a167720d2ffca26
@@ -35,6 +35,7 @@ description: |-
 
   Run `./install.sh` against a fresh connected repo with no `.claude/skills/danx-*` gitignore entry; confirm the entry is appended exactly once. Re-run; confirm no duplicate. Run `git status` in the connected repo; confirm danx-* symlinks are not Untracked.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -54,5 +55,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

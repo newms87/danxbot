@@ -132,6 +132,7 @@ description: |-
 
   Blocks: DX-220 (Phase 5 cannot meaningfully slim the cron or rename the module until the dispatch decisions are gone from `_poll`), DX-221 (Phase 6 cleanup operates on the post-Phase-5 module shape).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

@@ -4,8 +4,14 @@ id: DX-305
 external_id: 6a026d96e42d8ae6562bf56b
 parent_id: null
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 953fd2dd-2f33-4769-8fd2-21d2370212b8
+  pid: 77168
+  host: dan
+  kind: work
+  started_at: 2026-05-12T00:30:49.589Z
+  ttl_seconds: 7200
+status: In Progress
 type: Bug
 title: Picker has no single-flight guard → concurrent runPicker invocations spawn duplicate agent processes
 description: |-
@@ -119,7 +125,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
-assigned_agent: null
+assigned_agent: murphy
 waiting_on: null
 blocked: null
 requires_human: null

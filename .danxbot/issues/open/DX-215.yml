@@ -130,6 +130,7 @@ description: |-
   - Auto-scaling agent count (out of scope per DX-158).
   - Re-introducing any agent-facing save MCP tool (forbidden by DX-157).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

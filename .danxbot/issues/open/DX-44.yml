@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-44
 external_id: 69ec3c07f4738e531c138599
@@ -47,6 +47,7 @@ description: |-
 
   During P6 verification (Trello [WWYKnQhc](https://trello.com/c/WWYKnQhc)). Independent of P6 — the leak's mtimes show accumulation over weeks.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -118,5 +119,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

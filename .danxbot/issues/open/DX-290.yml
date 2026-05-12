@@ -4,13 +4,7 @@ id: DX-290
 external_id: 6a01aa9c0846498e733a9562
 parent_id: DX-287
 children: []
-dispatch:
-  id: 20431dc8-76fa-4319-97bb-41baa154c1ea
-  pid: 0
-  host: dan
-  kind: work
-  started_at: 2026-05-12T00:03:47.664Z
-  ttl_seconds: 7200
+dispatch: null
 status: ToDo
 type: Feature
 title: "Event-Driven Worker > Phase 4b.3: _poll dispatch-decision deletion + 17 SKIP marker cleanup"

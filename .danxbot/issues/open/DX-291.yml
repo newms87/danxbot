@@ -78,6 +78,7 @@ description: |-
   - Unit per phase + integration for the verdict round-trip + system test in P6 covering full happy + sad path on a real worktree.
   - See each phase card for its own AC + test scope.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

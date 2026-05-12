@@ -94,6 +94,7 @@ description: |-
   - System test as the integration ceiling.
   - Manual smoke: `make launch-worker-host REPO=danxbot` w/ a fixture card; observe the prep then work flow in a Windows Terminal tab.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

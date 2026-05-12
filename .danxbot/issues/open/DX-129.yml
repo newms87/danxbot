@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-129
 external_id: 69ded281a7a34875f2072d4e
@@ -21,6 +21,7 @@ description: |-
 
   - /home/newms/web/danxbot-flytebot/.danxbot/.env — add DANX_SLACK_* vars
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -64,7 +65,9 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked:
   reason: (no recorded reason — migrated from legacy v3 'Needs Help' status; agent should overwrite on next pickup)
   timestamp: 1970-01-01T00:00:00.000Z
+requires_human: null

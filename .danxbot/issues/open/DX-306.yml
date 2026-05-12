@@ -4,8 +4,14 @@ id: DX-306
 external_id: 6a026daf1ff76e8132a00194
 parent_id: null
 children: []
-dispatch: null
-status: ToDo
+dispatch:
+  id: 868bebbc-0f4b-4dd2-a7aa-c0df72a9055a
+  pid: 77779
+  host: dan
+  kind: work
+  started_at: 2026-05-12T00:31:03.026Z
+  ttl_seconds: 7200
+status: In Progress
 type: Bug
 title: Lock-acquire 429 keeps agent in free pool → same agent walks through every remaining card per tick
 description: |-
@@ -128,7 +134,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
-assigned_agent: null
+assigned_agent: murphy
 waiting_on: null
 blocked: null
 requires_human: null

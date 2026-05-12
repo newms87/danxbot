@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-42
 external_id: 69ec47e229d27cfa1c45de3e
@@ -20,6 +20,7 @@ description: |-
 
   Reference: Trello auX4nTRk's "Review Fixes (round 2)" comment + `worker-compose-mounts.test.ts`'s "does not override the baked DANXBOT_COMMIT" test as the prior-art shape.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -63,5 +64,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

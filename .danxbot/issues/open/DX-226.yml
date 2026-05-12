@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: memory
 id: DX-226
 external_id: 6a00034df6906e44fd6b46dd
@@ -78,6 +78,7 @@ description: |
   - Codifying the rule + sweeping for other polling sites (Phase 2 / DX-227).
   - Issue-detail drawer's per-tab live updates beyond the cache-invalidation behavior described above.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -121,3 +122,4 @@ retro:
 assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null
