@@ -51,7 +51,13 @@ describe("capture-server-cli", () => {
         }
       });
 
-      setTimeout(() => reject(new Error("CLI did not print port within 10s")), 10000);
+      // DX-310: 10s deadline raced `npx tsx` cold-start when this file
+      // ran in parallel with other subprocess-spawning suites under the
+      // default vitest pool. 30s is generous enough to absorb worst-case
+      // contention (tsx warm-up + node startup) without masking a real
+      // hang — `pool: "forks"` + `maxForks: 4` in vitest.config.ts is
+      // the contention-side half of the same fix.
+      setTimeout(() => reject(new Error("CLI did not print port within 30s")), 30000);
     });
   }
 
