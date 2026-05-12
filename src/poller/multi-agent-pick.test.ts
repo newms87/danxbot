@@ -802,6 +802,43 @@ describe("tryMultiAgentDispatch", () => {
     );
   });
 
+  /**
+   * DX-322 — throttled dispatches skip runPostDispatchProgressCheck.
+   *
+   * Without this guard, a rate-limit-killed dispatch (card naturally
+   * stays in ToDo because no work happened) would trigger the post-
+   * dispatch check, which writes a `source: "post-dispatch-check"`
+   * flag with NO `resume_at` — overwriting the throttle flag the
+   * rate-limit handler wrote moments earlier and degrading the
+   * halt-gate from "auto-clear past resume_at" to "permanent
+   * CRITICAL_FAILURE". Exactly the failure mode DX-322 exists to
+   * prevent.
+   */
+  it("throttled dispatches skip runPostDispatchProgressCheck (DX-322 — would overwrite the throttle flag with a permanent CRITICAL_FAILURE)", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "throttled",
+      summary: "Anthropic rate-limit — resumes at 2099-01-01T00:00:00.000Z",
+    } as never);
+
+    expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+  });
+
   it("AC #4: locally-only cards skip runPostDispatchProgressCheck (no tracker round-trip possible)", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({

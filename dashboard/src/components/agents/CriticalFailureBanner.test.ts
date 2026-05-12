@@ -108,4 +108,75 @@ describe("CriticalFailureBanner", () => {
     });
     expect(w.text()).toContain("not-a-date");
   });
+
+  /**
+   * DX-322 — throttle variant. Amber styling + "Throttled — resumes
+   * in Xh Ym Zs" headline + a tick-driven countdown. The "Clear flag"
+   * affordance stays available so the operator can short-circuit the
+   * wait if needed.
+   */
+  describe("throttle variant (DX-322)", () => {
+    function throttleFlag(
+      overrides: Partial<CriticalFailurePayload> = {},
+    ): CriticalFailurePayload {
+      return {
+        timestamp: "2026-05-12T20:00:00.000Z",
+        source: "throttle",
+        dispatchId: "d-throttle",
+        reason: "Anthropic rate-limit reached",
+        resume_at: "2099-01-01T00:00:00.000Z",
+        throttle_kind: "rate_limit",
+        ...overrides,
+      };
+    }
+
+    it("renders the amber 'Throttled — resumes in Xh Ym Zs' headline", () => {
+      const w = mount(CriticalFailureBanner, {
+        props: { flag: throttleFlag(), repoName: "danxbot" },
+      });
+      expect(w.text()).toContain("Throttled");
+      expect(w.text()).toContain("resumes in");
+      // Source label distinguishes the variant in the headline.
+      expect(w.text()).toContain("rate-limit throttle");
+    });
+
+    it("uses amber (not red) styling on the root container", () => {
+      const w = mount(CriticalFailureBanner, {
+        props: { flag: throttleFlag(), repoName: "r" },
+      });
+      const root = w.get('div[role="alert"]');
+      const cls = root.attributes("class") ?? "";
+      expect(cls).toContain("border-amber-500");
+      expect(cls).toContain("bg-amber-50");
+      expect(cls).not.toContain("border-red-500");
+    });
+
+    it("shows the resumes-at clock time when resume_at is provided", () => {
+      const w = mount(CriticalFailureBanner, {
+        props: { flag: throttleFlag(), repoName: "r" },
+      });
+      expect(w.text()).toContain("resumes at");
+    });
+
+    it("falls back to the red critical-failure styling for non-throttle sources", () => {
+      const w = mount(CriticalFailureBanner, {
+        props: { flag: flag({ source: "agent" }), repoName: "r" },
+      });
+      const root = w.get('div[role="alert"]');
+      const cls = root.attributes("class") ?? "";
+      expect(cls).toContain("border-red-500");
+      expect(cls).not.toContain("border-amber-500");
+      expect(w.text()).toContain("Poller halted");
+    });
+
+    it("operator clear still works on a throttle flag", async () => {
+      const w = mount(CriticalFailureBanner, {
+        props: { flag: throttleFlag(), repoName: "danxbot" },
+      });
+      await w.get("button").trigger("click");
+      const events = w.emitted<[string]>("clear");
+      expect(events).toHaveLength(1);
+      expect(events![0]).toEqual(["danxbot"]);
+    });
+  });
 });

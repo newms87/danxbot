@@ -106,13 +106,16 @@ describe("isCompleteStatus", () => {
   // DX-260 (Phase 2 of DX-246) — pin the COMPLETE_STATUSES set explicitly
   // so a future shrink (e.g. accidentally dropping `api_error_recover`)
   // surfaces here, not as a silent worker-stop validation failure.
-  it("accepts the full DX-260 set: agent-visible + launcher-internal", () => {
+  // DX-322 adds `rate_limited` — the rate-limit throttle handler's
+  // self-stop status, internal-only (not advertised on the MCP schema).
+  it("accepts the full launcher-internal status set", () => {
     expect([...COMPLETE_STATUSES]).toEqual([
       "completed",
       "failed",
       "critical_failure",
       "api_error_recover",
       "api_error_failed",
+      "rate_limited",
     ]);
   });
 
@@ -174,6 +177,17 @@ describe("mapCompleteToTerminalStatus (DX-260)", () => {
       "./danxbot-server.js"
     );
     expect(mapCompleteToTerminalStatus("api_error_failed")).toBe("failed");
+  });
+
+  it("rate_limited maps to throttled (DX-322 — distinct from failed/recovered)", async () => {
+    // The throttle flag carries `resume_at`; the DB row carries
+    // `"throttled"`. Operators reading the dispatches table see at a
+    // glance that the row was killed by a self-recovering throttle
+    // rather than a real failure.
+    const { mapCompleteToTerminalStatus } = await import(
+      "./danxbot-server.js"
+    );
+    expect(mapCompleteToTerminalStatus("rate_limited")).toBe("throttled");
   });
 });
 

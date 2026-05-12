@@ -6,7 +6,8 @@ export type DispatchStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "recovered";
+  | "recovered"
+  | "throttled";
 
 export type RuntimeMode = "docker" | "host";
 
@@ -222,6 +223,13 @@ export const TERMINAL_STATUSES: readonly DispatchStatus[] = [
   // continues on a fresh row stamped with `parent_recover_id` pointing
   // back at this one.
   "recovered",
+  // DX-322: a row killed by the rate-limit throttle handler. The
+  // dashboard renders the amber "throttled" pill; the throttle flag
+  // file at `<repo>/.danxbot/CRITICAL_FAILURE` carries the live
+  // `resume_at` deadline. Distinct from `"failed"` so the dashboard
+  // can color the row differently and the operator can tell a
+  // self-recovering throttle from a real failure.
+  "throttled",
 ];
 
 export function isTerminalStatus(status: DispatchStatus): boolean {

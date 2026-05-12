@@ -201,6 +201,15 @@ export async function replayStopQueue(
         continue;
       }
 
+      // DX-322 — `rate_limited` flows through the normal terminal
+      // mapping (→ DispatchStatus `"throttled"`); no critical_failure
+      // flag write. The live `handleRateLimitThrottle` in the worker
+      // already wrote the throttle flag (with `resume_at`) before the
+      // queue entry was produced. Re-writing here without `resume_at`
+      // (the queued entry doesn't carry it) would degrade the flag to
+      // an unparseable shape and re-halt the poller — exactly the
+      // failure mode the throttle feature exists to prevent.
+
       // Normal terminal: best-effort auto-sync (tracker push), then
       // finalize the row, then delete the file. Same ordering as the
       // live handleStop path. `mapCompleteToTerminalStatus` is the

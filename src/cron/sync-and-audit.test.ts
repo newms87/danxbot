@@ -2526,6 +2526,44 @@ describe("poll — critical-failure halt gate", () => {
     expect(mockReadFlag).not.toHaveBeenCalled();
     expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
   });
+
+  /**
+   * DX-322 — throttle source. `readFlag` is responsible for auto-
+   * clearing past `resume_at` and returning `null`; the gate trusts
+   * that contract. These tests pin the two branches the gate cares
+   * about: throttle-in-window halts (same as critical_failure) and
+   * throttle-post-window proceeds (readFlag returned null because it
+   * auto-cleared).
+   */
+  it("halts when a throttle flag is in-window (now < resume_at)", async () => {
+    mockReadFlag.mockReturnValue({
+      timestamp: "2026-05-12T20:00:00.000Z",
+      source: "throttle",
+      dispatchId: "d-throttle",
+      reason: "Anthropic rate-limit reached",
+      resume_at: "2099-01-01T00:00:00.000Z",
+      throttle_kind: "rate_limit",
+    });
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("proceeds when readFlag returned null after auto-clearing an expired throttle flag", async () => {
+    // readFlag's own auto-clear branch unlinks the file and returns
+    // null past `resume_at`. The gate sees a null payload, same as
+    // any "no flag present" state, and the tick runs normally.
+    mockReadFlag.mockReturnValue(null);
+    mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card", "ToDo")]);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockReadFlag).toHaveBeenCalled();
+    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  });
 });
 
 describe("poll — DX-142 process-table orphan scan (per-tick)", () => {

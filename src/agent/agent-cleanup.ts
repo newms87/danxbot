@@ -120,9 +120,12 @@ export function buildCleanup(
       if (dispatchTracker && job.status !== "running") {
         // DX-260 (Phase 2 of DX-246) adds `"recovered"` — a row that
         // ended terminal because the API-error recover handler killed
-        // it so a fresh dispatch could continue the chain. `summary`
-        // surfaces but `error` stays null (the row didn't fail; it
-        // handed off).
+        // it so a fresh dispatch could continue the chain. DX-322
+        // adds `"throttled"` — a row killed by the rate-limit handler
+        // because the Anthropic limit was hit; the throttle flag at
+        // `<repo>/.danxbot/CRITICAL_FAILURE` carries `resume_at`.
+        // Both `recovered` and `throttled` are NOT failures; the
+        // `error` field stays null and `summary` surfaces the reason.
         const dispatchStatus =
           job.status === "completed"
             ? "completed"
@@ -130,7 +133,9 @@ export function buildCleanup(
               ? "cancelled"
               : job.status === "recovered"
                 ? "recovered"
-                : "failed";
+                : job.status === "throttled"
+                  ? "throttled"
+                  : "failed";
         try {
           await dispatchTracker.finalize(dispatchStatus, {
             summary: job.summary || null,

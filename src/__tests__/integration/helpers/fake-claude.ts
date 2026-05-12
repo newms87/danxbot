@@ -50,6 +50,15 @@
  *                post-dispatch-check variant where the agent legitimately
  *                "completes" but never moves the tracked card. Status
  *                defaults to "completed"; summary to "ok".
+ *     - "rate-limit-once": DX-322. Emits the synthetic JSONL pair Claude
+ *                Code writes when the Anthropic API responds with a
+ *                rate-limit ("You've hit your limit · resets …").
+ *                Reset string defaults to "7:20am (America/Montevideo)";
+ *                override via FAKE_CLAUDE_RATE_LIMIT_RESET (e.g.
+ *                "11:59pm (UTC)") for clock-relative test assertions.
+ *                Process lingers so the launcher's ApiErrorDetector
+ *                window + handleRateLimitThrottle can run; SIGTERMed
+ *                by the handler.
  *   FAKE_CLAUDE_WRITE_DELAY_MS — Delay between JSONL entries (default: 50)
  *   FAKE_CLAUDE_EXIT_CODE — Exit code (default: 0, set to non-zero for error scenarios)
  *   FAKE_CLAUDE_LINGER_MS — Time to wait after writing entries before exiting (default: 3000).
@@ -597,6 +606,49 @@ async function runScenario(): Promise<void> {
 
   if (scenario === "yaml-lifecycle") {
     await runYamlLifecycleScenario();
+    return;
+  }
+
+  if (scenario === "rate-limit-once") {
+    // DX-322. Reproduces the synthetic JSONL pair Claude Code emits
+    // when the Anthropic API responds with a rate-limit ("You've hit
+    // your limit · resets …") — same shape as the stream-idle
+    // synthetic but with the rate-limit error text. The launcher's
+    // ApiErrorDetector classifies this as `kind: "rate_limit"` +
+    // parses `resume_at`, then routes to `handleRateLimitThrottle`
+    // (NOT the recover-cap loop). fake-claude lingers so the
+    // detector's 5s window can run; the handler kills this process
+    // via SIGTERM.
+    //
+    // Reset string defaults to "7:20am (America/Montevideo)" but is
+    // overridable via FAKE_CLAUDE_RATE_LIMIT_RESET for tests that
+    // need a deterministic clock-relative deadline.
+    const resetText =
+      process.env.FAKE_CLAUDE_RATE_LIMIT_RESET ||
+      "7:20am (America/Montevideo)";
+    const text = `API Error: You've hit your limit · resets ${resetText}`;
+    writeEntry({
+      type: "assistant",
+      message: {
+        model: "<synthetic>",
+        stop_reason: "stop_sequence",
+        content: [{ type: "text", text }],
+        usage: { input_tokens: 50, output_tokens: 0 },
+      },
+      isApiErrorMessage: true,
+      error: "rate_limit",
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    writeEntry({
+      type: "system",
+      subtype: "turn_duration",
+      durationMs: 1_500,
+      timestamp: new Date().toISOString(),
+      sessionId,
+    });
+    setInterval(() => {}, 60_000);
+    await new Promise(() => {});
     return;
   }
 

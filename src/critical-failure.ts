@@ -107,7 +107,16 @@ export type CriticalFailureSource =
   | "agent"
   | "post-dispatch-check"
   | "issues-db-mirror"
+  | "throttle"
   | "unparseable";
+
+/**
+ * DX-322 — supported throttle subtypes. Today the only throttle the
+ * worker auto-recovers from is Anthropic rate-limit; the union exists
+ * so a future "cost cap" / "concurrent dispatch" throttle can land
+ * without re-wiring the readFlag plumbing.
+ */
+export type ThrottleKind = "rate_limit";
 
 export interface CriticalFailurePayload {
   timestamp: string;
@@ -117,6 +126,21 @@ export interface CriticalFailurePayload {
   cardId?: string;
   cardUrl?: string;
   detail?: string;
+  /**
+   * DX-322 — present when `source === "throttle"`. Absolute UTC ISO
+   * timestamp at which the poller may auto-clear the flag and resume
+   * dispatching. The halt-gate compares `now >= resume_at`; past the
+   * deadline the file is unlinked + the tick proceeds normally. NEVER
+   * set on `source !== "throttle"` payloads — the normalizer enforces
+   * the invariant.
+   */
+  resume_at?: string;
+  /**
+   * DX-322 — present when `source === "throttle"`. Names the throttle
+   * subtype so the dashboard renders the right copy ("rate-limit reset
+   * 7:20am" vs. a future "cost cap").
+   */
+  throttle_kind?: ThrottleKind;
 }
 
 const FLAG_FILENAME = "CRITICAL_FAILURE";
@@ -139,6 +163,13 @@ export function flagPath(localPath: string): string {
  * `source`. Unknown extra fields are dropped. Invalid shapes return null
  * so `readFlag` can swap in the synthetic "unparseable" payload — a
  * corrupt file must still keep the poller halted (fail-closed).
+ *
+ * DX-322 — `"throttle"` payloads MUST carry `resume_at` (ISO 8601).
+ * Without it the halt-gate has nothing to compare `now` against, so a
+ * `throttle` flag would behave like a permanent CRITICAL_FAILURE — the
+ * opposite of the feature's intent. Reject the shape so a misconfigured
+ * writer surfaces loudly via the unparseable-payload fallback. Other
+ * sources MUST NOT carry `resume_at` (cross-contamination is a bug).
  */
 function normalize(raw: unknown): CriticalFailurePayload | null {
   if (!raw || typeof raw !== "object") return null;
@@ -149,6 +180,7 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
     source !== "agent" &&
     source !== "post-dispatch-check" &&
     source !== "issues-db-mirror" &&
+    source !== "throttle" &&
     source !== "unparseable"
   ) {
     return null;
@@ -158,6 +190,26 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
   if (typeof r.dispatchId !== "string" || !r.dispatchId) return null;
   if (typeof r.reason !== "string" || !r.reason) return null;
 
+  let resumeAt: string | undefined;
+  let throttleKind: ThrottleKind | undefined;
+  if (source === "throttle") {
+    if (typeof r.resume_at !== "string" || !r.resume_at) return null;
+    // Defense-in-depth: ensure it parses as an absolute time. A bare
+    // string like "soon" would pass the type check but break the
+    // gate's `now >= resume_at` comparison.
+    if (Number.isNaN(Date.parse(r.resume_at))) return null;
+    resumeAt = r.resume_at;
+    if (r.throttle_kind === "rate_limit") throttleKind = "rate_limit";
+    // Unknown throttle_kind values are dropped silently — the flag is
+    // still honored on its resume_at deadline, just rendered with a
+    // generic dashboard label.
+  } else if (r.resume_at !== undefined) {
+    // resume_at on a non-throttle payload is malformed — the gate
+    // doesn't know what to do with it. Reject the shape so the
+    // unparseable fallback fires.
+    return null;
+  }
+
   return {
     timestamp: r.timestamp,
     source,
@@ -166,6 +218,8 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
     cardId: typeof r.cardId === "string" && r.cardId ? r.cardId : undefined,
     cardUrl: typeof r.cardUrl === "string" && r.cardUrl ? r.cardUrl : undefined,
     detail: typeof r.detail === "string" && r.detail ? r.detail : undefined,
+    ...(resumeAt ? { resume_at: resumeAt } : {}),
+    ...(throttleKind ? { throttle_kind: throttleKind } : {}),
   };
 }
 
@@ -193,8 +247,18 @@ function unparseablePayload(path: string): CriticalFailurePayload {
  * fields, unknown source), returns a synthetic "unparseable" payload so
  * the poller halt gate stays tripped — a corrupt file must not silently
  * re-enable dispatches. Never throws; callers depend on read-safety.
+ *
+ * DX-322 — `source: "throttle"` payloads auto-clear past their
+ * `resume_at` deadline. When `now >= resume_at` the file is unlinked
+ * here and the call returns `null`, so the poller halt-gate proceeds
+ * normally on the same tick. This is the only inbound-clearing branch;
+ * every other source requires an operator (human / dashboard / `rm`).
+ * `nowFn` is injectable for tests.
  */
-export function readFlag(localPath: string): CriticalFailurePayload | null {
+export function readFlag(
+  localPath: string,
+  nowFn: () => number = Date.now,
+): CriticalFailurePayload | null {
   const path = flagPath(localPath);
   if (!existsSync(path)) return null;
   try {
@@ -205,6 +269,31 @@ export function readFlag(localPath: string): CriticalFailurePayload | null {
         `Critical-failure flag at ${path} has invalid shape — treating as unparseable halt signal`,
       );
       return unparseablePayload(path);
+    }
+    // Throttle auto-clear branch. The file is owned by the worker
+    // process that wrote it (or by a peer worker for the same repo);
+    // either way only this process reads it. A best-effort unlink is
+    // safe — a transient unlink failure (file already removed by a
+    // concurrent boot replay, EACCES) is logged and we still return
+    // `null` so the gate proceeds. Returning the payload after a
+    // failed unlink would re-halt on the next tick — same outcome as
+    // the operator clearing manually.
+    if (normalized.source === "throttle" && normalized.resume_at) {
+      const resumeMs = Date.parse(normalized.resume_at);
+      if (Number.isFinite(resumeMs) && nowFn() >= resumeMs) {
+        try {
+          unlinkSync(path);
+          log.info(
+            `Throttle flag at ${path} auto-cleared past resume_at=${normalized.resume_at}`,
+          );
+        } catch (err) {
+          log.warn(
+            `Failed to auto-clear expired throttle flag at ${path}`,
+            err,
+          );
+        }
+        return null;
+      }
     }
     return normalized;
   } catch (err) {
@@ -234,7 +323,25 @@ export function writeFlag(
     cardId: payload.cardId,
     cardUrl: payload.cardUrl,
     detail: payload.detail,
+    ...(payload.resume_at ? { resume_at: payload.resume_at } : {}),
+    ...(payload.throttle_kind ? { throttle_kind: payload.throttle_kind } : {}),
   };
+
+  // DX-322 — invariant: `resume_at` may ONLY ride on a `throttle`
+  // payload. The normalizer rejects the cross-contamination on read;
+  // we also reject on write so a programming bug surfaces at the
+  // writer rather than as a silent normalize-to-null on the next
+  // boot.
+  if (final.source === "throttle" && !final.resume_at) {
+    throw new Error(
+      "writeFlag: source='throttle' requires resume_at (ISO 8601)",
+    );
+  }
+  if (final.source !== "throttle" && final.resume_at) {
+    throw new Error(
+      `writeFlag: resume_at is only valid on source='throttle' (got source='${final.source}')`,
+    );
+  }
 
   const body = JSON.stringify(final, null, 2) + "\n";
   const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;

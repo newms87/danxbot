@@ -609,9 +609,28 @@ export async function tryMultiAgentDispatch(
             // safeguard against an env-level blocker (MCP/Bash/auth
             // failing) that lets the agent "finish" without moving the
             // card. The next poll tick reads the flag and halts.
+            //
+            // DX-296 — skip when the dispatch was a prep-only run
+            // (separate prepMode) OR when prep returned a non-`ok`
+            // verdict. In both cases the work-pass hasn't run yet and
+            // the card legitimately stays in ToDo — see
+            // `skipCardProgressForPrep` above.
+            //
+            // DX-322 — also skip when the dispatch ended `throttled`.
+            // The rate-limit throttle handler already wrote a throttle
+            // flag with `resume_at` to the same flag-file path; the
+            // post-dispatch check would write a
+            // `source: "post-dispatch-check"` payload (no `resume_at`)
+            // that OVERWRITES the throttle flag → poller halt-gate
+            // degrades from "auto-clear past resume_at" to "permanent
+            // CRITICAL_FAILURE" → exactly the failure mode DX-322
+            // exists to prevent. The card naturally stays in ToDo for
+            // a throttled dispatch (no work happened), so the check
+            // would always fire here without the guard.
             if (
               hasTrackerCoordinate(stamped) &&
-              !skipCardProgressForPrep
+              !skipCardProgressForPrep &&
+              job.status !== "throttled"
             ) {
               await runPostDispatchProgressCheck({
                 repo,

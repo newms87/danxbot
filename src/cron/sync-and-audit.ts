@@ -86,6 +86,23 @@ interface RepoCronState {
 
 const repoState = new Map<string, RepoCronState>();
 
+/**
+ * DX-322 — render `remainingMs` as a human-readable `Xh Ym Zs` /
+ * `Ym Zs` / `Zs` string for the throttle halt log. Operators reading
+ * `make logs` get the resume ETA at a glance without parsing ISO
+ * timestamps.
+ */
+function formatRemaining(remainingMs: number): string {
+  if (remainingMs <= 0) return "0s";
+  const totalSeconds = Math.floor(remainingMs / 1_000);
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 function getState(repoName: string): RepoCronState {
   let state = repoState.get(repoName);
   if (!state) {
@@ -164,11 +181,25 @@ export async function poll(repo: RepoContext): Promise<void> {
   // Slack listener and /api/launch are unaffected by design — the
   // halt is cron-only. See `.claude/rules/agent-dispatch.md`
   // "Critical failure flag".
+  //
+  // DX-322 — throttle-source flags self-clear. `readFlag` auto-
+  // unlinks the file when `now >= resume_at` and returns `null` on
+  // the same tick, so the gate proceeds normally past the deadline
+  // without operator action. While the flag is still in-window, the
+  // halt log shows remaining time so the dashboard / operator sees
+  // the resume ETA without parsing the JSON.
   const flag = readFlag(repo.localPath);
   if (flag) {
-    log.warn(
-      `[${repo.name}] cron halted — critical-failure flag present (source=${flag.source}, dispatch=${flag.dispatchId}): ${flag.reason}`,
-    );
+    if (flag.source === "throttle" && flag.resume_at) {
+      const remainingMs = Math.max(0, Date.parse(flag.resume_at) - Date.now());
+      log.warn(
+        `[${repo.name}] cron throttled — Anthropic rate-limit until ${flag.resume_at} (${formatRemaining(remainingMs)} remaining): ${flag.reason}`,
+      );
+    } else {
+      log.warn(
+        `[${repo.name}] cron halted — critical-failure flag present (source=${flag.source}, dispatch=${flag.dispatchId}): ${flag.reason}`,
+      );
+    }
     return;
   }
 

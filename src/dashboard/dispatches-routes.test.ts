@@ -133,6 +133,20 @@ describe("handleListDispatches", () => {
     expect(mockListDispatches).toHaveBeenCalledWith({ status: "recovered" });
   });
 
+  it("forwards status=throttled through the allowlist (DX-322)", async () => {
+    // Parallel to the `recovered` test above — pins the runtime
+    // allowlist alongside the compile-time `_AssertExhaustive` guard
+    // so a future drop of `throttled` from VALID_STATUSES would fail
+    // both the build and this test.
+    mockListDispatches.mockResolvedValueOnce([]);
+    const { res } = createMockReqRes("GET", "/api/dispatches?status=throttled");
+    await handleListDispatches(
+      res,
+      new URLSearchParams({ status: "throttled" }),
+    );
+    expect(mockListDispatches).toHaveBeenCalledWith({ status: "throttled" });
+  });
+
   it("returns 500 on listDispatches failure", async () => {
     mockListDispatches.mockRejectedValueOnce(new Error("db"));
     const { res } = createMockReqRes("GET", "/");

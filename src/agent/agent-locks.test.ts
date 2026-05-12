@@ -29,23 +29,21 @@ function normalizeSql(sql: string): string {
   return sql.replace(/\s+/g, " ").trim();
 }
 
-const TERMINAL_DISPATCH_STATUSES = [
-  "completed",
-  "failed",
-  "cancelled",
-  "timeout",
-  "recovered",
-  "critical_failure",
-  "api_error_failed",
-];
+// DX-322 — derive the terminal set from the production `TERMINAL_STATUSES`
+// constant. Test fixture used to inline it (with the spurious
+// `critical_failure` / `api_error_failed` / `timeout` entries removed by
+// the refactor); pinning the inline copy would now drift on every future
+// terminal-status addition. Re-import keeps the test honest.
+import { TERMINAL_STATUSES as PROD_TERMINAL_STATUSES } from "../dashboard/dispatches.js";
+const TERMINAL_DISPATCH_STATUSES: readonly string[] = PROD_TERMINAL_STATUSES;
+const TERMINAL_PLACEHOLDERS = PROD_TERMINAL_STATUSES.map(
+  (_, i) => `$${i + 2}`,
+).join(", ");
 const SQL_BUSY_AGENTS = normalizeSql(
   `SELECT DISTINCT agent_name FROM dispatches
      WHERE repo_name = $1
        AND agent_name IS NOT NULL
-       AND "status" NOT IN (
-         'completed', 'failed', 'cancelled', 'timeout',
-         'recovered', 'critical_failure', 'api_error_failed'
-       )`,
+       AND "status" NOT IN (${TERMINAL_PLACEHOLDERS})`,
 );
 const SQL_ASSIGNED_CARDS = normalizeSql(
   `SELECT id, assigned_agent FROM issues
@@ -57,10 +55,7 @@ const SQL_LIVE_DISPATCH_ISSUE_IDS = normalizeSql(
   `SELECT DISTINCT issue_id FROM dispatches
      WHERE repo_name = $1
        AND issue_id IS NOT NULL
-       AND "status" NOT IN (
-         'completed', 'failed', 'cancelled', 'timeout',
-         'recovered', 'critical_failure', 'api_error_failed'
-       )
+       AND "status" NOT IN (${TERMINAL_PLACEHOLDERS})
        AND pid_terminated_at IS NULL`,
 );
 

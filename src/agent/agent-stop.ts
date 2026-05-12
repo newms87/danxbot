@@ -48,16 +48,19 @@ export interface BuildJobStopHandlerDeps {
  *   - `critical_failure`   → `failed`                → `failed`
  *   - `api_error_failed`   → `failed`                → `failed`
  *   - `api_error_recover`  → `recovered`             → `recovered`
+ *   - `rate_limited`       → `throttled`             → `throttled` (DX-322)
  *
- * The cap-exhausted / critical-failure flags are written by the
- * caller BEFORE invoking `job.stop`, mirroring the two-layer pattern
- * the `critical_failure` handler in `worker/dispatch.ts` already uses.
+ * The cap-exhausted / critical-failure / throttle flags are written
+ * by the caller BEFORE invoking `job.stop`, mirroring the two-layer
+ * pattern the `critical_failure` handler in `worker/dispatch.ts`
+ * already uses.
  */
 function mapCompleteToInMemory(
   status: CompleteStatus,
-): "completed" | "failed" | "recovered" {
+): "completed" | "failed" | "recovered" | "throttled" {
   if (status === "completed") return "completed";
   if (status === "api_error_recover") return "recovered";
+  if (status === "rate_limited") return "throttled";
   return "failed";
 }
 

@@ -10,6 +10,10 @@ const LABELS: Record<DispatchStatus, string> = {
   failed: "Failed",
   cancelled: "Cancelled",
   recovered: "Recovered",
+  // DX-322 — distinct from `failed`/`recovered`: dispatch was killed
+  // by the rate-limit throttle handler and the worker is waiting for
+  // the limit to reset before re-dispatching.
+  throttled: "Throttled",
 };
 
 const CLASSES: Record<DispatchStatus, string> = {
@@ -23,6 +27,12 @@ const CLASSES: Record<DispatchStatus, string> = {
   // Sky blue: "intervened but didn't fail" — the recover child carries
   // the user-facing outcome.
   recovered: "bg-sky-500/20 text-sky-300",
+  // DX-322 — orange (distinct from running amber + completed emerald
+  // + failed red + recovered sky). The throttle banner uses amber for
+  // the banner border + bg; the dispatches-table pill uses orange so
+  // operators don't confuse a terminal "throttled" row with a live
+  // "running" row (both would be amber otherwise).
+  throttled: "bg-orange-500/25 text-orange-200",
 };
 </script>
 

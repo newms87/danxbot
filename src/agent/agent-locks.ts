@@ -41,6 +41,7 @@
  */
 
 import { query as defaultQuery } from "../db/connection.js";
+import { TERMINAL_STATUSES } from "../dashboard/dispatches.js";
 
 type QueryFn = <T extends object = Record<string, unknown>>(
   sql: string,
@@ -76,22 +77,24 @@ export function resetAgentLocksQueryFn(): void {
  * with thousands of legacy rows.
  */
 export async function busyAgents(repoName: string): Promise<Set<string>> {
-  // Active = NOT terminal. Terminal set must include every DispatchStatus
-  // that signals "agent process is gone" — completed, failed, cancelled,
-  // timeout, recovered (DX-246 stream-idle auto-recover collapses to this),
-  // critical_failure, api_error_failed. Omitting any one (e.g. the
-  // pre-DX-246 list of only completed/failed/cancelled) leaves stale rows
-  // marking the agent busy forever → picker sees roster as fully busy →
-  // silent zero-dispatch loop with cards available.
+  // Active = NOT terminal. Terminal set MUST derive from the
+  // canonical `TERMINAL_STATUSES` list in `dashboard/dispatches.ts` —
+  // any new terminal value (DX-322 added `"throttled"`) participates
+  // automatically without an SQL edit here. Pre-DX-322 the list was
+  // hardcoded inline, AND mistakenly carried `'critical_failure'` /
+  // `'api_error_failed'` (those are `CompleteStatus` values the
+  // worker collapses to `failed` BEFORE writing the row — they never
+  // appear in this column). Both forms of drift produce the same
+  // failure: stale rows marking the agent busy forever → picker sees
+  // roster as fully busy → silent zero-dispatch loop with cards
+  // available. The new form removes both.
+  const placeholders = TERMINAL_STATUSES.map((_, i) => `$${i + 2}`).join(", ");
   const rows = await queryFn<{ agent_name: string }>(
     `SELECT DISTINCT agent_name FROM dispatches
        WHERE repo_name = $1
          AND agent_name IS NOT NULL
-         AND "status" NOT IN (
-           'completed', 'failed', 'cancelled', 'timeout',
-           'recovered', 'critical_failure', 'api_error_failed'
-         )`,
-    [repoName],
+         AND "status" NOT IN (${placeholders})`,
+    [repoName, ...TERMINAL_STATUSES],
   );
   const out = new Set<string>();
   for (const r of rows) {
@@ -121,16 +124,19 @@ export async function busyAgents(repoName: string): Promise<Set<string>> {
 export async function liveDispatchIssueIds(
   repoName: string,
 ): Promise<Set<string>> {
+  // Same `TERMINAL_STATUSES`-derived list as `busyAgents` — see that
+  // function's header for the drift mode this guards against. The
+  // two queries MUST stay in lockstep; a card with a non-terminal
+  // dispatch row must be considered "live" here AND must keep its
+  // agent in `busyAgents`.
+  const placeholders = TERMINAL_STATUSES.map((_, i) => `$${i + 2}`).join(", ");
   const rows = await queryFn<{ issue_id: string }>(
     `SELECT DISTINCT issue_id FROM dispatches
        WHERE repo_name = $1
          AND issue_id IS NOT NULL
-         AND "status" NOT IN (
-           'completed', 'failed', 'cancelled', 'timeout',
-           'recovered', 'critical_failure', 'api_error_failed'
-         )
+         AND "status" NOT IN (${placeholders})
          AND pid_terminated_at IS NULL`,
-    [repoName],
+    [repoName, ...TERMINAL_STATUSES],
   );
   const out = new Set<string>();
   for (const r of rows) {

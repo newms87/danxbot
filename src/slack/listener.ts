@@ -206,6 +206,16 @@ function failureLineForStatus(
       // skip is missed, the user sees an informational note rather
       // than a misleading red X.
       return ":hourglass: Retrying after a transient API error — please hold.";
+    case "throttled":
+      // DX-322 — Anthropic rate-limit hit during a Slack-triggered
+      // dispatch. Unlike Trello cards (where the poller re-dispatches
+      // automatically past `resume_at`), the Slack listener has no
+      // mechanism to retry a thread reply when the limit clears. The
+      // user MUST re-ask after the deadline. The summary embeds the
+      // resume_at ISO so the message is actionable.
+      return tail
+        ? `:hourglass: Anthropic rate-limit reached. Please try again later — ${tail}.`
+        : ":hourglass: Anthropic rate-limit reached. Please try again later.";
   }
 }
 

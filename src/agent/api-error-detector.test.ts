@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ApiErrorDetector,
+  classifyApiError,
+  parseRateLimitResume,
   type ApiErrorInfo,
   type EntryConsumer,
   type WatcherLike,
@@ -160,10 +162,14 @@ describe("ApiErrorDetector", () => {
     expect(onApiError).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(onApiError).toHaveBeenCalledTimes(1);
+    // DX-322 — every stream-idle synthetic carries `kind: "stream_idle"`
+    // and NO `resume_at`. Rate-limit synthetics carry `kind: "rate_limit"`
+    // + `resume_at`, asserted in its own block below.
     expect(onApiError).toHaveBeenCalledWith({
       jobId: "job-test",
       errorText: expect.stringMatching(/Stream idle/i),
       recoverCount: 0,
+      kind: "stream_idle",
     });
   });
 
@@ -402,5 +408,310 @@ describe("ApiErrorDetector", () => {
     expect(() => spawn(0)).toThrow(/confirmationWindowMs/);
     expect(() => spawn(-1)).toThrow(/confirmationWindowMs/);
     expect(() => spawn(Number.NaN)).toThrow(/confirmationWindowMs/);
+  });
+});
+
+/**
+ * DX-322 — rate-limit kind discrimination + reset-time parsing.
+ *
+ * The detector classifies every synthetic JSONL entry as
+ * `kind: "stream_idle" | "rate_limit"` BEFORE arming the confirmation
+ * window so the recover handler can branch on the kind without re-
+ * parsing the error text. Rate-limit synthetics carry `resume_at` (ISO
+ * UTC); stream-idle synthetics do not.
+ *
+ * `parseRateLimitResume` is exported separately so the IANA tz + DST
+ * cases get exhaustive coverage without spinning up the detector for
+ * each variant.
+ */
+function rateLimitSynthetic(): AgentLogEntry {
+  return {
+    timestamp: Date.now(),
+    type: "assistant",
+    summary: "rate-limit-synthetic",
+    data: {
+      messageId: "msg-rate-limit",
+      content: [
+        {
+          type: "text",
+          text:
+            "API Error: You've hit your limit · resets 7:20am " +
+            "(America/Montevideo)",
+        },
+      ],
+      raw: {
+        isApiErrorMessage: true,
+        error: "rate_limit",
+        message: {
+          model: "<synthetic>",
+          stop_reason: "stop_sequence",
+          content: [
+            {
+              type: "text",
+              text:
+                "API Error: You've hit your limit · resets 7:20am " +
+                "(America/Montevideo)",
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+function rateLimitSyntheticUnparseable(): AgentLogEntry {
+  // Rate-limit pattern matches, but the reset wording is something the
+  // parser doesn't understand. Must fall back to stream_idle so the
+  // legacy recover loop fires.
+  return {
+    timestamp: Date.now(),
+    type: "assistant",
+    summary: "rate-limit-unparseable",
+    data: {
+      messageId: "msg-rate-limit-bad",
+      raw: {
+        isApiErrorMessage: true,
+        error: "rate_limit",
+        message: {
+          model: "<synthetic>",
+          content: [
+            {
+              type: "text",
+              text:
+                "API Error: 429 You've hit your limit · resets soon",
+            },
+          ],
+        },
+      },
+    },
+  };
+}
+
+describe("ApiErrorDetector — rate-limit kind discrimination (DX-322)", () => {
+  let watcher: MockWatcher;
+  let onApiError: ReturnType<typeof vi.fn<(info: ApiErrorInfo) => void>>;
+  let detector: ApiErrorDetector;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Pin Date.now() to a known instant in UTC so resume_at assertions
+    // are deterministic across CI hosts. 2026-05-12T20:00:00Z is well
+    // outside any DST transition for both tested tzs (Montevideo +
+    // Tokyo) so the math is stable.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-05-12T20:00:00.000Z"));
+    watcher = new MockWatcher();
+    onApiError = vi.fn();
+    detector = new ApiErrorDetector({
+      jobId: "job-rate-limit",
+      watcher,
+      getRecoverCount: () => 0,
+      onApiError,
+    });
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    detector.stop();
+    warnSpy.mockRestore();
+    vi.useRealTimers();
+  });
+
+  it("rate-limit synthetic → kind=rate_limit + parsed resume_at (Montevideo)", () => {
+    watcher.emit(rateLimitSynthetic());
+    vi.advanceTimersByTime(5_000);
+    expect(onApiError).toHaveBeenCalledTimes(1);
+    const fired = onApiError.mock.calls[0][0] as ApiErrorInfo;
+    expect(fired.kind).toBe("rate_limit");
+    // Montevideo runs UTC-3 in 2026-05 (autumn standard time). The reset
+    // wall clock is 07:20 Montevideo on 2026-05-13 (next day — the
+    // observed time is 20:00 UTC = 17:00 Montevideo, so today's 07:20
+    // is already in the past). Expected UTC: 10:20.
+    expect(fired.resume_at).toBe("2026-05-13T10:20:00.000Z");
+    expect(fired.errorText).toMatch(/hit your limit/);
+  });
+
+  it("stream-idle synthetic → kind=stream_idle, no resume_at", () => {
+    watcher.emit(syntheticByFlag());
+    vi.advanceTimersByTime(5_000);
+    expect(onApiError).toHaveBeenCalledTimes(1);
+    const fired = onApiError.mock.calls[0][0] as ApiErrorInfo;
+    expect(fired.kind).toBe("stream_idle");
+    expect(fired.resume_at).toBeUndefined();
+  });
+
+  it("rate-limit pattern with UNPARSEABLE reset wording → falls back to stream_idle (legacy recover loop)", () => {
+    watcher.emit(rateLimitSyntheticUnparseable());
+    vi.advanceTimersByTime(5_000);
+    expect(onApiError).toHaveBeenCalledTimes(1);
+    const fired = onApiError.mock.calls[0][0] as ApiErrorInfo;
+    // Fallback contract: never silently swallow. We log a warn so the
+    // operator sees the parser regression on the next dashboard tick.
+    expect(fired.kind).toBe("stream_idle");
+    expect(fired.resume_at).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/rate-limit pattern matched but reset-time unparseable/),
+    );
+  });
+});
+
+describe("parseRateLimitResume (DX-322 — reset-time parser)", () => {
+  // Pin the "live now" used by the wall-clock-to-UTC two-pass refinement
+  // so DST offset queries hit deterministic answers across CI hosts.
+  const now2026May = Date.parse("2026-05-12T20:00:00.000Z");
+
+  it("parses `resets 7:20am (America/Montevideo)` → next-day UTC 10:20", () => {
+    // 20:00 UTC = 17:00 Montevideo (UTC-3 standard time in May 2026).
+    // 07:20 Montevideo today is in the PAST → tomorrow → 13 May 07:20 MV
+    // → 13 May 10:20 UTC.
+    const iso = parseRateLimitResume(
+      "API Error: You've hit your limit · resets 7:20am (America/Montevideo)",
+      now2026May,
+    );
+    expect(iso).toBe("2026-05-13T10:20:00.000Z");
+  });
+
+  it("parses `resets 11:59pm (UTC)` → today UTC if still in the future", () => {
+    const iso = parseRateLimitResume(
+      "resets 11:59pm (UTC)",
+      Date.parse("2026-05-12T20:00:00.000Z"),
+    );
+    expect(iso).toBe("2026-05-12T23:59:00.000Z");
+  });
+
+  it("parses `resets 12:00am (UTC)` (midnight) — bumps to next day if equal to now", () => {
+    const iso = parseRateLimitResume(
+      "resets 12:00am (UTC)",
+      Date.parse("2026-05-12T00:00:00.000Z"),
+    );
+    // 12:00am === 00:00, today's 00:00 UTC equals `now`, so today's
+    // candidate fails the `<= now` guard and rolls to tomorrow.
+    expect(iso).toBe("2026-05-13T00:00:00.000Z");
+  });
+
+  it("DST-aware: Montevideo crossing into DST returns the live offset, not a stale -3h assumption", () => {
+    // Synthetic: query during the DST window. Montevideo historically
+    // observed UTC-2 during summer. We just assert the parser uses the
+    // live ICU offset for the date being computed — exact offset value
+    // is whatever V8's ICU bundle returns at test time. The contract is
+    // "no hand-rolled offset math"; we pin that by asserting the result
+    // is a valid ISO and within the 24h cap.
+    const iso = parseRateLimitResume(
+      "resets 3:00am (America/Montevideo)",
+      Date.parse("2026-01-15T12:00:00.000Z"),
+    );
+    expect(iso).toMatch(/^2026-01-1[56]T0[5-7]:00:00\.000Z$/);
+  });
+
+  it("today→tomorrow rollover always lands within the 24h cap for non-DST days", () => {
+    // Cap is `(resume_at - now) > 24h → undefined`. With the
+    // today-first / tomorrow-on-rollover logic, the natural ceiling is
+    // ~24h (give-or-take DST). This test pins the boundary against
+    // accidental regressions where a refactor might double-bump
+    // (today→tomorrow→day-after) and push past the cap.
+    //
+    // 1) Reset earlier today vs now → tomorrow bump → ≤24h ahead.
+    const tomorrowIso = parseRateLimitResume(
+      "resets 7:20am (America/Montevideo)",
+      Date.parse("2026-05-12T20:00:00.000Z"),
+    );
+    expect(tomorrowIso).toBe("2026-05-13T10:20:00.000Z");
+    const tomorrowMs = Date.parse(tomorrowIso!);
+    const nowMs = Date.parse("2026-05-12T20:00:00.000Z");
+    expect(tomorrowMs - nowMs).toBeLessThanOrEqual(24 * 60 * 60 * 1_000);
+
+    // 2) Reset later today vs now → today → ≤24h ahead.
+    const todayIso = parseRateLimitResume(
+      "resets 11:59pm (UTC)",
+      Date.parse("2026-05-12T20:00:00.000Z"),
+    );
+    expect(todayIso).toBe("2026-05-12T23:59:00.000Z");
+  });
+
+  it("returns undefined for an unknown IANA tz (Intl.DateTimeFormat throws)", () => {
+    const iso = parseRateLimitResume(
+      "resets 7:20am (Made/UpRegion)",
+      now2026May,
+    );
+    expect(iso).toBeUndefined();
+  });
+
+  it("returns undefined when the pattern doesn't match", () => {
+    expect(parseRateLimitResume("everything is fine", now2026May)).toBeUndefined();
+    expect(
+      parseRateLimitResume("resets 7:20am Tokyo", now2026May), // no parens
+    ).toBeUndefined();
+    expect(
+      parseRateLimitResume("resets 25:00am (UTC)", now2026May), // hour > 12
+    ).toBeUndefined();
+  });
+
+  it("handles 12am/12pm meridiem boundary correctly", () => {
+    // 12am === midnight (00:00); 12pm === noon (12:00).
+    const midnight = parseRateLimitResume(
+      "resets 12:00am (UTC)",
+      Date.parse("2026-05-12T22:00:00.000Z"),
+    );
+    expect(midnight).toBe("2026-05-13T00:00:00.000Z");
+    const noon = parseRateLimitResume(
+      "resets 12:00pm (UTC)",
+      Date.parse("2026-05-12T11:00:00.000Z"),
+    );
+    expect(noon).toBe("2026-05-12T12:00:00.000Z");
+  });
+});
+
+describe("classifyApiError (DX-322 — kind selection)", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => warnSpy.mockRestore());
+
+  const now = Date.parse("2026-05-12T20:00:00.000Z");
+
+  it("`hit your limit` → rate_limit + resume_at", () => {
+    const result = classifyApiError(
+      "hit your limit · resets 7:20am (America/Montevideo)",
+      now,
+    );
+    expect(result.kind).toBe("rate_limit");
+    expect(result.resumeAt).toBe("2026-05-13T10:20:00.000Z");
+  });
+
+  it("bare `429` token → rate_limit (if parseable reset present)", () => {
+    const result = classifyApiError(
+      "API Error: 429 — resets 11:59pm (UTC)",
+      Date.parse("2026-05-12T20:00:00.000Z"),
+    );
+    expect(result.kind).toBe("rate_limit");
+    expect(result.resumeAt).toBe("2026-05-12T23:59:00.000Z");
+  });
+
+  it("`rate_limit` token → rate_limit (if parseable reset present)", () => {
+    const result = classifyApiError(
+      "rate_limit hit · resets 11:59pm (UTC)",
+      Date.parse("2026-05-12T20:00:00.000Z"),
+    );
+    expect(result.kind).toBe("rate_limit");
+  });
+
+  it("Stream idle → stream_idle (no rate-limit pattern)", () => {
+    const result = classifyApiError(
+      "API Error: Stream idle timeout - partial response received",
+      now,
+    );
+    expect(result.kind).toBe("stream_idle");
+    expect(result.resumeAt).toBeUndefined();
+  });
+
+  it("rate-limit token but UNPARSEABLE reset → fallback stream_idle + warn", () => {
+    const result = classifyApiError(
+      "API Error: rate_limit hit — try again later",
+      now,
+    );
+    expect(result.kind).toBe("stream_idle");
+    expect(result.resumeAt).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalled();
   });
 });

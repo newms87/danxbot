@@ -31,6 +31,7 @@ const VALID_STATUSES = [
   "failed",
   "cancelled",
   "recovered",
+  "throttled",
 ] as const satisfies readonly DispatchStatus[];
 
 // Compile-time check: every `DispatchStatus` variant appears in

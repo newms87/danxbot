@@ -67,9 +67,9 @@ export const AGENT_COMPLETE_STATUSES = [
 
 /**
  * All values the `/api/stop/:jobId` endpoint AND `job.stop` accept.
- * Includes the agent-visible set plus the two launcher-internal status
+ * Includes the agent-visible set plus the launcher-internal status
  * values the API-error recover handler emits (DX-260 / Phase 2 of
- * DX-246):
+ * DX-246) and the rate-limit throttle handler emits (DX-322):
  *
  *   - `api_error_recover` — recover-ok path; maps to dispatch row
  *     status `"recovered"`. Caller is expected to follow up with
@@ -79,6 +79,11 @@ export const AGENT_COMPLETE_STATUSES = [
  *     exceeded `MAX_RECOVERS = 3`); maps to dispatch row status
  *     `"failed"`. Caller is expected to write the per-repo
  *     `CRITICAL_FAILURE` flag before signaling so the poller halts.
+ *   - `rate_limited` — DX-322 rate-limit throttle path; maps to
+ *     dispatch row status `"throttled"`. Caller is expected to write
+ *     a throttle-source `CRITICAL_FAILURE` flag with `resume_at`
+ *     BEFORE signaling so the poller honors the deadline and auto-
+ *     clears past it.
  *
  * Single source of truth for both the schema's enum (via
  * `AGENT_COMPLETE_STATUSES`) and the worker's `isCompleteStatus`
@@ -88,6 +93,7 @@ export const COMPLETE_STATUSES = [
   ...AGENT_COMPLETE_STATUSES,
   "api_error_recover",
   "api_error_failed",
+  "rate_limited",
 ] as const;
 export type CompleteStatus = (typeof COMPLETE_STATUSES)[number];
 
@@ -116,6 +122,10 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
  *   - `api_error_failed` → `failed`. DX-260: cap exhausted; the
  *     recover handler also writes the per-repo `CRITICAL_FAILURE`
  *     flag, mirroring the `critical_failure` two-layer pattern.
+ *   - `rate_limited` → `throttled`. DX-322: rate-limit throttle
+ *     handler killed the dispatch; the throttle flag at
+ *     `<repo>/.danxbot/CRITICAL_FAILURE` carries `resume_at` and
+ *     the poller auto-clears the flag past the deadline.
  *
  * Single source of truth — `worker/dispatch.ts` (handleStopFromDb),
  * `worker/replay-stop-queue.ts`, and `mcp/danxbot-server.ts`
@@ -125,9 +135,10 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
  */
 export function mapCompleteToTerminalStatus(
   status: CompleteStatus,
-): "completed" | "failed" | "recovered" {
+): "completed" | "failed" | "recovered" | "throttled" {
   if (status === "completed") return "completed";
   if (status === "api_error_recover") return "recovered";
+  if (status === "rate_limited") return "throttled";
   return "failed";
 }
 

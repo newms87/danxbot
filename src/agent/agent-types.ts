@@ -53,8 +53,14 @@ export interface AgentJob {
    * dispatch row whose `parent_recover_id` points at this one. Distinct
    * from `failed` so `buildCleanup` can finalize the dispatches row with
    * status `"recovered"` (DispatchStatus) instead of `"failed"`.
+   *
+   * `throttled` (DX-322) marks the dispatch as killed by the rate-limit
+   * throttle handler — the worker wrote a throttle flag with
+   * `resume_at` and the poller auto-resumes past the deadline.
+   * Distinct from `recovered` (no /api/resume POST) and from `failed`
+   * (no operator clearing required).
    */
-  status: "running" | "completed" | "failed" | "timeout" | "canceled" | "recovered";
+  status: "running" | "completed" | "failed" | "timeout" | "canceled" | "recovered" | "throttled";
   summary: string;
   startedAt: Date;
   completedAt?: Date;

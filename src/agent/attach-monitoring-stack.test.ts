@@ -732,4 +732,142 @@ describe("attachMonitoringStack", () => {
       fetchSpy.mockRestore();
     });
   });
+
+  /**
+   * DX-322 — rate-limit throttle handler. Routes BEFORE the recover-
+   * cap loop on `info.kind === "rate_limit"` and `info.resume_at`.
+   */
+  describe("Rate-limit throttle handler (DX-322)", () => {
+    function emitSyntheticRateLimit(): void {
+      emitWatcherEntry({
+        timestamp: Date.now(),
+        type: "assistant",
+        summary: "synthetic-rate-limit",
+        data: {
+          messageId: "msg-rate-limit",
+          content: [
+            {
+              type: "text",
+              text:
+                "API Error: You've hit your limit · resets 7:20am " +
+                "(America/Montevideo)",
+            },
+          ],
+          raw: {
+            isApiErrorMessage: true,
+            error: "rate_limit",
+            message: {
+              model: "<synthetic>",
+              stop_reason: "stop_sequence",
+              content: [
+                {
+                  type: "text",
+                  text:
+                    "API Error: You've hit your limit · resets 7:20am " +
+                    "(America/Montevideo)",
+                },
+              ],
+            },
+          },
+        },
+      });
+    }
+
+    it("rate-limit synthetic → bypasses recover loop (counter stays 0), writes throttle flag, stops with rate_limited", async () => {
+      vi.useFakeTimers();
+      // Pin Date.now() so the parsed resume_at is deterministic.
+      vi.setSystemTime(new Date("2026-05-12T20:00:00.000Z"));
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const job = createSkeletonJob();
+      await attachMonitoringStack({
+        job,
+        jobId: "test-job-throttle",
+        agentCwd: "/tmp/test-workspace",
+        promptDir: null,
+        options: baseOptions({
+          dispatch: { kind: "test", source: "test" } as never,
+          apiToken: "test-bearer",
+          initialRecoverCount: 0,
+          recoverContext: {
+            originalTask: "Process card DX-322",
+            workspace: "issue-worker",
+            workerPort: 9009,
+            repoLocalPath: "/tmp/repo",
+          },
+        }),
+      });
+
+      emitSyntheticRateLimit();
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      // recoverCount MUST stay 0 — throttle path does NOT call
+      // `job.recoverCount++` or `recordRecoverCount`. A regression
+      // that misroutes rate-limit through handleApiErrorRecover bumps
+      // both.
+      expect(job.recoverCount).toBe(0);
+      expect(mockDispatchTrackerRecordRecoverCount).not.toHaveBeenCalled();
+
+      // Throttle flag landed with the right shape (source, resume_at,
+      // throttle_kind, detail).
+      expect(mockWriteFlag).toHaveBeenCalledWith(
+        "/tmp/repo",
+        expect.objectContaining({
+          source: "throttle",
+          dispatchId: "test-job-throttle",
+          reason: "Anthropic rate-limit reached",
+          throttle_kind: "rate_limit",
+          resume_at: expect.stringMatching(
+            /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/,
+          ),
+          detail: expect.stringMatching(/hit your limit/),
+        }),
+      );
+
+      // job.stop called with the new `rate_limited` status.
+      expect(
+        job.stop as unknown as ReturnType<typeof vi.fn>,
+      ).toHaveBeenCalledWith("rate_limited", expect.any(String));
+
+      // NEVER POST /api/resume — throttle skips it; the picker
+      // re-dispatches the card on the first tick past resume_at.
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      fetchSpy.mockRestore();
+    });
+
+    it("rate-limit without recoverContext → falls back to api_error_failed (no silent flag-skip)", async () => {
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date("2026-05-12T20:00:00.000Z"));
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const job = createSkeletonJob();
+      await attachMonitoringStack({
+        job,
+        jobId: "test-job-throttle-no-ctx",
+        agentCwd: "/tmp/test-workspace",
+        promptDir: null,
+        options: baseOptions({
+          dispatch: { kind: "test", source: "test" } as never,
+          apiToken: "test-bearer",
+          // recoverContext intentionally absent — same defensive
+          // shape as the stream-idle handler's recoverContext-absent
+          // branch.
+        }),
+      });
+
+      emitSyntheticRateLimit();
+      await vi.advanceTimersByTimeAsync(5_001);
+
+      // Without recoverContext we can't write the flag → fail-loud
+      // to api_error_failed so the operator surfaces the bug.
+      expect(mockWriteFlag).not.toHaveBeenCalled();
+      expect(
+        job.stop as unknown as ReturnType<typeof vi.fn>,
+      ).toHaveBeenCalledWith("api_error_failed", expect.any(String));
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      fetchSpy.mockRestore();
+    });
+  });
 });

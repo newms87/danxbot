@@ -62,10 +62,47 @@ export interface WatcherLike {
   onEntry(consumer: EntryConsumer): void;
 }
 
+/**
+ * DX-322 — discriminator on `ApiErrorInfo`. The handler in
+ * `attach-monitoring-stack.ts` routes on this BEFORE incrementing the
+ * recover counter:
+ *
+ *   - `"stream_idle"`: legacy Anthropic stream-idle synthetic; the
+ *     recover loop bumps `recoverCount` and POSTs `/api/resume`.
+ *   - `"rate_limit"`: account-wide Anthropic rate-limit ("You've hit
+ *     your limit · resets …"). The recover loop is GUARANTEED to waste
+ *     tokens — none of the retries land until the reset deadline — so
+ *     the handler skips the loop entirely and writes a *throttle* flag
+ *     with `resume_at` instead. Poller auto-clears the flag past
+ *     `resume_at`, no operator round-trip.
+ *
+ * When the detector matches the rate-limit pattern but cannot parse a
+ * usable `resume_at` from the error text (unknown wording, malformed
+ * tz, time more than 24h out), it falls back to `"stream_idle"` so the
+ * legacy recover path still runs — the original safety net stays
+ * intact. The detector logs the unparsed string at WARN so an operator
+ * sees the regression on the next dashboard tick.
+ */
+export type ApiErrorKind = "stream_idle" | "rate_limit";
+
 export interface ApiErrorInfo {
   jobId: string;
   errorText: string;
   recoverCount: number;
+  kind: ApiErrorKind;
+  /**
+   * Absolute UTC ISO timestamp at which the Anthropic limit resets,
+   * present ONLY when `kind === "rate_limit"`. Past `resume_at` the
+   * worker's poller auto-clears the throttle flag and resumes
+   * dispatch.
+   *
+   * Clamped to `now + 24h` defensively — anything beyond is operator
+   * territory (see `parseRateLimitResume`), and the detector falls
+   * back to `kind: "stream_idle"` rather than stamp a year-out
+   * `resume_at` that would make the throttle flag look like a
+   * permanent halt.
+   */
+  resume_at?: string;
 }
 
 export interface ApiErrorDetectorOptions {
@@ -83,10 +120,42 @@ const DEFAULT_CONFIRMATION_WINDOW_MS = 5_000;
 const SYNTHETIC_MODEL = "<synthetic>";
 const API_ERROR_PATTERN = /API Error/i;
 
+/**
+ * DX-322 — defensive ceiling for parsed `resume_at`. Anything beyond is
+ * either a parser regression (12-hour wrap miscalc, century roll, etc.)
+ * or a genuinely long limit window that operators want to know about,
+ * not silently park on. The detector falls back to `"stream_idle"` so
+ * the legacy recover loop + CRITICAL_FAILURE flag fires instead — a
+ * year-long throttle flag would otherwise look like a permanent halt
+ * to the dashboard.
+ */
+const MAX_RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1_000;
+
+/**
+ * DX-322 — rate-limit synthetic patterns. Anthropic surfaces the limit
+ * in multiple forms; defense-in-depth catches all of them so a future
+ * wording change doesn't silently fall through to the legacy stream-
+ * idle loop (which burns the recover-cap on every retry while the
+ * limit holds).
+ *
+ *   - `RATE_LIMIT_PATTERN`: matches the error text as a whole. Catches
+ *     `hit your limit`, `rate_limit`, `rate limit`, and bare `429`.
+ *   - `RESET_TIME_PATTERN`: extracts `(hh):(mm)(am|pm) ((tz))`. The tz
+ *     is an IANA name (`America/Montevideo`, `UTC`, etc.) — bare
+ *     offsets like `-03:00` are NOT supported here; the parser falls
+ *     back to legacy stream-idle when the tz cannot be looked up via
+ *     `Intl.DateTimeFormat`.
+ */
+const RATE_LIMIT_PATTERN = /(hit your limit|rate[_ -]?limit|\b429\b)/i;
+const RESET_TIME_PATTERN =
+  /\bresets?\s+(\d{1,2}):(\d{2})\s*(am|pm)\s*\(([A-Za-z_]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?|UTC)\)/i;
+
 interface PendingRecover {
   timer: ReturnType<typeof setTimeout>;
   recoverCount: number;
   errorText: string;
+  kind: ApiErrorKind;
+  resumeAt?: string;
 }
 
 export class ApiErrorDetector {
@@ -145,7 +214,14 @@ export class ApiErrorDetector {
     const isSynthetic = matchesSynthetic(raw);
 
     if (isSynthetic) {
-      this.armOrIgnore(extractErrorText(raw));
+      const errorText = extractErrorText(raw);
+      // DX-322 — classify the synthetic. Rate-limit pattern → try to
+      // parse `resume_at`. Unparseable rate-limit string falls back to
+      // `"stream_idle"` so the legacy recover loop + CRITICAL_FAILURE
+      // path stays the safety net (never silently swallow). Stream-
+      // idle synthetics carry no `resume_at`.
+      const classified = classifyApiError(errorText, Date.now());
+      this.armOrIgnore(errorText, classified.kind, classified.resumeAt);
       return;
     }
 
@@ -163,8 +239,18 @@ export class ApiErrorDetector {
    * epoch the call is a no-op. If a timer is already armed (a duplicate
    * synthetic within the window) we let the original timer run — re-
    * arming would let a flapping API push the recover indefinitely.
+   *
+   * DX-322 — `kind` + `resumeAt` ride along on the pending record so
+   * `onApiError` receives the same classification the entry produced.
+   * Re-arm semantics deliberately ignore later entries (rate-limit
+   * after a stream-idle stays stream-idle for this window); the next
+   * epoch can re-classify when the recover handler bumps the counter.
    */
-  private armOrIgnore(errorText: string): void {
+  private armOrIgnore(
+    errorText: string,
+    kind: ApiErrorKind,
+    resumeAt?: string,
+  ): void {
     const currentEpoch = this.getRecoverCount();
     if (this.firedAtEpoch >= currentEpoch) return; // already fired this epoch
     if (this.pending) return; // timer already armed; do not re-arm
@@ -186,15 +272,257 @@ export class ApiErrorDetector {
       // fresh fire.
       if (this.firedAtEpoch >= info.recoverCount) return;
       this.firedAtEpoch = info.recoverCount;
-      this.onApiError({
+      const fired: ApiErrorInfo = {
         jobId: this.jobId,
         errorText: info.errorText,
         recoverCount: info.recoverCount,
-      });
+        kind: info.kind,
+      };
+      if (info.resumeAt) fired.resume_at = info.resumeAt;
+      this.onApiError(fired);
     }, this.confirmationWindowMs);
 
-    this.pending = { timer, recoverCount: currentEpoch, errorText };
+    this.pending = {
+      timer,
+      recoverCount: currentEpoch,
+      errorText,
+      kind,
+      resumeAt,
+    };
   }
+}
+
+/**
+ * DX-322 — classify a synthetic error's text. Pure function so unit
+ * tests can pin both arms without spinning up the detector. `nowMs` is
+ * threaded through (not read from `Date.now()` inside) so tests can
+ * pass a fixed time and assert deterministic `resume_at` values.
+ *
+ *   - Matches `RATE_LIMIT_PATTERN` → tries `parseRateLimitResume`. A
+ *     successful parse returns `{kind: "rate_limit", resumeAt}`. A
+ *     failed parse logs the original text at warn-level (for operator
+ *     visibility) and falls back to `{kind: "stream_idle"}` so the
+ *     legacy recover loop still runs.
+ *   - No rate-limit signal → `{kind: "stream_idle"}` unchanged.
+ *
+ * Exported for the unit tests in `api-error-detector.test.ts`. Not
+ * re-exported from the package root — internal seam.
+ */
+export function classifyApiError(
+  errorText: string,
+  nowMs: number,
+): { kind: ApiErrorKind; resumeAt?: string } {
+  if (!RATE_LIMIT_PATTERN.test(errorText)) {
+    return { kind: "stream_idle" };
+  }
+  const resumeAt = parseRateLimitResume(errorText, nowMs);
+  if (resumeAt) {
+    return { kind: "rate_limit", resumeAt };
+  }
+  // Logging via console.warn rather than the package logger to keep the
+  // detector module dependency-light (the launcher's createLogger is
+  // module-scoped above and depends on config; importing it here would
+  // pull the config chain into the pure function's transitive imports).
+  // The launcher's recover handler logs the same text again with the
+  // full job context, so this WARN is purely an operator-visible
+  // breadcrumb for "rate-limit shape changed and we're back on the
+  // legacy recover loop."
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[api-error-detector] rate-limit pattern matched but reset-time unparseable; falling back to stream_idle. errorText: ${errorText}`,
+  );
+  return { kind: "stream_idle" };
+}
+
+/**
+ * DX-322 — parse `resets H:MM(am|pm) (IANA/TZ)` out of the error text
+ * into an absolute UTC ISO `resume_at`. Returns `undefined` when:
+ *
+ *   - The pattern doesn't match.
+ *   - The named IANA tz is unknown to `Intl.DateTimeFormat`.
+ *   - The hour/minute is out of range.
+ *   - The computed `resume_at` is more than 24h in the future
+ *     (`MAX_RATE_LIMIT_WINDOW_MS`) — defensively rejected per spec.
+ *
+ * DST-correctness: the offset between the named tz's wall clock and
+ * UTC is computed via `Intl.DateTimeFormat.formatToParts` against the
+ * live `nowMs`. Hand-rolling offset math would miss Montevideo's 2026
+ * DST transition (and every future DST tz change); this delegates to
+ * the V8/ICU TZ database that ships with Node.
+ *
+ * 12-hour wrap: if the parsed wall-clock is BEFORE `nowMs` in the
+ * named tz, the reset is assumed to be tomorrow (the limit window
+ * crossed midnight). If even tomorrow exceeds the 24h cap, the parse
+ * fails fast.
+ */
+export function parseRateLimitResume(
+  errorText: string,
+  nowMs: number,
+): string | undefined {
+  const match = errorText.match(RESET_TIME_PATTERN);
+  if (!match) return undefined;
+  const hour12 = Number.parseInt(match[1], 10);
+  const minute = Number.parseInt(match[2], 10);
+  const meridiem = match[3].toLowerCase();
+  const tz = match[4];
+
+  if (!Number.isFinite(hour12) || hour12 < 1 || hour12 > 12) return undefined;
+  if (!Number.isFinite(minute) || minute < 0 || minute > 59) return undefined;
+
+  const hour24 =
+    meridiem === "am"
+      ? hour12 === 12
+        ? 0
+        : hour12
+      : hour12 === 12
+        ? 12
+        : hour12 + 12;
+
+  let tzWallParts: TzWallParts;
+  try {
+    tzWallParts = formatTzWallParts(new Date(nowMs), tz);
+  } catch {
+    // `Intl.DateTimeFormat` throws `RangeError` on an unknown timeZone.
+    // Caller falls back to stream_idle.
+    return undefined;
+  }
+
+  // Step 1 — guess: assume the reset is today in the named tz. Compute
+  // the UTC instant whose wall-clock representation in `tz` is
+  // `today @ hour24:minute:00`.
+  let candidateUtcMs = wallClockToUtc(
+    tzWallParts.year,
+    tzWallParts.month,
+    tzWallParts.day,
+    hour24,
+    minute,
+    tz,
+  );
+  if (candidateUtcMs === undefined) return undefined;
+
+  // Step 2 — if the reset is already in the past for this tz date, it
+  // must mean the limit window crosses midnight. Bump to tomorrow in
+  // the named tz and re-resolve to UTC. (Naive `+24h` would miss DST
+  // transitions where today and tomorrow differ by 23h or 25h; we go
+  // back through the wall-clock conversion so the live offset is read
+  // for the rolled-over date.)
+  if (candidateUtcMs <= nowMs) {
+    const tomorrowMs = candidateUtcMs + 24 * 60 * 60 * 1_000;
+    const tomorrowParts = formatTzWallParts(new Date(tomorrowMs), tz);
+    candidateUtcMs = wallClockToUtc(
+      tomorrowParts.year,
+      tomorrowParts.month,
+      tomorrowParts.day,
+      hour24,
+      minute,
+      tz,
+    );
+    if (candidateUtcMs === undefined) return undefined;
+  }
+
+  // Defensive 24h cap — anything farther is operator territory per
+  // spec (`Reset-time parser invariants`).
+  if (candidateUtcMs - nowMs > MAX_RATE_LIMIT_WINDOW_MS) return undefined;
+  // Also defensively reject anything still in the past — should be
+  // unreachable after the tomorrow-bump, but a malformed tz could in
+  // theory return a wall clock that places the reset in the past
+  // again (e.g. a 23h DST spring-forward where +24h still lands
+  // before `now`). Fail closed to legacy stream-idle in that case.
+  if (candidateUtcMs <= nowMs) return undefined;
+
+  return new Date(candidateUtcMs).toISOString();
+}
+
+interface TzWallParts {
+  year: number;
+  month: number; // 1-12
+  day: number; // 1-31
+  hour: number; // 0-23
+  minute: number;
+  second: number;
+}
+
+function formatTzWallParts(date: Date, tz: string): TzWallParts {
+  const fmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts: Record<string, string> = {};
+  for (const part of fmt.formatToParts(date)) {
+    if (part.type !== "literal") parts[part.type] = part.value;
+  }
+  // `hour: "2-digit"` with `hourCycle: "h23"` produces "00".."23" but
+  // older Node/ICU bundles have been observed to emit "24" for the
+  // midnight hour; normalize to keep arithmetic consistent.
+  let hour = Number.parseInt(parts.hour, 10);
+  if (hour === 24) hour = 0;
+  return {
+    year: Number.parseInt(parts.year, 10),
+    month: Number.parseInt(parts.month, 10),
+    day: Number.parseInt(parts.day, 10),
+    hour,
+    minute: Number.parseInt(parts.minute, 10),
+    second: Number.parseInt(parts.second, 10),
+  };
+}
+
+/**
+ * Convert a "wall clock" datetime `(year, month, day, hour, minute)`
+ * IN `tz` to its absolute UTC ms equivalent. Returns `undefined` if
+ * the tz is unknown to `Intl.DateTimeFormat`.
+ *
+ * Two-pass to handle DST: the offset between tz and UTC depends on
+ * the wall-clock date itself, so we use the initial guess to compute
+ * the offset, then correct. One iteration suffices for non-DST-
+ * transition wall clocks; on the spring-forward / fall-back hour the
+ * answer is ambiguous and we return whichever instant V8/ICU's
+ * formatter chooses (acceptable for rate-limit purposes — the reset
+ * is a rough deadline, not a billing event).
+ */
+function wallClockToUtc(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  tz: string,
+): number | undefined {
+  try {
+    const naiveMs = Date.UTC(year, month - 1, day, hour, minute, 0);
+    const guessOffsetMs = tzOffsetMs(new Date(naiveMs), tz);
+    const firstPassMs = naiveMs - guessOffsetMs;
+    // Refine once — DST transitions move the offset between the naïve
+    // guess and the corrected instant.
+    const refinedOffsetMs = tzOffsetMs(new Date(firstPassMs), tz);
+    return naiveMs - refinedOffsetMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Difference (in ms) between the wall-clock representation of `date`
+ * IN `tz` and the same wall clock interpreted as UTC. For a tz west
+ * of UTC (e.g. America/Montevideo, UTC-3) the result is negative;
+ * for a tz east of UTC the result is positive.
+ */
+function tzOffsetMs(date: Date, tz: string): number {
+  const parts = formatTzWallParts(date, tz);
+  const tzWallAsUtcMs = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second,
+  );
+  return tzWallAsUtcMs - date.getTime();
 }
 
 /**

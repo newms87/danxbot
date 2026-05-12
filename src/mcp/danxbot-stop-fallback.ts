@@ -42,8 +42,9 @@ interface DbWriteShape {
    * through the MCP tool and the worker is unreachable, the fallback
    * row still needs to land terminal=recovered so the recover-child
    * dispatch's `parent_recover_id` references a terminal row.
+   * DX-322 adds `throttled` for the same reason on the rate-limit path.
    */
-  dbStatus: "completed" | "failed" | "recovered";
+  dbStatus: "completed" | "failed" | "recovered" | "throttled";
   summary: string;
 }
 

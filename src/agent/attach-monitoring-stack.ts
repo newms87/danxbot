@@ -298,6 +298,23 @@ export async function attachMonitoringStack(
     watcher,
     getRecoverCount: () => job.recoverCount,
     onApiError: (info) => {
+      // DX-322 — route on `info.kind` BEFORE incrementing the recover
+      // counter. Rate-limit hits at ANY `recoverCount` jump straight to
+      // the throttle handler; retrying inside the limit window is
+      // guaranteed waste. Stream-idle synthetics still go through the
+      // legacy recover-cap path.
+      //
+      // We guard on `info.kind` alone, not also on `info.resume_at` —
+      // `classifyApiError` already falls back to `kind: "stream_idle"`
+      // when the reset is unparseable, so a `rate_limit` kind without
+      // `resume_at` is an internal contract violation. The throttle
+      // handler's own `if (!info.resume_at)` check (below) surfaces it
+      // loudly as `api_error_failed` rather than silently rerouting
+      // back to the recover loop.
+      if (info.kind === "rate_limit") {
+        void handleRateLimitThrottle({ info, job, jobId, options });
+        return;
+      }
       void handleApiErrorRecover({
         info,
         job,
@@ -590,5 +607,107 @@ async function handleApiErrorRecover(args: {
     }
   } catch (err) {
     log.error(`[Job ${jobId}] API-error recover handler threw`, err);
+  }
+}
+
+/**
+ * DX-322 — rate-limit throttle handler. Invoked by `ApiErrorDetector`
+ * when a synthetic error matched the rate-limit pattern AND a valid
+ * `resume_at` was parsed. Skips the `recoverCount` increment + the
+ * `/api/resume` POST entirely; the chain ends here pending the
+ * deadline.
+ *
+ * Two-layer pattern, mirroring `handleApiErrorRecover`:
+ *
+ *   1. Write the throttle flag (`source: "throttle"`, `resume_at`,
+ *      `throttle_kind: "rate_limit"`) to `<repo>/.danxbot/CRITICAL_FAILURE`
+ *      so the poller halt-gate honors the deadline. The flag is read
+ *      by the gate on every tick; past `resume_at` the read path
+ *      auto-unlinks the file and the gate proceeds normally.
+ *   2. Call `job.stop("rate_limited", summary)` which collapses the
+ *      in-memory status to `throttled` and finalizes the dispatch row
+ *      as `throttled` via `buildCleanup`. SIGTERMs the agent; no
+ *      `/api/resume` POST (the picker re-dispatches the card on the
+ *      first tick past `resume_at`).
+ *
+ * `recoverContext` is required because the flag path is repo-local
+ * (`recoverContext.repoLocalPath`). When it is absent (tests / ad-hoc
+ * spawns bypassing dispatch()), we fall back to the legacy
+ * stream-idle recover path — same defensive shape `handleApiErrorRecover`
+ * uses. Throttles WITHOUT a flag would silently let the next picker
+ * tick re-dispatch into the same limit, so we never proceed without
+ * the flag landing first.
+ */
+async function handleRateLimitThrottle(args: {
+  info: ApiErrorInfo;
+  job: AgentJob;
+  jobId: string;
+  options: SpawnAgentOptions;
+}): Promise<void> {
+  const { info, job, jobId, options } = args;
+  try {
+    if (job.status !== "running") {
+      log.info(
+        `[Job ${jobId}] Rate-limit throttle fired after job reached terminal (${job.status}); skipping`,
+      );
+      return;
+    }
+    if (!info.resume_at) {
+      // Internal contract violation — `classifyApiError` only emits
+      // `kind: "rate_limit"` when it parsed a `resume_at`. If we got
+      // here without one, something upstream silently dropped it.
+      // Surface as `api_error_failed` (NOT a silent fall-through to
+      // the recover loop) so operators see the regression in the
+      // dispatch row.
+      log.error(
+        `[Job ${jobId}] Rate-limit throttle invoked without resume_at — internal bug; collapsing to api_error_failed`,
+      );
+      await job.stop("api_error_failed", `Rate-limit detected but resume_at missing: ${info.errorText}`);
+      return;
+    }
+    const summary = `Anthropic rate-limit — resumes at ${info.resume_at} (${info.errorText})`;
+    const recoverContext = options.recoverContext;
+    if (!recoverContext) {
+      log.error(
+        `[Job ${jobId}] Rate-limit throttle: recoverContext absent — cannot write throttle flag; collapsing to api_error_failed`,
+      );
+      await job.stop("api_error_failed", summary);
+      return;
+    }
+    log.warn(
+      `[Job ${jobId}] Anthropic rate-limit — writing throttle flag with resume_at=${info.resume_at}; poller auto-clears past deadline`,
+    );
+    try {
+      writeFlag(recoverContext.repoLocalPath, {
+        source: "throttle",
+        dispatchId: jobId,
+        reason: "Anthropic rate-limit reached",
+        detail: info.errorText,
+        resume_at: info.resume_at,
+        throttle_kind: "rate_limit",
+      });
+    } catch (writeErr) {
+      // Flag write can fail on a disk error (ENOSPC, EACCES) or a
+      // writer-side invariant violation. Without the flag the
+      // poller has no signal to auto-clear past `resume_at`, so we
+      // can't safely mark the dispatch `throttled` — the next tick
+      // would re-dispatch the card straight into the live rate-
+      // limit. Collapse to `api_error_failed` so the dispatch row
+      // records the precise failure mode (and the operator sees the
+      // ENOSPC / etc. via the summary) rather than silently
+      // succeeding past the cleanup.
+      const errMsg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      log.error(
+        `[Job ${jobId}] Rate-limit throttle: writeFlag failed (${errMsg}) — collapsing to api_error_failed`,
+      );
+      await job.stop(
+        "api_error_failed",
+        `Rate-limit detected but throttle-flag write failed: ${errMsg}`,
+      );
+      return;
+    }
+    await job.stop("rate_limited", summary);
+  } catch (err) {
+    log.error(`[Job ${jobId}] Rate-limit throttle handler threw`, err);
   }
 }
