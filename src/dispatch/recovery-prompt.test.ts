@@ -75,6 +75,48 @@ describe("buildRecoveryPrompt", () => {
     expect(prompt).toContain("Re-run `git fetch origin`");
   });
 
+  describe("branch finalize is the preferred path for landable work", () => {
+    const aheadDirty: DirtyValidation = {
+      state: "dirty",
+      reason: "branch has unmerged commits",
+      details: { porcelain: "", ahead: 1, behind: 0 },
+    };
+
+    it("Allowed operations advertises finalize BEFORE graduation", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      const finalizeIdx = prompt.indexOf("Land work on `main` via `.danxbot/scripts/agent-finalize.sh`");
+      const graduateIdx = prompt.indexOf("Graduate `origin/phil` via `--force-with-lease`");
+      expect(finalizeIdx).toBeGreaterThan(0);
+      expect(graduateIdx).toBeGreaterThan(finalizeIdx);
+    });
+
+    it("renders Branch finalize section with decision tree + finalize call", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      expect(prompt).toContain("## Branch finalize");
+      expect(prompt).toContain("git cherry origin/main HEAD");
+      expect(prompt).toContain("agent-finalize.sh");
+      expect(prompt).toContain("FINALIZE");
+      expect(prompt).toContain("GRADUATE");
+    });
+
+    it("graduation section header marks it as edge case", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      expect(prompt).toContain("## Branch graduation (edge case");
+    });
+  });
+
   describe("DX-330 — branch graduation via three-lock force-with-lease", () => {
     const aheadDirty: DirtyValidation = {
       state: "dirty",
