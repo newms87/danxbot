@@ -1118,6 +1118,204 @@ describe("WorktreeManager", () => {
     });
   });
 
+  describe("provisionDashboardNodeModules / ensureProvisioned (DX-314)", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    function seedRootRepo(): void {
+      // Root node_modules + package.json so provisionNodeModules's
+      // sentinel-gated step does not throw or skip — its branch is
+      // covered elsewhere; this block focuses on the dashboard branch.
+      writeFileSync(
+        join(repoRoot, "package.json"),
+        JSON.stringify({ name: "test-repo", devDependencies: { tsx: "^4.0.0" } }),
+      );
+      mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
+      writeFileSync(join(repoRoot, "node_modules", ".bin", "tsx"), "#!fake\n");
+    }
+
+    function seedDashboard(): void {
+      // Dashboard subpackage with its own package.json AND its own
+      // node_modules shipping @vitejs/plugin-vue (the AC1 sentinel
+      // that proves the symlink resolves into the dashboard tree).
+      mkdirSync(join(repoRoot, "dashboard"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, "dashboard", "package.json"),
+        JSON.stringify({ name: "dashboard", dependencies: { vue: "^3.0.0" } }),
+      );
+      mkdirSync(
+        join(repoRoot, "dashboard", "node_modules", "@vitejs", "plugin-vue"),
+        { recursive: true },
+      );
+      writeFileSync(
+        join(
+          repoRoot,
+          "dashboard",
+          "node_modules",
+          "@vitejs",
+          "plugin-vue",
+          "package.json",
+        ),
+        JSON.stringify({ name: "@vitejs/plugin-vue", version: "5.0.0" }),
+      );
+      // Worktree's dashboard subdir — `git worktree add` creates this
+      // from the checked-in dashboard tree; mkdir mimics that here.
+      mkdirSync(join(worktreeRoot, "dashboard"), { recursive: true });
+    }
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-dashboard-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(worktreeRoot, { recursive: true });
+      seedRootRepo();
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("creates dashboard/node_modules symlink when dashboard/package.json is present", async () => {
+      seedDashboard();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, "dashboard", "node_modules");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(
+        realpathSync(join(repoRoot, "dashboard", "node_modules")),
+      );
+    });
+
+    it("dashboard/@vitejs/plugin-vue is reachable through the symlink (AC1 sentinel)", async () => {
+      seedDashboard();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(
+        existsSync(
+          join(
+            worktreeRoot,
+            "dashboard",
+            "node_modules",
+            "@vitejs",
+            "plugin-vue",
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it("is a no-op when repo has no dashboard/package.json (connected repo without dashboard subpackage)", async () => {
+      // No seedDashboard() — repo has no dashboard subdir. The
+      // existing root provisioning still runs; only the dashboard
+      // branch is gated off.
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(
+        existsSync(join(worktreeRoot, "dashboard", "node_modules")),
+      ).toBe(false);
+    });
+
+    it("is idempotent — running twice leaves the same dashboard/node_modules symlink", async () => {
+      seedDashboard();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, "dashboard", "node_modules");
+      const inodeBefore = lstatSync(link).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(link).ino).toBe(inodeBefore);
+    });
+
+    it("replaces a broken dashboard/node_modules symlink with a fresh one", async () => {
+      seedDashboard();
+      const link = join(worktreeRoot, "dashboard", "node_modules");
+      symlinkSync(join(workArea, "does-not-exist"), link, "dir");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(
+        realpathSync(join(repoRoot, "dashboard", "node_modules")),
+      );
+    });
+
+    it("replaces a real dashboard/node_modules directory with the symlink", async () => {
+      seedDashboard();
+      const real = join(worktreeRoot, "dashboard", "node_modules");
+      mkdirSync(real, { recursive: true });
+      writeFileSync(join(real, "stale.txt"), "stale\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(real).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(real, "stale.txt"))).toBe(false);
+    });
+
+    it("is a no-op when the worktree has no dashboard/ subdir (no parent for the symlink — worktree predates dashboard subpackage or operator deleted it)", async () => {
+      // Source-side fully populated, but `<worktreeRoot>/dashboard` is
+      // absent. `symlinkSync` would ENOENT on a missing parent;
+      // production bootstrap creates the dir via `git worktree add`,
+      // but a defensive skip keeps the umbrella from throwing in the
+      // edge case (operator-deleted dir, branch predating the
+      // dashboard subpackage). Mirrors how `provisionIssuesSymlink`
+      // handles a missing `<worktree>/.danxbot` parent.
+      mkdirSync(join(repoRoot, "dashboard", "node_modules", "@vitejs", "plugin-vue"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, "dashboard", "package.json"),
+        JSON.stringify({ name: "dashboard" }),
+      );
+      // Intentionally NOT mkdir-ing <worktreeRoot>/dashboard.
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(
+        existsSync(join(worktreeRoot, "dashboard", "node_modules")),
+      ).toBe(false);
+    });
+
+    it("umbrella: ensureProvisioned lands ALL provisioned artifacts in one call (root nm + dashboard nm + .env)", async () => {
+      // Regression guard for `provisionWorktreeArtifacts` — protects
+      // against a future refactor that drops any single provisioner
+      // from the umbrella. Extends the DX-244 atomicity test to cover
+      // the new DX-314 dashboard slot.
+      seedDashboard();
+      writeFileSync(join(repoRoot, ".env"), "DANXBOT_DB_USER=fake\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(
+        lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink(),
+      ).toBe(true);
+      expect(
+        lstatSync(join(worktreeRoot, "dashboard", "node_modules")).isSymbolicLink(),
+      ).toBe(true);
+      expect(lstatSync(join(worktreeRoot, ".env")).isSymbolicLink()).toBe(true);
+    });
+
+    it("is a no-op when dashboard/package.json is present but dashboard/node_modules is absent (operator has not run npm install in dashboard yet)", async () => {
+      // package.json present, source node_modules absent — silent
+      // skip mirrors how provisionNodeModules handles a missing
+      // repo-root node_modules. Worker can't run dashboard tests in
+      // this state either way, so no fail-loud is added here.
+      mkdirSync(join(repoRoot, "dashboard"), { recursive: true });
+      writeFileSync(
+        join(repoRoot, "dashboard", "package.json"),
+        JSON.stringify({ name: "dashboard" }),
+      );
+      mkdirSync(join(worktreeRoot, "dashboard"), { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(
+        existsSync(join(worktreeRoot, "dashboard", "node_modules")),
+      ).toBe(false);
+    });
+  });
+
   describe("provisionIssuesSymlink (DX-309)", () => {
     let workArea: string;
     let repoRoot: string;

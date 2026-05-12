@@ -686,20 +686,74 @@ function worktreeListIncludes(stdout: string, path: string): boolean {
 }
 
 /**
- * Provision both worktree symlinks (DX-242 + DX-244) — node_modules
- * for binary resolution, .env for vitest module-load env vars. Single
- * entry point so callers don't track which artifacts exist; adding a
- * new artifact (a future `.npmrc`, etc.) is one entry here, not
- * touch-ups across four callsites.
+ * Provision every worktree-shared artifact in one place. Callers
+ * (bootstrap / validate / syncWorktree / ensureProvisioned) invoke
+ * this and don't track which provisioners exist; adding a new artifact
+ * is one line here, not touch-ups across four callsites. Current
+ * artifacts:
+ *
+ *   - root `node_modules` symlink (DX-242)
+ *   - `dashboard/node_modules` symlink (DX-314)
+ *   - root `.env` symlink (DX-244)
+ *   - `.danxbot/issues` symlink (DX-309)
+ *   - `.danxbot/workspaces/<name>/` real-dir copies (DX-309)
  */
 function provisionWorktreeArtifacts(
   repoRoot: string,
   worktreePath: string,
 ): void {
   provisionNodeModules(repoRoot, worktreePath);
+  provisionDashboardNodeModules(repoRoot, worktreePath);
   provisionEnvFile(repoRoot, worktreePath);
   provisionIssuesSymlink(repoRoot, worktreePath);
   provisionWorktreeWorkspaces(repoRoot, worktreePath);
+}
+
+/**
+ * DX-314: symlink `<worktree>/dashboard/node_modules` ->
+ * `<repoRoot>/dashboard/node_modules` so `cd <worktree>/dashboard &&
+ * npx vitest run` resolves `@vitejs/plugin-vue` at vitest config-load
+ * time. DX-301 verification used a manual `ln -s` workaround; this
+ * provisions the link automatically. Mirrors `provisionNodeModules` —
+ * symlink, not install, so every worktree shares one resolved tree.
+ *
+ * Silent skip when `<repoRoot>/dashboard/package.json` is absent
+ * (connected repos without a dashboard subpackage) or when the
+ * worktree's own `dashboard/` subdir is absent (no parent for the
+ * link — `git worktree add origin/main` always creates it, but a
+ * worktree predating the dashboard subpackage or one where the dir
+ * was operator-deleted will hit this branch).
+ *
+ * No source-side `node_modules` sentinel like `provisionNodeModules`
+ * has for `.bin/tsx`: the worker itself never invokes anything from
+ * `dashboard/node_modules`, so a half-installed source produces a
+ * clear vitest "Cannot find package '@vitejs/plugin-vue'" error at
+ * first dashboard test run — actionable to the operator without
+ * adding a second sentinel.
+ */
+function provisionDashboardNodeModules(
+  repoRoot: string,
+  worktreePath: string,
+): void {
+  if (!existsSync(join(repoRoot, "dashboard", "package.json"))) {
+    log.debug(
+      `provisionDashboardNodeModules: ${join(repoRoot, "dashboard", "package.json")} does not exist — skipping`,
+    );
+    return;
+  }
+  if (!existsSync(join(worktreePath, "dashboard"))) {
+    log.debug(
+      `provisionDashboardNodeModules: ${join(worktreePath, "dashboard")} does not exist — skipping (no parent for the symlink)`,
+    );
+    return;
+  }
+  provisionSymlink(
+    repoRoot,
+    worktreePath,
+    join("dashboard", "node_modules"),
+    "dir",
+    "provisionDashboardNodeModules",
+  );
 }
 
 /**
