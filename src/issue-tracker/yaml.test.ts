@@ -225,7 +225,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
    */
   function legacyIssueWithoutRequiresHuman(): Issue {
     return {
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "DX-1",
       external_id: "",
@@ -252,6 +252,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
       blocked: null,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       requires_human: undefined as any,
+      conflict_on: [],
       assigned_agent: null,
       waiting_on: null,
       history: [],

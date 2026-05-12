@@ -292,6 +292,14 @@ export interface DispatchInput {
    */
   timeoutMs?: number;
   /**
+   * Optional Claude model name forwarded as `--model <name>` to the
+   * spawned claude CLI. Use to pin a specific model on a per-dispatch
+   * basis (e.g. conflict-check pins Sonnet so verdicts get reasoning
+   * quality regardless of the host's default). Omit to let claude
+   * resolve its own default.
+   */
+  model?: string;
+  /**
    * Open an interactive Windows Terminal tab alongside the headless claude.
    * Defaults to `config.isHost`. Callers rarely override — only scenarios
    * that need docker headless behavior inside host mode (tests) do.
@@ -689,6 +697,7 @@ async function runResolved(
         mcpConfigPath: settingsPath,
         settingsPath: resolved.settingsPath,
         topLevelAgent: resolved.topLevelAgent,
+        model: input.model,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,

@@ -26,7 +26,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -55,6 +55,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     assigned_agent: null,
     waiting_on: null,
     requires_human: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };
@@ -284,14 +285,14 @@ describe("serializeIssue / parseIssue", () => {
       // next save). Pin the legacy acceptance so a future tightening
       // doesn't drop it.
       const yaml1 = serializeIssue(fullIssue()).replace(
-        "schema_version: 6",
+        "schema_version: 7",
         "schema_version: 5",
       );
       const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
       // In-memory schema_version is normalized to 6 (the canonical
       // version the type system enforces); the on-disk shape is
       // re-emitted as 6 on round-trip.
-      expect(parsed.schema_version).toBe(6);
+      expect(parsed.schema_version).toBe(7);
     });
 
     it('parseIssue throws fail-loud on status: "Needs Approval" with a clear migration message (DX-231)', () => {
@@ -723,8 +724,8 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 6 is the current canonical version (DX-231 added requires_human)", () => {
-    const result = validateIssue(valid({ schema_version: 6 }));
+  it("schema_version: 7 is the current canonical version (DX-231 added requires_human)", () => {
+    const result = validateIssue(valid({ schema_version: 7 }));
     expect(result.ok).toBe(true);
   });
 
@@ -1209,7 +1210,7 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(6);
+    expect(issue.schema_version).toBe(7);
     expect(issue.tracker).toBe("memory");
     expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
@@ -1226,7 +1227,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 6,
+      schema_version: 7,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1262,11 +1263,12 @@ describe("serializeIssue byte-stable snapshot", () => {
       assigned_agent: null,
       waiting_on: null,
       requires_human: null,
+      conflict_on: [],
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 6
+      "schema_version: 7
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1319,6 +1321,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       waiting_on: null
       blocked: null
       requires_human: null
+      conflict_on: []
       "
     `);
   });
@@ -1331,7 +1334,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     // — broken for diffing + git history. The companion test for the
     // `null` shape pins the same field's absence-from-payload contract.
     const fixture: Issue = {
-      schema_version: 6,
+      schema_version: 7,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1368,11 +1371,12 @@ describe("serializeIssue byte-stable snapshot", () => {
         set_by: "agent",
         set_at: "2026-05-10T12:00:00.000Z",
       },
+      conflict_on: [],
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 6
+      "schema_version: 7
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1415,6 +1419,7 @@ describe("serializeIssue byte-stable snapshot", () => {
           - Redeploy worker; toggle off this flag
         set_by: agent
         set_at: 2026-05-10T12:00:00.000Z
+      conflict_on: []
       "
     `);
     // Round-trip — the snapshot is the canonical on-disk form; parsing

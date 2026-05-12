@@ -52,6 +52,13 @@ export interface BuildClaudeInvocationOptions {
    */
   topLevelAgent?: string;
   /**
+   * Optional Claude model name forwarded as `--model <name>`. When unset,
+   * claude resolves the model from its own defaults (env / settings /
+   * built-in). Use to pin a specific model on a per-dispatch basis
+   * (e.g. conflict-check pins Sonnet for judgment quality).
+   */
+  model?: string;
+  /**
    * Claude session UUID to resume via `--resume <id>`. When set, claude loads
    * the prior session's history and appends new turns to the same JSONL file.
    * The dispatch tag is still prepended to the firstMessage, so SessionLogWatcher
@@ -156,6 +163,10 @@ export function buildClaudeInvocation(
 
   if (options.topLevelAgent) {
     flags.push("--agent", options.topLevelAgent);
+  }
+
+  if (options.model) {
+    flags.push("--model", options.model);
   }
 
   if (options.mcpConfigPath) {

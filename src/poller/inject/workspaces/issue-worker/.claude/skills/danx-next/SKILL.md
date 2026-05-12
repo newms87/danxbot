@@ -79,7 +79,8 @@ That YAML is the source of truth for the card. The poller pre-hydrated it from t
 | `ac` | `[{check_item_id, title, checked}]` | Acceptance Criteria. Empty `check_item_id` on new items — tracker assigns. |
 | `comments` | `[{id?, author, timestamp, text}]` | Append a new comment by adding `{author, timestamp, text}` (no `id`). The worker handles tracker push semantics. |
 | `retro` | `{good, bad, action_item_ids[], commits[]}` | Fill on Done / Cancelled / Blocked. The worker auto-renders this as ONE structured comment on terminal save. `action_item_ids[]` is a `string[]` of `<PREFIX>-N` references. **`action_item_ids[]` is a LAST RESORT** — see Step 1.5. Only reference an action item when the work is BOTH unrelated to this card's ACs AND too large to reasonably finish in this session (multi-phase refactor, redesign, cross-cutting work needing its own scoping). Small in-scope or small unrelated fixes you spotted → DO THEM NOW, don't defer. Create the action item card first via `danx_issue_create({type, title, description, ac, ...})`, then push its returned `id` here. `action_item_ids[]` must contain only valid `<PREFIX>-N` format strings. Do NOT append a `## Retro` comment to `comments[]` yourself. |
-| `waiting_on` | `null` OR `{reason, timestamp, by[]}` | `null` when nothing blocks this card. Set to a `{reason, timestamp, by}` record when the card cannot proceed because it is waiting on **other in-flight work** that does NOT need a human (a phase sibling shipping first, an Action Items card needs to land, a separately-scoped task). `reason` is a non-empty sentence. `timestamp` is current ISO 8601. `by[]` is a non-empty list of the IMMEDIATE `<PREFIX>-N` blocker(s) — never transitive. If A→B→C, A's `by[]` is `["B"]` only; the chain is computed by the poller + dashboard from each card's direct blocker. If no existing card describes the unblock work, **create one** (`danx_issue_create`) and put its id here. The worker mechanically forces `status: ToDo` whenever `waiting_on` is non-null; you do not separately move status. The poller skips dispatching the card while any blocker is non-terminal, then auto-clears `waiting_on` and dispatches once every blocker is Done / Cancelled. **Waiting On is NOT Blocked** — Blocked is when THIS card itself is stuck; Waiting On is when THIS card is queued behind OTHER work. See Step 10b. |
+| `waiting_on` | `null` OR `{reason, timestamp, by[]}` | `null` when nothing blocks this card. Set to a `{reason, timestamp, by}` record when the card cannot proceed because it is waiting on **other in-flight work** that does NOT need a human (a phase sibling shipping first, an Action Items card needs to land, a separately-scoped task). `reason` is a non-empty sentence. `timestamp` is current ISO 8601. `by[]` is a non-empty list of the IMMEDIATE `<PREFIX>-N` blocker(s) — never transitive. If A→B→C, A's `by[]` is `["B"]` only; the chain is computed by the poller + dashboard from each card's direct blocker. If no existing card describes the unblock work, **create one** (`danx_issue_create`) and put its id here. The worker mechanically forces `status: ToDo` whenever `waiting_on` is non-null; you do not separately move status. The poller skips dispatching the card while any blocker is non-terminal, then auto-clears `waiting_on` and dispatches once every blocker is Done / Cancelled. **Waiting On is NOT Blocked** — Blocked is when THIS card itself is stuck; Waiting On is when THIS card is queued behind OTHER work. Before stamping, run the cycle audit in Step 10b. See Step 10b. |
+| `conflict_on` | `ConflictOnEntry[]` (default `[]`) | Each entry `{id: <PREFIX>-N, reason: non-empty string}` declares a **two-way dispatch mutex** with another open card. Set when this card has heavy structural overlap (>15 min human merge effort on a shared function / interface / pipeline) with another card such that running both concurrently produces a merge headache. The poller skips dispatch while ANY partner referenced in either direction (this card's list OR another card's list pointing at this card) is currently In Progress. Auto-effective-clears when partners reach Done / Cancelled — the entry stays as durable audit trail. Distinct from `waiting_on` (one-way precedence: A consumes B's output) and from `blocked` (THIS card self-stuck, human-action). See Step 10c for when to stamp this vs the alternatives. Stamped by: (a) the agent on its own card via Step 10c, (b) the conflict-check pre-dispatch precursor when its verdict is `kind: "conflict"`, (c) the operator via the dashboard. |
 
 **Save semantics:** there is no save verb. Use `Edit` / `Write` to modify the YAML on disk. The chokidar watcher detects the file change and upserts the new content into the `issues` Postgres table; an `issue_history` row records the RFC 6902 patch from the prior content. Schema validation does NOT block writes — a malformed YAML is mirrored as `{_malformed: true, raw: <text>}`. Verify your edits by re-reading the file after the write.
 
@@ -381,7 +382,16 @@ If your dispatch prompt's first paragraph reads `You are <name>.` followed by a 
 
 4. **Read the exit code:**
    - **Exit 0** — success. The script's stdout contains `PUSHED <sha>`. Capture that sha; append it to `retro.commits[]` in Step 9. Proceed.
-   - **Exit 1** — rebase conflict. The script's stderr (from `git rebase` itself) lists the conflicting paths. Resolve the conflicts in the worktree, run `git rebase --continue`, then re-invoke the script. If you cannot resolve the conflict (truly external), document the conflict in a `## Operator action required` comment and follow Step 10 (Blocked).
+   - **Exit 1** — rebase conflict. **This is EXPECTED, not a blocker.** The conflict-check at pick time is permissive on purpose; concurrent agents finalizing back-to-back will collide here regularly, and whoever pushes second owns the merge. **You are responsible for resolving every conflict cleanly, in this dispatch.** Procedure:
+
+     a. Read the script's stderr — it lists every conflicting path.
+     b. For each path, open it, read BOTH sides of every `<<<<<<<` / `=======` / `>>>>>>>` marker, and produce a merged result that **keeps all valid code from both sides**. Do not delete the other agent's work to make the conflict go away. Do not pick one side wholesale unless the two edits are semantically identical. The goal is a working tree that contains the intended behavior of *both* cards.
+     c. Re-read the file after editing to confirm no markers remain. Run `grep -n "<<<<<<< \|======= \|>>>>>>> " <path>` per path — must return zero matches.
+     d. `git add` every resolved path. Run `git rebase --continue`. If git stops on a further commit, repeat (a)–(c) until the rebase completes.
+     e. **Run the test suite.** As the rebaser you now own every test the merge could have broken — not just tests for *your* card. From the worktree: `npx vitest run > /tmp/vitest.log 2>&1 ; echo EXIT=$?` and `npx tsc --noEmit`. Any failure caused by your resolution OR by the interaction between the two cards' code paths is YOURS to fix. A failure already present on `origin/main` before your work is a pre-existing condition (rare — `origin/main` should be green) — confirm with `git stash && npx vitest run <failing-file>` only if you have strong evidence the failure is unrelated; otherwise assume the rebase caused it and fix it.
+     f. Once tests + typecheck are green, re-invoke `agent-finalize.sh` with the same args. The script will rebase (now a no-op), squash, and push.
+
+     Only escalate to Blocked when the conflict is genuinely outside the scope of either card — e.g. the conflicting file has been deleted on `origin/main` by a third party with no clear "what does this card want" answer. In that rare case, document the path, both diffs verbatim, and the specific decision you cannot make in a `## Operator action required` comment, then follow Step 10 (Blocked). "Conflict was hard" / "I don't know which side wins" / "tests broke" are NOT valid escalations — read both diffs, decide, fix the tests.
    - **Exit 2** — push race exhausted (`PUSH_RACE_EXHAUSTED` on stderr). Five consecutive non-fast-forward push rejections — the remote has another writer pushing faster than you can rebase. Append a comment to the card explaining (script output verbatim), then call `danxbot_complete({status: "failed", summary: "Push race exhausted; operator must finalize."})` and exit. Do NOT loop manually.
    - **Exit 64** — usage error. Either the args were malformed (missing `<title>` / `<bullets>`), `<CARD-ID>` doesn't match `<PREFIX>-N`, or `<title>` contains a newline. The script's stderr names the specific cause. Fix the invocation (single-line title, valid card id) and re-run. Do NOT `git rebase --continue` — that's a different failure.
    - **Exit 65** — wrong branch. The worktree HEAD is not on `<YOUR-NAME>`. Investigate (`git status`, `git branch --show-current`) — the worktree may be wedged. If you can switch back to your branch cleanly (`git checkout <YOUR-NAME>`), re-run the script. If you cannot, document the wedge in a `## Operator action required` comment and follow Step 10 (Blocked).
@@ -549,6 +559,29 @@ Trigger conditions:
 
 If the only thing blocking the card is human action → use Step 10 (Blocked) instead.
 
+### Cycle audit — MANDATORY before stamping `waiting_on`
+
+Before setting `waiting_on`, walk the chain to confirm you are not
+creating a loop:
+
+1. List every id you intend to put in `by[]`. Call them the
+   prospective blockers.
+2. For each prospective blocker B, read `<repo>/.danxbot/issues/open/B.yml`.
+   Inspect B's own `waiting_on.by[]`. Recurse into each of those.
+3. If THIS card's id appears anywhere in the transitive walk →
+   **CYCLE**. STOP. Do NOT stamp `waiting_on`. Either:
+   - Reconsider whether this is actually a `conflict_on` situation
+     (two-way mutex, see Step 10c) — most loops collapse to that.
+   - OR Step 1.5 fix-it-yourself: do the work in-session, break the
+     loop, ship.
+4. Record the audited ids in a `comments[]` entry titled
+   `## Waiting-on cycle audit` — the operator + the next agent see
+   what you walked. Example: `Walked: B→C→D. Candidate not in chain.`
+
+Loops in `waiting_on` produce no-progress queues that no agent can
+unstick — the poller never dispatches any card in the cycle. The
+audit is the load-bearing prevention.
+
 ### Procedure
 
 1. **Find the blocking card(s).** Search, in order, until you have at
@@ -614,6 +647,76 @@ on its next tick and skips dispatching this card while any blocker
 remains non-terminal. When every blocker reaches Done / Cancelled, the
 poller clears `waiting_on` automatically and dispatches the card on the
 same tick.
+
+Skip to Step 11.
+
+---
+
+## Step 10c — Stamp `conflict_on` (two-way dispatch mutex)
+
+Use Step 10c when YOU discover, mid-dispatch, that this card has a
+**heavy structural overlap** with another open card such that landing
+both concurrently would produce a merge headache too large to resolve
+at finalize time. **This is rare.** Most overlaps the conflict-check
+precursor would have flagged before you ever picked the card up; you
+are stamping here when in-flight evidence (a file you just touched is
+already in mid-edit on another agent's branch, a shared abstraction
+you must restructure that another card is rewriting) only becomes
+visible during your work.
+
+### When to use vs Step 10b (waiting_on) vs ok-just-merge
+
+|Symptom|Right choice|
+|---|---|
+|Candidate's work consumes the RUNTIME OUTPUT of another card (the migration must have run, the new API must respond, the new config key must exist) → ordering matters|Step 10b `waiting_on` (precedence)|
+|Two cards rewrite the same function / structurally rename a shared interface / both reorder a multi-step pipeline → mergeable but >15 min human resolution effort|Step 10c `conflict_on` (mutex)|
+|Same file, different functions / disjoint hunks / textual conflicts that git can auto-merge or a 1-minute hand-pick resolves|Neither — proceed; finalize-time rebase will handle it|
+|Card itself is self-stuck (ambiguous spec, missing credential, broken env)|Step 10 `blocked` (human-action)|
+
+`conflict_on` is **two-way enforcement**: a single entry on EITHER
+side blocks dispatch in BOTH directions while either partner is In
+Progress. You only need to stamp it on this card; the poller's
+`isEffectivelyConflicted` walk catches it from either direction.
+Cards listed in `conflict_on` auto-effective-clear when they reach
+Done / Cancelled — the entry stays on the YAML as a durable audit
+trail.
+
+### Procedure
+
+1. **Confirm the partner is open and active.** Read each partner card's
+   YAML at `<repo>/.danxbot/issues/open/<id>.yml`. The partner must be
+   `status: "In Progress"` or `"ToDo"` (a closed partner can't conflict
+   — its work is done). If the partner card doesn't exist or is
+   closed, this is not a conflict situation.
+2. **Edit this card's YAML.** Append to `conflict_on[]`:
+   ```yaml
+   conflict_on:
+     - id: <PREFIX>-N
+       reason: "<one-sentence: what files / functions / interfaces overlap and why a merge would be a headache>"
+   ```
+   - `reason` is non-empty and SPECIFIC — name the file or function or
+     interface that collides. Vague reasons get cleared by the next
+     triage pass.
+   - Append, don't replace — keep any existing entries.
+   - Do NOT change `status`. The poller's filter handles dispatch
+     eligibility from the conflict_on field directly.
+3. **Append a `comments[]` entry** titled `## Conflict on <PREFIX>-N`
+   describing what you discovered + what files / functions overlap +
+   why a merge would be too costly. The dashboard renders this; the
+   operator may clear the entry by removing it from the YAML if they
+   judge the conflict to be acceptable.
+4. **Save and exit via `danxbot_complete({status: "completed", ...})`.**
+   The poller skips dispatch for this card while any conflict partner
+   is In Progress, in either direction. When the partner reaches
+   terminal, the eligibility filter opens for this card on the next
+   tick.
+
+**Distinction from rebase-time merge conflict:** Step 10c is for
+heavy overlap discovered *during your work* that you decide is too
+costly to resolve at finalize time. A *garden-variety* rebase conflict
+at `agent-finalize.sh` exit 1 is EXPECTED behavior — see Step 7a Exit-1
+procedure. Don't stamp `conflict_on` to escape a rebase conflict you
+should resolve in-session.
 
 Skip to Step 11.
 

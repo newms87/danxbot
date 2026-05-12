@@ -11,7 +11,7 @@ function makeIssue(
   status: Issue["status"] = "In Progress",
 ): Issue {
   const merged: Issue = {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -39,6 +39,7 @@ function makeIssue(
     requires_human: null,
     assigned_agent: null,
     waiting_on: null,
+    conflict_on: [],
     history: [],
   };
   if (merged.status === "Blocked" && merged.blocked === null) {

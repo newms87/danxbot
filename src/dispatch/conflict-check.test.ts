@@ -13,7 +13,7 @@ function issue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id,
     external_id: "",
@@ -41,6 +41,7 @@ function issue(
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };
@@ -67,17 +68,17 @@ function fakeJob(overrides: Partial<AgentJob> = {}): AgentJob {
 
 describe("extractJsonVerdict", () => {
   it("parses bare JSON", () => {
-    expect(extractJsonVerdict('{"ok":true,"reason":"all good"}')).toEqual({
-      ok: true,
-      reason: "all good",
-    });
+    expect(
+      extractJsonVerdict('{"kind":"ok","reason":"all good"}'),
+    ).toEqual({ kind: "ok", reason: "all good" });
   });
   it("parses fenced ```json``` blocks", () => {
-    const summary = "Conclusion:\n```json\n{\"ok\":false,\"reason\":\"overlap\",\"blocked_by\":[\"DX-1\"]}\n```\n";
+    const summary =
+      'Conclusion:\n```json\n{"kind":"conflict","reason":"overlap","partners":[{"id":"DX-1","reason":"x"}]}\n```\n';
     expect(extractJsonVerdict(summary)).toEqual({
-      ok: false,
+      kind: "conflict",
       reason: "overlap",
-      blocked_by: ["DX-1"],
+      partners: [{ id: "DX-1", reason: "x" }],
     });
   });
   it("returns null for empty / non-string input", () => {
@@ -87,6 +88,13 @@ describe("extractJsonVerdict", () => {
   it("returns null for un-parseable JSON", () => {
     expect(extractJsonVerdict("not json at all")).toBeNull();
   });
+  it("survives prose-prepended JSON", () => {
+    expect(
+      extractJsonVerdict(
+        'After reviewing both YAMLs I see only dashboard files. {"kind":"ok","reason":"disjoint"}',
+      ),
+    ).toEqual({ kind: "ok", reason: "disjoint" });
+  });
 });
 
 describe("coerceVerdict", () => {
@@ -95,34 +103,148 @@ describe("coerceVerdict", () => {
     expect(coerceVerdict("foo")).toBeNull();
     expect(coerceVerdict(42)).toBeNull();
   });
-  it("returns null when ok is missing", () => {
-    expect(coerceVerdict({ reason: "x" })).toBeNull();
+  it("returns null when kind is unknown", () => {
+    expect(coerceVerdict({ kind: "bogus", reason: "x" })).toBeNull();
   });
-  it("strips invalid blocked_by entries", () => {
-    expect(
-      coerceVerdict({
-        ok: false,
-        reason: "x",
-        blocked_by: ["DX-1", null, "", "DX-2"],
-      }),
-    ).toEqual({ ok: false, reason: "x", blocked_by: ["DX-1", "DX-2"] });
-  });
-  it("ignores blocked_by when ok=true", () => {
-    expect(
-      coerceVerdict({ ok: true, reason: "x", blocked_by: ["DX-1"] }),
-    ).toEqual({ ok: true, reason: "x" });
+  it("parses ok verdict", () => {
+    expect(coerceVerdict({ kind: "ok", reason: "x" })).toEqual({
+      kind: "ok",
+      reason: "x",
+    });
   });
   it("defaults missing reason to empty string", () => {
-    expect(coerceVerdict({ ok: true })).toEqual({ ok: true, reason: "" });
+    expect(coerceVerdict({ kind: "ok" })).toEqual({ kind: "ok", reason: "" });
+  });
+  it("parses conflict verdict with partners", () => {
+    expect(
+      coerceVerdict({
+        kind: "conflict",
+        reason: "shared module",
+        partners: [
+          { id: "DX-1", reason: "fn rename" },
+          { id: "DX-2", reason: "signature change" },
+        ],
+      }),
+    ).toEqual({
+      kind: "conflict",
+      reason: "shared module",
+      partners: [
+        { id: "DX-1", reason: "fn rename" },
+        { id: "DX-2", reason: "signature change" },
+      ],
+    });
+  });
+  it("dedupes conflict partners by id", () => {
+    const r = coerceVerdict({
+      kind: "conflict",
+      reason: "x",
+      partners: [
+        { id: "DX-1", reason: "first" },
+        { id: "DX-1", reason: "dup — ignored" },
+      ],
+    });
+    expect(r).toEqual({
+      kind: "conflict",
+      reason: "x",
+      partners: [{ id: "DX-1", reason: "first" }],
+    });
+  });
+  it("strips invalid conflict partners (missing id, missing reason)", () => {
+    expect(
+      coerceVerdict({
+        kind: "conflict",
+        reason: "x",
+        partners: [
+          { id: "DX-1", reason: "ok" },
+          { reason: "no id" },
+          { id: "DX-2" }, // no reason
+          { id: "", reason: "empty id" },
+          null,
+        ],
+      }),
+    ).toEqual({
+      kind: "conflict",
+      reason: "x",
+      partners: [{ id: "DX-1", reason: "ok" }],
+    });
+  });
+  it("returns null for conflict verdict with empty partners", () => {
+    expect(
+      coerceVerdict({ kind: "conflict", reason: "x", partners: [] }),
+    ).toBeNull();
+  });
+  it("parses wait_for verdict with all required fields", () => {
+    expect(
+      coerceVerdict({
+        kind: "wait_for",
+        reason: "DX-1 defines the interface",
+        wait_for: ["DX-1"],
+        consumed_artifact: "AgentLock interface",
+        cycle_audit: { walked: ["DX-1"] },
+      }),
+    ).toEqual({
+      kind: "wait_for",
+      reason: "DX-1 defines the interface",
+      wait_for: ["DX-1"],
+      consumed_artifact: "AgentLock interface",
+      cycle_audit: { walked: ["DX-1"] },
+    });
+  });
+  it("demotes wait_for to null when consumed_artifact is empty / missing", () => {
+    expect(
+      coerceVerdict({
+        kind: "wait_for",
+        reason: "x",
+        wait_for: ["DX-1"],
+        cycle_audit: { walked: [] },
+      }),
+    ).toBeNull();
+    expect(
+      coerceVerdict({
+        kind: "wait_for",
+        reason: "x",
+        wait_for: ["DX-1"],
+        consumed_artifact: "   ",
+        cycle_audit: { walked: [] },
+      }),
+    ).toBeNull();
+  });
+  it("returns null for wait_for verdict with empty wait_for", () => {
+    expect(
+      coerceVerdict({
+        kind: "wait_for",
+        reason: "x",
+        wait_for: [],
+        consumed_artifact: "y",
+        cycle_audit: { walked: [] },
+      }),
+    ).toBeNull();
+  });
+  it("accepts cycle_audit shape as bare array (legacy-friendly)", () => {
+    expect(
+      coerceVerdict({
+        kind: "wait_for",
+        reason: "x",
+        wait_for: ["DX-1"],
+        consumed_artifact: "X",
+        cycle_audit: ["DX-1", "DX-2"],
+      }),
+    ).toEqual({
+      kind: "wait_for",
+      reason: "x",
+      wait_for: ["DX-1"],
+      consumed_artifact: "X",
+      cycle_audit: { walked: ["DX-1", "DX-2"] },
+    });
   });
 });
 
 describe("runConflictCheck", () => {
-  it("happy path: triage agent returns {ok: true} via summary", async () => {
+  it("happy path: agent returns kind:ok", async () => {
     const dispatchMock = vi.fn().mockImplementation(async (input) => {
       const job = fakeJob({
         status: "completed",
-        summary: '{"ok":true,"reason":"no overlap"}',
+        summary: '{"kind":"ok","reason":"no overlap"}',
       });
       input.onComplete?.(job);
       return { dispatchId: "did", job };
@@ -135,16 +257,16 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("ok");
     expect(dispatchMock).toHaveBeenCalledOnce();
   });
 
-  it("triage agent returns {ok: false, blocked_by: [...]} via summary", async () => {
+  it("agent returns kind:conflict with partners", async () => {
     const dispatchMock = vi.fn().mockImplementation(async (input) => {
       const job = fakeJob({
         status: "completed",
         summary:
-          '{"ok":false,"reason":"both touch launcher.ts","blocked_by":["DX-141"]}',
+          '{"kind":"conflict","reason":"both rewrite launcher.ts","partners":[{"id":"DX-141","reason":"shared fn"}]}',
       });
       input.onComplete?.(job);
       return { dispatchId: "did", job };
@@ -157,11 +279,13 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(false);
-    expect(result.blocked_by).toEqual(["DX-141"]);
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.partners).toEqual([{ id: "DX-141", reason: "shared fn" }]);
+    }
   });
 
-  it("malformed summary → conservative ok=false", async () => {
+  it("malformed summary → transient conflict (empty partners, no stamp)", async () => {
     const dispatchMock = vi.fn().mockImplementation(async (input) => {
       const job = fakeJob({ status: "completed", summary: "garbage" });
       input.onComplete?.(job);
@@ -175,15 +299,18 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/malformed/i);
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.partners).toEqual([]);
+      expect(result.reason).toMatch(/malformed/i);
+    }
   });
 
-  it("non-completed status (e.g. timeout) → conservative ok=false", async () => {
+  it("non-completed status (e.g. timeout) → transient conflict (empty partners)", async () => {
     const dispatchMock = vi.fn().mockImplementation(async (input) => {
       const job = fakeJob({
         status: "timeout",
-        summary: "Agent timed out after 90s",
+        summary: "Agent timed out after 300s",
       });
       input.onComplete?.(job);
       return { dispatchId: "did", job };
@@ -196,12 +323,14 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/did not complete cleanly/i);
-    expect(result.reason).toMatch(/timeout/i);
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.partners).toEqual([]);
+      expect(result.reason).toMatch(/did not complete cleanly/i);
+    }
   });
 
-  it("dispatch throws → conservative ok=false (no agent ran)", async () => {
+  it("dispatch throws → transient conflict (empty partners)", async () => {
     const dispatchMock = vi.fn().mockRejectedValue(new Error("boom"));
     const result = await runConflictCheck(
       {
@@ -211,11 +340,14 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(false);
-    expect(result.reason).toMatch(/failed to spawn/i);
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
+      expect(result.partners).toEqual([]);
+      expect(result.reason).toMatch(/failed to spawn/i);
+    }
   });
 
-  it("zero in-progress → short-circuits to ok=true without spawning", async () => {
+  it("zero in-progress → short-circuits to ok without spawning", async () => {
     const dispatchMock = vi.fn();
     const result = await runConflictCheck(
       {
@@ -225,27 +357,18 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(true);
+    expect(result.kind).toBe("ok");
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
-  it("awaits the async onComplete callback rather than reading dispatch's resolved 'running' job (DX-200 review fix)", async () => {
-    // Production `dispatch()` resolves immediately with status="running"
-    // and fires onComplete later when the agent exits. The helper
-    // MUST wait for the onComplete payload, not race the dispatch's
-    // resolution. Simulate this by deferring the onComplete call.
+  it("awaits the async onComplete callback (DX-200 review fix)", async () => {
     const dispatchMock = vi.fn().mockImplementation(async (input) => {
-      const runningJob = fakeJob({
-        status: "running",
-        summary: "",
-      });
-      // Fire onComplete a few microtasks later — same shape as the
-      // real launcher.
+      const runningJob = fakeJob({ status: "running", summary: "" });
       setTimeout(() => {
         input.onComplete?.(
           fakeJob({
             status: "completed",
-            summary: '{"ok":true,"reason":"async ok"}',
+            summary: '{"kind":"ok","reason":"async ok"}',
           }),
         );
       }, 5);
@@ -259,38 +382,13 @@ describe("runConflictCheck", () => {
       },
       { dispatch: dispatchMock, dispatchId: "did" },
     );
-    expect(result.ok).toBe(true);
-    expect(result.reason).toBe("async ok");
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") {
+      expect(result.reason).toBe("async ok");
+    }
   });
 
-  it("extractJsonVerdict survives prose-prepended JSON (agent reasoning + JSON)", async () => {
-    const dispatchMock = vi.fn().mockImplementation(async (input) => {
-      const job = fakeJob({
-        status: "completed",
-        summary:
-          'After reviewing both YAMLs I see the candidate touches dashboard files only. {"ok":true,"reason":"disjoint"}',
-      });
-      input.onComplete?.(job);
-      return { dispatchId: "did", job };
-    });
-    const result = await runConflictCheck(
-      {
-        repo: fakeRepo(),
-        candidate: issue("DX-100"),
-        inProgress: [issue("DX-141")],
-      },
-      { dispatch: dispatchMock, dispatchId: "did" },
-    );
-    expect(result.ok).toBe(true);
-    expect(result.reason).toBe("disjoint");
-  });
-
-  it("never-completing dispatch → grace-window timeout returns conservative ok=false", async () => {
-    // Stub dispatch to NEVER fire onComplete. The 90s+5s grace window
-    // is too long for a unit test, so we don't actually wait — instead
-    // we patch the helper's timeout. Compose with shorter grace via
-    // a wrapper test: rely on the timeoutPromise path. We simulate the
-    // grace expiry by resolving the test fast — using vi.useFakeTimers.
+  it("never-completing dispatch → grace-window timeout returns transient conflict", async () => {
     const dispatchMock = vi.fn().mockImplementation(async () => ({
       dispatchId: "did",
       job: fakeJob({ status: "running", summary: "" }),
@@ -305,11 +403,14 @@ describe("runConflictCheck", () => {
         },
         { dispatch: dispatchMock, dispatchId: "did" },
       );
-      // Advance past the grace window (90_000 + 5_000 = 95_000ms).
-      await vi.advanceTimersByTimeAsync(95_001);
+      // CONFLICT_CHECK_TIMEOUT_MS (300_000) + 5_000 grace.
+      await vi.advanceTimersByTimeAsync(305_001);
       const result = await promise;
-      expect(result.ok).toBe(false);
-      expect(result.reason).toMatch(/grace window/i);
+      expect(result.kind).toBe("conflict");
+      if (result.kind === "conflict") {
+        expect(result.partners).toEqual([]);
+        expect(result.reason).toMatch(/grace window/i);
+      }
     } finally {
       vi.useRealTimers();
     }
@@ -321,7 +422,7 @@ describe("runConflictCheck", () => {
       capturedStaged = input.stagedFiles ?? [];
       const job = fakeJob({
         status: "completed",
-        summary: '{"ok":true,"reason":"x"}',
+        summary: '{"kind":"ok","reason":"x"}',
       });
       input.onComplete?.(job);
       return { dispatchId: "did", job };

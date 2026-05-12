@@ -185,7 +185,7 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 const lastOpenCards: { value: IssueRef[] } = { value: [] };
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -206,6 +206,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     requires_human: null,
     assigned_agent: null,
     waiting_on: null,
+    conflict_on: [],
     history: [],
   };
 }
@@ -311,7 +312,7 @@ function seedDraft(
   ac: { check_item_id: string }[];
 }> {
   return tracker.createCard({
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,

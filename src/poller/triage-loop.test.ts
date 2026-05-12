@@ -91,7 +91,7 @@ function ice(total: number, i = 1, c = 1, e = 1): IssueIce {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -119,6 +119,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     requires_human: null,
     assigned_agent: null,
     waiting_on: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };

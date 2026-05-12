@@ -84,7 +84,7 @@ if (handle) {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -112,6 +112,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     requires_human: null,
     assigned_agent: null,
     waiting_on: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };
@@ -261,6 +262,71 @@ describe("local-issues — DB-backed", () => {
         );
         const result = await listDispatchableYamls(REPO_PATH, "ISS");
         expect(result.map((i) => i.id).sort()).toEqual(["ISS-3"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes card when its conflict_on partner is In Progress (forward direction)",
+      async () => {
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            status: "ToDo",
+            conflict_on: [
+              { id: "ISS-2", reason: "shared launcher fn" },
+            ],
+          }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "In Progress" }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual([]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "excludes card when another In Progress card lists IT in conflict_on (reverse direction)",
+      async () => {
+        await seed(
+          makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
+          1000,
+        );
+        await seed(
+          makeIssue({
+            id: "ISS-2",
+            external_id: "b",
+            status: "In Progress",
+            conflict_on: [{ id: "ISS-1", reason: "I conflict with ISS-1" }],
+          }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual([]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "INCLUDES card when conflict_on partner is terminal (Done) — auto-effective-clear",
+      async () => {
+        await seed(
+          makeIssue({
+            id: "ISS-1",
+            external_id: "a",
+            status: "ToDo",
+            conflict_on: [{ id: "ISS-2", reason: "x" }],
+          }),
+          1000,
+        );
+        await seed(
+          makeIssue({ id: "ISS-2", external_id: "b", status: "Done" }),
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
       },
     );
 

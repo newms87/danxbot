@@ -26,7 +26,7 @@ import type {
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -54,6 +54,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     requires_human: null,
     assigned_agent: null,
     waiting_on: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };

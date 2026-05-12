@@ -6,7 +6,7 @@ function defaultInput(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -319,7 +319,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 6,
+          schema_version: 7,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
@@ -340,6 +340,7 @@ describe("MemoryTracker", () => {
           assigned_agent: null,
           waiting_on: null,
           requires_human: null,
+          conflict_on: [],
           history: [],
         },
       ],
@@ -356,7 +357,7 @@ describe("MemoryTracker", () => {
     const tracker = new MemoryTracker({
       seed: [
         {
-          schema_version: 6,
+          schema_version: 7,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
@@ -377,6 +378,7 @@ describe("MemoryTracker", () => {
           assigned_agent: null,
           waiting_on: null,
           requires_human: null,
+          conflict_on: [],
           history: [],
         },
       ],

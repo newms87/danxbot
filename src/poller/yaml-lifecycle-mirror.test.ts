@@ -50,7 +50,7 @@ function makeRepo(): { localPath: string; tmpdir: string } {
 
 function makeIssue(id: string): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id,
     external_id: "",
@@ -84,7 +84,8 @@ function makeIssue(id: string): Issue {
     waiting_on: null,
     blocked: null,
     requires_human: null,
-    };
+    conflict_on: [],
+  };
 }
 
 interface FakeDb extends IssuesMirrorDb {

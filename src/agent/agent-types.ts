@@ -243,6 +243,14 @@ export interface SpawnAgentOptions {
    * `top_level_agent` field; threaded into spawnAgent by `dispatch()`.
    */
   topLevelAgent?: string;
+  /**
+   * Optional Claude model override forwarded as `--model <name>` to the
+   * spawned claude CLI. Use for dispatches that want to pin to a
+   * specific model regardless of the host's default (e.g. conflict-check
+   * pins to Sonnet for judgment quality). When omitted, claude uses its
+   * own default model resolution (env / settings / built-in default).
+   */
+  model?: string;
   /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */
   statusUrl?: string;
   /** API token for heartbeat and event forwarding */

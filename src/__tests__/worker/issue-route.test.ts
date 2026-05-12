@@ -494,7 +494,7 @@ describe("runSync (local-first persist)", () => {
     // that `runSync` falls through to the open/ write branch when the
     // saved YAML carries `requires_human != null`.
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-77",
       parent_id: null,
@@ -554,7 +554,7 @@ describe("runSync (local-first persist)", () => {
     // call regresses the operator banner without breaking recordError —
     // this test catches that regression.
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-44",
       parent_id: null,
@@ -626,7 +626,7 @@ describe("syncTrackedIssueOnComplete", () => {
 
   it("AC #4: calls syncIssue synchronously for the tracked id", async () => {
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-11",
       parent_id: null,
@@ -869,7 +869,7 @@ describe("syncTrackedIssueOnComplete — concurrent invocations", () => {
 
   it("two concurrent calls on same id serialize via chainOnIssueLock; later call observes earlier call's writes", async () => {
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-50",
       parent_id: null,
@@ -936,7 +936,7 @@ describe("syncTrackedIssueOnComplete — concurrent invocations", () => {
 
   it("first call rejecting via runSync does not poison the queue — second call still runs", async () => {
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-51",
       parent_id: null,
@@ -1405,7 +1405,7 @@ describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () =>
     // (a) entry lands once and (b) tracker push fires once (no
     // double-append from a hypothetical second helper invocation).
     await h.tracker.createCard({
-      schema_version: 6,
+      schema_version: 7,
       tracker: "memory",
       id: "ISS-510",
       parent_id: null,

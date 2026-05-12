@@ -22,6 +22,7 @@ import {
   type IssueTriageHistoryEntry,
   type IssueType,
   type RequiresHuman,
+  type ConflictOnEntry,
 } from "./interface.js";
 
 const TRIAGE_HISTORY_CAP = 10;
@@ -64,7 +65,7 @@ const TRIAGE_HISTORY_CAP = 10;
  * the validator's known-max stay in sync.
  */
 export const KNOWN_SCHEMA_MIN = 3;
-export const KNOWN_SCHEMA_MAX = 6;
+export const KNOWN_SCHEMA_MAX = 7;
 
 /**
  * Set of `schema_version` values this process has already warned about.
@@ -177,7 +178,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 6
+ *  - schema_version: 7
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -201,7 +202,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -222,6 +223,7 @@ export function createEmptyIssue(
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     history: [],
   };
 }
@@ -446,6 +448,16 @@ export function serializeIssue(issue: Issue): string {
             set_by: issue.requires_human.set_by,
             set_at: issue.requires_human.set_at,
           },
+    // `conflict_on` is the persistent dispatch-mutex record (v7). Each
+    // entry declares a heavy-overlap pairing with another open card —
+    // poller skips dispatch while any partner referenced from either
+    // direction is currently In Progress. Empty array = no declared
+    // conflicts. Position after `requires_human` keeps every dispatch
+    // gate adjacent.
+    conflict_on: issue.conflict_on.map((c) => ({
+      id: c.id,
+      reason: c.reason,
+    })),
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -542,7 +554,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -973,6 +985,19 @@ export function validateIssue(
     else requiresHumanResult = r;
   }
 
+  // conflict_on — optional field (v7). Missing → []. Present must be
+  // an array of `{id: <PREFIX>-N, reason: non-empty string}`. Legacy
+  // v3-v6 YAMLs omit the field; the validator defaults `[]` so they
+  // round-trip cleanly. Independent dispatch gate from `blocked` /
+  // `waiting_on` / `requires_human` — see `Issue.conflict_on`
+  // docstring for the two-way enforcement contract.
+  let conflictOnResult: ConflictOnEntry[] = [];
+  if ("conflict_on" in v && v.conflict_on !== null && v.conflict_on !== undefined) {
+    const r = validateConflictOn(v.conflict_on, idRegex, idShape);
+    if (typeof r === "string") errors.push(r);
+    else conflictOnResult = r;
+  }
+
   // history — optional field. Missing → []. Legacy YAMLs ship without the
   // field (DX-138 Phase 1 lands the schema). Present must be a list (or YAML
   // null which normalizes to []); each entry strictly validated so a
@@ -1052,7 +1077,7 @@ export function validateIssue(
     // contract: when the writer bumps, bump this literal AND
     // KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 6,
+    schema_version: 7,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -1073,9 +1098,52 @@ export function validateIssue(
     waiting_on: waitingOnResult,
     blocked: blockedResult,
     requires_human: requiresHumanResult,
+    conflict_on: conflictOnResult,
     history: historyResult,
   };
   return { ok: true, issue };
+}
+
+/**
+ * Validate the v7 `conflict_on` field. Shape: array of `{id, reason}`
+ * objects. Missing / null → empty array (default). Present must be an
+ * array; each entry must have a non-empty string `reason` and an `id`
+ * that matches `${prefix}-<N>`. The id is NOT required to resolve in
+ * the current open-set — a partner card may be closed (Done /
+ * Cancelled), in which case the entry is durable-audit-only and the
+ * eligibility filter ignores it (terminal partner cannot block
+ * dispatch). Self-reference (an entry pointing at the owning card's
+ * own id) is rejected fail-loud — would create a no-progress loop.
+ *
+ * Duplicate ids are deduplicated by keeping the LAST entry's reason
+ * (callers can update the reason by re-stamping). Validator does NOT
+ * verify the partner exists — the missing-card-handling is the
+ * poller's responsibility (`effectiveConflictOn`).
+ */
+function validateConflictOn(
+  value: unknown,
+  idRegex: RegExp,
+  idShape: string,
+): ConflictOnEntry[] | string {
+  if (!Array.isArray(value)) {
+    return `conflict_on must be a list of {id, reason} objects`;
+  }
+  const seen = new Map<string, ConflictOnEntry>();
+  for (let i = 0; i < value.length; i++) {
+    const entry = value[i];
+    if (!isPlainObject(entry)) {
+      return `conflict_on[${i}] must be a mapping with keys {id, reason}`;
+    }
+    const e = entry as Record<string, unknown>;
+    if (typeof e.id !== "string" || !idRegex.test(e.id)) {
+      return `conflict_on[${i}].id must match ${idShape} (got ${JSON.stringify(e.id)})`;
+    }
+    if (typeof e.reason !== "string" || e.reason.length === 0) {
+      return `conflict_on[${i}].reason must be a non-empty string`;
+    }
+    seen.set(e.id, { id: e.id, reason: e.reason });
+  }
+  return [...seen.values()];
 }
 
 /**

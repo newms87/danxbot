@@ -53,6 +53,7 @@ import { resolve } from "node:path";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
+import { applyConflictVerdict } from "./apply-conflict-verdict.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
 import {
   buildLockHolderInfo,
@@ -352,19 +353,31 @@ export async function tryMultiAgentDispatch(
         { repo, candidate: card, inProgress: liveInProgress },
         { dispatch, dispatchId: checkDispatchId },
       );
-      if (!verdict.ok) {
-        // Conflict-check rejection is a TRANSIENT, per-tick gate — NOT
-        // a persistent dep-chain wait. Semantics: "candidate overlaps
-        // an actively-In-Progress sibling on shared files". The reason
-        // evaporates the moment the sibling leaves In Progress (Done,
-        // Cancelled, ToDo bounce, recovery). `waiting_on` cleared only
-        // when deps reach TERMINAL — wrong lifecycle for this gate,
-        // produced stale stamps + cycles (DX-292 ↔ DX-294). We log
-        // the rejection and skip this tick; picker re-evaluates next
-        // tick against the live in-progress set.
-        log.warn(
-          `[${repo.name}] conflict-check skipped ${card.id} for ${agent.name} (will retry next tick): ${verdict.reason}`,
+      if (verdict.kind !== "ok") {
+        // v7 — conflict-check verdicts are PERSISTENTLY STAMPED on the
+        // candidate YAML so the next tick reads them from the DB and
+        // skips dispatch cheaply (no Sonnet call). Empty partner /
+        // wait_for arrays = transient skip (the conservativeTransient
+        // fallback inside runConflictCheck on timeout / malformed /
+        // spawn-fail). See DX-200 / DX-292↔DX-294 history: the cycle
+        // class came from auto-stamping waiting_on from a HEURISTIC
+        // file-overlap gate. v7 stamps from an EXPLICIT LLM verdict
+        // with rigorous gate + defensive cycle re-check below.
+        const stamped = await applyConflictVerdict(
+          repo,
+          card,
+          verdict,
+          liveInProgress,
         );
+        if (stamped === "transient") {
+          log.warn(
+            `[${repo.name}] conflict-check skipped ${card.id} for ${agent.name} (will retry next tick): ${verdict.reason}`,
+          );
+        } else {
+          log.info(
+            `[${repo.name}] conflict-check stamped ${card.id} (${stamped}): ${verdict.reason}`,
+          );
+        }
         remainingCards.splice(remainingCards.indexOf(card), 1);
         conflictBlocked++;
         continue;

@@ -197,7 +197,7 @@ function fakeRepo(): RepoContext {
 
 function issue(id: string, overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 6,
+    schema_version: 7,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -225,6 +225,7 @@ function issue(id: string, overrides: Partial<Issue> = {}): Issue {
     waiting_on: null,
     blocked: null,
     requires_human: null,
+    conflict_on: [],
     history: [],
     ...overrides,
   };
@@ -306,7 +307,7 @@ describe("tryMultiAgentDispatch", () => {
       dispatchId: "did",
       job: {} as never,
     });
-    mockedRunConflictCheck.mockResolvedValue({ ok: true, reason: "no overlap" });
+    mockedRunConflictCheck.mockResolvedValue({ kind: "ok", reason: "no overlap" });
 
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
@@ -329,9 +330,9 @@ describe("tryMultiAgentDispatch", () => {
       job: {} as never,
     });
     mockedRunConflictCheck.mockResolvedValue({
-      ok: false,
+      kind: "conflict",
       reason: "overlaps with launcher.ts",
-      blocked_by: ["DX-141"],
+      partners: [{ id: "DX-141", reason: "shared launcher fn" }],
     });
 
     const yl = await import("./yaml-lifecycle.js");
@@ -410,7 +411,7 @@ describe("tryMultiAgentDispatch", () => {
       dispatchId: "did",
       job: {} as never,
     });
-    mockedRunConflictCheck.mockResolvedValue({ ok: true, reason: "no overlap" });
+    mockedRunConflictCheck.mockResolvedValue({ kind: "ok", reason: "no overlap" });
 
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),

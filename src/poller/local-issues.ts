@@ -48,6 +48,7 @@ import {
   sortInputsForStatus,
 } from "../issue-tracker/sort.js";
 import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
+import { isEffectivelyConflicted } from "../issue/effective-conflict-on.js";
 import { repoNameFromPath } from "./repo-name.js";
 
 function fifoCompare(a: DbIssueRow, b: DbIssueRow): number {
@@ -113,11 +114,24 @@ export async function listDispatchableYamls(
     const closedDeps = await dbSelectIssuesByIds(repoName, [...missingDepIds]);
     for (const d of closedDeps) byId.set(d.id, d);
   }
+  // conflict_on gate (v7) — two-way dispatch mutex. A card is gated
+  // by the conflict_on gate iff it (a) lists an In Progress partner
+  // in its own conflict_on[], OR (b) some other open card lists THIS
+  // card in its conflict_on[] AND the other card is In Progress. The
+  // `allOpen` set the helper walks is the same `rows.map(r => issue)`
+  // set this filter is iterating — pre-extracted to a flat array
+  // since the helper iterates the full set per-call (O(n) per card —
+  // worst-case O(n²) total per tick; n is open-issues-per-repo,
+  // expected <500). Terminal partners ignored by the helper; missing
+  // partners ignored too (durable audit record on disk but no live
+  // dispatch gate).
+  const allOpen = rows.map((r) => r.issue);
   const filtered = rows.filter((r) => {
     const i = r.issue;
     if (i.status !== "ToDo") return false;
     if (isEffectivelyWaitingOn(i, byId)) return false;
     if (i.blocked != null) return false;
+    if (isEffectivelyConflicted(i, allOpen)) return false;
     // DX-231 (Phase 2 — DX-233): the orthogonal "needs human action"
     // field is a dispatch gate parallel to `blocked` and `waiting_on`.
     // Paired with `isDispatchSessionTerminal` in `src/worker/issue-route.ts`

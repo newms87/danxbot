@@ -94,6 +94,7 @@ interface StoredCard {
   waiting_on: { reason: string; timestamp: string; by: string[] } | null;
   blocked: { reason: string; timestamp: string } | null;
   requires_human: RequiresHuman | null;
+  conflict_on: { id: string; reason: string }[];
   labels: ManagedLabels;
 }
 
@@ -220,6 +221,7 @@ export class MemoryTracker implements IssueTracker {
       waiting_on: null,
       blocked: null,
       requires_human: null,
+      conflict_on: [],
       labels: {
         type: input.type,
         blocked: input.status === "Blocked",
@@ -393,7 +395,7 @@ export class MemoryTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 6,
+      schema_version: 7,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -442,6 +444,7 @@ export class MemoryTracker implements IssueTracker {
               set_by: card.requires_human.set_by,
               set_at: card.requires_human.set_at,
             },
+      conflict_on: card.conflict_on.map((c: { id: string; reason: string }) => ({ ...c })),
       // `history` is local-only audit; the tracker abstraction never sees it.
       // MemoryTracker mirrors Trello's contract: always emit [] on read so
       // the local YAML stays authoritative for the audit log.
@@ -494,6 +497,7 @@ export class MemoryTracker implements IssueTracker {
               set_by: issue.requires_human.set_by,
               set_at: issue.requires_human.set_at,
             },
+      conflict_on: issue.conflict_on.map((c: { id: string; reason: string }) => ({ ...c })),
       labels: {
         type: issue.type,
         blocked: issue.status === "Blocked",
