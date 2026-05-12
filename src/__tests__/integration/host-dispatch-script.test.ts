@@ -73,11 +73,16 @@ describe("buildDispatchScript (integration)", () => {
   }
 
   async function waitForFile(path: string, timeoutMs: number): Promise<void> {
+    // Wait for the file to exist AND have non-empty content. Bash redirection
+    // (`echo $$ > "$PID_FILE"`) opens the file (empty) before the echo writes
+    // the PID, so existence alone races with the content write under parallel
+    // test load — the read in the caller sees `""` and `toMatch(/^\d+$/)` fails.
     const start = Date.now();
-    while (!existsSync(path)) {
+    while (true) {
+      if (existsSync(path) && readFileSync(path, "utf-8").trim().length > 0) return;
       if (Date.now() - start >= timeoutMs) {
         throw new Error(
-          `waitForFile timed out after ${timeoutMs}ms — ${path} never appeared`,
+          `waitForFile timed out after ${timeoutMs}ms — ${path} never had content`,
         );
       }
       await sleep(20);

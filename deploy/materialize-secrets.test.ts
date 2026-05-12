@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const WORK = resolve("/tmp/danxbot-materialize-test");
+// Per-test unique temp dir — a previous hardcoded shared path raced under
+// parallel vitest runs (one suite's afterEach rmSync collided with the
+// next suite's beforeEach mkdirSync; the fake `aws` binary vanished and
+// the script failed with "No such file or directory").
+let WORK: string;
 const SCRIPT = resolve(__dirname, "templates/materialize-secrets.sh");
 
 /**
@@ -46,8 +51,7 @@ node -e '
 
 describe("materialize-secrets.sh", () => {
   beforeEach(() => {
-    rmSync(WORK, { recursive: true, force: true });
-    mkdirSync(WORK, { recursive: true });
+    WORK = mkdtempSync(join(tmpdir(), "danxbot-materialize-test-"));
     mkdirSync(resolve(WORK, "danxbot/repos/app/.danxbot"), { recursive: true });
   });
 
