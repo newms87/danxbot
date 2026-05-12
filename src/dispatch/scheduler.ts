@@ -722,6 +722,12 @@ export async function runPostDispatchProgressCheck(
     );
     return;
   }
+  if (!local || local.status !== "ToDo") {
+    log.info(
+      `[${repo.name}] post-dispatch check: local YAML for ${cardId} status=${local?.status ?? "(closed/missing)"} — tracker reports ToDo but local moved on, skipping flag (tracker likely stale, e.g. trello sync disabled)`,
+    );
+    return;
+  }
   if (local?.waiting_on) {
     log.info(
       `[${repo.name}] post-dispatch check: card "${card.title}" (${cardId}) intentionally waiting on ${local.waiting_on.by.join(", ")} — skipping flag`,

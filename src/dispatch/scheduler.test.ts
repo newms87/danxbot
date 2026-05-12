@@ -380,13 +380,15 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
     jobSummary: "ok",
   };
 
-  it("writes the CRITICAL_FAILURE flag when the tracked card stayed in ToDo", async () => {
+  it("writes the CRITICAL_FAILURE flag when the tracked card stayed in ToDo (local YAML agrees)", async () => {
     const repo = makeRepo();
     const tracker = makeFakeTracker(() =>
       makeIssue({ status: "ToDo", title: "Stuck card" }),
     );
     bootScheduler({ repo, tracker });
-    (findByExternalId as Mock).mockResolvedValue(null);
+    (findByExternalId as Mock).mockResolvedValue(
+      makeIssue({ status: "ToDo", title: "Stuck card" }),
+    );
 
     await runPostDispatchProgressCheck({ repo, ...baseInput });
 
@@ -415,6 +417,32 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
     const repo = makeRepo();
     const tracker = makeFakeTracker(() => makeIssue({ status: "Done" }));
     bootScheduler({ repo, tracker });
+
+    await runPostDispatchProgressCheck({ repo, ...baseInput });
+
+    expect(writeFlag).not.toHaveBeenCalled();
+  });
+
+  it("skips flag when local YAML moved out of ToDo even though tracker still reports ToDo (stale tracker, e.g. trello sync disabled)", async () => {
+    const repo = makeRepo();
+    const tracker = makeFakeTracker(() =>
+      makeIssue({ status: "ToDo", title: "Stale tracker card" }),
+    );
+    bootScheduler({ repo, tracker });
+    (findByExternalId as Mock).mockResolvedValue(makeIssue({ status: "Done" }));
+
+    await runPostDispatchProgressCheck({ repo, ...baseInput });
+
+    expect(writeFlag).not.toHaveBeenCalled();
+  });
+
+  it("skips flag when local YAML is missing (file moved to closed/) even though tracker still reports ToDo", async () => {
+    const repo = makeRepo();
+    const tracker = makeFakeTracker(() =>
+      makeIssue({ status: "ToDo", title: "Closed card" }),
+    );
+    bootScheduler({ repo, tracker });
+    (findByExternalId as Mock).mockResolvedValue(null);
 
     await runPostDispatchProgressCheck({ repo, ...baseInput });
 
@@ -486,6 +514,9 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
     bootScheduler({ repo: repoA, tracker: trackerA });
     bootScheduler({ repo: repoB, tracker: trackerB });
+    (findByExternalId as Mock).mockResolvedValue(
+      makeIssue({ status: "ToDo" }),
+    );
 
     await runPostDispatchProgressCheck({ repo: repoA, ...baseInput });
     expect(writeFlag).toHaveBeenCalledTimes(1);
@@ -709,6 +740,7 @@ describe("runPostDispatchProgressCheck — flag-detail formatting", () => {
     const repo = makeRepo();
     const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
+    (findByExternalId as Mock).mockResolvedValue(makeIssue({ status: "ToDo" }));
 
     await runPostDispatchProgressCheck({
       repo,
@@ -728,6 +760,7 @@ describe("runPostDispatchProgressCheck — flag-detail formatting", () => {
     const repo = makeRepo();
     const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
+    (findByExternalId as Mock).mockResolvedValue(makeIssue({ status: "ToDo" }));
 
     await runPostDispatchProgressCheck({
       repo,
