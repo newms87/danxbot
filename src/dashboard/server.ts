@@ -41,6 +41,7 @@ import {
   handleGetRoster,
   handlePatchAgentDefaults,
   handlePatchToggle,
+  handlePatchTrelloCredentials,
 } from "./agents-toggles.js";
 import { handlePutIssuePrefix } from "./agents-prefix.js";
 import {
@@ -254,6 +255,24 @@ async function route(
       req,
       res,
       decodeURIComponent(agentCriticalFailureMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // PATCH /api/agents/:repo/trello-credentials — user bearer required.
+  // DX-303. Rotates DANX_TRELLO_API_KEY / DANX_TRELLO_API_TOKEN in the
+  // repo's `.danxbot/.env`. Same auth band as the toggle route — the
+  // handler's own `requireUser` call produces the 401; the dispatch
+  // token is rejected (see `.claude/rules/agent-dispatch.md`).
+  const agentTrelloCredentialsMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/trello-credentials$/,
+  );
+  if (method === "PATCH" && agentTrelloCredentialsMatch) {
+    await handlePatchTrelloCredentials(
+      req,
+      res,
+      decodeURIComponent(agentTrelloCredentialsMatch[1]),
       dispatchDeps,
     );
     return true;

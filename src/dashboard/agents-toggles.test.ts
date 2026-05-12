@@ -77,11 +77,17 @@ vi.mock("./auth-middleware.js", () => ({
   },
 }));
 
+const mockWriteRepoEnvVars = vi.fn();
+vi.mock("./repo-env-writer.js", () => ({
+  writeRepoEnvVars: (...args: unknown[]) => mockWriteRepoEnvVars(...args),
+}));
+
 import {
   handleClearAgentCriticalFailure,
   handleGetRoster,
   handlePatchAgentDefaults,
   handlePatchToggle,
+  handlePatchTrelloCredentials,
 } from "./agents-toggles.js";
 import { deps, settings } from "./agents-test-fixtures.js";
 
@@ -96,6 +102,8 @@ beforeEach(() => {
   mockProxyToWorkerWithFallback.mockResolvedValue(undefined);
   mockAgentBusyOn.mockReset();
   mockAgentBusyOn.mockResolvedValue(new Map());
+  mockWriteRepoEnvVars.mockReset();
+  mockWriteRepoEnvVars.mockResolvedValue([]);
 });
 
 // ============================================================
@@ -662,5 +670,263 @@ describe("handlePatchAgentDefaults", () => {
 
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/EROFS/);
+  });
+});
+
+// ============================================================
+// PATCH /api/agents/:repo/trello-credentials — DX-303
+// ============================================================
+
+describe("handlePatchTrelloCredentials", () => {
+  const DEFAULT_TOKEN = "user-newms87";
+
+  function authReq(
+    body: Record<string, unknown>,
+    token = DEFAULT_TOKEN,
+  ): IncomingMessage {
+    const req = createMockReqWithBody("PATCH", body);
+    (req.headers as Record<string, string>)["authorization"] =
+      `Bearer ${token}`;
+    return req;
+  }
+
+  it("returns 401 when no bearer token is supplied", async () => {
+    const req = createMockReqWithBody("PATCH", {
+      apiKey: "fresh-key",
+    });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("rejects the dispatch token (only per-user bearers rotate secrets)", async () => {
+    const req = authReq({ apiKey: "fresh-key" }, "test-dispatch-token");
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(
+      req,
+      res,
+      "danxbot",
+      deps({ token: "test-dispatch-token" }),
+    );
+
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for an unknown repo", async () => {
+    const req = authReq({ apiKey: "fresh-key" });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "nonexistent", deps());
+
+    expect(res._getStatusCode()).toBe(404);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when neither apiKey nor apiToken is present", async () => {
+    const req = authReq({});
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/No credential field/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for an empty-string value", async () => {
+    const req = authReq({ apiKey: "" });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/non-empty/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a whitespace-only value", async () => {
+    const req = authReq({ apiToken: "   " });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/non-empty/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 for a non-string value", async () => {
+    const req = authReq({ apiKey: 42 });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/must be a string/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when a value contains a newline", async () => {
+    const req = authReq({ apiKey: "good\nbad" });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/newline/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when a value contains a carriage return", async () => {
+    const req = authReq({ apiToken: "good\rbad" });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/carriage-return/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when a value contains a null byte", async () => {
+    const req = authReq({ apiKey: "good\0bad" });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/null/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the body is not valid JSON", async () => {
+    const req = new (await import("http")).IncomingMessage(null as never);
+    req.method = "PATCH";
+    req.headers = { authorization: "Bearer user-alice" };
+    process.nextTick(() => {
+      req.emit("data", Buffer.from("not json"));
+      req.emit("end");
+    });
+    const res = createMockRes();
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/JSON/i);
+    expect(mockWriteRepoEnvVars).not.toHaveBeenCalled();
+  });
+
+  it("rotates apiKey only — writes DANX_TRELLO_API_KEY, leaves apiToken untouched", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_TRELLO_API_KEY"]);
+    const req = authReq({ apiKey: "new-key-value" });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteRepoEnvVars).toHaveBeenCalledTimes(1);
+    expect(mockWriteRepoEnvVars).toHaveBeenCalledWith({
+      repoLocalPath: "/repos/danxbot",
+      updates: { DANX_TRELLO_API_KEY: "new-key-value" },
+      writtenBy: "dashboard:newms87",
+    });
+    expect(JSON.parse(res._getBody())).toEqual({
+      updated: ["apiKey"],
+      restartRequired: true,
+    });
+  });
+
+  it("rotates apiToken only — writes DANX_TRELLO_API_TOKEN, leaves apiKey untouched", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_TRELLO_API_TOKEN"]);
+    const req = authReq({ apiToken: "new-token" });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteRepoEnvVars).toHaveBeenCalledWith({
+      repoLocalPath: "/repos/danxbot",
+      updates: { DANX_TRELLO_API_TOKEN: "new-token" },
+      writtenBy: "dashboard:newms87",
+    });
+    expect(JSON.parse(res._getBody())).toEqual({
+      updated: ["apiToken"],
+      restartRequired: true,
+    });
+  });
+
+  it("rotates both fields in a single PATCH", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue([
+      "DANX_TRELLO_API_KEY",
+      "DANX_TRELLO_API_TOKEN",
+    ]);
+    const req = authReq({ apiKey: "k", apiToken: "t" });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteRepoEnvVars).toHaveBeenCalledWith({
+      repoLocalPath: "/repos/danxbot",
+      updates: {
+        DANX_TRELLO_API_KEY: "k",
+        DANX_TRELLO_API_TOKEN: "t",
+      },
+      writtenBy: "dashboard:newms87",
+    });
+    expect(JSON.parse(res._getBody())).toEqual({
+      updated: ["apiKey", "apiToken"],
+      restartRequired: true,
+    });
+  });
+
+  it("never echoes the secret value back in the response", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_TRELLO_API_KEY"]);
+    const SECRET = "0123456789abcdef0123456789abcdef";
+    const req = authReq({ apiKey: SECRET });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(res._getBody()).not.toContain(SECRET);
+  });
+
+  it("records the actual operator's username in writtenBy", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_TRELLO_API_KEY"]);
+    const req = authReq({ apiKey: "k" }, "user-bob");
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockWriteRepoEnvVars).toHaveBeenCalledWith(
+      expect.objectContaining({ writtenBy: "dashboard:bob" }),
+    );
+  });
+
+  it("returns 500 when the writer throws (e.g. .env missing)", async () => {
+    mockWriteRepoEnvVars.mockRejectedValue(
+      new Error("Repo .env not found at /repos/danxbot/.danxbot/.env"),
+    );
+    const req = authReq({ apiKey: "k" });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody()).error).toMatch(/not found/i);
+  });
+
+  it("ignores unknown body fields (only apiKey/apiToken are honored)", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_TRELLO_API_KEY"]);
+    const req = authReq({
+      apiKey: "k",
+      apiToken: undefined,
+      DANX_TRELLO_API_KEY: "smuggled",
+      role: "admin",
+    });
+    const res = createMockRes();
+
+    await handlePatchTrelloCredentials(req, res, "danxbot", deps());
+
+    expect(res._getStatusCode()).toBe(200);
+    const updates = mockWriteRepoEnvVars.mock.calls[0][0].updates;
+    expect(Object.keys(updates)).toEqual(["DANX_TRELLO_API_KEY"]);
+    expect(updates.DANX_TRELLO_API_KEY).toBe("k");
   });
 });
