@@ -32,17 +32,20 @@ import {
   type QueryVerdict,
 } from "./aggregate.js";
 import {
+  COMMON_KNOWN_FLAGS,
   isInvokedAsScript,
   parseCommonRunFlags,
   pickArg,
+  validateKnownFlags,
 } from "./cli-args.js";
 import {
   loadEvalSet,
   resolveEvalSetPath,
   type EvalQuery,
 } from "./eval-set.js";
+import { finalizeReportWriteoutAndPersist } from "./finalize-report.js";
+import { formatCostUsd } from "./markdown-format.js";
 import { ProbeError, runProbe, type ProbeArgs, type ProbeResult } from "./probe.js";
-import { persistEvalSetReportWithLog } from "./report-file.js";
 import { renderReport } from "./report.js";
 import { splitEvalSet } from "./split.js";
 
@@ -82,10 +85,17 @@ function fail(msg: string): never {
   process.exit(2);
 }
 
+const EVAL_SET_OWN_FLAGS = ["plugin-skill", "eval-set"] as const;
+export const EVAL_SET_KNOWN_FLAGS = [
+  ...COMMON_KNOWN_FLAGS,
+  ...EVAL_SET_OWN_FLAGS,
+] as const;
+
 export function parseEvalSetArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): RunEvalSetArgs {
+  validateKnownFlags(argv, EVAL_SET_KNOWN_FLAGS, RunEvalSetArgsError);
   // Positional arg OR --plugin-skill flag.
   let pluginSkill = pickArg(argv, "plugin-skill");
   if (!pluginSkill) {
@@ -195,7 +205,7 @@ function thrownToRecord(runIndex: number, err: unknown): QueryRunRecord {
       cacheCreationTokens: 0,
     };
   }
-  const e = err as Error;
+  const e = err instanceof Error ? err : null;
   return {
     runIndex,
     triggered: false,
@@ -355,7 +365,8 @@ async function main(): Promise<number> {
   try {
     queries = loadEvalSet(args.evalSetPath);
   } catch (err) {
-    fail((err as Error).message);
+    const e = err instanceof Error ? err : new Error(String(err));
+    fail(e.message);
   }
 
   process.stderr.write(
@@ -364,18 +375,18 @@ async function main(): Promise<number> {
   process.stderr.write(`Eval-set: ${args.evalSetPath}\n`);
 
   const result = await runEvalSetCore(args, queries, runProbe);
-  process.stdout.write(result.markdown);
-  process.stdout.write("\n");
   // REPORT.md is auto-regenerated on every /skill-eval run so the prior
   // sweep's forensics survive across sessions; the writer is atomic
   // (temp+rename) and overwrites the previous run unconditionally.
-  persistEvalSetReportWithLog({
-    evalSetPath: args.evalSetPath,
+  // The shared finalize helper exposes the persistence call via an
+  // injectable dep — see `finalize-report.ts`.
+  finalizeReportWriteoutAndPersist({
     markdown: result.markdown,
+    evalSetPath: args.evalSetPath,
     runAt: new Date(),
   });
   process.stderr.write(
-    `\nExit ${result.exitCode} (${result.overallPass ? "PASS" : "FAIL"}) — total cost ~$${result.totalCostUsd.toFixed(4)} USD (model=${args.pricingModel}, estimated)\n`,
+    `\nExit ${result.exitCode} (${result.overallPass ? "PASS" : "FAIL"}) — total cost ${formatCostUsd(result.totalCostUsd)} USD (model=${args.pricingModel}, estimated)\n`,
   );
   return result.exitCode;
 }
@@ -384,6 +395,7 @@ if (isInvokedAsScript("run-eval-set")) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      fail(`unexpected runner error: ${(err as Error).stack ?? err}`);
+      const e = err instanceof Error ? err : new Error(String(err));
+      fail(`unexpected runner error: ${e.stack ?? e.message}`);
     });
 }

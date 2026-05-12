@@ -36,6 +36,58 @@ export function pickArg(argv: readonly string[], name: string): string | null {
 }
 
 /**
+ * Reject any `--unknown-flag` not in the per-CLI allowlist. Each entry
+ * runner declares the union of common + CLI-specific flags it accepts;
+ * a typo (e.g. `--eval-set-dir` for `--eval-sets-dir`) silently fell
+ * through to a default value before — operator surprise, masked
+ * misconfigs. The check runs after `pickArg` consumes every value, so
+ * a flag value like `--workspace skill-eval` does not get mistaken for
+ * an unknown flag.
+ *
+ * Bare positional args (anything not starting with `--`) are passed
+ * through untouched; positional handling stays in the per-CLI parser
+ * (e.g. plugin:skill).
+ */
+export function validateKnownFlags(
+  argv: readonly string[],
+  knownFlags: readonly string[],
+  ErrorCtor: new (message: string) => Error,
+): void {
+  const known = new Set(knownFlags);
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (!tok.startsWith("--")) continue;
+    const equalsIdx = tok.indexOf("=");
+    const name = (equalsIdx === -1 ? tok : tok.slice(0, equalsIdx)).slice(2);
+    if (!known.has(name)) {
+      throw new ErrorCtor(
+        `unknown flag --${name} — expected one of: ${Array.from(known).sort().map((n) => `--${n}`).join(", ")}`,
+      );
+    }
+    if (equalsIdx === -1 && i + 1 < argv.length && !argv[i + 1].startsWith("--")) {
+      i++;
+    }
+  }
+}
+
+/**
+ * Shared flag names every CLI consumes via `parseCommonRunFlags`. Used
+ * by each per-CLI parser to seed its `validateKnownFlags` allowlist —
+ * the per-CLI parser concatenates this list with its own unique flag
+ * names so a typo on either surface gets caught loudly.
+ */
+export const COMMON_KNOWN_FLAGS = [
+  "repo-root",
+  "workspace",
+  "workspace-cwd",
+  "timeout-ms",
+  "parallel",
+  "runs-per-query",
+  "seed",
+  "pricing-model",
+] as const;
+
+/**
  * Validate that `raw` is a base-10 positive integer with no trailing
  * non-digits. `Number.parseInt("5563abc")` returns `5563` — fine for
  * lenient input, dangerous for a config value the operator typed. The

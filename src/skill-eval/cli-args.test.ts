@@ -11,6 +11,7 @@ import {
   parseNonNegativeInt,
   parsePositiveInt,
   pickArg,
+  validateKnownFlags,
 } from "./cli-args.js";
 
 class TestErr extends Error {}
@@ -130,6 +131,72 @@ describe("parseCommonRunFlags", () => {
     expect(() =>
       parseCommonRunFlags(["--seed", "-1"], baseEnv, TestErr),
     ).toThrow(TestErr);
+  });
+});
+
+describe("validateKnownFlags", () => {
+  const KNOWN = ["seed", "parallel", "workspace", "pricing-model"] as const;
+
+  it("accepts every flag in the allowlist (space form)", () => {
+    expect(() =>
+      validateKnownFlags(
+        ["--seed", "1", "--parallel", "3", "--workspace", "skill-eval"],
+        KNOWN,
+        TestErr,
+      ),
+    ).not.toThrow();
+  });
+
+  it("accepts every flag in the allowlist (= form)", () => {
+    expect(() =>
+      validateKnownFlags(
+        ["--seed=1", "--parallel=3", "--workspace=skill-eval"],
+        KNOWN,
+        TestErr,
+      ),
+    ).not.toThrow();
+  });
+
+  it("ignores positional args (anything not starting with --)", () => {
+    expect(() =>
+      validateKnownFlags(
+        ["dev:debugging", "--seed", "1"],
+        KNOWN,
+        TestErr,
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects an unknown long flag (typo for an existing one)", () => {
+    expect(() =>
+      validateKnownFlags(["--eval-set-dir", "/tmp"], KNOWN, TestErr),
+    ).toThrow(TestErr);
+  });
+
+  it("error message names the offending flag verbatim", () => {
+    expect(() =>
+      validateKnownFlags(["--eval-set-dir", "/tmp"], KNOWN, TestErr),
+    ).toThrow(/--eval-set-dir/);
+  });
+
+  it("error message lists the accepted flags alphabetically (so operator sees the candidates)", () => {
+    try {
+      validateKnownFlags(["--bogus"], KNOWN, TestErr);
+      throw new Error("should not reach");
+    } catch (e) {
+      expect((e as Error).message).toMatch(
+        /--parallel, --pricing-model, --seed, --workspace/,
+      );
+    }
+  });
+
+  it("does NOT mistake a flag's value for an unknown flag (-- prefix on the value)", () => {
+    // `--pricing-model --strict-foo` would NOT parse `--strict-foo` as
+    // a value (it starts with `--`), so the validator should still
+    // catch it as an unknown flag.
+    expect(() =>
+      validateKnownFlags(["--pricing-model", "--strict-foo"], KNOWN, TestErr),
+    ).toThrow(/--strict-foo/);
   });
 });
 

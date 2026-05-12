@@ -118,6 +118,18 @@ describe("parseEvalSetArgs", () => {
       ).pricingModel,
     ).toBe("claude-opus-4-6");
   });
+
+  it("rejects an unknown --flag (typo: --evalsetpath) with RunEvalSetArgsError", () => {
+    expect(() =>
+      parseEvalSetArgs(["dev:debugging", "--evalsetpath", "/tmp"], baseEnv),
+    ).toThrow(RunEvalSetArgsError);
+  });
+
+  it("unknown-flag rejection names the offending flag verbatim", () => {
+    expect(() =>
+      parseEvalSetArgs(["dev:debugging", "--evalsetpath", "/tmp"], baseEnv),
+    ).toThrow(/--evalsetpath/);
+  });
 });
 
 describe("runEvalSetCore (with injected probe)", () => {

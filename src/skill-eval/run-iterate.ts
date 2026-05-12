@@ -36,10 +36,12 @@ import {
   createAnthropicClient,
 } from "./anthropic-client.js";
 import {
+  COMMON_KNOWN_FLAGS,
   isInvokedAsScript,
   parseCommonRunFlags,
   parsePositiveInt as parsePositiveIntShared,
   pickArg,
+  validateKnownFlags,
 } from "./cli-args.js";
 import { loadEvalSet, resolveEvalSetPath } from "./eval-set.js";
 import {
@@ -50,6 +52,8 @@ import {
   type IterationEvalSummary,
   type IterationRecord,
 } from "./iterate.js";
+import { finalizeReportWriteoutAndPersist } from "./finalize-report.js";
+import { formatPctOneDp } from "./markdown-format.js";
 import { makeAnthropicProposer } from "./description-proposer.js";
 import { resolvePluginSkillPaths } from "./plugin-paths.js";
 import {
@@ -58,7 +62,6 @@ import {
 } from "./plugin-git.js";
 import { runProbe } from "./probe.js";
 import { reloadAndVerify } from "./reload-propagation.js";
-import { persistEvalSetReportWithLog } from "./report-file.js";
 import { runEvalSetCore } from "./run-eval-set.js";
 
 const execFileAsync = promisify(execFile);
@@ -101,10 +104,25 @@ export interface RunIterateArgs {
   readonly proposerModel?: string;
 }
 
+const ITERATE_OWN_FLAGS = [
+  "plugin-skill",
+  "max-iterations",
+  "cost-cap-usd",
+  "source-root",
+  "cache-root",
+  "eval-set",
+  "proposer-model",
+] as const;
+export const ITERATE_KNOWN_FLAGS = [
+  ...COMMON_KNOWN_FLAGS,
+  ...ITERATE_OWN_FLAGS,
+] as const;
+
 export function parseIterateArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): RunIterateArgs {
+  validateKnownFlags(argv, ITERATE_KNOWN_FLAGS, RunIterateArgsError);
   let pluginSkill = pickArg(argv, "plugin-skill");
   if (!pluginSkill) {
     const positional = argv.find((a) => !a.startsWith("--"));
@@ -169,8 +187,22 @@ export interface FormatIterateReportInput {
   readonly result: IterateResult;
 }
 
-function formatPct(n: number): string {
-  return `${(n * 100).toFixed(1)}%`;
+// `IterateResult.status` ↔ user-facing verdict word. A const map beats
+// the nested-ternary chain — adding a new status is one entry, not a
+// merge-conflict-prone diff in the middle of a flow.
+const STATUS_WORDS: Record<IterateResult["status"], string> = {
+  green: "GREEN",
+  "max-iterations": "MAX-ITERATIONS",
+  "cost-cap": "COST-CAP",
+  "fatal-error": "FATAL-ERROR",
+};
+
+// Iterate's per-row "cost" column displays 2dp ($/iteration is usually
+// 10s of cents — 4dp is more precision than the operator needs in a
+// dense table), distinct from REPORT.md's 4dp `formatCostUsd`. Sharing
+// the `~$` prefix is enough for the estimate-marker consistency.
+function formatCostUsd2Dp(usd: number): string {
+  return `~$${usd.toFixed(2)}`;
 }
 
 export function formatIterateReport(
@@ -180,21 +212,13 @@ export function formatIterateReport(
   const lines: string[] = [];
   lines.push(`# Skill-eval iterate report: ${pluginSkill}`);
   lines.push("");
-  const verdictWord =
-    result.status === "green"
-      ? "GREEN"
-      : result.status === "max-iterations"
-        ? "MAX-ITERATIONS"
-        : result.status === "cost-cap"
-          ? "COST-CAP"
-          : "FATAL-ERROR";
-  lines.push(`**Status: ${result.status}** (${verdictWord})`);
+  lines.push(`**Status: ${result.status}** (${STATUS_WORDS[result.status]})`);
   lines.push("");
   lines.push(
-    `Best test accuracy: ${formatPct(result.bestTestAccuracy)} at iteration ${result.bestIteration}.`,
+    `Best test accuracy: ${formatPctOneDp(result.bestTestAccuracy)} at iteration ${result.bestIteration}.`,
   );
   lines.push(
-    `Total cost: ~$${result.totalCostUsd.toFixed(2)} (estimated, see per-iteration breakdown).`,
+    `Total cost: ${formatCostUsd2Dp(result.totalCostUsd)} (estimated, see per-iteration breakdown).`,
   );
   if (result.rolledBackTo !== undefined) {
     lines.push(
@@ -208,7 +232,7 @@ export function formatIterateReport(
   lines.push("|---|---|---|---|---|---|");
   for (const it of result.iterations) {
     lines.push(
-      `| ${it.iteration} | ${formatPct(it.trainAccuracy)} | ${formatPct(it.testAccuracy)} | ~$${it.costUsd.toFixed(2)} | ${it.commitSha ?? "—"} | ${it.status} |`,
+      `| ${it.iteration} | ${formatPctOneDp(it.trainAccuracy)} | ${formatPctOneDp(it.testAccuracy)} | ${formatCostUsd2Dp(it.costUsd)} | ${it.commitSha ?? "—"} | ${it.status} |`,
     );
   }
 
@@ -238,10 +262,15 @@ async function defaultGitExec(
     const { stdout, stderr } = await execFileAsync(cmd, [...args]);
     return { stdout, stderr, exitCode: 0, cmd, args: [...args] };
   } catch (e) {
-    const err = e as { stdout?: string; stderr?: string; code?: number };
+    const err = e as {
+      stdout?: string;
+      stderr?: string;
+      code?: number;
+      message?: string;
+    };
     return {
       stdout: err.stdout ?? "",
-      stderr: err.stderr ?? (e as Error).message,
+      stderr: err.stderr ?? err.message ?? String(e),
       exitCode: typeof err.code === "number" ? err.code : 1,
       cmd,
       args: [...args],
@@ -361,14 +390,14 @@ async function main(): Promise<number> {
   });
 
   const md = formatIterateReport({ pluginSkill: args.pluginSkill, result });
-  process.stdout.write(md);
-  process.stdout.write("\n");
   // REPORT.md captures the iterate-shaped markdown (status + per-iteration
   // history table + errors block) so the operator can inspect the
-  // forensics after the run without re-tailing stdout.
-  persistEvalSetReportWithLog({
-    evalSetPath: args.evalSetPath,
+  // forensics after the run without re-tailing stdout. Shared finalize
+  // helper exposes persistence via an injectable dep — see
+  // `finalize-report.ts`.
+  finalizeReportWriteoutAndPersist({
     markdown: md,
+    evalSetPath: args.evalSetPath,
     runAt: new Date(),
   });
 
@@ -379,7 +408,8 @@ if (isInvokedAsScript("run-iterate")) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      fail(`unexpected runner error: ${(err as Error).stack ?? err}`);
+      const e = err instanceof Error ? err : new Error(String(err));
+      fail(`unexpected runner error: ${e.stack ?? e.message}`);
     });
 }
 

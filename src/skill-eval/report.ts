@@ -17,6 +17,11 @@
  */
 
 import type { QueryVerdict, SideAccuracy } from "./aggregate.js";
+import {
+  formatCostUsd,
+  formatElapsed,
+  formatPercent,
+} from "./markdown-format.js";
 
 export interface ReportInput {
   readonly pluginSkill: string;
@@ -31,31 +36,6 @@ export interface ReportInput {
   readonly totalCostUsd: number;
   readonly pricingModel: string;
   readonly elapsedMs: number;
-}
-
-function formatPercent(ratio: number): string {
-  return `${(ratio * 100).toFixed(2)}%`;
-}
-
-function formatCostUsd(usd: number): string {
-  // Four decimals keeps sub-cent precision visible — a single short
-  // probe can cost less than $0.001, and rounding to 2dp would print
-  // `$0.00` for a real charge. Operators want the actual number.
-  //
-  // Prefix `~` because the figure is a model-price ESTIMATE: the
-  // dispatched agent's model is whatever the host's `~/.claude` config
-  // defaults to (Opus / Sonnet / whatever), but cost is computed using
-  // `--pricing-model` (Sonnet by default). The 4-decimal precision
-  // without the `~` would imply exactness the harness cannot deliver
-  // until per-message model extraction lands.
-  return `~$${usd.toFixed(4)}`;
-}
-
-function formatElapsed(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes}m ${remainder}s`;
 }
 
 function classifyFailure(v: QueryVerdict): string {

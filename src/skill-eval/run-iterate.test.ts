@@ -75,6 +75,18 @@ describe("parseIterateArgs", () => {
     expect(a.sourceRoot).toBe("/custom/source");
     expect(a.cacheRoot).toBe("/custom/cache");
   });
+
+  it("rejects an unknown --flag (typo: --max-iter) with RunIterateArgsError", () => {
+    expect(() =>
+      parseIterateArgs(["dev:debugging", "--max-iter", "3"], env),
+    ).toThrow(RunIterateArgsError);
+  });
+
+  it("unknown-flag rejection names the offending flag verbatim", () => {
+    expect(() =>
+      parseIterateArgs(["dev:debugging", "--max-iter", "3"], env),
+    ).toThrow(/--max-iter/);
+  });
 });
 
 describe("formatIterateReport", () => {

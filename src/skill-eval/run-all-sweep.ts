@@ -19,6 +19,11 @@
  *     unpredictably and exceeds the 30-minute / $25 sweep budget from
  *     DX-279 ACs.
  *
+ * Module split (DX-332):
+ *   - `sweep-discovery.ts` — discoverEvalSets + DiscoveredEvalSet
+ *   - `sweep-rollup.ts`    — renderSweepRollup + sanitizeErrorForGfm + SweepEntryResult/SweepStatus
+ *   - `run-all-sweep.ts`   — CLI main + orchestrator (this file)
+ *
  * Side effects:
  *   - One `REPORT.md` written next to each eval-set (auto-regenerated
  *     every run; same writer as Modes 2 + 3 use, so a single source
@@ -32,21 +37,19 @@
  * dispatch pipeline, the filesystem, or the network.
  */
 
-import {
-  existsSync,
-  readdirSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { QueryVerdict, SideAccuracy } from "./aggregate.js";
+import type { SideAccuracy } from "./aggregate.js";
 import { aggregateSide } from "./aggregate.js";
 import {
+  COMMON_KNOWN_FLAGS,
   isInvokedAsScript,
   parseCommonRunFlags,
   pickArg,
+  validateKnownFlags,
 } from "./cli-args.js";
 import { loadEvalSet, type EvalQuery } from "./eval-set.js";
+import { formatCostUsd, formatElapsed } from "./markdown-format.js";
 import { runProbe } from "./probe.js";
 import {
   persistEvalSetReport,
@@ -57,6 +60,21 @@ import {
   type RunEvalSetArgs,
   type RunEvalSetResult,
 } from "./run-eval-set.js";
+import {
+  discoverEvalSets,
+  type DiscoveredEvalSet,
+} from "./sweep-discovery.js";
+import {
+  renderSweepRollup,
+  type SweepEntryResult,
+} from "./sweep-rollup.js";
+
+// Re-export the split-module surface area existing consumers reach for
+// (only `discoverEvalSets`, `renderSweepRollup`, and `SweepEntryResult`
+// have callers outside this file as of DX-332). New consumers should
+// import directly from sweep-discovery.ts / sweep-rollup.ts.
+export type { SweepEntryResult };
+export { discoverEvalSets, renderSweepRollup };
 
 export class RunAllSweepArgsError extends Error {}
 
@@ -72,25 +90,6 @@ export interface RunAllSweepArgs {
   readonly pricingModel: string;
 }
 
-export type SweepStatus = "GREEN" | "FAIL" | "ERROR";
-
-export interface SweepEntryResult {
-  readonly pluginSkill: string;
-  readonly evalSetDir: string;
-  readonly evalSetPath: string;
-  readonly overallPass: boolean;
-  readonly train: SideAccuracy;
-  readonly test: SideAccuracy;
-  readonly runsPerQuery: number;
-  readonly costUsd: number;
-  readonly elapsedMs: number;
-  readonly status: SweepStatus;
-  readonly errorMessage?: string;
-  readonly reportPath?: string;
-  readonly trainVerdicts?: readonly QueryVerdict[];
-  readonly testVerdicts?: readonly QueryVerdict[];
-}
-
 export interface RunAllSweepResult {
   readonly entries: readonly SweepEntryResult[];
   readonly totalCostUsd: number;
@@ -99,56 +98,6 @@ export interface RunAllSweepResult {
   readonly exitCode: 0 | 1 | 2;
   readonly rollupMarkdown: string;
   readonly sweepReportPath?: string;
-}
-
-export interface DiscoveredEvalSet {
-  readonly pluginSkill: string;
-  readonly evalSetDir: string;
-  readonly evalSetPath: string;
-}
-
-/**
- * Walk a single level of `evalSetsDir`, return one entry per
- * subdirectory that contains an `eval-set.json` file. Directory name
- * `<plugin>-<skill>` is parsed by splitting on the FIRST hyphen so
- * skill names with hyphens (e.g. `issue-card-workflow`) round-trip
- * correctly. Plugin names with hyphens are out of scope for V1 — none
- * of the priority plugins have one; an operator naming a plugin with
- * an internal hyphen would have to supply a meta.json escape hatch
- * later.
- *
- * Entries are sorted lexicographically by directory name so the sweep
- * order is deterministic across hosts / filesystems.
- */
-export function discoverEvalSets(
-  evalSetsDir: string,
-): DiscoveredEvalSet[] {
-  if (!existsSync(evalSetsDir)) return [];
-  const entries = readdirSync(evalSetsDir).sort();
-  const out: DiscoveredEvalSet[] = [];
-  for (const name of entries) {
-    const dir = join(evalSetsDir, name);
-    let dirStat;
-    try {
-      dirStat = statSync(dir);
-    } catch {
-      continue;
-    }
-    if (!dirStat.isDirectory()) continue;
-    const idx = name.indexOf("-");
-    if (idx === -1) continue;
-    const plugin = name.slice(0, idx);
-    const skill = name.slice(idx + 1);
-    if (plugin.length === 0 || skill.length === 0) continue;
-    const evalSetPath = join(dir, "eval-set.json");
-    if (!existsSync(evalSetPath)) continue;
-    out.push({
-      pluginSkill: `${plugin}:${skill}`,
-      evalSetDir: dir,
-      evalSetPath,
-    });
-  }
-  return out;
 }
 
 export type SweepRunOneFn = (
@@ -225,8 +174,11 @@ function buildSuccessEntry(
   };
 }
 
+export type SweepErrorCategory = "schema" | "dispatch";
+
 function buildErrorEntry(
   d: DiscoveredEvalSet,
+  category: SweepErrorCategory,
   err: unknown,
   elapsedMs: number,
 ): SweepEntryResult {
@@ -241,7 +193,11 @@ function buildErrorEntry(
     costUsd: 0,
     elapsedMs,
     status: "ERROR",
-    errorMessage: errorToMessage(err),
+    // Category prefix lets operators triage in the rollup table without
+    // opening REPORT.md: `schema:` = eval-set didn't load (fix the JSON);
+    // `dispatch:` = sweep loop reached this entry but probe orchestration
+    // threw (worker / Anthropic / harness bug).
+    errorMessage: `${category}: ${errorToMessage(err)}`,
   };
 }
 
@@ -251,8 +207,13 @@ async function runOneEntry(
   deps: RunAllSweepDeps,
 ): Promise<SweepEntryResult> {
   const entryStartMs = deps.now();
+  let queries: readonly EvalQuery[];
   try {
-    const queries = loadEvalSet(d.evalSetPath);
+    queries = loadEvalSet(d.evalSetPath);
+  } catch (err) {
+    return buildErrorEntry(d, "schema", err, deps.now() - entryStartMs);
+  }
+  try {
     const result = await deps.runOne(buildRunEvalSetArgs(d, args), queries);
     const writeRes = deps.writeReport({
       evalSetPath: d.evalSetPath,
@@ -261,7 +222,7 @@ async function runOneEntry(
     });
     return buildSuccessEntry(d, args, result, writeRes, deps.now() - entryStartMs);
   } catch (err) {
-    return buildErrorEntry(d, err, deps.now() - entryStartMs);
+    return buildErrorEntry(d, "dispatch", err, deps.now() - entryStartMs);
   }
 }
 
@@ -297,9 +258,10 @@ function buildEmptyDiscoveryResult(
  *          the sweep-level flags.
  *       3. Write per-skill REPORT.md via `writeReport`.
  *       4. Capture train + test SideAccuracy via `aggregateSide`.
- *   - A throw from `runOne` (or eval-set load failure) records the
- *     entry as `status: ERROR` with the message and DOES NOT abort the
- *     sweep — every other discoverable eval-set still runs.
+ *   - A throw from `loadEvalSet` records the entry as `status: ERROR`
+ *     with `errorMessage: "schema: ..."` and DOES NOT abort the sweep.
+ *   - A throw from `runOne` records the entry as `status: ERROR`
+ *     with `errorMessage: "dispatch: ..."`.
  *   - After every entry, render the roll-up via `renderSweepRollup`
  *     and write SWEEP.md via `writeSweepMarkdown`.
  *
@@ -352,110 +314,25 @@ export async function runAllSweepCore(
   };
 }
 
-function formatPercent(ratio: number): string {
-  return `${(ratio * 100).toFixed(2)}%`;
-}
-
-function formatCostUsd(usd: number): string {
-  return `~$${usd.toFixed(4)}`;
-}
-
-function formatElapsed(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes}m ${remainder}s`;
-}
-
-const ERROR_MESSAGE_MAX_CHARS = 80;
-
-/**
- * Sanitize a free-form error message for inclusion in a single GFM
- * table cell. Newlines, carriage returns, and pipe characters all
- * break the table layout — replace them with single spaces. The
- * 80-char cap keeps the table row legible; longer error messages
- * stay available in REPORT.md / the raw `errorMessage` field on the
- * entry.
- */
-function sanitizeErrorForGfm(raw: string): string {
-  const trimmed = raw.length > ERROR_MESSAGE_MAX_CHARS
-    ? raw.slice(0, ERROR_MESSAGE_MAX_CHARS)
-    : raw;
-  return trimmed.replace(/[|\r\n]+/g, " ");
-}
-
-function formatSweepRow(e: SweepEntryResult): string {
-  const trainCell =
-    e.train.total === 0
-      ? "—"
-      : `${formatPercent(e.train.accuracy)} (${e.train.correct}/${e.train.total})`;
-  const testCell =
-    e.test.total === 0
-      ? "—"
-      : `${formatPercent(e.test.accuracy)} (${e.test.correct}/${e.test.total})`;
-  const runsCell = e.runsPerQuery === 0 ? "—" : `${e.runsPerQuery}`;
-  const costCell = formatCostUsd(e.costUsd);
-  const elapsedCell = formatElapsed(e.elapsedMs);
-  const statusCell =
-    e.status === "ERROR" && e.errorMessage
-      ? `ERROR (${sanitizeErrorForGfm(e.errorMessage)})`
-      : e.status;
-  const reportLink = e.reportPath ? ` ([REPORT.md](${e.reportPath}))` : "";
-  return `| \`${e.pluginSkill}\`${reportLink} | ${trainCell} | ${testCell} | ${runsCell} | ${costCell} | ${elapsedCell} | ${statusCell} |`;
-}
-
-export interface RenderSweepRollupInput {
-  readonly entries: readonly SweepEntryResult[];
-  readonly totalCostUsd: number;
-  readonly totalElapsedMs: number;
-  readonly overallPass: boolean;
-  readonly runAt: Date;
-}
-
-/**
- * Pure markdown renderer for the sweep roll-up. Writes a GFM table
- * with one row per entry and a summary block.
- *
- * `ERROR` rows surface the error message in the same Status column so
- * the operator can see why an eval-set was skipped without diffing
- * REPORT.md files.
- */
-export function renderSweepRollup(input: RenderSweepRollupInput): string {
-  const lines: string[] = [];
-  lines.push("# Skill-eval --all sweep");
-  lines.push("");
-  lines.push(`**Overall: ${input.overallPass ? "PASS" : "FAIL"}**`);
-  lines.push("");
-  lines.push(`- Last run: \`${input.runAt.toISOString()}\``);
-  lines.push(`- Eval-sets: \`${input.entries.length}\``);
-  lines.push(`- Total cost: \`${formatCostUsd(input.totalCostUsd)}\``);
-  lines.push(`- Total elapsed: \`${formatElapsed(input.totalElapsedMs)}\``);
-  lines.push("");
-  lines.push("## Per-skill summary");
-  lines.push("");
-  lines.push("| Skill | Train | Test | Runs | Cost | Elapsed | Status |");
-  lines.push("|---|---|---|---|---|---|---|");
-  for (const e of input.entries) {
-    lines.push(formatSweepRow(e));
-  }
-  if (input.entries.length === 0) {
-    lines.push("");
-    lines.push("_No eval-sets discovered. Check `--eval-sets-dir`._");
-  }
-  return lines.join("\n");
-}
+const SWEEP_OWN_FLAGS = ["eval-sets-dir"] as const;
+export const SWEEP_KNOWN_FLAGS = [
+  ...COMMON_KNOWN_FLAGS,
+  ...SWEEP_OWN_FLAGS,
+] as const;
 
 /**
  * Parse argv into `RunAllSweepArgs`. Mirrors `parseEvalSetArgs` /
  * `parseIterateArgs` for the flags that apply to single-skill runs
  * (parallel, seed, runs-per-query, pricing-model, timeouts), plus a
  * single sweep-specific flag (`--eval-sets-dir`) defaulting to
- * `<repoRoot>/tests/skill-evals`.
+ * `<repoRoot>/tests/skill-evals`. Rejects unknown `--flag` tokens via
+ * `validateKnownFlags`.
  */
 export function parseSweepArgs(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
 ): RunAllSweepArgs {
+  validateKnownFlags(argv, SWEEP_KNOWN_FLAGS, RunAllSweepArgsError);
   const common = parseCommonRunFlags(argv, env, RunAllSweepArgsError);
   const evalSetsDir =
     pickArg(argv, "eval-sets-dir") ??
@@ -510,8 +387,10 @@ async function main(): Promise<number> {
 
   process.stdout.write(result.rollupMarkdown);
   process.stdout.write("\n");
+  // Sweep banner: cost + elapsed via the shared formatters so the line
+  // shape matches REPORT.md's parameters block exactly.
   process.stderr.write(
-    `\nSwept ${result.entries.length} eval-sets — Exit ${result.exitCode} (${result.overallPass ? "PASS" : "FAIL"}) — total cost ~$${result.totalCostUsd.toFixed(4)} USD — elapsed ${formatElapsed(result.totalElapsedMs)}\n`,
+    `\nSwept ${result.entries.length} eval-sets — Exit ${result.exitCode} (${result.overallPass ? "PASS" : "FAIL"}) — total cost ${formatCostUsd(result.totalCostUsd)} USD — elapsed ${formatElapsed(result.totalElapsedMs)}\n`,
   );
   if (result.sweepReportPath) {
     process.stderr.write(`SWEEP.md written: ${result.sweepReportPath}\n`);
@@ -523,6 +402,7 @@ if (isInvokedAsScript("run-all-sweep")) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {
-      fail(`unexpected runner error: ${(err as Error).stack ?? err}`);
+      const e = err instanceof Error ? err : new Error(String(err));
+      fail(`unexpected runner error: ${e.stack ?? e.message}`);
     });
 }

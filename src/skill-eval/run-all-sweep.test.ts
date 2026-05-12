@@ -711,4 +711,115 @@ describe("parseSweepArgs", () => {
     expect(args.runsPerQuery).toBe(5);
     expect(args.parallel).toBe(2);
   });
+
+  it("rejects an unknown --flag (typo: --eval-set-dir singular) with RunAllSweepArgsError", () => {
+    expect(() =>
+      parseSweepArgs(["--eval-set-dir", "/tmp/typo"], baseEnv),
+    ).toThrow(RunAllSweepArgsError);
+  });
+
+  it("unknown-flag rejection names the offending flag verbatim", () => {
+    expect(() =>
+      parseSweepArgs(["--eval-set-dir", "/tmp/typo"], baseEnv),
+    ).toThrow(/--eval-set-dir/);
+  });
+});
+
+describe("runAllSweepCore — category-prefixed error messages (DX-332 AC5)", () => {
+  let root: string;
+  let evalSetsDir: string;
+
+  function baseArgs(): RunAllSweepArgs {
+    return {
+      evalSetsDir,
+      repoRoot: "/fake/repo",
+      workspace: "skill-eval",
+      workspaceCwd: "/fake/workspace",
+      timeoutMs: 60000,
+      parallel: 3,
+      seed: 1,
+      runsPerQuery: 3,
+      pricingModel: "claude-sonnet-4-6",
+    };
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "skill-eval-sweep-cat-"));
+    evalSetsDir = join(root, "tests", "skill-evals");
+    mkdirSync(evalSetsDir, { recursive: true });
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("stamps `schema:` prefix when loadEvalSet throws (eval-set.json is malformed)", async () => {
+    const dir = join(evalSetsDir, "broken-skill");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "eval-set.json"),
+      "not valid json {{{",
+      "utf8",
+    );
+
+    const runOne: SweepRunOneFn = vi.fn(async () => {
+      throw new Error("runOne should not be invoked when load throws");
+    });
+    const result = await runAllSweepCore(baseArgs(), {
+      runOne,
+      writeReport: () => ({ path: "/fake/REPORT.md", bytesWritten: 0 }),
+      writeSweepMarkdown: () => "/fake/SWEEP.md",
+      now: () => 0,
+    });
+
+    expect(runOne).not.toHaveBeenCalled();
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].status).toBe("ERROR");
+    expect(result.entries[0].errorMessage).toMatch(/^schema: /);
+  });
+
+  it("stamps `dispatch:` prefix when runOne throws (probe/orchestration failure)", async () => {
+    makeFakeEvalSetDir(evalSetsDir, "dev-debugging");
+
+    const runOne: SweepRunOneFn = async () => {
+      throw new Error("probe dispatch exploded");
+    };
+    const result = await runAllSweepCore(baseArgs(), {
+      runOne,
+      writeReport: () => ({ path: "/fake/REPORT.md", bytesWritten: 0 }),
+      writeSweepMarkdown: () => "/fake/SWEEP.md",
+      now: () => 0,
+    });
+
+    expect(result.entries).toHaveLength(1);
+    expect(result.entries[0].status).toBe("ERROR");
+    expect(result.entries[0].errorMessage).toMatch(/^dispatch: /);
+    expect(result.entries[0].errorMessage).toContain("probe dispatch exploded");
+  });
+
+  it("mixes schema + dispatch errors in one sweep with distinct prefixes per entry", async () => {
+    // Broken JSON → schema:.
+    const broken = join(evalSetsDir, "broken-skill");
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, "eval-set.json"), "not json", "utf8");
+    // Dispatch failure → dispatch:.
+    makeFakeEvalSetDir(evalSetsDir, "dev-debugging");
+
+    const runOne: SweepRunOneFn = async () => {
+      throw new Error("dispatch boom");
+    };
+
+    const result = await runAllSweepCore(baseArgs(), {
+      runOne,
+      writeReport: () => ({ path: "/fake/REPORT.md", bytesWritten: 0 }),
+      writeSweepMarkdown: () => "/fake/SWEEP.md",
+      now: () => 0,
+    });
+
+    expect(result.entries).toHaveLength(2);
+    const byPluginSkill = Object.fromEntries(
+      result.entries.map((e) => [e.pluginSkill, e]),
+    );
+    expect(byPluginSkill["broken:skill"].errorMessage).toMatch(/^schema: /);
+    expect(byPluginSkill["dev:debugging"].errorMessage).toMatch(/^dispatch: /);
+  });
 });
