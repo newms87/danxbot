@@ -54,8 +54,7 @@ export interface BuildClaudeInvocationOptions {
   /**
    * Optional Claude model name forwarded as `--model <name>`. When unset,
    * claude resolves the model from its own defaults (env / settings /
-   * built-in). Use to pin a specific model on a per-dispatch basis
-   * (e.g. conflict-check pins Sonnet for judgment quality).
+   * built-in). Use to pin a specific model on a per-dispatch basis.
    */
   model?: string;
   /**

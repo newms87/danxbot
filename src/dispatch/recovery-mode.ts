@@ -1,38 +1,32 @@
 /**
- * Branch-recovery dispatch routing (DX-161 / multi-worker dispatch epic
- * DX-158). Owns the validate→reset/recover decision tree + post-completion
- * re-validation. Pure prompt construction lives in `./recovery-prompt.ts`;
- * default IO helpers live in `./recovery-card-update.ts`. Splitting them
- * lets pure-prompt tests run without loading `dispatch/core.js` (which
- * pulls in `config.ts` + every required env var).
+ * Worktree-aware dispatch entry point (DX-297 / DX-291 P6 — collapsed).
  *
- * `dispatchWithRecovery` is the worktree-aware front door. Callers (the
- * Phase-5 poller; agent-CRUD endpoints when they spawn a hands-on
- * dispatch) pass an `agentName` + `manager`; `dispatchWithRecovery`
- * inserts the validate/reset/recover gate ahead of the actual dispatch.
+ * `dispatchWithRecovery` is a thin pre-flight wrapper: it refreshes the
+ * host clone's `refs/remotes/origin/main`, fast-forwards (or rebases)
+ * the agent's worktree to that tip, and hands off to `deps.dispatch`.
+ * The prep skill (DX-291 P4 / `danxbot:danx-prep`) is the new authority
+ * on agent-readiness — WIP recovery, validate, conflict reasoning, and
+ * branch-state inspection ALL live on the agent's worktree as the first
+ * step of every dispatch.
  *
- * Existing callers (Slack, legacy poller, external `/api/launch` without
- * an agent) keep calling `dispatch()` directly — no behaviour change.
+ * DX-297 deleted the legacy `validate → dispatchInRecoveryMode` dirty
+ * branch (recovery prompt, last-modified-card scan, Needs Help comment
+ * append) — the prep skill's `verdict: "abort"` path now handles every
+ * blocked-worktree scenario via the prep-verdict route's
+ * `agents.<name>.broken` stamp.
  *
- * Single-fork invariant: the recovery dispatch IS itself a normal
- * dispatch; `dispatchInRecoveryMode` calls `deps.dispatch(...)` once
- * with the recovery prompt. The post-completion re-validate runs in the
- * dispatch's `onComplete` callback (no second spawn).
+ * On `syncWorktree.kind === "abort"` (ff-only refused, fetch mid-failure)
+ * this wrapper stamps `agents.<name>.broken` persistently so the picker
+ * skips the agent until the operator clears the field, then throws a
+ * plain `Error` so the multi-agent caller's existing try/catch fires its
+ * dispatch-cleanup bookkeeping (clear YAML `dispatch{}`, quarantine,
+ * release lock).
  */
 
 import { createLogger } from "../logger.js";
-import type { RepoContext } from "../types.js";
-import type { WorktreeManager } from "../agent/worktree-manager.js";
+import { setAgentBroken } from "../settings-file.js";
 import type { DispatchInput, DispatchResult } from "./core.js";
-import {
-  buildRecoveryPrompt,
-  buildStillDirtyComment,
-  type DirtyValidation,
-} from "./recovery-prompt.js";
-import {
-  appendNeedsHelpComment as defaultAppendNeedsHelpComment,
-  findLastModifiedOpenCard as defaultFindLastModifiedOpenCard,
-} from "./recovery-card-update.js";
+import type { WorktreeManager } from "../agent/worktree-manager.js";
 
 const log = createLogger("recovery-mode");
 
@@ -45,173 +39,8 @@ export interface RecoveryDeps {
    * pass a `vi.fn()`.
    */
   dispatch: (input: DispatchInput) => Promise<DispatchResult>;
-  /**
-   * Lookup the most-recently-modified open issue YAML in the repo.
-   * Defaults to a real-FS scan; tests stub. See
-   * `./recovery-card-update.ts` for the Phase 3 limitation note.
-   */
-  findLastModifiedOpenCard?: (
-    repo: RepoContext,
-  ) => Promise<{ id: string; path: string } | null>;
-  /**
-   * Append a Needs Help comment to a card YAML. Defaults to the
-   * yaml-parser-based helper in `./recovery-card-update.ts`; tests stub.
-   */
-  appendNeedsHelpComment?: (cardPath: string, body: string) => Promise<void>;
 }
 
-/** Re-export so callers don't need a second import for the type. */
-export type { DirtyValidation } from "./recovery-prompt.js";
-export { buildRecoveryPrompt } from "./recovery-prompt.js";
-
-/**
- * Spawn the recovery dispatch and wire post-completion re-validation.
- *
- * Flow:
- *   1. Build the recovery prompt from the dirty validation result.
- *   2. Call `deps.dispatch()` with that prompt, marking the dispatch's
- *      API metadata `endpoint = "internal:recovery"` so dashboards / log
- *      readers can spot recovery runs without a schema change.
- *   3. On completion, re-run `validate()`. If still dirty, find the
- *      last-modified open card and append a Needs Help comment so an
- *      operator can intervene. If clean, poller picks again next tick.
- *
- * The caller's `input.onComplete` is invoked BEFORE the post-recovery
- * follow-up runs. Errors from either side are caught + logged so the
- * dispatch lifecycle never propagates an unhandled promise rejection
- * back to the worker.
- */
-export async function dispatchInRecoveryMode(
-  input: DispatchInput,
-  agentName: string,
-  validation: DirtyValidation,
-  manager: WorktreeManager,
-  deps: RecoveryDeps,
-): Promise<DispatchResult> {
-  const findLast = deps.findLastModifiedOpenCard ?? defaultFindLastModifiedOpenCard;
-  const appendComment = deps.appendNeedsHelpComment ?? defaultAppendNeedsHelpComment;
-
-  const worktreePath = manager.worktreePath(input.repo, agentName);
-  const prompt = buildRecoveryPrompt({ agentName, worktreePath, validation });
-  log.warn(
-    `dispatchInRecoveryMode(${input.repo.name}/${agentName}): ${validation.reason} — spawning recovery prompt`,
-  );
-
-  // Mark the dispatch as recovery via the API metadata so the dashboard +
-  // log readers can distinguish it from a normal `work` run. We always
-  // overlay onto an `api` trigger — recovery dispatches are worker-
-  // internal, not Slack/Trello-driven.
-  const recoveryMeta: DispatchInput["apiDispatchMeta"] = {
-    trigger: "api",
-    metadata: {
-      endpoint: "internal:recovery",
-      callerIp: null,
-      statusUrl: null,
-      initialPrompt: prompt,
-      ...(input.apiDispatchMeta.trigger === "api"
-        ? { workspace: input.apiDispatchMeta.metadata.workspace }
-        : {}),
-    },
-  };
-
-  const recoveryInput: DispatchInput = {
-    ...input,
-    task: prompt,
-    title: `Branch recovery — ${agentName}`,
-    apiDispatchMeta: recoveryMeta,
-    onComplete: async (job) => {
-      // Stamp BEFORE caller.onComplete so the caller's "did the tracked
-      // card progress?" guard can short-circuit. Recovery dispatches do
-      // branch cleanup, not card work — running the progress check
-      // would write a spurious CRITICAL_FAILURE flag every time recovery
-      // succeeds against a clean ToDo card. See AgentJob.recoveryMode
-      // for the cross-file contract.
-      job.recoveryMode = true;
-      // Caller's onComplete first — preserve existing semantics + don't
-      // let our follow-up errors mask the caller's bookkeeping. Errors
-      // from the caller are caught + logged so the dispatch lifecycle
-      // doesn't surface an unhandled rejection.
-      if (input.onComplete) {
-        try {
-          await input.onComplete(job);
-        } catch (callerErr) {
-          log.error(
-            `recovery(${input.repo.name}/${agentName}): caller onComplete threw`,
-            callerErr,
-          );
-        }
-      }
-      try {
-        const post = await manager.validate(input.repo, agentName);
-        if (post.state !== "dirty") {
-          log.info(
-            `recovery(${input.repo.name}/${agentName}): branch is now clean — poller will pick next card`,
-          );
-          return;
-        }
-        log.warn(
-          `recovery(${input.repo.name}/${agentName}): STILL dirty after recovery — ${post.reason}`,
-        );
-        const card = await findLast(input.repo);
-        if (!card) {
-          log.error(
-            `recovery(${input.repo.name}/${agentName}): no open cards to attach Needs Help to — operator must inspect manually`,
-          );
-          return;
-        }
-        const body = buildStillDirtyComment(agentName, post);
-        await appendComment(card.path, body);
-        log.warn(
-          `recovery(${input.repo.name}/${agentName}): filed Needs Help on ${card.id} (${card.path})`,
-        );
-      } catch (err) {
-        log.error(
-          `recovery(${input.repo.name}/${agentName}): post-recovery validation threw`,
-          err,
-        );
-      }
-    },
-  };
-
-  return deps.dispatch(recoveryInput);
-}
-
-/**
- * Worktree-aware dispatch entry point. Use this from callers that own a
- * named agent + a `WorktreeManager`.
- *
- * On `clean` validation we run `syncWorktree` to fast-forward (or no-op
- * when already at HEAD) BEFORE handing off to dispatch — this is the
- * one chance to refresh the worktree's `main` ref. On `dirty` we route
- * to `dispatchInRecoveryMode` instead and the normal dispatch is
- * skipped — the next poll tick re-evaluates after recovery completes.
- *
- * `syncWorktree` is the DX-293 non-destructive replacement for the
- * retired `resetClean` — fetch + ff-only OR rebase OR abort, never
- * `git reset --hard`. Since `validate() === clean` already implies
- * `ahead === 0`, the rebase branch is unreachable through this
- * caller; it exists for the prep skill (DX-291 P3+) which bypasses
- * the legacy validate gate.
- *
- * On a `kind: "abort"` result we throw a plain `Error` (NOT
- * `WorktreeError`) to preserve the previous "dispatch fails loud"
- * semantics. Importing `WorktreeError` as a runtime value would
- * eager-load `worktree-manager.ts`, whose top-level `promisify(
- * execFileCb)` call trips partial `node:child_process` mocks in
- * otherwise-unrelated tests (`src/cron/sync-and-audit.test.ts` etc.). The
- * type-only `WorktreeManager` import keeps this module load-time
- * clean. DX-291 P3+ replaces this throw with the prep-verdict path
- * that flips `agents.<name>.broken` so the operator can route via
- * the dashboard instead of a dead-lettered dispatch.
- *
- * **Caller serialization invariant:** callers MUST hold a per-agent
- * dispatch lock around this function so a concurrent operator-driven
- * dirtying op cannot race with `validate()` + `syncWorktree()`.
- * Phase 5 (DX-200) lands the formal lock via the `dispatches` table;
- * until then, the single-poller invariant + the absence of an
- * issue-worker dispatch API for arbitrary callers gives us this
- * property by construction.
- */
 export async function dispatchWithRecovery(
   input: DispatchInput,
   worktreeContext: { agentName: string; manager: WorktreeManager },
@@ -219,28 +48,37 @@ export async function dispatchWithRecovery(
 ): Promise<DispatchResult> {
   const { agentName, manager } = worktreeContext;
 
-  // Refresh the host clone's `refs/remotes/origin/main` BEFORE validate
+  // Refresh the host clone's `refs/remotes/origin/main` BEFORE syncWorktree
   // so external pushes (PR-merge via GitHub web UI, peer-dev pushes,
-  // this host's own non-finalize pushes) are visible to the next
-  // syncWorktree. Without this, the agent starts on whatever sha was
-  // cached at the last finalize / manual fetch — silent staleness.
-  // Transient failures fall through (warning logged inside the
-  // manager) so a flaky network does not dead-letter the dispatch.
+  // this host's own non-finalize pushes) are visible. Transient failures
+  // fall through (warning logged inside the manager) so a flaky network
+  // does not dead-letter the dispatch.
   await manager.fetchOrigin(input.repo);
 
-  const validation = await manager.validate(input.repo, agentName);
-  if (validation.state === "dirty") {
-    return dispatchInRecoveryMode(input, agentName, validation, manager, deps);
-  }
-  // Clean — fast-forward (or no-op) before normal spawn. Abort is a
-  // genuine failure mode (ff-only refused, fetch failed mid-way) and
-  // throws so the worker dispatch loop surfaces it loudly. Plain
-  // `Error` (not `WorktreeError`) — see the JSDoc above for the
-  // load-time rationale.
+  // Fast-forward (or rebase) the worktree to the freshly-fetched
+  // origin/main. The prep skill runs branch-state inspection itself; this
+  // call is a cheap pre-flight so the common clean-ff case takes zero
+  // tokens. On abort (ff-only refused, history diverged), persistently
+  // mark the agent broken — the picker will skip this agent next tick
+  // until the operator clears the field via the dashboard.
   const sync = await manager.syncWorktree(input.repo, agentName);
   if (sync.kind === "abort") {
+    const reason = `syncWorktree aborted: ${sync.reason}`;
+    log.warn(
+      `dispatchWithRecovery(${input.repo.name}/${agentName}): ${reason} — ${sync.details}`,
+    );
+    await setAgentBroken(
+      input.repo.localPath,
+      agentName,
+      {
+        reason,
+        suggested_steps: sync.details ? [sync.details] : [],
+        set_at: new Date().toISOString(),
+      },
+      "worker",
+    );
     throw new Error(
-      `dispatchWithRecovery(${input.repo.name}/${agentName}): syncWorktree aborted: ${sync.reason} — ${sync.details}`,
+      `dispatchWithRecovery(${input.repo.name}/${agentName}): ${reason} — ${sync.details}`,
     );
   }
   return deps.dispatch(input);

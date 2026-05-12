@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { DanxButton, DanxDialog, useDialog } from "@thehammer/danx-ui";
 import {
-  fetchAgentRoster,
-  patchAgentDefaults,
   resetAllData,
   type ResetAllDataResult,
   type RepoInfo,
-  type ToggleError,
 } from "../api";
 import { useAgents } from "../composables/useAgents";
 import RepoCard from "./agents/RepoCard.vue";
@@ -101,49 +98,6 @@ async function onTrelloRefresh(_repo: string): Promise<void> {
   await refreshAgents();
 }
 
-// agentDefaults.conflictCheckEnabled — fetched per-repo on mount + when
-// the selection changes. Round-trips through PATCH /api/agents-settings.
-const conflictCheckEnabled = ref<boolean>(true);
-const conflictCheckLoading = ref<boolean>(false);
-const conflictCheckSaving = ref<boolean>(false);
-const conflictCheckError = ref<string | null>(null);
-
-async function loadConflictCheck(): Promise<void> {
-  if (!activeRepoName.value) return;
-  conflictCheckLoading.value = true;
-  conflictCheckError.value = null;
-  try {
-    const roster = await fetchAgentRoster(activeRepoName.value);
-    conflictCheckEnabled.value = roster.settings.conflictCheckEnabled;
-  } catch (err) {
-    conflictCheckError.value = (err as Error).message;
-  } finally {
-    conflictCheckLoading.value = false;
-  }
-}
-
-async function onConflictCheckChange(next: boolean): Promise<void> {
-  if (!activeRepoName.value) return;
-  const prev = conflictCheckEnabled.value;
-  conflictCheckEnabled.value = next;
-  conflictCheckSaving.value = true;
-  conflictCheckError.value = null;
-  try {
-    const result = await patchAgentDefaults(activeRepoName.value, next);
-    conflictCheckEnabled.value = result.settings.conflictCheckEnabled;
-  } catch (err) {
-    conflictCheckEnabled.value = prev;
-    const te = err as ToggleError;
-    conflictCheckError.value =
-      te?.serverMessage ?? te?.message ?? "Save failed.";
-  } finally {
-    conflictCheckSaving.value = false;
-  }
-}
-
-onMounted(() => void loadConflictCheck());
-watch(activeRepoName, () => void loadConflictCheck());
-
 // ── Danger Zone (global) ─────────────────────────────────────────────
 const { isOpen, open, close } = useDialog();
 const saving = ref(false);
@@ -219,41 +173,6 @@ function dismissResult(): void {
         />
       </template>
 
-      <article
-        class="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 shadow-sm"
-        data-test="conflict-check-card"
-      >
-        <header class="mb-2 flex items-center justify-between">
-          <div>
-            <h3 class="text-sm font-bold text-gray-900 dark:text-white">
-              Multi-worker conflict check
-            </h3>
-            <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              Run a triage-precursor LLM call before each issue-worker dispatch when other agents are working, to flag overlapping file edits before code is generated. Disable to skip the extra call (cost-sensitive ops).
-            </p>
-          </div>
-          <label
-            class="relative inline-flex items-center cursor-pointer"
-            :class="{ 'opacity-60 cursor-wait': conflictCheckLoading || conflictCheckSaving }"
-          >
-            <input
-              type="checkbox"
-              class="sr-only peer"
-              :checked="conflictCheckEnabled"
-              :disabled="conflictCheckLoading || conflictCheckSaving"
-              data-test="conflict-check-toggle"
-              @change="onConflictCheckChange(($event.target as HTMLInputElement).checked)"
-            />
-            <div class="w-11 h-6 bg-gray-300 peer-focus:ring-2 peer-focus:ring-blue-500 rounded-full peer dark:bg-gray-600 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600" />
-          </label>
-        </header>
-        <p
-          v-if="conflictCheckError"
-          class="mt-2 text-xs text-red-600 dark:text-red-400"
-        >
-          {{ conflictCheckError }}
-        </p>
-      </article>
     </section>
 
     <section

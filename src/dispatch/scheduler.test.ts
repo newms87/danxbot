@@ -915,7 +915,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
         overrides: {},
         display: {},
         agents: {},
-        agentDefaults: { conflictCheckEnabled: true },
+        agentDefaults: { prepMode: "combined" },
         meta: {
           updatedAt: new Date(0).toISOString(),
           updatedBy: "worker",

@@ -175,17 +175,6 @@ export interface AgentJob {
     summary?: string,
   ) => Promise<void>;
   /**
-   * Set to `true` by `dispatchInRecoveryMode` (`src/dispatch/recovery-mode.ts`)
-   * BEFORE the caller's `onComplete` is invoked. Recovery dispatches do
-   * branch cleanup, not card work — the tracked card stays where it was
-   * by design. Caller onComplete hooks that run "did the tracked card
-   * progress?" guards (multi-agent-pick's `runPostDispatchProgressCheck`,
-   * legacy `runSync`'s `checkCardProgressedOrHalt`) MUST short-circuit when
-   * this is set or they will write a spurious CRITICAL_FAILURE flag and
-   * halt the poller. Lock release + dispatch-block clear still run.
-   */
-  recoveryMode?: boolean;
-  /**
    * Restage context preserved at /api/launch + /api/resume time so a
    * later POST /api/restage/:dispatchId can re-run the same
    * `prepareStagedFiles + writeStagedFiles` chain that produced the
@@ -288,9 +277,9 @@ export interface SpawnAgentOptions {
   /**
    * Optional Claude model override forwarded as `--model <name>` to the
    * spawned claude CLI. Use for dispatches that want to pin to a
-   * specific model regardless of the host's default (e.g. conflict-check
-   * pins to Sonnet for judgment quality). When omitted, claude uses its
-   * own default model resolution (env / settings / built-in default).
+   * specific model regardless of the host's default. When omitted,
+   * claude uses its own default model resolution (env / settings /
+   * built-in default).
    */
   model?: string;
   /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */

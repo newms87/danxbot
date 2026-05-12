@@ -802,32 +802,6 @@ describe("tryMultiAgentDispatch", () => {
     );
   });
 
-  it("recovery-mode dispatches skip runPostDispatchProgressCheck (branch cleanup, not card work — would write spurious CRITICAL_FAILURE)", async () => {
-    writeSettings({ alice: agentRecord("alice") });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1")],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-
-    expect(result.dispatched).toBe(1);
-    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    await dispatchInput.onComplete!({
-      id: "did-1",
-      status: "completed",
-      summary: "recovered branch",
-      recoveryMode: true,
-    } as never);
-
-    expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
-  });
-
   it("AC #4: locally-only cards skip runPostDispatchProgressCheck (no tracker round-trip possible)", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({

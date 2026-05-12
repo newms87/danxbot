@@ -1,15 +1,13 @@
 /**
- * Mutation routes for the Agents tab — feature toggles, conflict-check
- * default, critical-failure flag clear, agent roster fetch, Trello
- * credential rotation.
+ * Mutation routes for the Agents tab — feature toggles, critical-failure
+ * flag clear, agent roster fetch, Trello credential rotation.
  *
  *   GET    /api/agents?repo=<name>                       → handleGetRoster
  *   PATCH  /api/agents/:repo/toggles                     → handlePatchToggle
- *   PATCH  /api/agents-settings?repo=<name>              → handlePatchAgentDefaults
  *   PATCH  /api/agents/:repo/trello-credentials          → handlePatchTrelloCredentials
  *   DELETE /api/agents/:repo/critical-failure            → handleClearAgentCriticalFailure
  *
- * All five require a per-user bearer issued from `/api/auth/login` —
+ * All four require a per-user bearer issued from `/api/auth/login` —
  * `DANXBOT_DISPATCH_TOKEN` is NOT accepted (that's the bot↔repo
  * credential, scoped to `/api/launch` and friends via
  * `dispatch-proxy.ts`). See `.claude/rules/agent-dispatch.md` for the
@@ -59,15 +57,14 @@ export interface AgentRosterEntry extends AgentRecordWithName {
 
 export interface AgentRosterResponse {
   agents: AgentRosterEntry[];
-  settings: { conflictCheckEnabled: boolean };
 }
 
 /**
- * GET /api/agents?repo=<name> — agent roster for a single repo plus
- * `agentDefaults.conflictCheckEnabled`. The router dispatches here when
- * the `?repo=` query is present; the unparameterized variant continues
- * to call `handleListAgents` for the per-repo aggregation list. Same
- * path, two shapes, distinct consumers — see `.claude/rules/dashboard.md`.
+ * GET /api/agents?repo=<name> — agent roster for a single repo. The
+ * router dispatches here when the `?repo=` query is present; the
+ * unparameterized variant continues to call `handleListAgents` for the
+ * per-repo aggregation list. Same path, two shapes, distinct consumers
+ * — see `.claude/rules/dashboard.md`.
  */
 export async function handleGetRoster(
   res: ServerResponse,
@@ -100,79 +97,11 @@ export async function handleGetRoster(
         return busy ? { name, ...record, busyOn: busy } : { name, ...record };
       },
     );
-    const conflictCheckEnabled =
-      settings.agentDefaults?.conflictCheckEnabled ?? true;
-    const body: AgentRosterResponse = {
-      agents,
-      settings: { conflictCheckEnabled },
-    };
+    const body: AgentRosterResponse = { agents };
     json(res, 200, body);
   } catch (err) {
     log.error(`handleGetRoster(${repoName}) failed`, err);
     json(res, 500, { error: "Failed to load agent roster" });
-  }
-}
-
-/**
- * PATCH /api/agents-settings?repo=<name> — operator toggles the
- * conflict-check default for a repo. Body: `{conflictCheckEnabled: boolean}`.
- * Anything else 400s. The handler writes via `writeSettings` (which
- * preserves overrides + agents + display) and returns the refreshed
- * `agentDefaults` block.
- */
-export async function handlePatchAgentDefaults(
-  req: IncomingMessage,
-  res: ServerResponse,
-  repoName: string,
-  deps: DispatchProxyDeps,
-): Promise<void> {
-  const auth = await requireUser(req);
-  if (!auth.ok) {
-    json(res, 401, { error: "Unauthorized" });
-    return;
-  }
-
-  const repo = deps.repos.find((r) => r.name === repoName);
-  if (!repo) {
-    json(res, 404, { error: `Repo "${repoName}" is not configured` });
-    return;
-  }
-
-  let body: Record<string, unknown>;
-  try {
-    body = await parseBody(req);
-  } catch {
-    json(res, 400, { error: "Invalid JSON body" });
-    return;
-  }
-
-  const enabled = body["conflictCheckEnabled"];
-  if (enabled !== true && enabled !== false) {
-    json(res, 400, { error: "conflictCheckEnabled must be true or false" });
-    return;
-  }
-
-  try {
-    await writeSettings(repo.localPath, {
-      agentDefaults: { conflictCheckEnabled: enabled },
-      writtenBy: `${DASHBOARD_PREFIX}${auth.user.username}`,
-    });
-    const refreshed = readSettings(repo.localPath);
-    json(res, 200, {
-      settings: {
-        conflictCheckEnabled:
-          refreshed.agentDefaults?.conflictCheckEnabled ?? true,
-      },
-    });
-  } catch (err) {
-    log.error(
-      `handlePatchAgentDefaults(${repoName}, ${enabled}) failed`,
-      err,
-    );
-    json(res, 500, {
-      error:
-        err instanceof Error ? err.message : "Failed to update agentDefaults",
-    });
   }
 }
 

@@ -18,10 +18,14 @@
  *     `ensureProvisioned` is the EXTRA seam for callers (today: the
  *     worker boot path) that want the repair WITHOUT triggering git
  *     work.
- *   - `validate(ctx, name)` — pre-dispatch sanity check. Returns `clean`
+ *   - `validate(ctx, name)` — diagnostic-only sanity check. Returns `clean`
  *     when the worktree has no uncommitted changes and zero local commits
  *     ahead of `origin/main`; otherwise `dirty` with `{porcelain, ahead,
- *     behind}` so the caller can build a recovery prompt.
+ *     behind}`. **No production code paths read this any more** since
+ *     DX-297 retired the dirty-routing recovery dispatch — the prep skill
+ *     (DX-291 P4) inspects branch state on the agent's worktree itself
+ *     via Bash. Kept for diagnostic seams (boot health, ad-hoc operator
+ *     queries) and exercised by `worktree-manager.test.ts`.
  *   - `syncWorktree(ctx, name)` — non-destructive branch sync (DX-293).
  *     Fetches origin, then either no-ops, fast-forwards via `git pull
  *     --ff-only`, or rebases the agent branch onto `origin/main`. On
@@ -42,12 +46,16 @@
  *     best-effort branch deletion (local + remote). Called on
  *     `DELETE /api/agents/:name`.
  *
- * Branch-recovery dispatch — when `validate()` returns dirty, the dispatch
- * layer spawns a recovery-mode prompt instead of the next normal `work`
- * card. The recovery agent reads the porcelain + ahead count, finishes any
- * WIP, commits, and exits. The worker re-runs `validate()` afterward; still
- * dirty → file a Needs Help comment on the last-modified card. See
- * `src/dispatch/recovery-mode.ts`.
+ * Branch-state recovery — owned by the prep skill (`danxbot:danx-prep`)
+ * since DX-297, NOT this module. Every multi-agent dispatch runs the
+ * prep agent first on the worktree; it commits uncommitted WIP, syncs
+ * the branch against `origin/main`, and emits a `verdict: "abort"`
+ * via `mcp__danxbot__danxbot_prep_verdict` when the worktree is wedged
+ * (the worker route then stamps `agents.<name>.broken` on
+ * `<repo>/.danxbot/settings.json` so the picker excludes the agent on
+ * subsequent ticks). The retired alternative (`dispatchInRecoveryMode`
+ * with a separate recovery prompt and a post-completion `validate()`
+ * re-check) was deleted in DX-297 — do NOT reintroduce.
  *
  * Git execution is injected via `GitRunner` so unit tests can stub commands
  * deterministically while integration tests run against real git tmpdirs.

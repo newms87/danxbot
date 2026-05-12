@@ -47,7 +47,7 @@ Source of truth = `Makefile` (`make help`). Always `cd /home/newms/web/danxbot` 
 |---------|-------|------|---------|
 | `make test` / `make test-unit` / `make test-integration` | 1 | free | Mocked + fake-claude |
 | `make test-validate` | 2 | ~$1 | Real Claude API, 150k token cap. Excluded from `make test`. |
-| `make test-system[-dispatch,-health,-heartbeat,-cancel,-error,-stall,-poller,-cleanup,-slack]` | 3 | ~$1 max | Full stack; needs infra+worker+`ANTHROPIC_API_KEY`. `test-system-slack` free (fakes everything except optional `REAL_CLAUDE=1` Haiku+Opus case). |
+| `make test-system[-dispatch,-health,-heartbeat,-cancel,-error,-stall,-poller,-cleanup,-slack,-prep]` | 3 | ~$1 max | Full stack; needs infra+worker+`ANTHROPIC_API_KEY`. `test-system-slack` + `test-system-prep` are free (deterministic — no Claude spend). `test-system-prep` covers the four prep-verdict paths (DX-291 / DX-297) via the prep-flow integration test. |
 
 ## Conventions
 

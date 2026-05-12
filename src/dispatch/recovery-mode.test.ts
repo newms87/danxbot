@@ -1,22 +1,18 @@
 /**
- * Unit tests for branch-recovery dispatch routing (DX-161).
+ * Unit tests for `dispatchWithRecovery` (DX-291 P6 — collapsed wrapper).
  *
- * Pure prompt content lives in `./recovery-prompt.test.ts`; the YAML-edit
- * + last-modified-card scan lives in `./recovery-card-update.test.ts`.
- * This file covers `dispatchWithRecovery` routing + `dispatchInRecoveryMode`
- * post-completion behaviour ONLY.
- *
- * No `vi.mock("./core.js")` here — `recovery-mode.ts` no longer imports
- * the dispatch default; `deps.dispatch` is required, so the test file
- * loads no transitive `config.ts` chain. (Code-review M2 fix.)
+ * The dirty-routing + recovery-prompt branch was retired in DX-297; the
+ * prep skill (DX-291 P4) now owns WIP recovery, validate, and branch-state
+ * inspection. This file covers the slimmer surface: fetch → syncWorktree →
+ * spawn; on syncWorktree abort, persistent `agents.<name>.broken` stamp +
+ * throw.
  */
 
-import { describe, it, expect, vi } from "vitest";
-import {
-  dispatchInRecoveryMode,
-  dispatchWithRecovery,
-  type DirtyValidation,
-} from "./recovery-mode.js";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { dispatchWithRecovery } from "./recovery-mode.js";
 import type {
   SyncResult,
   ValidationResult,
@@ -103,25 +99,67 @@ function fakeJob(): AgentJob {
   return { status: "completed", summary: "ok" } as unknown as AgentJob;
 }
 
-const dirty: DirtyValidation = {
-  state: "dirty",
-  reason: "uncommitted changes",
-  details: { porcelain: " M file", ahead: 0, behind: 0 },
-};
-
-// ============================================================
-// dispatchWithRecovery — routing
-// ============================================================
+/**
+ * Build a per-test repo dir with a seeded `agents` roster, so the
+ * setAgentBroken side-effect on the abort path lands on a real file the
+ * test can read back. Returns the absolute repoLocalPath.
+ */
+function seedRepo(agentName: string): { repoLocalPath: string; cleanup: () => void } {
+  const repoLocalPath = mkdtempSync(join(tmpdir(), "dispatch-with-recovery-"));
+  mkdirSync(join(repoLocalPath, ".danxbot"), { recursive: true });
+  const settings = {
+    overrides: {
+      slack: { enabled: null },
+      issuePoller: { enabled: null, pickupNamePrefix: null },
+      dispatchApi: { enabled: null },
+      ideator: { enabled: null },
+      autoTriage: { enabled: null },
+      trelloSync: { enabled: null },
+    },
+    display: {},
+    agents: {
+      [agentName]: {
+        type: "agent" as const,
+        bio: "test agent",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          mon: [],
+          tue: [],
+          wed: [],
+          thu: [],
+          fri: [],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        broken: null,
+        created_at: "2026-05-08T12:00:00Z",
+        updated_at: "2026-05-08T12:00:00Z",
+      },
+    },
+    agentDefaults: { prepMode: "combined" },
+    meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
+  };
+  writeFileSync(
+    join(repoLocalPath, ".danxbot", "settings.json"),
+    JSON.stringify(settings, null, 2),
+  );
+  return {
+    repoLocalPath,
+    cleanup: () => rmSync(repoLocalPath, { recursive: true, force: true }),
+  };
+}
 
 describe("dispatchWithRecovery", () => {
-  it("clean validation → syncWorktree called, then deps.dispatch invoked verbatim", async () => {
+  it("happy path: fetchOrigin → syncWorktree → deps.dispatch invoked verbatim", async () => {
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "id-1",
+        dispatchId: "id-happy",
         job: fakeJob(),
       }),
     );
-    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
+    const manager = mkManager({});
     const input = mkInput();
 
     const result = await dispatchWithRecovery(
@@ -131,14 +169,14 @@ describe("dispatchWithRecovery", () => {
     );
 
     expect(manager.calls.fetchOrigin).toBe(1);
-    expect(manager.calls.validate).toBe(1);
     expect(manager.calls.syncWorktree).toBe(1);
+    expect(manager.calls.validate).toBe(0); // validate is now retired — prep skill owns it
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock.mock.calls[0][0].task).toBe("do the thing");
-    expect(result.dispatchId).toBe("id-1");
+    expect(result.dispatchId).toBe("id-happy");
   });
 
-  it("fetchOrigin runs before validate (refresh cached origin/main BEFORE deciding clean/dirty)", async () => {
+  it("fetchOrigin runs before syncWorktree (refresh cached origin/main BEFORE deciding to ff)", async () => {
     const order: string[] = [];
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({
@@ -150,10 +188,6 @@ describe("dispatchWithRecovery", () => {
       fetchOrigin: async () => {
         order.push("fetchOrigin");
         return true;
-      },
-      validate: async () => {
-        order.push("validate");
-        return { state: "clean" };
       },
       syncWorktree: async () => {
         order.push("syncWorktree");
@@ -167,7 +201,7 @@ describe("dispatchWithRecovery", () => {
       { dispatch: dispatchMock },
     );
 
-    expect(order).toEqual(["fetchOrigin", "validate", "syncWorktree"]);
+    expect(order).toEqual(["fetchOrigin", "syncWorktree"]);
   });
 
   it("dispatch proceeds when fetchOrigin returns false (transient network failure does not dead-letter)", async () => {
@@ -179,7 +213,6 @@ describe("dispatchWithRecovery", () => {
     );
     const manager = mkManager({
       fetchOrigin: async () => false,
-      validate: async () => ({ state: "clean" }),
     });
 
     const result = await dispatchWithRecovery(
@@ -189,155 +222,156 @@ describe("dispatchWithRecovery", () => {
     );
 
     expect(manager.calls.fetchOrigin).toBe(1);
-    expect(manager.calls.validate).toBe(1);
     expect(manager.calls.syncWorktree).toBe(1);
     expect(result.dispatchId).toBe("id-flaky");
   });
 
-  it("syncWorktree abort → throws plain Error (preserves loud-fail semantics; type-only WorktreeManager import avoids eager worktree-manager.ts load)", async () => {
-    // The dirty branch handles in-flight WIP via the recovery dispatch.
-    // A `kind: "abort"` here means the clean branch could not sync
-    // (ff-only pull rejected mid-fetch, network failure, etc.) — there
-    // is no in-flight work to commit and no broken-agent plumbing yet
-    // (DX-291 P3+ replaces this throw with the prep verdict). Throwing
-    // makes the worker surface the failure loudly instead of silently
-    // dispatching against a stale worktree.
-    const dispatchMock = vi.fn();
-    const manager = mkManager({
-      validate: async () => ({ state: "clean" }),
-      syncWorktree: async () => ({
-        kind: "abort",
-        reason: "ff-only pull rejected",
-        details: "fatal: Not possible to fast-forward",
-      }),
-    });
-
-    await expect(
-      dispatchWithRecovery(
-        mkInput(),
-        { agentName: "alice", manager },
-        { dispatch: dispatchMock },
-      ),
-    ).rejects.toThrow(/syncWorktree aborted/);
-    expect(dispatchMock).not.toHaveBeenCalled();
-  });
-
-  it("DX-330 integration: wedged-state worktree → dispatched recovery prompt enumerates three locks in order (cherry audit → EXPECTED_SHA → tag-push-then-ls-remote-then-force-with-lease) AND the abort path forbids bare --force fallback", async () => {
-    const wedged: DirtyValidation = {
-      state: "dirty",
-      reason: "branch has unmerged commits",
-      details: { porcelain: "", ahead: 2, behind: 0 },
-    };
+  it("does not call manager.validate (prep skill owns state inspection)", async () => {
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "wedge-id",
+        dispatchId: "id-skip-validate",
         job: fakeJob(),
       }),
     );
-    const manager = mkManager({ validate: async () => wedged });
+    const manager = mkManager({});
 
     await dispatchWithRecovery(
       mkInput(),
-      { agentName: "phil", manager },
-      { dispatch: dispatchMock },
-    );
-
-    const prompt = dispatchMock.mock.calls[0][0].task as string;
-
-    // Lock ordering inside the dispatched prompt.
-    const lock1 = prompt.indexOf("git cherry origin/main origin/phil");
-    const lock2 = prompt.indexOf('EXPECTED_SHA="$(git rev-parse origin/phil)"');
-    const tagPush = prompt.indexOf('git push origin "refs/tags/$TAG"');
-    const lsRemote = prompt.indexOf(
-      'git ls-remote origin "refs/tags/$TAG" | grep -q .',
-    );
-    const forcePush = prompt.indexOf(
-      'git push --force-with-lease="phil:$EXPECTED_SHA" origin "phil"',
-    );
-
-    expect(lock1).toBeGreaterThan(0);
-    expect(lock2).toBeGreaterThan(0);
-    expect(tagPush).toBeGreaterThan(0);
-    expect(lsRemote).toBeGreaterThan(0);
-    expect(forcePush).toBeGreaterThan(0);
-
-    expect(lock1).toBeLessThan(lock2);
-    expect(lock2).toBeLessThan(tagPush);
-    expect(tagPush).toBeLessThan(lsRemote);
-    expect(lsRemote).toBeLessThan(forcePush);
-
-    expect(prompt).toContain("Abort path");
-    expect(prompt).toContain(
-      "Branch graduation aborted — operator action required",
-    );
-    expect(prompt).toContain("Do NOT fall back to bare");
-    expect(prompt).toContain(
-      'danxbot_complete({status: "failed", summary: "Recovery aborted',
-    );
-
-    // Force-push restrictions hold for the other-than-self surface.
-    expect(prompt).toMatch(
-      /`git push --force-with-lease` against `main`.*forbidden/,
-    );
-    expect(prompt).toMatch(
-      /`git push --force-with-lease` against any branch other than your own \(`phil`\)/,
-    );
-  });
-
-  it("dirty validation → routes to recovery-mode dispatch with recovery prompt + 'internal:recovery' endpoint", async () => {
-    const dispatchMock = vi.fn(
-      async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "recovery-id",
-        job: fakeJob(),
-      }),
-    );
-    const manager = mkManager({ validate: async () => dirty });
-
-    const result = await dispatchWithRecovery(
-      mkInput({ task: "Original work card description" }),
       { agentName: "alice", manager },
       { dispatch: dispatchMock },
     );
 
-    expect(manager.calls.validate).toBe(1);
-    expect(manager.calls.syncWorktree).toBe(0); // never sync on dirty
-    expect(dispatchMock).toHaveBeenCalledTimes(1);
+    expect(manager.calls.validate).toBe(0);
+  });
 
-    const handed = dispatchMock.mock.calls[0][0];
-    expect(handed.task).toContain("<!-- danxbot-recovery -->");
-    expect(handed.task).not.toContain("Original work card description");
-    expect(handed.title).toBe("Branch recovery — alice");
-
-    // M3 fix — the dispatch metadata now carries the recovery marker so
-    // dashboards / log readers can spot recovery runs without a schema
-    // change. The original `initialPrompt` is replaced with the recovery
-    // prompt (the dispatch row's `initialPrompt` reflects what was
-    // actually shipped to claude).
-    expect(handed.apiDispatchMeta.trigger).toBe("api");
-    if (handed.apiDispatchMeta.trigger === "api") {
-      expect(handed.apiDispatchMeta.metadata.endpoint).toBe("internal:recovery");
-      expect(handed.apiDispatchMeta.metadata.initialPrompt).toContain(
-        "<!-- danxbot-recovery -->",
+  it("deps.dispatch rejection propagates AS-IS — no agents.<name>.broken stamp on downstream spawn failure", async () => {
+    // Regression pin: only `syncWorktree` abort is supposed to stamp
+    // `agents.<name>.broken`. A spawn-side failure (workspace resolve
+    // throws, OS spawn error, MCP probe failure) must bubble up to the
+    // multi-agent-pick caller's try/catch verbatim — wrapping it in a
+    // broken stamp would lock the agent out for an unrelated transient
+    // error.
+    const seeded = seedRepo("alice");
+    try {
+      const dispatchMock = vi.fn(
+        async (_input: DispatchInput): Promise<DispatchResult> => {
+          throw new Error("spawn failed: workspace resolver error");
+        },
       );
+      const manager = mkManager({});
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await expect(
+        dispatchWithRecovery(
+          input,
+          { agentName: "alice", manager },
+          { dispatch: dispatchMock },
+        ),
+      ).rejects.toThrow(/spawn failed/);
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toBeNull();
+    } finally {
+      seeded.cleanup();
     }
-    expect(result.dispatchId).toBe("recovery-id");
+  });
+
+  describe("syncWorktree abort → stamps agents.<name>.broken + throws", () => {
+    let seeded: { repoLocalPath: string; cleanup: () => void };
+
+    beforeEach(() => {
+      seeded = seedRepo("alice");
+    });
+
+    afterEach(() => {
+      seeded.cleanup();
+    });
+
+    it("stamps agents.<name>.broken persistently then throws plain Error", async () => {
+      const dispatchMock = vi.fn();
+      const manager = mkManager({
+        syncWorktree: async () => ({
+          kind: "abort",
+          reason: "ff-only pull rejected",
+          details: "fatal: Not possible to fast-forward",
+        }),
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await expect(
+        dispatchWithRecovery(
+          input,
+          { agentName: "alice", manager },
+          { dispatch: dispatchMock },
+        ),
+      ).rejects.toThrow(/syncWorktree aborted/);
+      expect(dispatchMock).not.toHaveBeenCalled();
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toMatchObject({
+        reason: "syncWorktree aborted: ff-only pull rejected",
+        suggested_steps: ["fatal: Not possible to fast-forward"],
+      });
+      expect(settings.agents.alice.broken.set_at).toMatch(
+        /^\d{4}-\d{2}-\d{2}T/,
+      );
+    });
+
+    it("empty sync.details → suggested_steps stays empty (not stamped with empty string)", async () => {
+      const dispatchMock = vi.fn();
+      const manager = mkManager({
+        syncWorktree: async () => ({
+          kind: "abort",
+          reason: "fetch failed",
+          details: "",
+        }),
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await expect(
+        dispatchWithRecovery(
+          input,
+          { agentName: "alice", manager },
+          { dispatch: dispatchMock },
+        ),
+      ).rejects.toThrow(/syncWorktree aborted/);
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken.suggested_steps).toEqual([]);
+    });
   });
 });
 
 describe("dispatchWithRecovery — persona inheritance (DX-162)", () => {
-  // The persona block prepended by `dispatch()` (Phase 4) lives on
-  // `DispatchInput.agent`. Recovery-mode wraps the input via `...input`
-  // spread + task-override; if the spread drops `agent`, recovery
-  // dispatches lose the persona. Pin that here so a future refactor
-  // can't regress the inheritance silently.
-  it("clean validation: deps.dispatch receives input.agent verbatim (no spread loss)", async () => {
+  it("deps.dispatch receives input.agent verbatim (no spread loss)", async () => {
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "id-clean-with-agent",
+        dispatchId: "id-with-agent",
         job: fakeJob(),
       }),
     );
-    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
+    const manager = mkManager({});
     const input = mkInput({
       agent: { name: "alice", bio: "Senior backend engineer." },
     });
@@ -352,206 +386,5 @@ describe("dispatchWithRecovery — persona inheritance (DX-162)", () => {
       bio: "Senior backend engineer.",
     });
   });
-
-  it("dirty validation: recovery-mode dispatch ALSO carries input.agent verbatim through the spread", async () => {
-    const dispatchMock = vi.fn(
-      async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "id-recovery-with-agent",
-        job: fakeJob(),
-      }),
-    );
-    const manager = mkManager({ validate: async () => dirty });
-    const input = mkInput({
-      agent: { name: "alice", bio: "Senior backend engineer." },
-    });
-
-    await dispatchWithRecovery(input, { agentName: "alice", manager }, {
-      dispatch: dispatchMock,
-    });
-
-    expect(dispatchMock).toHaveBeenCalledTimes(1);
-    expect(dispatchMock.mock.calls[0][0].agent).toEqual({
-      name: "alice",
-      bio: "Senior backend engineer.",
-    });
-    // The recovery prompt replaced the task body, so `dispatch()` will
-    // prepend the persona in front of the recovery prompt — exactly
-    // what we want.
-    expect(dispatchMock.mock.calls[0][0].task).toContain("alice");
-  });
 });
 
-// ============================================================
-// dispatchInRecoveryMode — post-completion re-validate
-// ============================================================
-
-describe("dispatchInRecoveryMode post-completion behaviour", () => {
-  it("stamps job.recoveryMode = true BEFORE caller's onComplete fires (so progress-check guards short-circuit and don't write CRITICAL_FAILURE for a recovery dispatch)", async () => {
-    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
-    const observed: Array<boolean | undefined> = [];
-    const callerOnComplete = vi.fn(async (job: AgentJob) => {
-      observed.push(job.recoveryMode);
-    });
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-rm", job: fakeJob() };
-      },
-    );
-
-    await dispatchInRecoveryMode(
-      mkInput({ onComplete: callerOnComplete }),
-      "alice",
-      dirty,
-      manager,
-      { dispatch: dispatchMock },
-    );
-
-    expect(callerOnComplete).toHaveBeenCalledTimes(1);
-    expect(observed).toEqual([true]);
-  });
-
-  it("re-validates after completion; clean → no Needs Help comment filed", async () => {
-    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-x", job: fakeJob() };
-      },
-    );
-    const findLast = vi.fn().mockResolvedValue({ id: "DX-1", path: "/p/DX-1.yml" });
-    const append = vi.fn().mockResolvedValue(undefined);
-
-    await dispatchInRecoveryMode(mkInput(), "alice", dirty, manager, {
-      dispatch: dispatchMock,
-      findLastModifiedOpenCard: findLast,
-      appendNeedsHelpComment: append,
-    });
-
-    expect(findLast).not.toHaveBeenCalled();
-    expect(append).not.toHaveBeenCalled();
-  });
-
-  it("re-validates after completion; still-dirty → files Needs Help on the last-modified card", async () => {
-    const stillDirty: DirtyValidation = {
-      state: "dirty",
-      reason: "branch has unmerged commits",
-      details: { porcelain: "", ahead: 5, behind: 0 },
-    };
-    const manager = mkManager({ validate: async () => stillDirty });
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-y", job: fakeJob() };
-      },
-    );
-    const findLast = vi.fn().mockResolvedValue({ id: "DX-42", path: "/p/DX-42.yml" });
-    const append = vi.fn().mockResolvedValue(undefined);
-
-    await dispatchInRecoveryMode(mkInput(), "alice", dirty, manager, {
-      dispatch: dispatchMock,
-      findLastModifiedOpenCard: findLast,
-      appendNeedsHelpComment: append,
-    });
-
-    expect(findLast).toHaveBeenCalledTimes(1);
-    expect(append).toHaveBeenCalledTimes(1);
-    const [path, body] = append.mock.calls[0];
-    expect(path).toBe("/p/DX-42.yml");
-    expect(body).toContain("Branch recovery still dirty");
-    expect(body).toContain("alice");
-    expect(body).toContain("branch has unmerged commits");
-    expect(body).toContain("5"); // ahead count surfaces in the comment
-  });
-
-  it("still-dirty + no open cards → logs (no throw, no append)", async () => {
-    const stillDirty: DirtyValidation = {
-      state: "dirty",
-      reason: "uncommitted changes",
-      details: { porcelain: " M f", ahead: 0, behind: 0 },
-    };
-    const manager = mkManager({ validate: async () => stillDirty });
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-z", job: fakeJob() };
-      },
-    );
-    const findLast = vi.fn().mockResolvedValue(null);
-    const append = vi.fn();
-
-    await expect(
-      dispatchInRecoveryMode(mkInput(), "alice", dirty, manager, {
-        dispatch: dispatchMock,
-        findLastModifiedOpenCard: findLast,
-        appendNeedsHelpComment: append,
-      }),
-    ).resolves.toBeDefined();
-
-    expect(findLast).toHaveBeenCalledTimes(1);
-    expect(append).not.toHaveBeenCalled();
-  });
-
-  it("preserves caller's onComplete — invoked alongside the recovery follow-up", async () => {
-    const manager = mkManager({ validate: async () => ({ state: "clean" }) });
-    const callerOnComplete = vi.fn();
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-q", job: fakeJob() };
-      },
-    );
-
-    await dispatchInRecoveryMode(
-      mkInput({ onComplete: callerOnComplete }),
-      "alice",
-      dirty,
-      manager,
-      { dispatch: dispatchMock },
-    );
-
-    expect(callerOnComplete).toHaveBeenCalledTimes(1);
-  });
-
-  it("caller's onComplete throws → error is logged, recovery follow-up still runs (H1 fix)", async () => {
-    // Caller's onComplete throws; the post-recovery validate + append
-    // chain MUST still execute. This is the H1 contract — the recovery
-    // dispatch's lifecycle isn't held hostage to the caller's bookkeeping.
-    const stillDirty: DirtyValidation = {
-      state: "dirty",
-      reason: "uncommitted changes",
-      details: { porcelain: " M f", ahead: 0, behind: 0 },
-    };
-    const manager = mkManager({ validate: async () => stillDirty });
-    const callerOnComplete = vi.fn().mockRejectedValue(new Error("caller bug"));
-    const append = vi.fn().mockResolvedValue(undefined);
-    const findLast = vi
-      .fn()
-      .mockResolvedValue({ id: "DX-1", path: "/p/DX-1.yml" });
-
-    const dispatchMock = vi.fn(
-      async (input: DispatchInput): Promise<DispatchResult> => {
-        await input.onComplete?.(fakeJob());
-        return { dispatchId: "id-q", job: fakeJob() };
-      },
-    );
-
-    await expect(
-      dispatchInRecoveryMode(
-        mkInput({ onComplete: callerOnComplete }),
-        "alice",
-        dirty,
-        manager,
-        {
-          dispatch: dispatchMock,
-          findLastModifiedOpenCard: findLast,
-          appendNeedsHelpComment: append,
-        },
-      ),
-    ).resolves.toBeDefined();
-
-    expect(callerOnComplete).toHaveBeenCalledTimes(1);
-    expect(findLast).toHaveBeenCalledTimes(1);
-    expect(append).toHaveBeenCalledTimes(1);
-  });
-});

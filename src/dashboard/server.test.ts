@@ -72,7 +72,6 @@ vi.mock("./dispatch-proxy.js", async () => {
 const mockHandleGetAgent = vi.fn();
 const mockHandleGetRoster = vi.fn();
 const mockHandleListAgents = vi.fn();
-const mockHandlePatchAgentDefaults = vi.fn();
 const mockHandlePatchToggle = vi.fn();
 const mockHandleClearAgentCriticalFailure = vi.fn();
 const mockHandlePutIssuePrefix = vi.fn();
@@ -89,8 +88,6 @@ vi.mock("./agents-toggles.js", () => ({
   handleClearAgentCriticalFailure: (...args: unknown[]) =>
     mockHandleClearAgentCriticalFailure(...args),
   handleGetRoster: (...args: unknown[]) => mockHandleGetRoster(...args),
-  handlePatchAgentDefaults: (...args: unknown[]) =>
-    mockHandlePatchAgentDefaults(...args),
   handlePatchToggle: (...args: unknown[]) => mockHandlePatchToggle(...args),
 }));
 vi.mock("./agents-prefix.js", () => ({
@@ -240,7 +237,6 @@ describe("dashboard server", () => {
     mockHandleGetAgent.mockReset();
     mockHandleGetRoster.mockReset();
     mockHandleListAgents.mockReset();
-    mockHandlePatchAgentDefaults.mockReset();
     mockHandlePatchToggle.mockReset();
     mockHandleClearAgentCriticalFailure.mockReset();
     mockHandlePutIssuePrefix.mockReset();
@@ -424,7 +420,7 @@ describe("dashboard server", () => {
       expect(res._getStatusCode()).toBe(401);
     });
 
-    // ── DX-159 Phase 1: ?repo= branches and PATCH /api/agents-settings ──
+    // ── DX-159 Phase 1: ?repo= branches ──
 
     it("GET /api/agents without ?repo= dispatches to handleListAgents", async () => {
       mockHandleListAgents.mockImplementation(
@@ -457,29 +453,6 @@ describe("dashboard server", () => {
       // Second arg is the decoded repo name.
       expect(mockHandleGetRoster.mock.calls[0][1]).toBe("danxbot");
       expect(mockHandleListAgents).not.toHaveBeenCalled();
-    });
-
-    it("PATCH /api/agents-settings without auth returns 401 (handler-internal)", async () => {
-      const { req, res } = createMockReqRes(
-        "PATCH",
-        "/api/agents-settings?repo=danxbot",
-      );
-      await requestHandler(req, res);
-      // Without ?repo= the router 400s. With ?repo= and no auth, the
-      // handler runs and produces 401 via requireUser. Our handler is
-      // mocked here, so it's invoked but doesn't actually 401 — verify
-      // dispatch happened (auth-validation contract is owned by
-      // agents-toggles.test.ts).
-      expect(mockHandlePatchAgentDefaults).toHaveBeenCalledTimes(1);
-    });
-
-    it("PATCH /api/agents-settings without ?repo= returns 400 from the router", async () => {
-      const { req, res } = createMockReqRes("PATCH", "/api/agents-settings");
-      withAuth(req);
-      await requestHandler(req, res);
-      expect(res._getStatusCode()).toBe(400);
-      expect(JSON.parse(res._getBody()).error).toContain("repo");
-      expect(mockHandlePatchAgentDefaults).not.toHaveBeenCalled();
     });
 
     // ── DX-160 Phase 2: Agent CRUD + avatar route wiring ─────────

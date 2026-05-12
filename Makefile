@@ -27,7 +27,7 @@ TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/l
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-yaml-memory test-system-cleanup \
-       test-system-multi-worker test-system-slack test-system-agent-creation \
+       test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user ensure-root-user reset-data \
        publish-danx-issue-mcp publish-playwright-mcp
@@ -264,6 +264,9 @@ test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
 
 test-system-agent-creation: ## DX-262 — agent CRUD + worktree validity E2E (free, no Claude API)
 	@./src/__tests__/system/test-agent-creation.sh
+
+test-system-prep: ## DX-291 / DX-297 — prep verdict route + onComplete chain (free, no Claude API)
+	@./src/__tests__/system/run-prep-system-test.sh
 
 test-system-multi-worker: ## DX-164 Phase 6 — multi-agent roster surface (free) + REAL_CLAUDE=1 concurrent dispatch (~$1)
 	@$(SYSTEM_TEST_SCRIPT) --test multi-worker

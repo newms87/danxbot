@@ -85,7 +85,6 @@ vi.mock("./repo-env-writer.js", () => ({
 import {
   handleClearAgentCriticalFailure,
   handleGetRoster,
-  handlePatchAgentDefaults,
   handlePatchToggle,
   handlePatchTrelloCredentials,
 } from "./agents-toggles.js";
@@ -384,7 +383,7 @@ describe("handlePatchToggle", () => {
 });
 
 // ============================================================
-// GET /api/agents?repo=<name> — roster + agentDefaults (DX-159 Phase 1)
+// GET /api/agents?repo=<name> — roster (DX-159 Phase 1)
 // ============================================================
 
 describe("handleGetRoster", () => {
@@ -392,7 +391,7 @@ describe("handleGetRoster", () => {
     mockReadSettings.mockReturnValue({
       ...settings(),
       agents: {},
-      agentDefaults: { conflictCheckEnabled: true },
+      agentDefaults: { prepMode: "combined" },
     });
 
     const res = createMockRes();
@@ -400,10 +399,7 @@ describe("handleGetRoster", () => {
 
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody());
-    expect(body).toEqual({
-      agents: [],
-      settings: { conflictCheckEnabled: true },
-    });
+    expect(body).toEqual({ agents: [] });
     expect(mockReadSettings).toHaveBeenCalledWith("/repos/danxbot");
   });
 
@@ -430,7 +426,7 @@ describe("handleGetRoster", () => {
           updated_at: "2026-05-08T12:00:00Z",
         },
       },
-      agentDefaults: { conflictCheckEnabled: false },
+      agentDefaults: { prepMode: "combined" },
     });
 
     const res = createMockRes();
@@ -441,7 +437,6 @@ describe("handleGetRoster", () => {
     expect(body.agents).toHaveLength(1);
     expect(body.agents[0].name).toBe("alice");
     expect(body.agents[0].bio).toBe("A");
-    expect(body.settings.conflictCheckEnabled).toBe(false);
   });
 
   it("returns 404 for an unknown repo", async () => {
@@ -506,7 +501,7 @@ describe("handleGetRoster", () => {
           updated_at: "2026-05-08T12:00:00Z",
         },
       },
-      agentDefaults: { conflictCheckEnabled: true },
+      agentDefaults: { prepMode: "combined" },
     });
     mockAgentBusyOn.mockResolvedValue(
       new Map([
@@ -553,7 +548,7 @@ describe("handleGetRoster", () => {
           updated_at: "2026-05-08T12:00:00Z",
         },
       },
-      agentDefaults: { conflictCheckEnabled: true },
+      agentDefaults: { prepMode: "combined" },
     });
     mockAgentBusyOn.mockRejectedValue(new Error("db down"));
 
@@ -564,112 +559,6 @@ describe("handleGetRoster", () => {
     const body = JSON.parse(res._getBody());
     expect(body.agents).toHaveLength(1);
     expect(body.agents[0].busyOn).toBeUndefined();
-  });
-});
-
-// ============================================================
-// PATCH /api/agents-settings?repo=<name> — agentDefaults toggle
-// ============================================================
-
-describe("handlePatchAgentDefaults", () => {
-  it("returns 401 without a user bearer", async () => {
-    const req = createMockReqWithBody("PATCH", {
-      conflictCheckEnabled: false,
-    });
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(401);
-    expect(mockWriteSettings).not.toHaveBeenCalled();
-  });
-
-  it("rejects the dispatch token (only user bearers mutate settings)", async () => {
-    const req = createMockReqWithBody("PATCH", {
-      conflictCheckEnabled: false,
-    });
-    req.headers = { authorization: "Bearer test-token" };
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(401);
-    expect(mockWriteSettings).not.toHaveBeenCalled();
-  });
-
-  it("returns 404 for an unknown repo", async () => {
-    const req = createMockReqWithBody("PATCH", {
-      conflictCheckEnabled: true,
-    });
-    req.headers = { authorization: "Bearer user-alice" };
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "not-a-repo", deps());
-
-    expect(res._getStatusCode()).toBe(404);
-    expect(mockWriteSettings).not.toHaveBeenCalled();
-  });
-
-  it("rejects bodies that fail to parse as JSON with 400", async () => {
-    const req = new (await import("http")).IncomingMessage(null as never);
-    req.method = "PATCH";
-    req.headers = { authorization: "Bearer user-alice" };
-    process.nextTick(() => {
-      req.emit("data", Buffer.from("not json"));
-      req.emit("end");
-    });
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/JSON/i);
-    expect(mockWriteSettings).not.toHaveBeenCalled();
-  });
-
-  it("rejects bodies missing conflictCheckEnabled with 400", async () => {
-    const req = createMockReqWithBody("PATCH", {});
-    req.headers = { authorization: "Bearer user-alice" };
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(400);
-    expect(mockWriteSettings).not.toHaveBeenCalled();
-  });
-
-  it("writes the new toggle and returns the refreshed agentDefaults", async () => {
-    mockWriteSettings.mockResolvedValue(undefined);
-    mockReadSettings.mockReturnValue({
-      ...settings(),
-      agents: {},
-      agentDefaults: { conflictCheckEnabled: false },
-    });
-
-    const req = createMockReqWithBody("PATCH", {
-      conflictCheckEnabled: false,
-    });
-    req.headers = { authorization: "Bearer user-alice" };
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(200);
-    expect(mockWriteSettings).toHaveBeenCalledTimes(1);
-    const [path, patch] = mockWriteSettings.mock.calls[0];
-    expect(path).toBe("/repos/danxbot");
-    expect(patch.agentDefaults).toEqual({ conflictCheckEnabled: false });
-    expect(patch.writtenBy).toBe("dashboard:alice");
-    const body = JSON.parse(res._getBody());
-    expect(body.settings).toEqual({ conflictCheckEnabled: false });
-  });
-
-  it("returns 500 when writeSettings throws", async () => {
-    mockWriteSettings.mockRejectedValue(new Error("EROFS: read-only fs"));
-
-    const req = createMockReqWithBody("PATCH", {
-      conflictCheckEnabled: true,
-    });
-    req.headers = { authorization: "Bearer user-alice" };
-    const res = createMockRes();
-    await handlePatchAgentDefaults(req, res, "danxbot", deps());
-
-    expect(res._getStatusCode()).toBe(500);
-    expect(JSON.parse(res._getBody()).error).toMatch(/EROFS/);
   });
 });
 

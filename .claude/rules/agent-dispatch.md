@@ -117,6 +117,21 @@ Multi-block assistant turns emit one JSONL entry per content block but stamp ide
 
 Parent→child linkage is by `description` text — parent's `tool_use.input.description` matches sub-agent meta's `description`. NOT by UUID or `agentId`. Sub-agent entries carry `isSidechain: true` + `agentId` matching the filename hash. Tool name is `Agent` (older captures: `Task`); readers should accept both. Relevant when walking sub-agents in `src/dashboard/jsonl-reader.ts`.
 
+## Pre-dispatch prep step (DX-291)
+
+Every multi-agent dispatch begins with the `danxbot:danx-prep` skill running on the agent's worktree. It runs WIP recovery (commit-first), branch sync against `origin/main`, file-scope conflict reasoning against in-progress siblings, and a self-stuck check on the candidate card, then emits ONE verdict via `mcp__danxbot__danxbot_prep_verdict`:
+
+| Verdict | Worker side-effect |
+|---|---|
+| `ok` | Combined-mode → keep dispatch running, agent proceeds into `/danx-next`. Separate-mode → stop, poller re-picks next tick for the work pass. |
+| `conflict_on` | Append `{id, reason}` entries to the candidate YAML's `conflict_on[]` for each partner; poller filter skips while any partner is non-terminal. |
+| `blocked` | Stamp `status: "Blocked"` + `blocked: {reason, timestamp}` on the candidate YAML. |
+| `abort` | Stamp `agents.<name>.broken` on `<repo>/.danxbot/settings.json` so the picker skips this agent until the operator clears the field via the dashboard. |
+
+Mode is per-repo via `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json` (`combined` default, `separate` for dev-loop debugging).
+
+The prep skill is the new authority on "is the agent ready?" — DX-297 retired the separate `runConflictCheck` precursor and the `dispatchInRecoveryMode` legacy recovery prompt. `dispatchWithRecovery` (`src/dispatch/recovery-mode.ts`) is now a thin wrapper: `fetchOrigin` + `syncWorktree` + spawn. On `syncWorktree` abort it stamps `agents.<name>.broken` directly (matches the prep-verdict route's stamp path) and throws.
+
 ## Stall Recovery
 
 `StallDetector`: no watcher activity + no ✻ indicator for threshold → nudge up to `DEFAULT_MAX_NUDGES` → kill + resume with nudge prompt → after max exhausted, mark failed. Identical in both runtimes (reads watcher, not process).
@@ -157,6 +172,8 @@ Mechanical pre-edit check for `src/terminal.ts` / any WT-launching bash:
 | Reintroducing an agent-facing save MCP tool / HTTP route | DX-157 retired this. Round-trip would double-mirror to DB and leak tracker errors into agent output. |
 | `allowed-tools.txt` / `--allowed-tools` / per-tool allowlist | Retired (`src/workspace/resolve.ts` header). `--dangerously-skip-permissions` bypasses `--allowed-tools` so the flag was never an enforceable gate. Workspace `.mcp.json` + `--strict-mcp-config` IS the agent's MCP surface. Stale `allowed-tools.txt` throws `WorkspaceLegacyFileError` at resolve time. |
 | Calling `runPicker` / `tryMultiAgentDispatch` outside the per-repo single-flight mutex (`firePickerWithMutex` / `runWithPickerMutex` in `src/dispatch/scheduler.ts`) | DX-305. Three concurrency sources fire pickers for one repo; without the mutex, two macrotasks pick the same agent + card → double-spawn. Use `firePickerWithMutex(repoName)` for fire-and-forget pokes; `runWithPickerMutex(repoName, fn)` when caller needs the `MultiAgentPickResult`. |
+| Reintroducing `runConflictCheck`, `dispatchInRecoveryMode`, `buildRecoveryPrompt`, or any other separate pre-dispatch conflict-check / recovery-prompt dispatch | DX-297 retired these. The `danxbot:danx-prep` skill runs file-overlap + branch-state reasoning DIRECTLY on the agent's worktree as the first step of every dispatch. The prep-verdict worker route (DX-294) is the single writer of `conflict_on[]` stamping + `agents.<name>.broken` stamping. A separate precursor session would double-stamp + reintroduce the timeout false-positive class (DX-273, DX-274). |
+| `git reset --hard`, `git checkout <ref>`, `git restore`, `git clean -f` in any dispatch / worktree / recovery code path | Destroys uncommitted agent work irrecoverably. Commit-first is the only recovery primitive — see `~/web/claude-plugins/dev/skills/git-discipline/SKILL.md` "Never Destroy Work. Ever." The prep skill's WIP recovery commits the residue to the agent's branch; sync uses `fetch + pull --ff-only + rebase` exclusively. |
 
 ## Critical failure flag — poller halt
 

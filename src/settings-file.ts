@@ -236,7 +236,6 @@ export interface AgentRecord {
 export type AgentPrepMode = "combined" | "separate";
 
 export interface AgentDefaults {
-  conflictCheckEnabled: boolean;
   prepMode: AgentPrepMode;
 }
 
@@ -317,7 +316,7 @@ const PARSE_ERROR_LOG_INTERVAL_MS = 60_000;
  * merge fallback).
  */
 export function defaultAgentDefaults(): AgentDefaults {
-  return { conflictCheckEnabled: true, prepMode: "combined" };
+  return { prepMode: "combined" };
 }
 
 /**
@@ -563,18 +562,14 @@ function normalizeAgents(raw: unknown): Record<string, AgentRecord> {
 }
 
 function normalizeAgentDefaults(raw: unknown): AgentDefaults {
-  let conflictCheckEnabled = true;
   let prepMode: AgentPrepMode = "combined";
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const r = raw as Record<string, unknown>;
-    if (typeof r.conflictCheckEnabled === "boolean") {
-      conflictCheckEnabled = r.conflictCheckEnabled;
-    }
     if (r.prepMode === "combined" || r.prepMode === "separate") {
       prepMode = r.prepMode;
     }
   }
-  return { conflictCheckEnabled, prepMode };
+  return { prepMode };
 }
 
 function normalize(partial: Partial<Settings> | null | undefined): Settings {
@@ -1016,26 +1011,6 @@ export function isTrelloSyncOverrideDisabled(localPath: string): boolean {
       err,
     );
     return false;
-  }
-}
-
-/**
- * Return whether triage-precursor conflict-check should run for this
- * repo. Defaults to `true` when the file is missing, the key is unset,
- * or the JSON is corrupt — the conservative "extra LLM call per
- * dispatch" branch keeps multi-worker safety on by default. Operators
- * opt OUT explicitly via the dashboard for cost-sensitive ops.
- */
-export function isConflictCheckEnabled(localPath: string): boolean {
-  try {
-    const settings = readSettings(localPath);
-    return settings.agentDefaults?.conflictCheckEnabled ?? true;
-  } catch (err) {
-    log.error(
-      `isConflictCheckEnabled threw — returning true for ${localPath}`,
-      err,
-    );
-    return true;
   }
 }
 

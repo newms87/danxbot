@@ -36,14 +36,13 @@
  *      g. Dispatch via `dispatchWithRecovery` (worktree-aware entry
  *         point that routes through persona injection).
  *
- * Why no in-picker conflict-check call anymore: the prep agent (Phase
- * 4 / DX-295) runs the file-overlap reasoning DIRECTLY on the agent's
- * worktree as the first step of every dispatch. The legacy
- * `runConflictCheck` precursor and its `applyConflictVerdict` YAML
- * stamp path are retired — `conflict_on[]` stamping is now done by
- * the prep-verdict worker route (DX-294) when the agent emits
- * `verdict: "conflict_on"`. The picker just dispatches and lets the
- * verdict shape the outcome.
+ * Why no in-picker conflict-check call: the prep agent (DX-291 P4) runs
+ * the file-overlap reasoning DIRECTLY on the agent's worktree as the
+ * first step of every dispatch. The legacy `runConflictCheck` precursor
+ * and its `applyConflictVerdict` YAML stamp path were retired in DX-297
+ * — `conflict_on[]` stamping is now done by the prep-verdict worker
+ * route (DX-294) when the agent emits `verdict: "conflict_on"`. The
+ * picker just dispatches and lets the verdict shape the outcome.
  *
  * Returns the count of successfully-dispatched agents on this tick (0
  * when no agent was eligible, no card was available, or every
@@ -592,7 +591,8 @@ export async function tryMultiAgentDispatch(
             //
             // Run the check otherwise (combined-mode work dispatch, or
             // separate-mode self-claim work pass — both expect card
-            // progress). Skip when locally-only or recovery-mode (existing).
+            // progress). Skip when locally-only or prep verdict already
+            // shaped the outcome (existing).
             const verdict = job.prepVerdict;
             const isPrepOnlyOk =
               verdict?.verdict === "ok" && job.dispatchKind === "prep";
@@ -609,14 +609,8 @@ export async function tryMultiAgentDispatch(
             // safeguard against an env-level blocker (MCP/Bash/auth
             // failing) that lets the agent "finish" without moving the
             // card. The next poll tick reads the flag and halts.
-            //
-            // Skip when the dispatch was recovery-mode (branch cleanup,
-            // not card work) — the tracked card stays in ToDo by design
-            // and writing CRITICAL_FAILURE would halt the poller for a
-            // non-issue. See AgentJob.recoveryMode.
             if (
               hasTrackerCoordinate(stamped) &&
-              !job.recoveryMode &&
               !skipCardProgressForPrep
             ) {
               await runPostDispatchProgressCheck({
@@ -632,20 +626,15 @@ export async function tryMultiAgentDispatch(
             // tally + per-agent/per-card quarantine. Both replace
             // protections that lived in the deleted poller-tick state
             // (per-poller failure counter + per-poller backoff window).
-            // Recovery dispatches do NOT increment / reset either
-            // counter — they are out-of-band branch hygiene, not card
-            // work — so skip the post-dispatch failure accounting
-            // entirely.
             //
-            // DX-296 — also skip quarantine accounting on prep abort.
-            // The prep-verdict route already stamped
-            // `agents.<name>.broken` so the picker filters this agent
-            // out next tick; the card itself is innocent (the env was
-            // broken on the agent's worktree). Quarantining the card
-            // would punish a future healthy agent for an unrelated
-            // env failure.
+            // DX-296 — skip quarantine accounting on prep abort. The
+            // prep-verdict route already stamped `agents.<name>.broken`
+            // so the picker filters this agent out next tick; the card
+            // itself is innocent (the env was broken on the agent's
+            // worktree). Quarantining the card would punish a future
+            // healthy agent for an unrelated env failure.
             const isPrepAbort = verdict?.verdict === "abort";
-            if (!job.recoveryMode && !isPrepAbort) {
+            if (!isPrepAbort) {
               if (job.status === "completed") {
                 clearQuarantineForSuccess({
                   repoName: repo.name,

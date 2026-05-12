@@ -106,6 +106,6 @@ export function settingsWithAgents(agents: Record<string, unknown>) {
   return {
     ...settings(),
     agents,
-    agentDefaults: { conflictCheckEnabled: true, prepMode: "combined" as const },
+    agentDefaults: { prepMode: "combined" as const },
   };
 }

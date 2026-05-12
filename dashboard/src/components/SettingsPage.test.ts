@@ -3,12 +3,8 @@ import { flushPromises, mount } from "@vue/test-utils";
 import type { RepoInfo } from "../api";
 
 const mockResetAllData = vi.fn();
-const mockFetchAgentRoster = vi.fn();
-const mockPatchAgentDefaults = vi.fn();
 vi.mock("../api", () => ({
   resetAllData: (...args: unknown[]) => mockResetAllData(...args),
-  fetchAgentRoster: (...args: unknown[]) => mockFetchAgentRoster(...args),
-  patchAgentDefaults: (...args: unknown[]) => mockPatchAgentDefaults(...args),
 }));
 
 // DX-159 Phase 1: SettingsPage now imports `useAgents` (SSE-backed).
@@ -44,12 +40,6 @@ function mountPage(opts?: { attachTo?: Element }) {
 
 beforeEach(() => {
   mockResetAllData.mockReset();
-  mockFetchAgentRoster.mockReset();
-  mockFetchAgentRoster.mockResolvedValue({
-    agents: [],
-    settings: { conflictCheckEnabled: true },
-  });
-  mockPatchAgentDefaults.mockReset();
   mockAgentsRef.value = [];
   mockRefresh.mockReset();
 });
@@ -119,40 +109,6 @@ describe("SettingsPage", () => {
     // Success panel is NOT shown
     expect(w.find('[data-test="reset-data-success"]').exists()).toBe(false);
     w.unmount();
-  });
-
-  it("renders the conflict-check toggle reflecting the fetched agentDefaults state", async () => {
-    mockFetchAgentRoster.mockResolvedValueOnce({
-      agents: [],
-      settings: { conflictCheckEnabled: false },
-    });
-    const w = mountPage();
-    await flushPromises();
-
-    expect(mockFetchAgentRoster).toHaveBeenCalledWith("danxbot");
-    const card = w.find('[data-test="conflict-check-card"]');
-    expect(card.exists()).toBe(true);
-    const toggle = card.find<HTMLInputElement>('[data-test="conflict-check-toggle"]');
-    expect(toggle.element.checked).toBe(false);
-  });
-
-  it("PATCHes agentDefaults when the conflict-check toggle is flipped", async () => {
-    mockFetchAgentRoster.mockResolvedValueOnce({
-      agents: [],
-      settings: { conflictCheckEnabled: true },
-    });
-    mockPatchAgentDefaults.mockResolvedValueOnce({
-      settings: { conflictCheckEnabled: false },
-    });
-    const w = mountPage();
-    await flushPromises();
-
-    const toggle = w.find<HTMLInputElement>('[data-test="conflict-check-toggle"]');
-    toggle.element.checked = false;
-    await toggle.trigger("change");
-    await flushPromises();
-
-    expect(mockPatchAgentDefaults).toHaveBeenCalledWith("danxbot", false);
   });
 
   // DX-304 — TrelloConfigPanel mounts as a sibling section under the

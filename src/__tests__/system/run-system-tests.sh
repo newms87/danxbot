@@ -1270,7 +1270,7 @@ _multi_worker_seed_agents() {
       },
       display: {},
       agents: {},
-      agentDefaults: { conflictCheckEnabled: false },
+      agentDefaults: { prepMode: "combined" },
       meta: {},
     };
     if (fs.existsSync(path)) {

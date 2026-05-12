@@ -247,10 +247,10 @@ Enumerate so a future agent reading this body never reaches for them.
 
 ## Why this skill exists
 
-Today's `runConflictCheck` (in `<worktree>/src/dispatch/conflict-check.ts`, retired in Phase 6 / DX-297) is a separate Claude dispatch in the shared `issue-worker` workspace, capped at 90s. Three failure modes routinely fire false-positive conflicts:
+The retired `runConflictCheck` (`src/dispatch/conflict-check.ts`, deleted in DX-297) was a separate Claude dispatch in the shared `issue-worker` workspace, capped at 90s. Three failure modes routinely fired false-positive conflicts:
 
-1. The check's session times out → conservative `ok: false` → `waiting_on` stamp on the candidate. Pattern observed on DX-273 + DX-274.
-2. The check runs in the shared workspace cwd, not the agent's worktree → it cannot triage "is my branch ready to take new work?" alongside the file-overlap question.
-3. Branch prep is a separate concern (`fetchOrigin` + `validate` + `resetClean`) inside `dispatchWithRecovery` that runs AFTER conflict-check and uses a destructive `git reset --hard` on every "clean" path.
+1. The check's session timed out → conservative `ok: false` → `waiting_on` stamp on the candidate. Pattern observed on DX-273 + DX-274.
+2. The check ran in the shared workspace cwd, not the agent's worktree → it could not triage "is my branch ready to take new work?" alongside the file-overlap question.
+3. Branch prep was a separate concern (`fetchOrigin` + `validate` + `resetClean`) inside `dispatchWithRecovery` that ran AFTER conflict-check and used a destructive `git reset --hard` on every "clean" path.
 
 This skill collapses all three concerns into a single pre-agent dispatch on the **target agent's worktree** that is read-write only via the commit-first primitive. The legacy two-step gauntlet (conflict-check + recovery + work) is replaced by one prep step followed by the work (combined) or two prep+work dispatches (separate).

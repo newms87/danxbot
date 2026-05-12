@@ -175,9 +175,12 @@ Skills live in the `danxbot@newms-plugins` plugin (`~/web/claude-plugins/danxbot
 
 | Skill | Purpose |
 |---|---|
+| `/danx-prep` | Pre-dispatch prep — WIP recovery + branch sync + file-scope conflict + self-stuck check. Runs first on every multi-agent dispatch (DX-291); emits a verdict via `mcp__danxbot__danxbot_prep_verdict` (`ok` / `conflict_on` / `blocked` / `abort`). Mode (`combined` vs `separate`) controlled by `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json`. Replaces the retired `runConflictCheck` precursor + `dispatchInRecoveryMode` recovery prompt (DX-297). |
 | `/danx-start` | Process ALL cards in ToDo |
 | `/danx-next` | Process the single top card |
 | `/danx-ideate` | Build knowledge + generate feature cards |
+
+The `abort` verdict stamps `agents.<name>.broken` on `<repo>/.danxbot/settings.json` — the picker filters that agent out until the operator clears the field via the dashboard Agents tab. `conflict_on` stamps `conflict_on[]` on the candidate YAML so the poller's `isAnyKindBlocked` filter skips it while any partner is non-terminal.
 
 ### Subagent Roles
 

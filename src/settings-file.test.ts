@@ -18,7 +18,6 @@ import {
   getIssuePollerPickupPrefix,
   getPrepMode,
   isAgentBroken,
-  isConflictCheckEnabled,
   isFeatureEnabled,
   isTrelloSyncOverrideDisabled,
   isValidIanaTimeZone,
@@ -1039,8 +1038,8 @@ describe("settings-file", () => {
   // agents{} + agentDefaults — DX-159 Phase 1
   //
   // Schema additions: AgentRecord-typed entries keyed by agent name plus
-  // an optional `agentDefaults` block carrying the conflictCheckEnabled
-  // toggle. Validation rules (drop-on-fail unless noted as filter):
+  // an optional `agentDefaults` block carrying the prepMode toggle.
+  // Validation rules (drop-on-fail unless noted as filter):
   //   - Max 5 entries; excess dropped + warned.
   //   - Name regex: ^[a-z][a-z0-9_-]{0,31}$ (URL/branch/path-safe).
   //   - capabilities: non-empty subset of {issue-worker,slack,api}.
@@ -1051,7 +1050,7 @@ describe("settings-file", () => {
   //     element; empty array allowed.
   //
   // Helpers: readAgents(ctx) returns a stable-ordered array of valid
-  // records; isConflictCheckEnabled(ctx) returns true by default.
+  // records.
   // ============================================================
 
   describe("agents schema", () => {
@@ -1228,33 +1227,10 @@ describe("settings-file", () => {
       expect(arr.map((a) => a.bio)).toEqual(["C", "A", "B"]);
     });
 
-    it("isConflictCheckEnabled() defaults true when undefined and reflects explicit values", async () => {
-      // Default (no agentDefaults written) → true.
-      expect(isConflictCheckEnabled(localPath)).toBe(true);
-
-      // Explicit true.
-      await writeSettings(localPath, {
-        agentDefaults: { conflictCheckEnabled: true },
-        writtenBy: "dashboard:test",
-      });
-      expect(isConflictCheckEnabled(localPath)).toBe(true);
-
-      // Explicit false.
-      await writeSettings(localPath, {
-        agentDefaults: { conflictCheckEnabled: false },
-        writtenBy: "dashboard:test",
-      });
-      expect(isConflictCheckEnabled(localPath)).toBe(false);
-
-      // Returns true on a corrupt file (fail-safe — never throws).
-      writeFileSync(settingsFilePath(localPath), "not json");
-      expect(isConflictCheckEnabled(localPath)).toBe(true);
-    });
-
     it("preserves agents + agentDefaults across an unrelated overrides patch", async () => {
       await writeSettings(localPath, {
         agents: { alice: validAgent({ bio: "A" }) },
-        agentDefaults: { conflictCheckEnabled: false },
+        agentDefaults: { prepMode: "separate" },
         writtenBy: "dashboard:test",
       });
 
@@ -1266,7 +1242,7 @@ describe("settings-file", () => {
 
       const s = readSettings(localPath);
       expect(s.agents?.alice.bio).toBe("A");
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+      expect(s.agentDefaults?.prepMode).toBe("separate");
     });
 
     it("missing agents/agentDefaults in stored file load as empty/defaults (backwards-compat)", () => {
@@ -1284,7 +1260,7 @@ describe("settings-file", () => {
       );
       const s = readSettings(localPath);
       expect(s.agents).toEqual({});
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(true);
+      expect(s.agentDefaults?.prepMode).toBe("combined");
     });
 
     it("drops records missing required fields (bio, enabled, timestamps)", () => {
@@ -1480,7 +1456,7 @@ describe("settings-file", () => {
           "dashboard:test",
         );
         await writeSettings(localPath, {
-          agentDefaults: { conflictCheckEnabled: false },
+          agentDefaults: { prepMode: "separate" },
           writtenBy: "dashboard:test",
         });
 
@@ -1500,7 +1476,7 @@ describe("settings-file", () => {
         await mutateAgents(localPath, () => ({}), "dashboard:test");
         const s = readSettings(localPath);
         expect(s.agents).toEqual({});
-        expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+        expect(s.agentDefaults?.prepMode).toBe("separate");
       });
 
       it("merge respects AGENTS_MAX cap — patch entries dropped (operator-first insertion order) when combined exceed cap", async () => {
@@ -1567,7 +1543,7 @@ describe("settings-file", () => {
       );
       const s = readSettings(localPath);
       expect(s.agents).toEqual({});
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(true);
+      expect(s.agentDefaults?.prepMode).toBe("combined");
     });
   });
 
@@ -1580,26 +1556,19 @@ describe("settings-file", () => {
       // No file at all → defaultSettings()
       expect(getPrepMode(localPath)).toBe("combined");
 
-      // Field present but prepMode missing → still combined.
+      // agentDefaults block present but prepMode missing → still combined.
       writeFileSync(
         settingsFilePath(localPath),
         JSON.stringify({
           overrides: {},
-          agentDefaults: { conflictCheckEnabled: false },
+          agentDefaults: {},
           meta: { updatedAt: "2026-05-08T12:00:00Z", updatedBy: "worker" },
         }),
       );
       expect(getPrepMode(localPath)).toBe("combined");
     });
 
-    it("round-trips 'separate' through writeSettings without clobbering conflictCheckEnabled", async () => {
-      // Seed with conflictCheckEnabled=false so the prepMode-only patch
-      // must NOT reset it to the default.
-      await writeSettings(localPath, {
-        agentDefaults: { conflictCheckEnabled: false },
-        writtenBy: "dashboard:test",
-      });
-
+    it("round-trips 'separate' through writeSettings", async () => {
       await writeSettings(localPath, {
         agentDefaults: { prepMode: "separate" },
         writtenBy: "dashboard:test",
@@ -1607,8 +1576,6 @@ describe("settings-file", () => {
 
       const s = readSettings(localPath);
       expect(s.agentDefaults?.prepMode).toBe("separate");
-      // Sibling field preserved across the partial patch.
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
       // Reader observes the round-tripped value.
       expect(getPrepMode(localPath)).toBe("separate");
     });
@@ -2026,7 +1993,7 @@ describe("settings-file", () => {
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
         display: { worker: { port: 5562, runtime: "docker" } },
-        agentDefaults: { conflictCheckEnabled: false },
+        agentDefaults: { prepMode: "separate" },
         writtenBy: "dashboard:tester",
       });
 
@@ -2042,7 +2009,7 @@ describe("settings-file", () => {
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
       expect(s.display.worker?.port).toBe(5562);
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+      expect(s.agentDefaults?.prepMode).toBe("separate");
       expect(Object.keys(s.agents ?? {})).toEqual(["alice"]);
     });
   });
