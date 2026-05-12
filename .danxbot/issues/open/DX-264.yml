@@ -4,7 +4,13 @@ id: DX-264
 external_id: 6a0154d5a5a1a7cefcb1c218
 parent_id: DX-263
 children: []
-dispatch: null
+dispatch:
+  id: fd173d33-80f3-488b-abf6-503f7a5e1458
+  pid: 0
+  host: dan
+  kind: work
+  started_at: 2026-05-12T00:35:15.407Z
+  ttl_seconds: 7200
 status: ToDo
 type: Feature
 title: "Card-edit gaps > Phase 1: Same-column drag-to-reorder + persisted position"

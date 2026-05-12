@@ -4,13 +4,7 @@ id: DX-274
 external_id: 6a015f9245ca34d99eb8fdee
 parent_id: DX-269
 children: []
-dispatch:
-  id: 9cf4b7fd-1157-4595-b6d5-ede913812254
-  pid: 0
-  host: dan
-  kind: work
-  started_at: 2026-05-12T00:34:16.446Z
-  ttl_seconds: 7200
+dispatch: null
 status: ToDo
 type: Feature
 title: 'Plugin consolidation > Phase 5: Docs cleanup — kill "edit in two places" mentions'
