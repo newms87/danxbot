@@ -60,6 +60,14 @@ import {
   runPostDispatchProgressCheck,
   tryAcquireLock,
 } from "../dispatch/scheduler.js";
+import { escalateOnRepeatedFailures } from "../dispatch/failure-escalation.js";
+import {
+  clearQuarantineForSuccess,
+  isAgentQuarantined,
+  isCardQuarantined,
+  quarantineAgent,
+  quarantineCard,
+} from "../dispatch/quarantine.js";
 import {
   assignedCards,
   busyAgents,
@@ -269,6 +277,39 @@ export async function tryMultiAgentDispatch(
       // cards minus the one we couldn't claim, so they'd hit the same
       // wall. Bail out.
       break;
+    }
+
+    // AC #2 of DX-221 — per-agent + per-card quarantine cooldown.
+    // Replaces the deleted per-poller backoff window. A
+    // freshly-failed agent + a freshly-failed card each get a short
+    // cooldown so the picker does not hot-loop against an env-level
+    // blocker; cleared on a successful dispatch (clearQuarantineForSuccess
+    // in onComplete). See src/dispatch/quarantine.ts for the contract.
+    if (
+      isAgentQuarantined({
+        repoName: repo.name,
+        agentName: agent.name,
+        now: now.getTime(),
+      })
+    ) {
+      log.info(
+        `[${repo.name}] multi-agent pick: ${agent.name} is quarantined — skipping this tick`,
+      );
+      skipAgents.add(agent.name);
+      continue;
+    }
+    if (
+      isCardQuarantined({
+        repoName: repo.name,
+        cardId: card.id,
+        now: now.getTime(),
+      })
+    ) {
+      log.info(
+        `[${repo.name}] multi-agent pick: ${card.id} is quarantined — skipping`,
+      );
+      remainingCards.splice(remainingCards.indexOf(card), 1);
+      continue;
     }
 
     log.info(
@@ -551,7 +592,7 @@ export async function tryMultiAgentDispatch(
             // AC #4 of DX-219 — post-dispatch card-progress check +
             // CRITICAL_FAILURE halt ported into the multi-agent path.
             // Skip locally-only cards (no external_id, no tracker round-
-            // trip is possible). The legacy `_poll` single-card path's
+            // trip is possible). The legacy `runSync` single-card path's
             // `checkCardProgressedOrHalt` ran for every trello-trigger
             // dispatch; this is the multi-agent equivalent. Token-burn
             // safeguard against an env-level blocker (MCP/Bash/auth
@@ -571,6 +612,55 @@ export async function tryMultiAgentDispatch(
                 jobSummary: job.summary,
               });
             }
+
+            // AC #1 + AC #2 of DX-221 — per-card consecutive-failure
+            // tally + per-agent/per-card quarantine. Both replace
+            // protections that lived in the deleted poller-tick state
+            // (per-poller failure counter + per-poller backoff window).
+            // Recovery dispatches do NOT increment / reset either
+            // counter — they are out-of-band branch hygiene, not card
+            // work — so skip the post-dispatch failure accounting
+            // entirely.
+            if (!job.recoveryMode) {
+              if (job.status === "completed") {
+                clearQuarantineForSuccess({
+                  repoName: repo.name,
+                  agentName: agent.name,
+                  cardId: stamped.id,
+                });
+              } else if (job.status === "failed") {
+                quarantineAgent({
+                  repoName: repo.name,
+                  agentName: agent.name,
+                  reason: `dispatch ${job.id} failed on ${stamped.id}: ${job.summary || "(no summary)"}`,
+                });
+                quarantineCard({
+                  repoName: repo.name,
+                  cardId: stamped.id,
+                  reason: `dispatch ${job.id} failed: ${job.summary || "(no summary)"}`,
+                });
+                try {
+                  const fresh = loadLocalFromDisk(
+                    repo.localPath,
+                    stamped.id,
+                    repo.issuePrefix,
+                  );
+                  if (fresh) {
+                    await escalateOnRepeatedFailures({
+                      repoName: repo.name,
+                      repoLocalPath: repo.localPath,
+                      internalIssueId: stamped.id,
+                      card: fresh,
+                    });
+                  }
+                } catch (escErr) {
+                  log.error(
+                    `[${repo.name}] escalation check threw for ${stamped.id}`,
+                    escErr,
+                  );
+                }
+              }
+            }
           },
         },
         { agentName: agent.name, manager },
@@ -581,6 +671,21 @@ export async function tryMultiAgentDispatch(
         `[${repo.name}] multi-agent dispatch failed for ${card.id} → ${agent.name}`,
         err,
       );
+      // AC #2 of DX-221 — dispatch threw before `onComplete` would
+      // ever fire (spawn-fail, worktree validation throw, etc.).
+      // Quarantine both sides so the next picker tick does not
+      // hot-loop against the same broken pairing.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      quarantineAgent({
+        repoName: repo.name,
+        agentName: agent.name,
+        reason: `dispatch threw on ${card.id}: ${errMsg}`,
+      });
+      quarantineCard({
+        repoName: repo.name,
+        cardId: card.id,
+        reason: `dispatch threw: ${errMsg}`,
+      });
       // Dispatch threw post-stamp → YAML carries a `dispatch:` block
       // pointing at a dispatchId that never made it into the DB. Without
       // clearing, every subsequent tick's `listDispatchableYamls` filter

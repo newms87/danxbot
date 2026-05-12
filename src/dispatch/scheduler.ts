@@ -2,12 +2,12 @@
  * Per-repo dispatch scheduler — Phase 4 of Event-Driven Worker (DX-219).
  *
  * Today this module is a thin coordinator that ports four protections
- * from the legacy `_poll` single-card dispatch path (which DX-242
+ * from the legacy `runSync` single-card dispatch path (which DX-242
  * removed) onto the multi-agent dispatch path (DX-200). Without these
  * ports the multi-agent picker is a regression vs the legacy path it
  * replaces. The full event-driven scheduler (reconcile step 8 wiring,
  * triage `expires_at` setTimeout, per-dispatch TTL setTimeout,
- * settings.json file-watch + `onAgentRosterChange`, `_poll` decision
+ * settings.json file-watch + `onAgentRosterChange`, `runSync` decision
  * deletion) is deferred to follow-up phases — those concerns are NOT
  * in this card's `ac[]`.
  *
@@ -106,7 +106,7 @@ const pendingPokes = new Set<string>();
  * DX-305: per-repo single-flight mutex around picker execution. Three
  * sources can fire a picker invocation in the same macrotask burst —
  * `onReconcileResult`'s setImmediate, `onAgentRosterChange`'s
- * setImmediate, AND the legacy `_poll` direct call (until DX-290 retires
+ * setImmediate, AND the legacy `runSync` direct call (until DX-290 retires
  * the latter). Without this mutex two consecutive macrotasks each invoke
  * `runPicker` against the same `busy`/`assigned` snapshot — both pick
  * the same agent + card and `spawnAgent` runs twice. The two existing
@@ -206,7 +206,7 @@ export function bootScheduler(args: {
    * wires a closure that re-fetches dispatchable + in-progress card
    * lists and invokes `tryMultiAgentDispatch`. Tests register a spy.
    * Omitting the callback keeps `onReconcileResult` a no-op for that
-   * repo — the legacy `_poll` per-tick path still runs picks until
+   * repo — the legacy `runSync` per-tick path still runs picks until
    * Phase 4b.3 deletes it.
    */
   runPicker?: RunPickerFn;
@@ -493,9 +493,9 @@ async function firePickerWithMutex(repoName: string): Promise<void> {
 
 /**
  * DX-305: bridge for callers that want to run their OWN picker function
- * (specifically the legacy `_poll` path which still calls
+ * (specifically the legacy `runSync` path which still calls
  * `tryMultiAgentDispatch` directly and observes its `MultiAgentPickResult`
- * to decide whether to short-circuit the legacy single-card fallthrough).
+ * to decide whether to short-circuit the prior single-card dispatch fallthrough).
  * Acquires the same single-flight mutex as the registered-picker path so
  * all three concurrency sources coalesce.
  *
@@ -519,7 +519,7 @@ export async function runWithPickerMutex<T>(
     return { ran: true, value };
   } finally {
     // The tail-run schedule fires REGARDLESS of whether `fn` threw.
-    // Intentional: a thrown `_poll`-side picker still represents
+    // Intentional: a thrown `runSync`-side picker still represents
     // unattended dispatch demand (cards remain dispatchable) — the
     // registered picker should get a chance to make progress on the
     // next macrotask. Caller's outer try/catch sees the original
@@ -541,10 +541,10 @@ export async function runWithPickerMutex<T>(
  * `make deploy`). Wires identically to `onReconcileResult` — fires the
  * registered picker once per macrotask burst so a roster change
  * surfaces newly-idle agents to the dispatch loop without waiting for
- * the next `_poll` tick.
+ * the next `runSync` tick.
  *
  * Skip conditions:
- *   - No picker registered for the repo (legacy `_poll` path still
+ *   - No picker registered for the repo (legacy `runSync` path still
  *     runs picks; the change will be picked up there).
  *   - A roster-change poke is already pending for this repo on the
  *     current macrotask burst — debounce coalesces 2+ writes within
@@ -562,7 +562,7 @@ export function onAgentRosterChange(repoName: string): void {
   setImmediate(() => {
     pendingRosterPokes.delete(repoName);
     // DX-305: route through the single-flight mutex so a concurrent
-    // `onReconcileResult` poke (or legacy `_poll` direct picker call)
+    // `onReconcileResult` poke (or legacy `runSync` direct picker call)
     // cannot land a duplicate `runPicker` invocation against the same
     // `busy`/`assigned` snapshot.
     void firePickerWithMutex(repoName);
@@ -581,7 +581,7 @@ export function onAgentRosterChange(repoName: string): void {
  *   - No picker registered for the repo — `bootScheduler` was called
  *     without `runPicker`. Until Phase 4b.3 wires every production
  *     caller, some repos legitimately have no picker (the legacy
- *     `_poll` path is still doing picks).
+ *     `runSync` path is still doing picks).
  *   - A picker run is already queued for this repo on the current
  *     macrotask burst — debounce coalesces 2+ reconciles in the same
  *     tick into one picker invocation.
@@ -609,7 +609,7 @@ export function onReconcileResult(args: {
   setImmediate(() => {
     pendingPokes.delete(repoName);
     // DX-305: route through the single-flight mutex so a concurrent
-    // `onAgentRosterChange` poke (or legacy `_poll` direct picker call)
+    // `onAgentRosterChange` poke (or legacy `runSync` direct picker call)
     // cannot land a duplicate `runPicker` invocation against the same
     // `busy`/`assigned` snapshot.
     void firePickerWithMutex(repoName);
@@ -680,7 +680,7 @@ export interface PostDispatchCheckInput {
  * Extracted from `checkCardProgressedOrHalt` in `src/cron/sync-and-audit.ts`
  * and parameterized so the multi-agent picker can wire it into
  * `onComplete` without depending on `state.trackedCardId`. The
- * production safeguard the legacy `_poll` path had against
+ * production safeguard the legacy `runSync` path had against
  * $1k/day token-burn loops now applies to every multi-agent dispatch.
  *
  * AC #4 of DX-219.

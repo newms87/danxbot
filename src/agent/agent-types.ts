@@ -159,7 +159,7 @@ export interface AgentJob {
    * branch cleanup, not card work — the tracked card stays where it was
    * by design. Caller onComplete hooks that run "did the tracked card
    * progress?" guards (multi-agent-pick's `runPostDispatchProgressCheck`,
-   * legacy `_poll`'s `checkCardProgressedOrHalt`) MUST short-circuit when
+   * legacy `runSync`'s `checkCardProgressedOrHalt`) MUST short-circuit when
    * this is set or they will write a spurious CRITICAL_FAILURE flag and
    * halt the poller. Lock release + dispatch-block clear still run.
    */

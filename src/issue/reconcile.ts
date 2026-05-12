@@ -9,11 +9,11 @@
  * validate, hash diff, atomic write, await DB mirror). Phase 2 absorbed
  * two poller helpers into step 3 and activated steps 9-10. Phase 3 lit
  * up step 7 — the outbound tracker push — and retired the per-tick
- * `_poll` mirror. Phase 4b.1 (this commit / DX-288) lights up step 8 —
+ * `runSync` mirror. Phase 4b.1 (this commit / DX-288) lights up step 8 —
  * `fanout.dispatchableChanged` computed via a per-card cache diff, and
  * a per-repo scheduler hook fired AFTER the per-card mutex resolves so
  * the dispatch picker can react to reconcile-observed state flips
- * without waiting for the next `_poll` tick.
+ * without waiting for the next `runSync` tick.
  *
  *   - Step 3a: parent-status derive from children (was
  *     `recomputeParentStatuses`).

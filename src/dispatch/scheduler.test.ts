@@ -1,7 +1,7 @@
 /**
  * Unit tests for the per-repo dispatch scheduler (Phase 4 / DX-219).
  *
- * Covers the four ports from the legacy `_poll` single-card path onto
+ * Covers the four ports from the legacy `runSync` single-card path onto
  * the multi-agent dispatch path:
  *
  *   - AC #1: tracker-comment lock helpers re-exported.
@@ -1064,7 +1064,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
  * consecutive macrotasks and each invoke `runPicker` against the same
  * `busy`/`assigned` snapshot — both pick the same agent + card and
  * `spawnAgent` runs twice. The mutex coalesces concurrent pokes from
- * ANY source (reconcile, roster, legacy `_poll`) into one in-flight
+ * ANY source (reconcile, roster, legacy `runSync`) into one in-flight
  * run plus at most one tail run.
  */
 describe("picker single-flight mutex (DX-305)", () => {
@@ -1183,7 +1183,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     expect(picker).toHaveBeenCalledTimes(2);
   });
 
-  it("runWithPickerMutex bridges the legacy _poll picker call through the same mutex", async () => {
+  it("runWithPickerMutex bridges the legacy runSync picker call through the same mutex", async () => {
     const repo = makeReconcileRepo();
     let resolvePicker: (() => void) | null = null;
     const picker = vi.fn<RunPickerFn>().mockImplementation(
@@ -1203,7 +1203,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     await waitMacrotask();
     expect(picker).toHaveBeenCalledTimes(1);
 
-    // _poll fires its direct call into the mutex — must be denied
+    // runSync fires its direct call into the mutex — must be denied
     // because a run is already in flight.
     const directFn = vi.fn().mockResolvedValue({ dispatched: 7 });
     const guarded = await runWithPickerMutex(repo.name, directFn);
@@ -1258,7 +1258,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     await waitMacrotask();
     expect(picker).toHaveBeenCalledTimes(1);
 
-    // _poll arrives mid-run; mutex denies, tail flag set.
+    // runSync arrives mid-run; mutex denies, tail flag set.
     const directFn = vi.fn().mockResolvedValue({ dispatched: 0 });
     const guarded = await runWithPickerMutex(repo.name, directFn);
     expect(guarded.ran).toBe(false);

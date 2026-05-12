@@ -684,7 +684,7 @@ export function handleStatus(res: ServerResponse, jobId: string): void {
  * `GET /api/jobs` — snapshot of every job currently in `activeJobs`,
  * including running and recently-finished (within the TTL grace window).
  *
- * Primary consumer: the system test (`test_poller`) needs to know which
+ * Primary consumer: the system test (`test_cron_sweep`) needs to know which
  * dispatches are holding the worker's `teamRunning` slot so it can
  * cancel them before injecting its fixture card. Without this surface
  * the test relied on luck — a pre-existing in-flight dispatch (e.g. a

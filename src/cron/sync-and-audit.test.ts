@@ -240,7 +240,7 @@ vi.mock("../agent/host-pid.js", () => ({
 }));
 
 // DX-142 Phase 3: process-table orphan scan called once per tick in
-// `_poll` (alongside `evictDeadDispatches`). Mock it to a no-op so the
+// `runSync` (alongside `evictDeadDispatches`). Mock it to a no-op so the
 // poller tick stays Layer 1 and any test that wants to assert the
 // per-tick call shape can reach the captured fn directly.
 const mockReapOrphans = vi
@@ -397,7 +397,7 @@ vi.mock("../poller/local-issues.js", () => ({
 // epic-status: queries the DB for parents/children since DX-155. The
 // unit-mock suite has no live PG, so stub recompute to a no-op. Spy
 // kept on `mockRecomputeParentStatuses` so DX-217 Phase 2 anti-
-// regression tests can assert `_poll` no longer calls it.
+// regression tests can assert `runSync` no longer calls it.
 const mockRecomputeParentStatuses = vi
   .fn()
   .mockResolvedValue([] as unknown[]);
@@ -452,7 +452,7 @@ vi.mock("../poller/heal-external-id.js", () => ({
 }));
 
 // DX-218 (Event-Driven Worker Phase 3) retired the per-tick retry-queue
-// drain from `_poll`. The poller no longer imports `drainRetries` or
+// drain from `runSync`. The poller no longer imports `drainRetries` or
 // `recordSystemError`; what remains lives behind the timer callback in
 // `src/issue-tracker/retry-queue.ts` (boot-rescheduled by `src/index.ts`)
 // and is exercised in `src/issue-tracker/retry-queue.test.ts`.
@@ -475,11 +475,11 @@ vi.mock("../workspace/write-if-changed.js", () => ({
   },
 }));
 
-// DX-290: zero-dispatch invariant spy. `_poll` MUST NOT invoke the
+// DX-290: zero-dispatch invariant spy. `runSync` MUST NOT invoke the
 // multi-agent picker — every dispatch decision moved to the scheduler's
 // `runPicker` callback (registered at boot in `src/index.ts`). Keep the
 // mock at module level so the assertion captures any future regression
-// where `_poll` re-introduces a direct picker call.
+// where `runSync` re-introduces a direct picker call.
 const mockTryMultiAgentDispatch = vi
   .fn()
   .mockResolvedValue({ dispatched: 0, conflictBlocked: 0 });
@@ -1784,10 +1784,10 @@ language: node
   // (d) DX-149: rm failures during prune used to propagate out of
   // `poll()` so the operator saw them immediately ("fail-loud per
   // CLAUDE.md"). DX-149 retired that contract for everything inside
-  // `_poll`: the worker process must survive a single bad tick so
+  // `runSync`: the worker process must survive a single bad tick so
   // Slack listener / dispatch API / dashboard SSE stay alive when
   // ONE per-tick failure (tracker, lock, fs) hits. The replacement
-  // contract — log+swallow at the top of `_poll`, retry on the next
+  // contract — log+swallow at the top of `runSync`, retry on the next
   // tick — applies to syncRepoFiles' rm failures too because the
   // wrap is intentionally one block (see DX-149 design rationale on
   // top-level vs per-call). This test pins the new shape so a
@@ -2085,7 +2085,7 @@ language: node
 
   // Symmetric DX-149 update for `scrubRepoRootDanxArtifacts`. Pre-DX-149
   // an rm failure here propagated out of `poll()`; post-DX-149 the
-  // `_poll` top-level catch logs+swallows so the worker process
+  // `runSync` top-level catch logs+swallows so the worker process
   // survives. Stale `danx-*` rules at `<repo>/.claude/` will retry on
   // the next tick — same convergence model as the tracker call wrap.
   it("scrubRepoRootDanxArtifacts rm failure is logged + swallowed (DX-149)", async () => {
@@ -2165,19 +2165,19 @@ language: node
 
 
 /**
- * DX-149 — _poll crash isolation.
+ * DX-149 — runSync crash isolation.
  *
- * Before the fix, any tracker call inside `_poll` AFTER the existing
+ * Before the fix, any tracker call inside `runSync` AFTER the existing
  * inner try/catch around `fetchOpenCards` (e.g. `tryAcquireLock` →
- * `tracker.getComments`) would throw straight past `_poll` and out
+ * `tracker.getComments`) would throw straight past `runSync` and out
  * through `poll()`'s `finally`, killing the whole worker process.
  *
- * Contract: a single top-level try/catch in `_poll` swallows any
+ * Contract: a single top-level try/catch in `runSync` swallows any
  * thrown error, logs it, and returns cleanly so the next tick fires.
  * `state.polling` is already reset in `poll()`'s finally; these tests
  * verify that property end-to-end by calling `poll()` twice.
  */
-describe("poll — _poll crash isolation (DX-149)", () => {
+describe("poll — runSync crash isolation (DX-149)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -2187,15 +2187,15 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     mockIsFeatureEnabled.mockReturnValue(true);
   });
 
-  it("survives tracker.getComments rejection from a deeper _poll path — no rethrow", async () => {
+  it("survives tracker.getComments rejection from a deeper runSync path — no rethrow", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     // Pre-DX-241 this test hit `tracker.getComments` via
-    // `tryAcquireLock` inside `_poll`. DX-241 moved the lock
+    // `tryAcquireLock` inside `runSync`. DX-241 moved the lock
     // acquisition to `tryMultiAgentDispatch` (and removed it from
-    // `_poll` entirely — every poll tick used to write an orphan
+    // `runSync` entirely — every poll tick used to write an orphan
     // lock comment), but the property the test guards is broader: a
-    // tracker rejection from ANY `_poll` code path must not kill the
-    // worker. The orphan-push path under `_poll` calls
+    // tracker rejection from ANY `runSync` code path must not kill the
+    // worker. The orphan-push path under `runSync` calls
     // `tracker.getComments` to dedupe stamps, so it's a faithful
     // replacement crash class.
     mockTracker.getComments.mockRejectedValue(
@@ -2204,18 +2204,18 @@ describe("poll — _poll crash isolation (DX-149)", () => {
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
-    // Either the top-level _poll catch OR an inner per-card catch
+    // Either the top-level runSync catch OR an inner per-card catch
     // absorbs the error — both satisfy the contract. Assert the
     // worker did NOT escalate the throw (which would kill the
     // process via poll()'s finally).
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("subsequent poll() tick fires after a _poll crash — state.polling reset", async () => {
+  it("subsequent poll() tick fires after a runSync crash — state.polling reset", async () => {
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
     mockTracker.getComments.mockRejectedValueOnce(new Error("boom"));
 
-    // First tick: crashes inside _poll, swallowed by top-level catch.
+    // First tick: crashes inside runSync, swallowed by top-level catch.
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
     // Second tick: tracker is healthy again. fetchOpenCards must be
@@ -2244,8 +2244,8 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("survives an early-_poll throw from healExternalIds (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
-    // Reviewer-recommended representative test for the deeper-in-_poll
+  it("survives an early-runSync throw from healExternalIds (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
+    // Reviewer-recommended representative test for the deeper-in-runSync
     // throw paths the wrap also covers (now: reapOrphans,
     // runInvariantHeal, bulkSyncMissingYamls — the dispatch-decision
     // paths the wrap used to cover were retired in DX-290). Pins the
@@ -2255,7 +2255,7 @@ describe("poll — _poll crash isolation (DX-149)", () => {
     // DX-217 (Event-Driven Worker Phase 2): replaces an earlier test
     // that used `healLocalYamls` for this same purpose. That helper was
     // absorbed into `reconcileIssue` step 3c and no longer runs from
-    // `_poll`; `healExternalIds` is the next-best representative early
+    // `runSync`; `healExternalIds` is the next-best representative early
     // path.
     mockHealExternalIds.mockImplementationOnce(() => {
       throw new Error("disk full during external_id heal pass");
@@ -2275,11 +2275,11 @@ describe("poll — _poll crash isolation (DX-149)", () => {
 
 
   it("top-level catch does not trip backoff (next tick fetches cards as normal, no `In backoff` skip)", async () => {
-    // Pin the invariant in the comment at index.ts:516–519: a `_poll`
+    // Pin the invariant in the comment at index.ts:516–519: a `runSync`
     // crash is logged + swallowed but does NOT count as a dispatch
     // failure for backoff purposes. Observable behavior: after a crash
     // the very next `poll()` invokes `fetchOpenCards` and does NOT log
-    // `In backoff`. A regression that incremented `state.consecutiveFailures`
+    // `In backoff`. A regression that incremented a failure counter
     // inside the top-level catch would skip the second tick with
     // `In backoff — Ns remaining` instead.
     mockTracker.fetchOpenCards.mockResolvedValue([ref("c1", "Card 1", "ToDo")]);
@@ -2292,7 +2292,7 @@ describe("poll — _poll crash isolation (DX-149)", () => {
 
     // Second tick — must run, must not be skipped by backoff. Assert
     // it advances the call count rather than fixing an absolute number,
-    // since `_poll` may call `fetchOpenCards` more than once per tick
+    // since `runSync` may call `fetchOpenCards` more than once per tick
     // (Needs Help + ToDo paths share the same mock).
     mockTracker.getComments.mockResolvedValue([]);
     await poll(MOCK_REPO_CONTEXT);
@@ -2308,12 +2308,12 @@ describe("poll — _poll crash isolation (DX-149)", () => {
 });
 
 // DX-218 (Event-Driven Worker Phase 3) retired the per-tick
-// `drainRetries` call from `_poll`; the retry queue's timers are now
+// `drainRetries` call from `runSync`; the retry queue's timers are now
 // armed inside `enqueueRetry` (`src/issue-tracker/retry-queue.ts`) at
 // `setTimeout(nextEligibleAt - now)` and tested at module level in
 // `src/issue-tracker/retry-queue.test.ts`. The corresponding wiring
 // describe block (`poll — DX-132 retry-queue drain wiring`) was deleted
-// alongside the call site — there is nothing in `_poll` to assert
+// alongside the call site — there is nothing in `runSync` to assert
 // against.
 
 describe("poll — issuePoller feature toggle", () => {
@@ -2549,7 +2549,7 @@ describe("poll — DX-142 process-table orphan scan (per-tick)", () => {
     });
   });
 
-  it("a reapOrphans rejection does not crash the tick — the rest of _poll still runs", async () => {
+  it("a reapOrphans rejection does not crash the tick — the rest of runSync still runs", async () => {
     // The wiring is wrapped in try/catch — a failed reap pass should
     // not prevent the rest of the tick (tracker fetch, dispatch, etc).
     mockReapOrphans.mockRejectedValueOnce(new Error("pgrep exploded"));
@@ -2557,7 +2557,7 @@ describe("poll — DX-142 process-table orphan scan (per-tick)", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // Tracker fetch still happens — proves the catch landed and
-    // _poll continued past the reap pass.
+    // runSync continued past the reap pass.
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 });
@@ -2591,7 +2591,7 @@ describe("shutdown", () => {
 
 
 describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
-  // After Event-Driven Worker Phase 2 (DX-217), `_poll` no longer
+  // After Event-Driven Worker Phase 2 (DX-217), `runSync` no longer
   // calls `healLocalYamls`, `recomputeParentStatuses`, or
   // `resolveWaitingOnCards` directly. Each helper's logic was absorbed
   // into `reconcileIssue` step 3 (`src/issue/reconcile.ts`); chokidar
@@ -2610,14 +2610,14 @@ describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
     mockHealLocalYamls.mockReturnValue({ healed: [], errors: [] });
   });
 
-  it("does NOT call healLocalYamls from _poll (Phase 2 — absorbed into reconcile step 3c)", async () => {
+  it("does NOT call healLocalYamls from runSync (Phase 2 — absorbed into reconcile step 3c)", async () => {
     await poll(MOCK_REPO_CONTEXT);
     expect(mockHealLocalYamls).not.toHaveBeenCalled();
     // Tick still advances past the (now absent) heal pass.
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 
-  it("does NOT call recomputeParentStatuses from _poll (Phase 2 — absorbed into reconcile step 3a)", async () => {
+  it("does NOT call recomputeParentStatuses from runSync (Phase 2 — absorbed into reconcile step 3a)", async () => {
     mockRecomputeParentStatuses.mockClear();
     await poll(MOCK_REPO_CONTEXT);
     expect(mockRecomputeParentStatuses).not.toHaveBeenCalled();
@@ -2668,7 +2668,7 @@ describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () 
     const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0]!;
     expect(healExternalOrder).toBeLessThan(fetchOrder);
 
-    // Phase 2 anti-regression: healLocalYamls is NOT called from _poll
+    // Phase 2 anti-regression: healLocalYamls is NOT called from runSync
     // (was previously asserted to run before healExternalIds; it now
     // runs from reconcile, not the tick).
     expect(mockHealLocalYamls).not.toHaveBeenCalled();
@@ -2699,12 +2699,12 @@ describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () 
 /**
  * DX-290 (Event-Driven Worker Phase 4b.3) — zero-dispatch spy invariant.
  *
- * `_poll` is sync + audit only. Every dispatch decision belongs to the
+ * `runSync` is sync + audit only. Every dispatch decision belongs to the
  * scheduler's `runPicker` callback (fired by reconcile's
  * `onReconcileResult` and settings-watch's `onAgentRosterChange`); the
  * per-card triage + TTL timers (DX-289) own their own scheduling. A
  * regression that re-introduces a `dispatch()` call OR a
- * `tryMultiAgentDispatch` call from `_poll`'s body trips this spy.
+ * `tryMultiAgentDispatch` call from `runSync`'s body trips this spy.
  *
  * The fixture seeds a dispatchable ToDo card on disk (the shape that
  * historically would have triggered the legacy picker invocation) and
@@ -2719,7 +2719,7 @@ describe("poll — DX-290 zero-dispatch invariant", () => {
     mockTryMultiAgentDispatch.mockClear();
   });
 
-  it("_poll never invokes dispatch() or tryMultiAgentDispatch with a dispatchable ToDo card on disk", async () => {
+  it("runSync never invokes dispatch() or tryMultiAgentDispatch with a dispatchable ToDo card on disk", async () => {
     // Seed BOTH the tracker fetch AND the local-YAML dispatch source.
     // A regression that re-introduces the legacy
     // `tryMultiAgentDispatch({cards: dispatchableIssues, ...})` call
@@ -2736,7 +2736,7 @@ describe("poll — DX-290 zero-dispatch invariant", () => {
     await poll(MOCK_REPO_CONTEXT);
 
     // The dispatch decision belongs to the scheduler's runPicker
-    // callback (registered at boot in src/index.ts), NOT _poll.
+    // callback (registered at boot in src/index.ts), NOT runSync.
     expect(mockDispatch).not.toHaveBeenCalled();
     expect(mockTryMultiAgentDispatch).not.toHaveBeenCalled();
   });

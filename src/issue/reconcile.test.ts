@@ -260,7 +260,7 @@ describe("reconcileIssue — behaviour parity (no-op chokepoint)", () => {
   // operate on, reconcile produces an IDENTICAL canonical YAML on disk
   // (because Phase 1 body is a no-op chokepoint). Phase 2 absorbs the
   // helpers and converts these table entries into "reconcile produces
-  // what _poll did" assertions.
+  // what runSync did" assertions.
   const fixtures: Array<{ name: string; status: IssueStatus; dir: "open" | "closed" }> = [
     { name: "ToDo card", status: "ToDo", dir: "open" },
     { name: "In Progress card", status: "In Progress", dir: "open" },

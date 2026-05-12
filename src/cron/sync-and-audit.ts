@@ -31,7 +31,7 @@
  *      "audit")`. Drift surfaces as `recordSystemError({source:
  *      "audit-drift"})` so the dashboard banner counts divergence.
  *
- * Everything else `_poll` used to do is gone — dispatch decisions,
+ * Everything else `runSync` used to do is gone — dispatch decisions,
  * triage walk, dead-dispatch eviction, parent-status derive,
  * waiting-on auto-clear, orphan push. Each moved to either reconcile
  * (DX-217/DX-218), per-card / per-dispatch `setTimeout` timers
@@ -71,7 +71,7 @@ const log = createLogger("cron");
  *
  * DX-290 slimmed this from the legacy seven-field shape to a
  * re-entrancy guard plus the timer handle. The legacy fields —
- * `teamRunning`, `consecutiveFailures`, `backoffUntil`,
+ * `teamRunning`, `failureTally`, `quarantineUntil`,
  * `priorTodoCardIds`, `trackedCardId`, `triageTracked` — all served
  * the single-fork `spawnClaude` dispatch path that DX-290 retired.
  * The multi-agent dispatch path (`src/poller/multi-agent-pick.ts`,

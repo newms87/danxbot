@@ -357,7 +357,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
 
     const log = trackerHandle.current!.getRequestLog();
     // The poller calls fetchOpenCards twice per tick (NH check +
-    // _poll's ToDo branch). Assert the count rather than positions so
+    // runSync's ToDo branch). Assert the count rather than positions so
     // a future refactor that parallelizes the two fetches via
     // Promise.all doesn't silently break this test.
     const methods = methodsOnly(log);
@@ -521,7 +521,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
 
     // DX-290 (Phase 4b.3): bulk-sync now hydrates EVERY tracker-listed
     // ToDo card — the legacy primary-selection hydrate-or-stamp path
-    // (with the real dispatchId) was retired when `_poll` stopped
+    // (with the real dispatchId) was retired when `runSync` stopped
     // making dispatch decisions. The multi-agent picker stamps the
     // dispatch UUID via `stampDispatchAndWrite` when it claims a card,
     // not here. Result: 3 ToDo cards → 3 bulk-sync hydrates, all with
@@ -547,11 +547,11 @@ describe("Integration: poller hot path against MemoryTracker", () => {
   });
 
 
-  it("bulk-sync: a primary hydrate failure is logged + swallowed by _poll's top-level catch (DX-149) — no dispatch fires", async () => {
+  it("bulk-sync: a primary hydrate failure is logged + swallowed by runSync's top-level catch (DX-149) — no dispatch fires", async () => {
     // Counterpart to the sibling-tolerant test. Pre-DX-149 contract was
-    // "primary hydrate failure rethrows from _poll" so the worker
+    // "primary hydrate failure rethrows from runSync" so the worker
     // process would die loud on a credential regression. DX-149 retired
-    // that — the top-level catch in _poll now logs + swallows EVERY
+    // that — the top-level catch in runSync now logs + swallows EVERY
     // throw inside its body, so a single bad card no longer kills the
     // whole worker (Slack listener, dispatch API, dashboard SSE all
     // share the worker process). Observable contract preserved here:

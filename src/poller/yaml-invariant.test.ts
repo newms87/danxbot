@@ -46,7 +46,7 @@ import type { Issue } from "../issue-tracker/interface.js";
  *     accumulates orphans surfaces in the test log. Documented
  *     exceptions (pre-DX-200 schema residue, pre-DX-286
  *     persistAfterSync residue) keep this informational instead of a
- *     hard gate — the per-tick heal scan in `_poll` clears open/
+ *     hard gate — the per-tick heal scan in `runSync` clears open/
  *     orphans on the next worker tick.
  */
 

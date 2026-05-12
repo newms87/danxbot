@@ -5,7 +5,7 @@
  * `reconcileIssue` is the single function every entry point — chokidar
  * watcher, dispatch lifecycle, scheduler, cron audit, Trello inbound
  * hydration — calls when a card's state may have changed. Phase 1 wires
- * the chokepoint without moving any logic out of `_poll`. Steps 1, 2, 4,
+ * the chokepoint without moving any logic out of `runSync`. Steps 1, 2, 4,
  * 5, 6 of the body (load, validate, hash diff, atomic write, await DB
  * mirror) are real; steps 3 (compute derived state), 7 (tracker push),
  * 8 (scheduler poke), 9 (recurse on parent), 10 (recurse on dependents)

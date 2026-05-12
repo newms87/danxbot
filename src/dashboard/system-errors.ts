@@ -1,7 +1,7 @@
 /**
  * In-memory system-errors ring buffer + EventBus producer.
  *
- * Producers ({@link recordSystemError} call sites in `runSync`, `_poll`'s
+ * Producers ({@link recordSystemError} call sites in `runSync`, `runSync`'s
  * heal pass, and the retry-queue's max-attempts hook) push events here.
  * Consumers — the REST list endpoint (`GET /api/system-errors`) and the
  * SSE stream (`GET /api/stream?topics=system-errors`) — read from the
@@ -32,7 +32,9 @@ export type SystemErrorSource =
   | "prep-verdict-replay"
   | "orphan-reaper"
   | "legacy-cleanup"
-  | "audit-drift";
+  | "audit-drift"
+  | "quarantine"
+  | "stuck-card";
 
 /**
  * `"info"` is the audit-trail channel: routine, non-actionable events

@@ -454,10 +454,10 @@ async function startWorkerMode(): Promise<void> {
   //
   // Phase 4b.1 (DX-288) wires the `runPicker` callback so reconcile's
   // dispatchableChanged poke fires the multi-agent picker without
-  // waiting for the next `_poll` tick. The closure re-reads card
+  // waiting for the next `runSync` tick. The closure re-reads card
   // state on each fire so we observe the latest YAML truth (DB-backed
   // via `listDispatchableYamls`). Phase 4b.3 (DX-290) deleted the
-  // legacy `_poll` picker invocation; this `runPicker` is now the SOLE
+  // legacy `runSync` picker invocation; this `runPicker` is now the SOLE
   // dispatcher — fired by reconcile's `onReconcileResult` and
   // settings-watch's `onAgentRosterChange` through the scheduler's
   // single-flight mutex.
@@ -474,7 +474,7 @@ async function startWorkerMode(): Promise<void> {
         repo.issuePrefix,
       );
       // DX-290: operator-facing pickup-name-prefix filter. Migrated
-      // from `_poll`'s deleted dispatch-decision block so the toggle in
+      // from `runSync`'s deleted dispatch-decision block so the toggle in
       // `<repo>/.danxbot/settings.json` continues to work — when set,
       // ONLY YAMLs whose `title` starts with the prefix are eligible
       // for dispatch. Used by the system-test harness for race-free

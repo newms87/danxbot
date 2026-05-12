@@ -13,7 +13,7 @@
  *   3. Persisting the YAML back to its same directory (open/ or closed/).
  *
  * The blanked YAML now looks like an orphan to `pushOrphans`, which
- * runs LATER IN THE SAME `_poll` tick (`healExternalIds` is wired
+ * runs LATER IN THE SAME `runSync` tick (`healExternalIds` is wired
  * before `tracker.fetchOpenCards`; `pushOrphans` runs after the
  * inbound mirror). `tracker.createCard` mints a fresh tracker-native
  * id within the same tick — recovery is single-tick for `open/` YAMLs.

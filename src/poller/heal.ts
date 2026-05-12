@@ -79,7 +79,7 @@ import { createLogger } from "../logger.js";
  * disambiguates the typical `open/` → `closed/` move (terminal status
  * flushed to closed bucket) from the DX-147 inverse `closed/` → `open/`
  * move (status drifted back to non-terminal). Callers that log per-action
- * (e.g. the poller `_poll` block) can render direction-aware strings
+ * (e.g. the poller `runSync` block) can render direction-aware strings
  * without re-parsing the issue.
  */
 export interface HealedIssue {
@@ -313,7 +313,7 @@ export interface HealOrphanInvariantResult {
  * has not expired, the card is left alone. The in-flight dispatch will
  * reconcile via its own onComplete chain.
  *
- * Runs once at boot and at the top of every `_poll` tick.
+ * Runs once at boot and at the top of every `runSync` tick.
  *
  * Idempotent: `clearDispatchAndWrite` short-circuits when dispatch is
  * already null. Tracker-independent. Tolerates malformed YAMLs.

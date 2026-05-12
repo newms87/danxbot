@@ -633,7 +633,7 @@ test_stall() {
   skip "Stall detection test deferred to Phase 4 (requires ✻-based redesign)"
 }
 
-test_poller() {
+test_cron_sweep() {
   log_header "test-system-poller"
 
   # This test requires Trello API credentials and a running poller.
@@ -666,7 +666,7 @@ test_poller() {
 
   # Engage the poller filter before doing anything else. The repo's worker
   # re-reads settings on every poll tick — no restart required.
-  if ! _poller_set_pickup_prefix "$settings_file" "$pickup_prefix"; then
+  if ! _cron_set_pickup_prefix "$settings_file" "$pickup_prefix"; then
     fail "Failed to write pickupNamePrefix to $settings_file"
     return
   fi
@@ -733,7 +733,7 @@ test_poller() {
 
   if [[ -z "$card_id" ]]; then
     fail "Failed to create test card: $card_response"
-    _poller_clear_pickup_prefix "$settings_file"
+    _cron_clear_pickup_prefix "$settings_file"
     return
   fi
   pass "Test card created (id: $card_id)"
@@ -766,7 +766,7 @@ test_poller() {
     fail "Card still in original list after 120s — pickupNamePrefix filter failed to deliver the card. Check worker logs for the filter line ('pickupNamePrefix=...') and confirm settings.json was written before the card was created."
     # Cleanup
     curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
-    _poller_clear_pickup_prefix "$settings_file"
+    _cron_clear_pickup_prefix "$settings_file"
     return
   fi
 
@@ -811,7 +811,7 @@ test_poller() {
   # Cleanup: delete the test card and clear the poller filter
   curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
   pass "Test card cleaned up"
-  _poller_clear_pickup_prefix "$settings_file"
+  _cron_clear_pickup_prefix "$settings_file"
   log_info "Cleared poller pickupNamePrefix"
 
   log_info "Completed in $((SECONDS - start_time))s"
@@ -823,7 +823,7 @@ test_poller() {
 # writer as `setup` (the closest existing SettingsWriter literal — the
 # system test runner is operator-driven, not the dashboard). Returns
 # non-zero on failure so the caller can `fail` cleanly.
-_poller_set_pickup_prefix() {
+_cron_set_pickup_prefix() {
   local settings_file="$1"
   local prefix="$2"
   mkdir -p "$(dirname "$settings_file")"
@@ -857,9 +857,9 @@ _poller_set_pickup_prefix() {
 
 # Helper: clear `pickupNamePrefix` (set to null) and stamp meta. Always
 # safe to call — missing file becomes a no-op since there's nothing
-# to filter on. Used on every test_poller exit path so a failed test
+# to filter on. Used on every test_cron_sweep exit path so a failed test
 # never leaves the live worker filtered to a deleted test card.
-_poller_clear_pickup_prefix() {
+_cron_clear_pickup_prefix() {
   local settings_file="$1"
   if [[ ! -f "$settings_file" ]]; then return 0; fi
   node -e '
@@ -1449,7 +1449,7 @@ main() {
       cancel)      test_cancel ;;
       error)       test_error ;;
       stall)       test_stall ;;
-      poller)      test_poller ;;
+      poller)      test_cron_sweep ;;
       yaml-memory) test_yaml_memory ;;
       multi-worker) test_multi_worker ;;
       cleanup)     test_cleanup ;;
@@ -1462,7 +1462,7 @@ main() {
     test_cancel
     test_error
     test_stall
-    test_poller
+    test_cron_sweep
     test_yaml_memory
     test_multi_worker
     test_cleanup

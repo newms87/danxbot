@@ -520,7 +520,7 @@ export async function runSync(
     // longer rolled back by tracker errors); this line ensures the
     // failed tracker push is REPLAYED on a subsequent poller tick
     // instead of being permanently lost. Drain runs at the top of
-    // every `_poll`. Enqueue is best-effort — a filesystem failure
+    // every `runSync`. Enqueue is best-effort — a filesystem failure
     // here would shadow the original tracker error, so we swallow.
     try {
       enqueueRetry({

@@ -97,6 +97,7 @@ import {
   guardLiveDispatchForCard,
   runPostDispatchProgressCheck,
 } from "../dispatch/scheduler.js";
+import { _resetQuarantine } from "../dispatch/quarantine.js";
 import {
   clearDispatchAndWrite,
   loadLocal,
@@ -235,6 +236,10 @@ beforeEach(() => {
   tmpRepo = mkdtempSync(join(tmpdir(), "multi-agent-pick-"));
   setAgentLocksQueryFn(async () => [] as never);
   vi.clearAllMocks();
+  // DX-221 — quarantine state is in-memory + module-scoped; reset
+  // between tests so a failed dispatch in one test does not skip the
+  // agent + card in the next.
+  _resetQuarantine();
 });
 
 afterEach(() => {
@@ -1428,6 +1433,100 @@ describe("tryMultiAgentDispatch", () => {
       // Agent walked BOTH cards — DX-1 (lock held → skip card, agent
       // stays eligible) then DX-2 (acquired, dispatched).
       expect(calls).toEqual(["ext-DX-1", "ext-DX-2"]);
+    });
+  });
+
+  /**
+   * DX-221 AC #2 — per-agent + per-card quarantine. The picker MUST
+   * skip a quarantined agent (the agent failed recently) and a
+   * quarantined card (the card failed recently). Both cooldowns clear
+   * on a successful dispatch elsewhere. Wired by the picker's loop
+   * checks (`isAgentQuarantined` + `isCardQuarantined`) plus the
+   * onComplete callbacks. End-to-end onComplete behavior is covered
+   * by the helper-level tests in `src/dispatch/quarantine.test.ts` +
+   * `failure-escalation.test.ts`; this test pins the picker-skip
+   * branches the helper APIs would otherwise be exercised through.
+   */
+  describe("DX-221: quarantine gates", () => {
+    it("a quarantined agent is skipped — dispatch does NOT fire", async () => {
+      const { quarantineAgent } = await import("../dispatch/quarantine.js");
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      quarantineAgent({
+        repoName: "danxbot",
+        agentName: "alice",
+        reason: "test fixture",
+        durationMs: 60_000,
+        now: NOW.getTime(),
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        inProgress: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    });
+
+    it("a quarantined card is skipped — dispatch does NOT fire", async () => {
+      const { quarantineCard } = await import("../dispatch/quarantine.js");
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      quarantineCard({
+        repoName: "danxbot",
+        cardId: "DX-1",
+        reason: "test fixture",
+        durationMs: 60_000,
+        now: NOW.getTime(),
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        inProgress: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    });
+
+    it("an expired quarantine does NOT skip — picker proceeds normally", async () => {
+      const { quarantineAgent } = await import("../dispatch/quarantine.js");
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      // Quarantine in the past — expired by the time the picker runs.
+      quarantineAgent({
+        repoName: "danxbot",
+        agentName: "alice",
+        reason: "ancient",
+        durationMs: 1_000,
+        now: NOW.getTime() - 60_000,
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        inProgress: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
     });
   });
 });

@@ -108,7 +108,7 @@ export async function runInboundFetch(
   // the DB-backed listing in `local-issues.ts`. DX-218 retired the
   // per-tick orphan-push pass; outbound (YAML → tracker) pushes are
   // now reconcile step 7's job. DX-290 retired the dispatch decision
-  // + stuck-card scan from `_poll` entirely.
+  // + stuck-card scan from `runSync` entirely.
   //
   // Cards on the Trello Action Items list surface with
   // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are
@@ -128,7 +128,7 @@ export async function runInboundFetch(
   // Bulk-sync every tracker-listed card that lacks a local YAML so the
   // multi-agent dispatch path and per-card triage agent each have a
   // YAML to read. Coverage:
-  //   - Every ToDo card (DX-290: the legacy single-card primary path
+  //   - Every ToDo card (DX-290: the prior single-card dispatch primary path
   //     had its own dedicated hydrate pipeline that took the primary
   //     directly; that pipeline is gone, so we hydrate the whole bucket).
   //   - Every In Progress card (closes the gap where a worker died

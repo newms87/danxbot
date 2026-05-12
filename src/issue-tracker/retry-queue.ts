@@ -53,7 +53,7 @@
  *      `<repo>/.danxbot/.gitignore` already lists `.trello-retry/`.
  *
  *   6. **Why not `drainRetries`?** Phase 3 retires the per-tick
- *      `drainRetries` call from `_poll`. Polling for backoff windows is
+ *      `drainRetries` call from `runSync`. Polling for backoff windows is
  *      per-tick noise — `setTimeout` fires within milliseconds of the
  *      window expiring, beats a per-minute drain by 30-90s on average.
  *      The function is preserved as a manual flush helper for tests
