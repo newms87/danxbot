@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-35
 external_id: 69efa83b4b0133a3a08096f2
@@ -41,6 +41,7 @@ description: |-
 
   The skill files are injected by the poller into every connected repo on the next tick after merge — no extra step needed.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -60,5 +61,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

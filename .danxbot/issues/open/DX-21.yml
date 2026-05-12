@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-21
 external_id: 69f2244c3931a36785a9b821
@@ -30,6 +30,7 @@ description: |-
 
   Code review of dry-run feature in card uHECTOjj (commit `7dd4abb`).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -49,5 +50,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

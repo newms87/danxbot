@@ -1,0 +1,156 @@
+schema_version: 6
+tracker: memory
+id: DX-249
+external_id: 6a00be7f1adc429b66b39f89
+parent_id: DX-247
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Danx UI > Phase 2: DanxRangeSlider component (single + dual-handle)"
+description: |-
+  ## Context
+
+  Phase 2 of DX-247. The danxbot agent schedule UI needs a dual-handle slider to select an `HH:MM-HH:MM` window per day. `~/web/danx-ui` ships no slider primitive. Build a generic `DanxRangeSlider` that handles both single-handle and dual-handle cases so it can power the danxbot use case AND any future numeric-range UIs.
+
+  Work happens in `~/web/danx-ui/`. Read `CLAUDE.md` + `.claude/rules/{component-architecture,tailwind-v4,testing,demo-live-preview}.md` first.
+
+  ## Solution
+
+  ### New component: `src/components/range-slider/`
+
+  ```
+  src/components/range-slider/
+  ├── DanxRangeSlider.vue
+  ├── useRangeSlider.ts
+  ├── range-slider.css
+  ├── types.ts
+  ├── index.ts
+  └── __tests__/
+      ├── DanxRangeSlider.test.ts
+      └── useRangeSlider.test.ts
+  ```
+
+  ### Component contract
+
+  ```vue
+  <!-- Single-handle -->
+  <DanxRangeSlider v-model="value" :min="0" :max="100" :step="1" />
+
+  <!-- Dual-handle -->
+  <DanxRangeSlider v-model="window" :min="0" :max="1440" :step="15" />
+  <!-- where window = [540, 1020] (09:00–17:00 expressed in minutes-of-day) -->
+
+  <!-- With formatter -->
+  <DanxRangeSlider v-model="window" :min="0" :max="1440" :step="15">
+    <template #value="{ value }">{{ formatHHMM(value) }}</template>
+  </DanxRangeSlider>
+  ```
+
+  Mode inferred from initial v-model shape: `number` → single-handle; `[number, number]` tuple → dual-handle. No explicit `mode` prop. Type: `defineModel<number | [number, number]>`.
+
+  | Prop | Type | Default | Notes |
+  |---|---|---|---|
+  | `modelValue` | `number \| [number, number]` | required | v-model |
+  | `min` | `number` | `0` | |
+  | `max` | `number` | `100` | |
+  | `step` | `number` | `1` | |
+  | `disabled` | `boolean` | `false` | |
+  | `variant` | `VariantType` | `""` | Shared variant system |
+
+  | Slot | Scope | Purpose |
+  |---|---|---|
+  | `value` | `{ value: number, handle: "single" \| "min" \| "max" }` | Format the bubble label above each handle. Defaults to `String(value)`. |
+
+  | Event | Payload |
+  |---|---|
+  | `update:modelValue` | New value (number for single-handle, tuple for dual-handle) |
+
+  ### Behavior
+
+  - Dual-handle: handles cannot cross. `min[i]` ≤ `max[i]` at all times. If a user drags one past the other, clamp to within `step` of the other.
+  - Keyboard: `←` `→` move focused handle by `step`. `PageDown` `PageUp` move by `10 × step`. `Home` `End` jump to `min` / `max`.
+  - Mouse/touch: drag any handle; clicking the track jumps the nearest handle.
+  - ARIA: each handle is `role="slider"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`, `aria-orientation="horizontal"`. The container is `role="group"` with an aria-label.
+  - Disabled: pointer-events none, focus-disabled, dimmed token.
+
+  ### Composable: `useRangeSlider.ts`
+
+  Pulls the math out of the SFC for testability. Exports a `useRangeSlider(opts)` returning `{ singleValue, minValue, maxValue, isDual, setSingle, setMin, setMax, percent, percentMin, percentMax }`. The SFC subscribes via `defineModel` and calls `setMin`/`setMax`/`setSingle`. Tests for arithmetic (clamp, step rounding, cross-prevention) live against the composable, not the DOM.
+
+  ### Tokens (component → semantic)
+
+  ```css
+  .danx-range-slider {
+    --dx-range-track-bg: var(--color-surface-muted);
+    --dx-range-track-fill-bg: var(--color-accent);
+    --dx-range-handle-bg: var(--color-on-accent);
+    --dx-range-handle-shadow: var(--shadow-sm);
+    --dx-range-track-h: 4px;
+    --dx-range-handle-size: 16px;
+  }
+  ```
+
+  Component token file is `var()`-only.
+
+  ## Files
+
+  - **NEW** `src/components/range-slider/DanxRangeSlider.vue`
+  - **NEW** `src/components/range-slider/useRangeSlider.ts`
+  - **NEW** `src/components/range-slider/range-slider.css`
+  - **NEW** `src/components/range-slider/types.ts`
+  - **NEW** `src/components/range-slider/index.ts`
+  - **NEW** `src/components/range-slider/__tests__/DanxRangeSlider.test.ts`
+  - **NEW** `src/components/range-slider/__tests__/useRangeSlider.test.ts`
+  - **NEW** `demo/pages/RangeSliderPage.vue`
+  - **NEW** `docs/range-slider.md`
+  - **EDIT** `src/index.ts` — add range-slider exports
+  - **EDIT** `package.json#exports` — add `./components/range-slider` + `./components/range-slider/styles`
+  - **EDIT** `demo/main.ts`, `demo/App.vue`, `demo/composables/useLivePreview.ts`
+
+  ## Acceptance
+
+  - [ ] `DanxRangeSlider.vue` has full comment block (Purpose, @props, @emits, @slots, @tokens, @example)
+  - [ ] Mode auto-detected: `number` v-model → single, `[number, number]` v-model → dual
+  - [ ] Dual-handle: handles cannot cross; clamp on attempt
+  - [ ] Step rounding: dragging produces only `min + n × step` values within `[min, max]`
+  - [ ] Keyboard: arrows step, PageUp/Down step ×10, Home/End jump
+  - [ ] ARIA: each handle `role="slider"` with valid `aria-valuemin/max/now`
+  - [ ] Slot `value` receives `{ value, handle }` and overrides the default label
+  - [ ] `disabled` blocks all input methods + applies dimmed token
+  - [ ] `useRangeSlider` composable owns the math; SFC owns the DOM
+  - [ ] `range-slider.css` is `var()`-only
+  - [ ] Tests: prop rendering, single mode, dual mode, step rounding, cross-prevention, keyboard arrows, slot rendering, ARIA, disabled, variant style application — for both component AND composable
+  - [ ] Zero `[Vue warn]` in test stderr
+  - [ ] `yarn test:coverage` passes 100% thresholds
+  - [ ] Demo page covers single, dual, formatted (HH:MM), disabled, variants
+  - [ ] Demo registered in all three places (`main.ts`, `App.vue`, `useLivePreview.ts`)
+  - [ ] `docs/range-slider.md` user reference complete
+  - [ ] `package.json#exports` adds new paths
+  - [ ] `yarn typecheck` + `yarn lint` clean
+  - [ ] `/flow-verify` passes
+priority: 4
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-125
 external_id: 69df29baef8a77eb7ec58d54
@@ -15,6 +15,7 @@ description: |
 
   **ICE Score:** 320 = 5 × 8 × 8 (I: 5 — Valuable for debugging stuck workers in production; not user-facing but ops-critical. C: 8 — Clear pattern, same style as existing health fields. E: 8 — Small addition to two files with no cross-cutting concerns.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -52,5 +53,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

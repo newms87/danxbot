@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-23
 external_id: 69f19af4de7803343305c64a
@@ -53,6 +53,7 @@ description: |-
 
   Working on Trello QqvncYfR a second time (re-pickup loop).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -72,5 +73,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

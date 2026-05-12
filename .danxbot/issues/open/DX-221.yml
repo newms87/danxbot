@@ -1,0 +1,160 @@
+schema_version: 6
+tracker: memory
+id: DX-221
+external_id: 69ffebbd4395b8ca58f88b48
+parent_id: DX-215
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Event-Driven Worker > Phase 6: Cleanup + docs + epic acceptance verification"
+description: |-
+  ## Context
+
+  Final phase of the Event-Driven Worker epic (DX-215). After Phase 5 (DX-220) lands, the system is fully event-driven and the cron is a slim Trello-inbound + audit sweep. This phase deletes residual dead code, updates documentation, and verifies the epic-level acceptance criteria.
+
+  ## Solution
+
+  ### Dead code sweep
+
+  Search for and delete any remaining references to:
+
+  - `_poll` symbol (the function name in the old poller).
+  - "tick" in code comments where the comment refers to dispatch decisions, parent derivation, or tracker outbound (audit comments referring to "1-min sweep" are fine).
+  - "single-dispatch-per-tick invariant" — the invariant is gone (multi-worker landed in DX-200 + Phase 4 of this epic; the scheduler dispatches as agents become free, not per tick).
+  - `state.consecutiveFailures` / `state.backoffUntil` — dispatch backoff is now per-dispatch, not per-poller-tick.
+
+  Each deletion paired with a test update that asserts the symbol is gone.
+
+  ### Documentation updates
+
+  **`CLAUDE.md`** (project root):
+
+  - "Architecture" section diagram updated to show: chokidar → reconcileIssue → DB + Trello + scheduler. Cron shown as a separate path for Trello inbound + audit only.
+  - The "Slack message → Router → dispatch → spawnAgent" arrow stays (Slack path unchanged).
+  - "Local YAML → Poller → dispatch" arrow becomes "Local YAML → chokidar → reconcileIssue → scheduler → dispatch".
+
+  **`.claude/rules/agent-dispatch.md`**:
+
+  - Spawn-Flow section step 1 ("Trigger fires: HTTP POST /api/launch, the per-repo poller picks up a local YAML in...") updates: replace "the per-repo poller picks up" with "the per-repo chokidar watcher fires reconcileIssue, which signals the scheduler when the YAML becomes dispatchable".
+  - Add section "Reconcile chokepoint" linking to the new rule below.
+
+  **New rule: `.claude/rules/event-driven.md`**:
+
+  - Reconcile contract: trigger types, fanout shape, per-step error policy.
+  - Mutex semantics: per-card, queueing behavior.
+  - Recursion bounds: depth cap 5, visited set.
+  - Cron audit role: drift catcher only, not a primary code path.
+  - Forbidden patterns: bypassing reconcile to mutate state, second chokidar watcher, polling for state-change.
+
+  **Update `CLAUDE.md` "Auto-loaded rules" table** to point at the new event-driven rule when touching `src/issue/reconcile.ts`, `src/dispatch/scheduler.ts`, or `src/cron/sync-and-audit.ts`.
+
+  ### Helper module shape final pass
+
+  After all moves in Phases 1-5, audit the `src/issue/reconcile/` subtree for:
+
+  - Files >300 LOC → split.
+  - Helpers used by exactly one caller → inline back into reconcile.
+  - Pure helpers tested via reconcile.test.ts → consider extracting unit tests for the helpers themselves.
+
+  ### Epic-level verification
+
+  Walk every AC on DX-215. For each, capture evidence:
+
+  - Reconcile is sole entry point: grep for direct `writeIssue` calls outside `src/issue/reconcile.ts` — must return zero hits. Document the grep output in a comment on DX-215.
+  - Latency claims: capture a local-environment dispatch from YAML write to claude spawn; record elapsed ms.
+  - LOC claims: `wc -l src/cron/sync-and-audit.ts` < 300.
+  - Drift audit zero: query the recorded `audit-drift` system errors over the previous 7-day window in dev; must be zero.
+  - Multi-worker concurrency: re-run `make test-system-multi-worker`; assert 3 commits land on main.
+
+  Comment all evidence on DX-215 before flipping it Done.
+
+  ## Files
+
+  Modify:
+
+  - `CLAUDE.md` (architecture diagram).
+  - `.claude/rules/agent-dispatch.md` (Spawn-Flow section).
+  - `.claude/rules/event-driven.md` (new file; consider whether to ship as a plugin rule under `~/web/claude-plugins/danxbot/rules/event-driven.md` per global CLAUDE.md mandatory pre-edit check).
+  - Possibly: helper module split / inline per the audit.
+
+  Modify (deletions):
+
+  - Any module retaining vestigial `_poll` / "tick" / `consecutiveFailures` references.
+
+  Comment:
+
+  - DX-215 epic body — append epic-level verification evidence.
+
+  ## Test plan
+
+  1. `grep -rn '_poll\|consecutiveFailures\|backoffUntil\|single-dispatch-per-tick' src/ docs/ .claude/` — zero matches outside historical commit messages.
+  2. Manual smoke: edit a YAML; observe full pipeline (DB upsert → Trello push → scheduler dispatch) within 2s in local dev.
+  3. `make test`, `make test-system`, `make deploy-smoke TARGET=gpt` — all green.
+  4. Marketplace plugin source updates (if `event-driven.md` lives there) committed + pushed; `/reload-plugins` not required for new sessions per the DX-211 retro lesson.
+
+  ## Acceptance
+
+  - `_poll` and "tick" terminology eliminated from the codebase outside historical commits.
+  - `CLAUDE.md` architecture diagram reflects the event-driven model.
+  - `.claude/rules/event-driven.md` exists and documents the reconcile contract.
+  - Helper module audit completed; no module >300 LOC; pure helpers have direct unit tests where they have non-trivial logic.
+  - DX-215 epic-level ACs all verified with evidence captured in a comment on DX-215.
+  - Multi-worker concurrency test (DX-164 system fixture) green.
+  - `make test`, `make test-system`, `make deploy-smoke TARGET=gpt` green.
+
+  ## Legacy-poller protections — design replacements (DX-242 / DX-243)
+
+  Two protections lived in the legacy poller's per-tick state (`state.consecutiveFailures` / `state.backoffUntil`) + the per-tick failure handler. DX-242 removed legacy entirely; this phase MUST design + ship per-dispatch equivalents OR explicitly retire each w/ written rationale of what replaces them.
+
+  5. **Stuck-card recovery — auto-escalate to Needs Help on N consecutive failures.** Legacy: `state.consecutiveFailures` counter incremented on each agent failure; at threshold the card moves to Needs Help w/ a comment explaining the failures. Replacement: per-dispatch failure tally on the card YAML (`dispatch.failure_count` or similar) so the count survives worker restart; scheduler's `onDispatchStop({status: "failed"})` increments + triggers the Needs Help move at threshold. Retains the production safeguard against infinite-retry loops.
+
+  6. **Consecutive-failure backoff — halt dispatch loop when many failures in a row.** Legacy: `state.backoffUntil` blocked the entire poller from dispatching anything for an exponentially-growing window after N failures (broken-environment circuit breaker). Replacement: scheduler tracks per-agent + per-card backoff windows independently — a single broken card doesn't halt other cards / agents. Implementation: extend the per-dispatch TTL timer (DX-219) to also schedule a "quarantine until" timestamp on the agent record; picker skips quarantined agents until expiry. Also surface a system-error banner via `recordSystemError` when an agent enters quarantine so operator notices.
+
+  ## Out of scope
+
+  - New scheduler policies (this is purely cleanup + docs).
+  - Webhook-based Trello inbound (separate effort).
+  - Per-agent model preference / per-agent tool allowlist (out of scope per DX-158).
+  - Cross-repo reconcile (each repo keeps its own watcher + scheduler).
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a002c9d7878708f086c7202
+    title: "Stuck-card recovery: per-dispatch failure tally lands on YAML; scheduler auto-escalates to Needs Help at threshold (replaces legacy `state.consecutiveFailures`)"
+    checked: false
+  - check_item_id: 6a002c9ee9fa5b6d58fb354e
+    title: "Per-agent + per-card backoff/quarantine: scheduler skips quarantined agents until expiry; surfaces via `recordSystemError` (replaces legacy `state.backoffUntil`)"
+    checked: false
+  - check_item_id: 6a002c9e2611171064d13181
+    title: "Audit grep: `_poll`, `consecutiveFailures`, `backoffUntil`, `legacy single-card` zero matches in `src/` (excluding historical commit messages)"
+    checked: false
+  - check_item_id: 6a002c9e90e2f4d178fbbd5c
+    title: "DX-243 audit closed: every legacy-only protection (lock, DB guard, creds guard, post-dispatch check, stuck-card recovery, backoff) verifiably ported OR retired w/ written rationale"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on:
+  reason: Phase 5 (DX-220) must land first — Phase 6 verifies epic-level acceptance which assumes all prior phases shipped.
+  timestamp: 2026-05-09T00:00:00Z
+  by:
+    - DX-220
+blocked: null
+requires_human: null

@@ -1,0 +1,92 @@
+schema_version: 6
+tracker: memory
+id: DX-251
+external_id: 6a00bea7d5308b99679a016c
+parent_id: DX-247
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Danx UI > Phase 4: Swap AgentScheduleEditor to DanxToggle + DanxRangeSlider"
+description: |-
+  ## Context
+
+  Phase 4 of DX-247. After DX-250 publishes `@thehammer/danx-ui` with Toggle + RangeSlider, replace the temporary native-input UI in `dashboard/src/components/agents/AgentScheduleEditor.vue` with the proper Danx UI primitives.
+
+  The temporary impl (a separate, earlier commit landed alongside the epic creation) introduced `always_on: boolean` on `AgentSchedule` plus a per-day on/off + window picker UX using native `<input type="checkbox">` and two native `<input type="range">`. This card swaps those native inputs for `DanxToggle` + `DanxRangeSlider` while preserving the data shape exactly — no schema changes here.
+
+  ## Solution
+
+  ### Bump consumer
+
+  ```
+  cd ~/web/danxbot/dashboard
+  yarn add @thehammer/danx-ui@^<new-version>
+  ```
+
+  ### `AgentScheduleEditor.vue` rewrite
+
+  Replace:
+
+  - The 24/7 `<input type="checkbox" v-model="always_on">` → `<DanxToggle v-model="always_on">`.
+  - Each per-day `<input type="checkbox">` (on/off) → `<DanxToggle v-model="dayEnabled[key]">`.
+  - The two-handle window picker (currently two stacked native `<input type="range">`) → a single `<DanxRangeSlider v-model="dayWindow[key]" :min="0" :max="1440" :step="15">` with a `value` slot that calls `formatHHMM(value)`.
+
+  Helper functions stay (`hhmmToMinutes`, `minutesToHHMM`, `windowToTuple`, `tupleToWindow`).
+
+  When `always_on` is `true`, the per-day rows render disabled (DanxToggle + DanxRangeSlider both accept `disabled`). Toggling 24/7 off restores the per-day state — the data on disk is preserved (the entire point of the `always_on` field per the epic context).
+
+  ### Update tests
+
+  - `dashboard/src/components/__tests__/AgentScheduleEditor.test.ts` — replace native-input selectors (`input[type="checkbox"]`, `input[type="range"]`) with the danx-ui component selectors. Preserve every behavior assertion (toggle 24/7 → all rows disabled; per-day toggle off → window slider hidden/disabled; window emit shape).
+  - Confirm dashboard tsc + vitest pass: `cd dashboard && npx vue-tsc --noEmit && npx vitest run`.
+
+  ### Out of scope
+
+  - No backend changes (`always_on` already validated).
+  - No new agent capabilities.
+  - No restyling beyond what Danx UI's tokens provide; if the visual matches the rest of the dashboard poorly, file a follow-up theming card — do not patch it here.
+
+  ## Files
+
+  - **EDIT** `dashboard/src/components/agents/AgentScheduleEditor.vue`
+  - **EDIT** `dashboard/src/components/__tests__/AgentScheduleEditor.test.ts`
+  - **EDIT** `dashboard/package.json` — bump `@thehammer/danx-ui`
+  - **EDIT** `dashboard/yarn.lock` (or `package-lock.json`) — generated
+
+  ## Acceptance
+
+  - [ ] `import { DanxToggle, DanxRangeSlider } from "@thehammer/danx-ui"` resolves at the new minor in `dashboard/`
+  - [ ] `AgentScheduleEditor.vue` contains zero `<input type="checkbox">` and zero `<input type="range">`
+  - [ ] 24/7 toggle: ON → all per-day rows visually disabled; OFF → per-day state restored exactly as it was
+  - [ ] Per-day toggle: OFF → range slider for that day disabled/hidden; ON → previous window restored
+  - [ ] Window slider min/max/step: `[0, 1440, 15]`; bubble label uses `formatHHMM(value)`
+  - [ ] `cd dashboard && npx vitest run` passes
+  - [ ] `cd dashboard && npx vue-tsc --noEmit` passes
+  - [ ] `npx vitest run` (backend) passes — sanity, no backend changes expected
+  - [ ] Visual check in dev (port 5566): create new agent default 24/7 ON; toggle off; toggle a single day; drag window; save; reload — settings round-trip
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

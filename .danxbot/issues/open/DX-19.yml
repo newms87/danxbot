@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-19
 external_id: 69f2275e61645cb69bd13025
@@ -26,6 +26,7 @@ description: |-
 
   The current 3-way duplication is acceptable per the original code-reviewer audit on `gxYOlv5M`. Defer until a fourth optional repo field actually lands; introducing the helper for 3 instances right now is borderline premature.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -45,5 +46,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

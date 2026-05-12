@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-27
 external_id: 69f17f4c2fd19793d391b165
@@ -32,6 +32,7 @@ description: |-
 
   `6AjSUCUQ` (Halt-flag AC12 fake-claude integration test).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -51,5 +52,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

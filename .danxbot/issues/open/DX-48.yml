@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-48
 external_id: 69ec3120e95d0e8486f817c8
@@ -29,6 +29,7 @@ description: |-
   - `deploy/workers.test.ts` — reference for the string-shape assertion pattern
   - `deploy/test-helpers.ts` — already has fixtures; extend if needed
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -67,5 +68,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

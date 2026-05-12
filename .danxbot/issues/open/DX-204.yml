@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-204
 external_id: 69fe4ed34ebc41d8115eb0bf
@@ -105,6 +105,7 @@ description: |
   empirical migration verification instead. This card carries the
   uncovered structural fix.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -133,5 +134,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

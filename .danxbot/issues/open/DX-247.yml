@@ -1,0 +1,133 @@
+schema_version: 6
+tracker: memory
+id: DX-247
+external_id: 6a01461bf78094314ebd3653
+parent_id: null
+children:
+  - DX-248
+  - DX-249
+  - DX-250
+  - DX-251
+dispatch: null
+status: Review
+type: Epic
+title: "[Danx UI Adoption] Toggle + RangeSlider components for agent schedule UI"
+description: |-
+  ## Context
+
+  The danxbot dashboard's `AgentScheduleEditor.vue` (DX-160 Phase 2) currently uses raw `<input type="text">` for `HH:MM-HH:MM` per-day windows + a native `<input type="checkbox">` for the agent-level enable. The redesigned schedule UI (24/7 master toggle + per-day on/off + dual-handle range slider for the active window) wants two reusable primitives danx-ui doesn't yet ship:
+
+  1. **`DanxToggle`** — accessible boolean switch with v-model, sized variants, disabled state, three-tier CSS tokens.
+  2. **`DanxRangeSlider`** — single OR dual-handle range input with v-model, min/max/step, keyboard support, disabled state, value formatter slot.
+
+  `~/web/danx-ui` (the `@thehammer/danx-ui` package source) currently has: `badge`, `button`, `chip`, `code-viewer`, `dialog`, `field-wrapper`, `icon`, `input`, `markdown-editor`, `popover`, `progress-bar`, `select`, `skeleton`, `tabs`, `textarea`, `toast`, `tooltip`. Neither toggle nor slider exists. (`useNestedJsonToggle.ts` is a code-viewer composable, not a component.)
+
+  This epic owns the upstream component build, the publish, and the danxbot-side swap. A temporary native-input implementation lands in danxbot first (separate small commit) so the schedule UX is shipped before this epic completes; the swap phase (DX-251) replaces those temporary inputs once `@thehammer/danx-ui` exposes the new components.
+
+  ## Goals
+
+  - Build `DanxToggle` + `DanxRangeSlider` in `~/web/danx-ui` per its component-architecture rules: `defineModel`, `<script setup lang="ts">`, named exports, three-tier tokens, 100% test coverage, demo page registered in all three places (`demo/main.ts`, `demo/App.vue`, `demo/composables/useLivePreview.ts`), `docs/*.md` user reference, `yarn test:coverage` clean, `/flow-verify` passing.
+  - Publish a new `@thehammer/danx-ui` minor version exposing the two components + their styles via `package.json` exports. Publishing IS the completion step (`thehammer-publish` skill — standing autonomous-publish authorization). No operator gate.
+  - Swap `AgentScheduleEditor.vue` in danxbot from native inputs → `DanxToggle` + `DanxRangeSlider`. Verify visually + via existing dashboard tests.
+
+  ## Phases
+
+  | Card | Phase | Scope |
+  |---|---|---|
+  | DX-248 | Phase 1 | `DanxToggle` component in `~/web/danx-ui/src/components/toggle/`. Sizes (sm/md/lg), v-model boolean, disabled, label slot, ARIA `role="switch"`, three-tier tokens (`--dx-toggle-*`), 100% coverage, demo page, `docs/toggle.md`. |
+  | DX-249 | Phase 2 | `DanxRangeSlider` component in `~/web/danx-ui/src/components/range-slider/`. v-model `number \| [number, number]` (single vs dual-handle inferred from initial value or `dual` prop), `min`/`max`/`step`/`disabled`, value formatter slot, keyboard arrow + page nav, ARIA `role="slider"` per handle, three-tier tokens (`--dx-range-*`), 100% coverage, demo page, `docs/range-slider.md`. |
+  | DX-250 | Phase 3 | Publish `@thehammer/danx-ui` minor bump (`yarn build` → `npm publish`) with both components exported. Verify `package.json#exports` exposes `./components/toggle`, `./components/toggle/styles`, `./components/range-slider`, `./components/range-slider/styles`. Smoke test: `npm view @thehammer/danx-ui dist.tarball` shows the new files. Publishing follows the standing-authorization rule for `@thehammer/*` (no operator gate). |
+  | DX-251 | Phase 4 | In danxbot: `yarn add @thehammer/danx-ui@latest` in `dashboard/`. Replace the temporary native-input UI in `AgentScheduleEditor.vue` with `DanxToggle` (24/7 master + per-day on/off) and `DanxRangeSlider` (per-day window). Update `dashboard/src/components/__tests__/` accordingly. Confirm `cd dashboard && npx vitest run` + `cd dashboard && npx vue-tsc --noEmit` pass. |
+
+  ## Locked decisions
+
+  - **Two separate cards for the components.** Toggle + RangeSlider are independent surface; one PR per component lets test/doc/demo work parallelize cleanly.
+  - **Dual-handle inferred from v-model shape.** `v-model="num"` → single. `v-model="[lo, hi]"` → dual. Avoids a `mode` prop that conflicts with the model.
+  - **No emit for "release" vs "input".** RangeSlider emits `update:modelValue` on every value change. If a consumer needs throttling that's their concern.
+  - **CSS tokens only, no styling props.** Per danx-ui forbidden-patterns table. Variants (danger/success/etc.) via the shared `useVariant` composable.
+  - **Publish is autonomous.** `thehammer-publish` skill carries the standing authorization. Phase 3 does not pause for operator approval.
+  - **Temp native-input UI ships separately.** A small companion commit in danxbot (NOT a card in this epic — temporary by design) implements the new schedule shape (`always_on` master + per-day on/off + range slider) using native `<input type="checkbox">` + two native `<input type="range">`. Lives until DX-251 swaps them out.
+
+  ## Out of scope
+
+  - No new variant types specific to toggle/range — reuse `VariantType` from `src/shared/types`.
+  - No theme overhaul of existing components.
+  - No backend schema changes — the schedule data shape (`AgentSchedule`) gets one additive field (`always_on: boolean`) handled in the temp-impl commit, not this epic.
+
+  ## Acceptance (epic-level — verified after Phase 4)
+
+  - `import { DanxToggle, DanxRangeSlider } from "@thehammer/danx-ui"` works in danxbot's dashboard.
+  - `AgentScheduleEditor.vue` contains zero native `<input type="checkbox">` / `<input type="range">` — every interactive control is a Danx UI component.
+  - `cd ~/web/danx-ui && yarn test:coverage` passes 100% thresholds.
+  - `cd ~/web/danxbot && npx vitest run` + `cd dashboard && npx vitest run` + `cd dashboard && npx vue-tsc --noEmit` all green.
+  - `npm view @thehammer/danx-ui versions` includes the new minor with both components.
+priority: 5
+triage:
+  expires_at: 2026-05-12T02:29:03Z
+  reassess_hint: ""
+  last_status: Keep
+  last_explain: "Epic well-formed: 4 phase children (DX-248..DX-251) linked, all in Review; danx-ui anchors verified (component list, AgentScheduleEditor.vue consumer, schema). I=3 moderate UX/dev cleanup with reusable primitives + concrete consumer swap; C=5 all anchors verified in code; E=2 multi-session across two repos w/ 100% coverage + publish + swap."
+  ice:
+    total: 30
+    i: 3
+    c: 5
+    e: 2
+  history:
+    - timestamp: 2026-05-11T02:29:03Z
+      status: Keep
+      explain: "Epic well-formed: 4 phase children (DX-248..DX-251) linked, all in Review; danx-ui anchors verified (component list, AgentScheduleEditor.vue consumer, schema). I=3 moderate UX/dev cleanup with reusable primitives + concrete consumer swap; C=5 all anchors verified in code; E=2 multi-session across two repos w/ 100% coverage + publish + swap."
+      expires_at: 2026-05-12T02:29:03Z
+      ice:
+        total: 30
+        i: 3
+        c: 5
+        e: 2
+ac:
+  - check_item_id: 6a01461c26ca84dacd3c4747
+    title: DX-248, DX-249, DX-250, DX-251 all closed Done.
+    checked: false
+  - check_item_id: 6a01461cfe29661a7436936f
+    title: "`AgentScheduleEditor.vue` uses `DanxToggle` + `DanxRangeSlider` exclusively (no native checkbox/range inputs)."
+    checked: false
+  - check_item_id: 6a01461cf791d3859b9ab387
+    title: "`@thehammer/danx-ui` published to npm with both components in `exports`."
+    checked: false
+comments:
+  - id: 6a01461fdb2172a69979be05
+    author: danxbot-triage
+    timestamp: 2026-05-11T02:59:43.370Z
+    text: |
+      <!-- danxbot -->
+
+      ## Triage — 2026-05-11
+
+      **Status:** Review → ToDo
+      **Decision:** Keep
+      **ICE:** 30 (3×5×2)
+      **Explain:** Epic well-formed: 4 phase children (`DX-248`..`DX-251`) linked and all in Review. Danx UI anchors verified — current `@thehammer/danx-ui` component list quoted accurately (no `toggle` / `range-slider` yet), consumer `AgentScheduleEditor.vue` (DX-160 Phase 2) named, `AgentSchedule` schema field call-outs match. Locked decisions sound (dual-handle inferred from v-model shape, CSS tokens only, autonomous publish via `thehammer-publish`). Phases scope is clean: two component builds → publish → swap. **I=3** moderate UX/dev cleanup with reusable primitives + concrete consumer swap (not production-blocking). **C=5** all anchors verified in code. **E=2** multi-session across two repos with 100% coverage + demo + docs + publish + swap.
+  - id: 6a01461d1073a3484f297308
+    author: newms87
+    timestamp: 2026-05-11T02:59:41.228Z
+    text: |
+      ## Triage — 2026-05-11
+
+      **Status:** Review → ToDo
+      **Decision:** Keep
+      **ICE:** 30 (3×5×2)
+      **Explain:** Epic well-formed: 4 phase children (`DX-248`..`DX-251`) linked and all in Review. Danx UI anchors verified — current `@thehammer/danx-ui` component list quoted accurately (no `toggle` / `range-slider` yet), consumer `AgentScheduleEditor.vue` (DX-160 Phase 2) named, `AgentSchedule` schema field call-outs match. Locked decisions sound (dual-handle inferred from v-model shape, CSS tokens only, autonomous publish via `thehammer-publish`). Phases scope is clean: two component builds → publish → swap. **I=3** moderate UX/dev cleanup with reusable primitives + concrete consumer swap (not production-blocking). **C=5** all anchors verified in code. **E=2** multi-session across two repos with 100% coverage + demo + docs + publish + swap.
+history:
+  - timestamp: 2026-05-11T02:59:34.903Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Review
+    note: All non-cancelled children Review — parent Review
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

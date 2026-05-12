@@ -1,0 +1,130 @@
+schema_version: 6
+tracker: memory
+id: DX-291
+external_id: 6a023a3e39d5bcdf392a8f5c
+parent_id: null
+children:
+  - DX-292
+  - DX-293
+  - DX-294
+  - DX-295
+  - DX-296
+  - DX-297
+  - DX-298
+dispatch: null
+status: ToDo
+type: Epic
+title: Pre-dispatch prep step on agent worktree (replaces conflict-check timeout cliff)
+description: |-
+  ## Why
+
+  Today's `runConflictCheck` (src/dispatch/conflict-check.ts) is a separate Claude dispatch in the shared `issue-worker` workspace, capped at 90s + 5s grace. Three failure modes routinely fire false-positive conflicts:
+
+  1. The check's Claude session times out (90s exceeded) → conservative `ok: false` → candidate card stamped `waiting_on` with reason `"Conflict-check rejection: Conflict-check did not complete cleanly (status=timeout, summary=Agent exceeded max runtime of 2 minutes); treating as conflict (conservative)"`. Real conflict count: zero. Pattern observed on DX-273 + DX-274 at `2026-05-11T04:52:01Z`.
+  2. Conflict-check uses the shared workspace cwd, NOT the agent's worktree → check has no context on the worktree's current branch state, so it cannot triage "is my branch even ready to take new work?" alongside the file-overlap question.
+  3. Branch prep (`fetchOrigin` + `validate` + `resetClean`) is a separate concern inside `dispatchWithRecovery`, runs AFTER conflict-check passes, and uses a destructive `git reset --hard` on every "clean" path. Across the two-step gauntlet the system spends 3 dispatches per card on a bad day (conflict-check + recovery + work) and exposes the worktree to `git reset --hard` exactly when validate races.
+
+  ## What we are building
+
+  A single PRE-AGENT dispatch on the **target agent's worktree** that combines branch prep + conflict-check + WIP commit handling + (optionally) the actual work, governed by a per-repo settings toggle.
+
+  **Settings toggle** `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json`:
+
+  - `"combined"` (default) — one dispatch on the worktree carrying BOTH the `danx-prep` skill body AND `/danx-next` body. The agent runs prep first, emits a verdict via the new `danxbot_prep_verdict` MCP tool, and if the verdict is `ok` continues inline into the card work in the same session. Cheaper (1 spawn) + preserves prep context for the work agent.
+  - `"separate"` — one prep dispatch ONLY. Verdict via `danxbot_prep_verdict`, then `danxbot_complete`. Poller re-picks the card on the next tick and dispatches the work agent. Cleaner failure isolation, useful for cost-sensitive deployments or debugging.
+
+  Both modes share the same prep skill, same MCP tool, same worktree, same verdict shape.
+
+  ## Prep skill workflow (`danx-prep`, lives at `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.md`)
+
+  1. `git fetch origin`.
+  2. Inspect `git status --porcelain` + `git rev-list --left-right origin/main...HEAD`.
+  3. **Uncommitted work present** → search every YAML under `<repo>/.danxbot/issues/{open,closed}/` for the card most-likely-associated with the changed files (heuristic: file paths mentioned in description / AC / comments; recent activity timestamps; assigned_agent matches). Commit the WIP to disk + append a `comments[]` entry on the found card: `"recovered uncommitted work from prior session — files: <paths>"`. If no card matches well, commit anyway with a fallback comment on a freshly-created `Action Items` card explaining the orphan recovery.
+  4. **Branch sync:**
+     - Pure behind origin/main → `git pull --ff-only origin/main`.
+     - Commits ahead of origin/main (real work) → `git rebase origin/main`.
+     - Rebase conflict OR ff-only refuses → `git rebase --abort` (or no-op) → emit verdict `abort` (agent broken).
+  5. **Conflict check:** read every `<repo>/.danxbot/issues/open/*.yml` with `status: "In Progress"` (excluding self if applicable). Reason about file-scope overlap between this candidate and each in-progress sibling.
+  6. **Emit verdict** via `mcp__danxbot__danxbot_prep_verdict({verdict, reason, blocked_by?, broken_details?})`:
+     - `ok` → branch ready, no overlap, no WIP unhandled. (If `prepMode = "combined"` agent now begins the work body inline.)
+     - `waiting_on` → overlap with one or more in-progress cards; `blocked_by` lists their `ISS-N`. Worker stamps `waiting_on` on the YAML.
+     - `blocked` → the CARD itself cannot proceed (spec ambiguous, AC impossible, etc.). Worker stamps `status: Blocked` + `blocked` record.
+     - `abort` → AGENT environment is in a bad state and cannot recover without destroying work. Worker stamps `agents.<name>.broken = {reason, suggested_steps, set_at}` in settings.json → poller skips this agent indefinitely → dashboard renders red banner with reason + suggested steps + "Mark Resolved" button.
+
+  ## ABSOLUTE RULE: No destructive git ops anywhere in this flow
+
+  `git reset --hard`, `git checkout <ref> -- <path>`, `git restore`, `git clean -f` are FORBIDDEN — see `~/web/claude-plugins/dev/skills/git-discipline/SKILL.md` "Never Destroy Work. Ever." If work must be removed, commit-first / delete-second in a follow-up commit with explanation. The legacy `worktree-manager.ts#resetClean` is retired in Phase 2; replaced with `syncWorktree` (fetch + ff-only OR rebase OR abort).
+
+  ## Architecture pointers
+
+  - Multi-agent pick: `src/poller/multi-agent-pick.ts`
+  - Legacy conflict-check: `src/dispatch/conflict-check.ts` (retired in Phase 6)
+  - Worktree manager: `src/agent/worktree-manager.ts`
+  - Recovery routing: `src/dispatch/recovery-mode.ts` (subsumed by prep)
+  - Settings: `src/settings-file.ts`
+  - MCP infrastructure server: `src/mcp/danxbot-server.ts`
+  - Worker dispatch routes: `src/worker/dispatch.ts`, `src/worker/server.ts`
+  - Inject path for the skill: `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/`
+  - Dashboard agents tab: `src/dashboard/agents-*.ts` + `dashboard/src/components/Agents*`
+
+  ## Out of scope
+
+  - Changing the per-agent worktree layout (DX-161 stands).
+  - Changing the legacy single-card poller path (no-agent-roster repos keep using `runConflictCheck` — actually no, conflict-check is retired entirely in P6; single-card path uses prep too).
+  - Migrating existing `waiting_on` records authored by the old conflict-check timeout.
+
+  ## Test plan
+
+  - Unit per phase + integration for the verdict round-trip + system test in P6 covering full happy + sad path on a real worktree.
+  - See each phase card for its own AC + test scope.
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a023a3fb26af4f32e458703
+    title: Settings schema, MCP tool, prep skill, multi-agent-pick, dashboard surface, and conflict-check retirement all land via the seven phase cards
+    checked: false
+  - check_item_id: 6a023a405dac2e1496fa36fb
+    title: "Real conflict-check happy path: prep dispatch returns ok in <30s on a clean worktree with no in-progress siblings (faster than the legacy 90s cap)"
+    checked: false
+  - check_item_id: 6a023a415e75adc1068b5f8b
+    title: "Synthetic env-broken case: prep returns abort, agent marked broken in settings, dashboard surfaces red banner, next tick skips this agent until human clears via dashboard"
+    checked: false
+  - check_item_id: 6a023a426eefb2253d94396b
+    title: "Synthetic conflict case: prep returns waiting_on with blocked_by, candidate YAML carries waiting_on.by referencing the overlapping card(s), auto-clears when those reach terminal status"
+    checked: false
+  - check_item_id: 6a023a434909d5f943ebc1b9
+    title: DX-273 + DX-274 (or analogous false-positive parents) no longer reproduce the legacy timeout-as-conflict failure mode
+    checked: false
+  - check_item_id: 6a023a433459b3046bc6c8aa
+    title: No git reset --hard, git checkout <ref>, git restore, or git clean -f anywhere in the new flow (verified by grep on the diff)
+    checked: false
+  - check_item_id: 6a023a4415a1482b3cddffaa
+    title: src/dispatch/conflict-check.ts deleted; its tests deleted or migrated to the new flow
+    checked: false
+  - check_item_id: 6a023a44fb95a7b067a57dd2
+    title: src/agent/worktree-manager.ts#resetClean removed; replaced by syncWorktree (ff-only OR rebase OR abort)
+    checked: false
+  - check_item_id: 6a023a45e1e834fc31de5471
+    title: .claude/rules/agent-dispatch.md Forbidden Patterns table updated to cite the new flow + the destructive-git ban
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

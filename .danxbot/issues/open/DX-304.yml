@@ -1,0 +1,162 @@
+schema_version: 6
+tracker: trello
+id: DX-304
+external_id: 6a026171e55f5c7b89a758f3
+parent_id: DX-301
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "DX-301 > Phase 3: TrelloConfigPanel.vue + masked credential edit + read-only board IDs"
+description: |-
+  Parent epic: **DX-301** — Dashboard Settings: per-repo Trello config section.
+
+  Builds on Phase 1 (the `trelloSync` toggle) and Phase 2 (the `.env` writer + credential PATCH route). This phase ships the **dedicated dashboard panel** the operator sees on the per-repo Settings page.
+
+  ## Vue surface
+
+  New component: `dashboard/src/components/agents/TrelloConfigPanel.vue`.
+
+  Layout (matching the ASCII mock in the parent epic):
+
+  ```
+  ┌── Trello Configuration ──────────────────┐
+  │ Sync enabled:  [●○○] true / false / null │
+  │ Effective: <true|false> (from <override|env-default>) │
+  │                                          │
+  │ Board ID: <boardId> (read-only)          │
+  │ ToDo list: <todoListId> (read-only)      │
+  │                                          │
+  │ API Key:    [••••…ab12] [edit] [reveal]  │
+  │ API Token:  [••••…cd34] [edit] [reveal]  │
+  │                                          │
+  │ [Save]                                   │
+  └──────────────────────────────────────────┘
+  ```
+
+  ### Sync-enabled toggle row
+
+  Reuse `FeatureToggle.vue` with `feature="trelloSync"`. The toggle row from Phase 1 (added to `RepoCard.vue` for compatibility) MOVES into this panel and is removed from the generic feature list — the dedicated panel is the authoritative surface. Three-valued semantics (`true` / `false` / `null`) unchanged.
+
+  Display the **effective** value below the toggle: `Effective: true (from override)` or `Effective: false (from env default)` so operators immediately see which source is winning.
+
+  ### Read-only board ID + ToDo list ID
+
+  Source: `agent.settings.display.trello.boardId` and (new) `agent.settings.display.trello.todoListId`.
+
+  Phase 1 already exposes `display.trello.boardId` and `display.trello.configured`. The `todoListId` is not currently in the display block; ADD it in `buildDisplayFromContext` in `src/settings-file.ts` (also expose `inProgressListId`, `doneListId` if cheap — but the AC asks only for `boardId` + `todoListId`).
+
+  Render both fields as readonly text rows. Append a `[copy]` button for the boardId for convenience (`navigator.clipboard.writeText`).
+
+  ### API key + API token edit fields
+
+  - Initial state: masked. Display value = `mask(apiKey, 4)` from `display.trello.apiKey` (already exists as a masked mirror in the display block; Phase 2 doesn't add a raw-value surface).
+  - `[edit]` button → switches the row to an input field. Input starts empty (operators always type the full new credential — we don't pre-fill secrets even masked).
+  - `[reveal]` button → only renders when `import.meta.env.DEV === true`. Click toggles the input's `type` between `"password"` and `"text"`. In production builds the button is omitted entirely; the rule is "dev mode only" per AC #6.
+  - `[Save]` posts `PATCH /api/agents/:repo/trello-credentials` (the route from Phase 2) with only the fields the operator edited (omit untouched fields entirely so we never accidentally overwrite a token while editing the key).
+  - Disable [Save] when nothing is dirty; show a spinner during PATCH; surface 4xx / 5xx errors inline.
+  - After successful PATCH: re-fetch the agent snapshot so the display masks update to the new last-4.
+
+  ### Mount point
+
+  `dashboard/src/components/SettingsPage.vue` already renders `RepoCard.vue` for the selected repo. Mount `TrelloConfigPanel` as a sibling section UNDER `RepoCard`'s feature toggles (or inside `RepoCard` if that fits the existing layout better — pick whichever produces less visual churn).
+
+  Move the `trelloSync` row out of `RepoCard.vue`'s generic feature loop — it lives in the new panel now (the panel's toggle is THE toggle for the feature, single source of truth in the UI).
+
+  ## API client extension
+
+  `dashboard/src/api.ts`: add `patchTrelloCredentials(repo, {apiKey?, apiToken?})` that posts to the new route. Returns `{updated: string[]}`. Use the existing bearer-injection wrapper.
+
+  ## Tests
+
+  - `dashboard/src/components/agents/TrelloConfigPanel.test.ts`:
+    - Renders all five rows (toggle, effective line, board ID, ToDo list ID, key+token rows).
+    - Toggle round-trip: click cycles `null → !envDefault → opposite → null`; emits the right `feature: "trelloSync"` payload to the parent.
+    - Reveal button hidden when not in dev mode (mock `import.meta.env.DEV`).
+    - Reveal toggles password ↔ text input type.
+    - Save with only `apiKey` dirty: API call body has `apiKey`, not `apiToken`.
+    - Save with both dirty: both fields included.
+    - 400 from server surfaces inline.
+  - `dashboard/src/components/SettingsPage.test.ts`: panel renders under the active repo's RepoCard; switching repos re-mounts the panel with the new repo's data.
+  - `cd dashboard && npx vue-tsc --noEmit` green; `npx tsc --noEmit` green.
+
+  ## Manual smoke (note in retro, not gated)
+
+  1. `make launch-infra` running, dashboard at `http://localhost:5566`.
+  2. Pick a Trello-enabled repo; the new panel renders the current toggle state + masked credentials + board IDs.
+  3. Flip toggle to `false` → tail `make logs REPO=<repo>` and confirm `[<repo>] trello sync disabled` log lines on the next inbound + outbound attempts.
+  4. Edit the API key field with a deliberately-wrong value; Save → 200; tail the worker log and confirm next Trello call fails with auth, then flip toggle back off to stop the failure noise.
+  5. Restore the real key via the same flow; confirm sync resumes.
+
+  ## Out of scope
+
+  - `Reset Trello state` button (clear retry-queue entries for the repo). Defer to a follow-up card if operators ask for it.
+  - Editing `<repo>/.danxbot/config/trello.yml` (board / list / label IDs). Config file remains canonical; this panel is read-only for those.
+
+  ## Key files
+
+  | File | Change |
+  |---|---|
+  | `dashboard/src/components/agents/TrelloConfigPanel.vue` | NEW |
+  | `dashboard/src/components/agents/TrelloConfigPanel.test.ts` | NEW |
+  | `dashboard/src/components/SettingsPage.vue` | Mount the panel under RepoCard |
+  | `dashboard/src/components/agents/RepoCard.vue` | Remove `trelloSync` row from the generic feature list (now owned by the panel) |
+  | `dashboard/src/api.ts` | `patchTrelloCredentials` helper |
+  | `src/settings-file.ts` | Extend `buildDisplayFromContext` to surface `todoListId` (and other list IDs if cheap) |
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a0261727b84424122139611
+    title: Per-repo Settings page renders a `TrelloConfigPanel.vue` section under the active repo's card
+    checked: false
+  - check_item_id: 6a026172b5d435ee6721d542
+    title: Sync-enabled three-valued toggle (true/false/null) lives in the panel; flip persists to `overrides.trelloSync.enabled` and round-trips through `/api/agents/:repo/toggles`
+    checked: false
+  - check_item_id: 6a02617250da3a36e57b8979
+    title: API key + API token edit rows render masked value initially; `[edit]` switches to input; `[reveal]` button renders only when `import.meta.env.DEV` is true; reveal toggles input type between password and text
+    checked: false
+  - check_item_id: 6a02617305a85149098b4f36
+    title: "`[Save]` POSTs only dirty fields via `patchTrelloCredentials`; success re-fetches the agent snapshot; 4xx surfaces inline"
+    checked: false
+  - check_item_id: 6a026173c83504afd7bcf521
+    title: Read-only board ID + ToDo list ID rows render the values from `display.trello.boardId` + `display.trello.todoListId` (`buildDisplayFromContext` extended to surface the latter)
+    checked: false
+  - check_item_id: 6a0261749e1ca2922ee213df
+    title: "`trelloSync` row removed from the generic feature toggle loop in `RepoCard.vue`; the panel is the single UI surface for the feature"
+    checked: false
+  - check_item_id: 6a02617461e78c89353a2ed5
+    title: Dashboard tests cover render + toggle round-trip + reveal visibility + masked-edit round-trip
+    checked: false
+  - check_item_id: 6a02617439783d363dc33fe6
+    title: "`cd dashboard && npx vitest run` green; `cd dashboard && npx vue-tsc --noEmit` green; `npx tsc --noEmit` green; `npx vitest run` (backend) green"
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-11T23:08:37.797Z
+    actor: dispatch:2310df0c-daea-43c1-9f99-917b05127121
+    event: created
+    to: ToDo
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked:
+  reason: "Waits for DX-303 (Phase 2: atomic .env writer + Trello credential PATCH route) — the Vue panel's masked credential edit rows consume the `PATCH /api/agents/:repo/trello-credentials` endpoint that Phase 2 ships."
+  timestamp: 2026-05-11T23:08:00Z
+  by:
+    - DX-303
+requires_human: null

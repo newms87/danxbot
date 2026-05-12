@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-33
 external_id: 69efecad56cd0c321f700448
@@ -66,6 +66,7 @@ description: |-
   - Commit 7042162 — playwright text-block fix where the gap was discovered
   - Commit eae2d4d — workspace wiring that prod failed to pick up
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -85,5 +86,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

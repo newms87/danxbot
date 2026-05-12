@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-121
 external_id: 69df27729976c65c8fd31310
@@ -15,6 +15,7 @@ description: |-
 
   **ICE Score:** 245 = 5 × 7 × 7 (I: 5 — prevents cost runaway and queue congestion from fast users; real risk in shared channels. C: 7 — message-queue.ts already has isolated state, adding a userId counter map is straightforward. E: 7 — isolated to message-queue.ts + one call site in listener.ts, ~2 hours.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -52,5 +53,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

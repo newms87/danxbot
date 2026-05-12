@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-31
 external_id: 69f1304dba6b0d8a9972c198
@@ -40,6 +40,7 @@ description: |-
 
   Test-review of card SWTli9Jz (AgentHandle refactor). Flagged Critical by test-reviewer; deferred to keep that card scoped.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -59,5 +60,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

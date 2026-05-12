@@ -1,0 +1,139 @@
+schema_version: 6
+tracker: memory
+id: DX-275
+external_id: 6a01759d7277b6432971b2a5
+parent_id: null
+children:
+  - DX-276
+  - DX-277
+  - DX-278
+  - DX-279
+dispatch: null
+status: ToDo
+type: Epic
+title: Skill-eval harness — agent-driven regression suite for plugin skill load triggers
+description: |-
+  ## Problem
+
+  Plugin skill triggers are advisory-only. Agents read MANDATORY-tagged trigger lists in skill descriptions + the `base/scripts/plugin-skill-mandate.sh` re-injection, then routinely skip the load when the user phrasing doesn't match the literal trigger words. Confirmed empirically this session:
+
+  - Self-test: fresh CC agent given "tell me what the test results were" against a log full of `✗`/`Failed` produced a bug summary WITHOUT loading `dev:debugging`. Agent admitted skip post-hoc but didn't re-classify the task.
+  - Root cause is task-classification failure, not unread rules. Description-level triggers cannot enforce against the agent's "I'm just summarizing" frame.
+
+  ## Goal
+
+  A regression suite of prompt → expected-skill-load assertions, runnable per-skill, driven by a CC agent. Lets us iterate skill descriptions until each skill triggers correctly across the full prompt corpus (including should-NOT-trigger negatives). Bring all priority skills to ≥95% trigger accuracy on both sides.
+
+  ## Why custom (not off-the-shelf)
+
+  | Tool | Status |
+  |---|---|
+  | Anthropic skill-creator | Right design (eval-set + iteration loop). BLOCKED by [#36570](https://github.com/anthropics/claude-code/issues/36570) (`claude -p` doesn't trigger skills) + [#556](https://github.com/anthropics/skills/issues/556) (`run_eval.py` 0% recall across 144 queries). Both open + unassigned. Cannot use until Anthropic ships fixes. |
+  | SkillCheck | Static linter for SKILL.md spec compliance. Doesn't spawn agents → can't catch trigger skips. Useful as complementary lint, not the test harness. |
+  | promptfoo | YAML-driven trajectory assertions, but OpenAI-acquired March 2026 (uncertainty), and doesn't natively understand CC `Skill` tool. Same custom wrapper effort either way. |
+  | DeepEval / Inspect AI / Braintrust | Designed for in-process agent code (LangChain/etc), not external CLI agents. Wrong shape for danxbot. |
+
+  Danxbot already runs interactive `claude` via host-mode dispatch (per `.claude/rules/agent-dispatch.md` "Host mode MUST be interactive") — interactive mode DOES trigger skills, sidestepping bugs #36570 + #556. We have 80% of the harness already (dispatch, JSONL watcher, status API, jobs API). Cost-to-build is small; cost-to-wait is unknown.
+
+  Adopt skill-creator's eval-set FORMAT (JSON, `[{query, should_trigger}]`) so tests stay portable — drop into Anthropic's runner once #36570 + #556 ship.
+
+  ## Architecture
+
+  ```
+  /skill-eval <plugin>:<skill>
+     ↓
+  1. Read tests/skill-evals/<plugin>-<skill>/eval-set.json
+  2. For each query (parallel, bounded):
+       - dispatch() to isolated workspace (host-mode → interactive claude)
+       - Stage any fixture files
+       - Wait terminal status
+       - Locate JSONL via dispatch tag
+       - Assert: did Skill(<plugin>:<skill>) fire BEFORE first assistant text?
+  3. Aggregate trigger-rate matrix:
+       - should_trigger queries:    X/N pass (recall)
+       - should_not_trigger queries: Y/M pass (precision)
+  4. If <100% on either side: emit per-query failure samples (prompt + JSONL excerpt)
+  5. CC agent reads report → identifies pattern → edits plugin source SKILL.md description → commits + pushes + /reload-plugins → re-runs /skill-eval
+  6. Loop until 100%/100% or operator stops
+  ```
+
+  ## Acceptance
+
+  See phase ACs. Epic-level acceptance: `/skill-eval` works end-to-end on at least 6 priority skills with eval-sets ≥20 queries each (skill-creator-recommended size), achieves ≥95% trigger accuracy on both should-trigger + should-not-trigger sides for each, all green on a single sweep that the CC agent can run + iterate against autonomously.
+
+  ## Out of scope
+
+  - Replacing the existing `dev:debugging` Phase 12 format requirement (that's a separate concern; the harness verifies trigger-load, not output-shape — output-shape gets a different assertion type later if needed).
+  - Production CI integration (V1 is operator-driven `/skill-eval`; CI hook can come later).
+  - Output-quality grading (LLM-as-judge for response shape) — not needed for V1's narrow trigger-load assertion.
+  - Hooking the harness into a Stop-hook for runtime enforcement (decision-log: prompting fixes are preferred; enforcement-hook is a separate epic if prompting can't get us to ≥95%).
+
+  ## Cost estimate
+
+  - Single eval-set run: ~$0.50 (20 queries × 3 runs × small interactive dispatch, ~$0.01/dispatch)
+  - Per-skill iteration cycle (5 iterations max): ~$2.50
+  - Bringing 6 priority skills green: ~$15 one-time + ~$3 per regression sweep
+
+  ## Phases
+
+  P1 — Harness skeleton (DX-276)
+  P2 — Eval-set format + first eval-set for `dev:debugging` (DX-277)
+  P3 — Iteration loop + agent-driven description-fix flow (DX-278)
+  P4 — Coverage expansion + per-skill reporting (DX-279)
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a01759e9e9fa295afa71634
+    title: Phase cards DX-276/277/278/279 created same turn as this epic; children[] populated
+    checked: false
+  - check_item_id: 6a01759ff121ed053452f85c
+    title: /skill-eval skill exists at <danxbot>/.claude/skills/skill-eval/SKILL.md (NOT plugin repo)
+    checked: false
+  - check_item_id: 6a01759f6996f01a7534cc19
+    title: Eval-set format = skill-creator JSON shape ([{query, should_trigger}])
+    checked: false
+  - check_item_id: 6a01759f96e1d75340f81414
+    title: "Runner uses host-mode dispatch (interactive claude), bypasses bug #36570/#556"
+    checked: false
+  - check_item_id: 6a0175a07bbc4d421203d112
+    title: "≥95% trigger accuracy on should_trigger AND should_not_trigger for 6 priority skills: dev:debugging, investigate:investigate, dev:testing, dev:git-discipline, base:process-kill, danxbot:issue-card-workflow"
+    checked: false
+  - check_item_id: 6a0175a08ce1bec48f71f0dc
+    title: CC agent can autonomously run + iterate (read failures → propose description edit → commit + push + /reload-plugins → re-run) without human in the loop per iteration
+    checked: false
+  - check_item_id: 6a0175a052fe02fa7b003b8f
+    title: "Per-skill markdown report: pass/fail matrix, cost, JSONL forensics links"
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-11T06:22:16.834Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Review
+    note: All non-cancelled children Review — parent Review
+  - timestamp: 2026-05-11T06:22:31.157Z
+    actor: worker:auto-derive
+    event: status_change
+    from: Review
+    to: ToDo
+    note: Any child ToDo — parent ToDo
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

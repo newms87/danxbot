@@ -1,0 +1,105 @@
+schema_version: 6
+tracker: memory
+id: DX-269
+external_id: 6a015f119778467dfa33d879
+parent_id: null
+children:
+  - DX-270
+  - DX-271
+  - DX-272
+  - DX-273
+  - DX-274
+dispatch: null
+status: ToDo
+type: Epic
+title: Retire inject-pipeline static rules + skills → consolidate in `danxbot` plugin
+description: |-
+  ## Context
+
+  The danxbot poller's inject pipeline (`src/poller/inject/workspaces/<workspace>/.claude/{rules,skills}/`) ships 11 static content files that **already exist** (or should exist) in the `~/web/claude-plugins/danxbot/skills/` plugin. Every dispatched workspace's `.claude/settings.json` already enables `danxbot@newms-plugins` with `autoUpdate: true`, so the plugin's content is reachable inside containers — the inject duplicates are dead weight + actively drifting.
+
+  Audit (2026-05-11):
+
+  **Already in plugin, drifted vs inject:**
+  - `comment-style` (plugin 43 lines) vs `danx-comment-style.md` (inject 38 lines)
+  - `halt-flag` (86) vs `danx-halt-flag.md` (81)
+  - `no-unauthorized-worker-launch` (86) vs `danx-no-launch-worker.md` (87)
+  - `danx-next` (plugin 617) vs inject (684)
+  - `danx-triage-card` (plugin 344) vs inject (359)
+
+  **Already in plugin, byte-equal with inject (just delete inject):**
+  - `danx-epic-link` (205)
+  - `danx-ideate` (93)
+  - `danx-start` (68)
+
+  **Missing from plugin entirely (move from inject):**
+  - `danx-no-false-blockers.md` (204) → plugin skill `no-false-blockers`
+  - `danx-no-interactive.md` (75) → plugin skill `autonomous-mode`
+  - `danx-requires-human.md` (182) → plugin skill `requires-human`
+  - `issue-blocker` skill (173) → plugin skill `issue-blocker`
+  - `danx-slack-agent.md` (58, slack-worker) → plugin skill `slack-agent`
+
+  **Stays in inject (NOT plugin candidates):**
+  - Per-workspace structural files: `.mcp.json` (overlay placeholders `${DANX_REPO_ROOT}`, `${DANXBOT_WORKER_PORT}`), `workspace.yml`, workspace-marker `CLAUDE.md`, `.claude/settings.json` (env + plugin enablement). Bootstrap layer + runtime overlay → can't be plugin (plugin is single static blob, no template substitution).
+  - Per-repo rendered files: `danx-repo-config.md`, `danx-repo-overview.md`, `danx-repo-workflow.md`, `danx-tools.md`. Content varies per `RepoContext`, regenerated each tick.
+
+  ## Why this matters
+
+  Drift is silent. Today's 5 drifted files mean dispatched agents read a different version of the rule than the operator's main session does. Examples already observed:
+  - `no-launch-worker` is triple-drifted (slack-worker 74 / issue-worker 87 / plugin 86) — three slightly different "don't launch a worker" rules in flight.
+  - `danx-next` inject is 67 lines newer than plugin — agent edits to the workflow that never made it to the operator's session.
+
+  After this epic: ONE source for every static rule (plugin), automatic propagation via `autoUpdate: true`, edit ceremony = `git push` to claude-plugins repo. Same flow as any plugin edit — no special inject-pipeline rules to remember.
+
+  ## Plugin placement decision
+
+  **Single `danxbot` plugin** (status quo). NOT split into `danxbot-core` / `danxbot-worker`. Rationale:
+  - CC's plugin loader subsets at plugin granularity, not skill granularity. Splitting forces a third `danxbot-shared` plugin or duplication for the ~5 skills both audiences need.
+  - Skill `description` triggers already gate per-session firing — operator-only skills (`prod-access`) won't trigger inside dispatched workers because nothing in the prompt mentions production.
+  - ~20 skills post-migration is well within CC loader's comfortable range.
+  - Revisit only at 50+ skills OR a measured loader regression.
+
+  ## Phase ordering
+
+  P1 + P2 independent (different plugin files). P3 (delete inject + writer change) waits on both. P4 (smoke verify) waits on P3. P5 (docs) waits on P4.
+
+  ## Acceptance for the epic itself
+
+  All 5 phases Done → repeat the audit script from the description → zero drift, zero duplication.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history:
+  - timestamp: 2026-05-11T04:56:08.453Z
+    actor: worker:auto-derive
+    event: status_change
+    from: ToDo
+    to: Blocked
+    note: Any child Blocked — parent Blocked
+  - timestamp: 2026-05-11T23:53:39.815Z
+    actor: worker:auto-derive
+    event: status_change
+    from: Blocked
+    to: ToDo
+    note: Any child ToDo — parent ToDo
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

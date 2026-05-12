@@ -1,0 +1,162 @@
+schema_version: 6
+tracker: trello
+id: DX-301
+external_id: 6a026035d3987e12c815b5e4
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Dashboard Settings: per-repo Trello config section (enable toggle + API key/token edit)"
+description: |-
+  ## Why
+
+  Operator needs first-class controls over Trello sync from the dashboard. Today:
+
+  - The per-repo Trello toggle (`DANX_TRELLO_ENABLED` in `<repo>/.danxbot/.env`) requires shell access to flip — operators on the dashboard can't disable a misbehaving repo's sync without SSHing.
+  - Trello API key + token (`DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`) require shell access to rotate — sensitive, but the workflow today routes through manual env edits + restarts.
+
+  Both should be editable from the dashboard's per-repo Settings tab.
+
+  ## What we build
+
+  A new **Trello configuration** section in the per-repo Settings panel (`dashboard/src/components/AgentsTab.vue` or wherever the per-repo settings UI lives — confirm via grep first). Three controls:
+
+  ### 1. Trello sync enable toggle (per repo)
+
+  - Three-valued like other toggles: `true` (force on) / `false` (force off — disables BOTH inbound AND outbound Trello sync entirely for this repo) / `null` (defer to env default).
+  - Field name: `overrides.trelloSync.enabled` in `<repo>/.danxbot/settings.json` (parallel to existing `overrides.slack` etc).
+  - Hot-path reader: `isTrelloSyncEnabled(ctx)` in `src/settings-file.ts`. Never throws; falls back to `DANX_TRELLO_ENABLED` env default on failure.
+  - When `false`: poller skips Trello poll entirely (no inbound new-card hydration, no inbound comment pull); worker skips all outbound Trello calls (mirror-push, orphan-push, auto-sync, retry queue). Cards continue to flow through YAML + DB normally; the Trello board freezes at its last-synced state until the toggle is re-enabled.
+  - Operator override semantics: this overrides the env default + survives every redeploy (existing writer-merge invariant).
+
+  ### 2. Trello API key edit field
+
+  - Masked input (show `••••…last-4`, click-to-reveal toggle in dev mode).
+  - PATCH writes to `<repo>/.danxbot/.env` `DANX_TRELLO_API_KEY=<new>` line via the existing settings writer pipeline (NOT settings.json — env file is the credential surface).
+  - Worker re-reads the env after PATCH (file watch on `.env` already in place? confirm; if not, add the file-watcher OR live on the next worker restart with a clear "restart required" hint).
+
+  ### 3. Trello API token edit field
+
+  - Same shape as key: masked input + click-to-reveal in dev mode.
+  - PATCH writes `DANX_TRELLO_API_TOKEN=<new>`.
+
+  ### 4. Optional: Trello board ID display (read-only)
+
+  Show the resolved `boardId` + `todoListId` etc. from `<repo>/.danxbot/config/trello.yml` so operator can sanity-check which board they're affecting before flipping the toggle. Read-only (config-file owned).
+
+  ## API surface
+
+  Extend the existing per-repo settings PATCH endpoint (`PATCH /api/repos/:repo/settings` or analogous — confirm via grep) with the new allowlist fields:
+
+  | Field | Type | Allowed values |
+  |---|---|---|
+  | `overrides.trelloSync.enabled` | `boolean \| null` | `true` / `false` / `null` |
+  | `env.DANX_TRELLO_API_KEY` | `string` (non-empty) | any |
+  | `env.DANX_TRELLO_API_TOKEN` | `string` (non-empty) | any |
+
+  Auth: per-user bearer (NOT dispatch token). Rejects malformed values fail-loud.
+
+  Env file writes use an atomic temp+rename (preserve `.env`'s other variables, never clobber).
+
+  ## Vue surface
+
+  Inside the per-repo Settings panel:
+
+  ```
+  ┌── Trello Configuration ──────────────────┐
+  │ Sync enabled:  [●○○] true / false / null │
+  │ Effective: <true|false> (from <override|env-default>) │
+  │                                          │
+  │ Board ID: <boardId> (read-only)          │
+  │ ToDo list: <todoListId> (read-only)      │
+  │                                          │
+  │ API Key:    [••••…ab12] [edit] [reveal]  │
+  │ API Token:  [••••…cd34] [edit] [reveal]  │
+  │                                          │
+  │ [Save] [Reset Trello state]              │
+  └──────────────────────────────────────────┘
+  ```
+
+  `Reset Trello state` is optional + scoped — clears retry-queue entries for this repo (useful after a token rotation that left stale 401 retries pinned). If complex, defer to a follow-up card.
+
+  ## Tests
+
+  - Backend: PATCH allowlist tests for each new field; reject malformed; .env atomic write preserves other vars.
+  - Backend: `isTrelloSyncEnabled` fallback ordering + override precedence.
+  - Dashboard: `TrelloConfigPanel.vue` test — render, toggle round-trip, masked key+token edit round-trip.
+  - Manual smoke: flip toggle to `false`, watch poller log line `[repo] trello sync disabled — skipping Trello inbound + outbound`; flip back, sync resumes within one tick.
+
+  ## Key files (confirm before editing)
+
+  - `src/settings-file.ts` — new `isTrelloSyncEnabled` reader + writer allowlist
+  - `src/dashboard/agents-toggles.ts` (or wherever repo settings PATCH lives) — extend allowlist
+  - `src/dashboard/<repo-env-writer>.ts` — atomic .env writer (new file unless one already exists for env mutation)
+  - `src/poller/index.ts` — gate Trello poll + mirror on `isTrelloSyncEnabled`
+  - `src/worker/auto-sync.ts` — same gate
+  - `dashboard/src/components/<TrelloConfigPanel>.vue` — new
+  - `dashboard/src/components/AgentsTab.vue` (or per-repo Settings panel host) — mount the new panel
+  - `dashboard/src/api.ts` — `patchRepoSettings` extension
+
+  ## Out of scope
+
+  - Editing `<repo>/.danxbot/config/trello.yml` (board / list IDs). Config file remains canonical; dashboard shows read-only.
+  - Multi-board support per repo.
+  - Switching tracker implementation from the dashboard (Memory ↔ Trello). Tracker selection is config-file owned.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a026036ba00830be1e2850b
+    title: Per-repo settings panel renders a Trello Configuration section
+    checked: false
+  - check_item_id: 6a026037114c572f68267f03
+    title: Sync-enabled three-valued toggle (true/false/null) saved to settings.json overrides.trelloSync.enabled
+    checked: false
+  - check_item_id: 6a026037cd1e6bd38cf4f371
+    title: isTrelloSyncEnabled hot-path reader implemented; never throws; falls back to env default
+    checked: false
+  - check_item_id: 6a0260382c89b66677eec3d2
+    title: Toggle=false halts BOTH inbound Trello hydration AND outbound Trello calls for the repo (verified in poller + auto-sync + orphan-push + retry queue)
+    checked: false
+  - check_item_id: 6a0260384bec2888d77b3697
+    title: API key + API token edit fields PATCH atomic-write to <repo>/.danxbot/.env preserving other vars
+    checked: false
+  - check_item_id: 6a0260398110007bc84db55e
+    title: Edit fields display masked value with click-to-reveal in dev mode only
+    checked: false
+  - check_item_id: 6a0260399f72edc4fce5d57b
+    title: Read-only board ID + ToDo list ID surfaced from config/trello.yml
+    checked: false
+  - check_item_id: 6a02603a174a65c3368699f1
+    title: PATCH allowlist rejects malformed values fail-loud
+    checked: false
+  - check_item_id: 6a02603a9b9e3d887862300b
+    title: Backend + dashboard tests green; tsc --noEmit + vue-tsc --noEmit green
+    checked: false
+comments: []
+history:
+  - timestamp: 2026-05-12T00:03:21.885Z
+    actor: tracker:trello
+    event: created
+    to: ToDo
+    note: Hydrated from tracker external_id 6a026035d3987e12c815b5e4
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

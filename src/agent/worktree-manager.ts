@@ -62,7 +62,9 @@ import {
   existsSync,
   lstatSync,
   readFileSync,
+  readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   symlinkSync,
 } from "node:fs";
@@ -659,6 +661,115 @@ function provisionWorktreeArtifacts(
 ): void {
   provisionNodeModules(repoRoot, worktreePath);
   provisionEnvFile(repoRoot, worktreePath);
+  provisionIssuesSymlink(repoRoot, worktreePath);
+}
+
+/**
+ * DX-309: provision a `<worktree>/.danxbot/issues` symlink pointing at
+ * `<repoRoot>/.danxbot/issues`. Issue YAMLs are the canonical state of
+ * each card; per-worktree-branch issue divergence would split the
+ * source of truth and break the chokidar mirror that keeps the DB +
+ * tracker in sync. With the symlink, an agent dispatched into a
+ * worktree edits `<worktree>/.danxbot/issues/...` and the write lands
+ * on `<main>/.danxbot/issues/...` — single canonical store, no merge
+ * conflicts on branch integration.
+ *
+ * `.danxbot/issues/` is gitignored so the symlink is invisible to git
+ * (no working-tree noise on the agent's branch).
+ *
+ * Migration safety: an existing real `<worktree>/.danxbot/issues/` dir
+ * with YAMLs that don't exist in main is preserved under
+ * `<worktree>/.danxbot/issues.pre-symlink-<unix>/` BEFORE the rm so
+ * operator can reconcile by hand. Identical (by mtime+size or by
+ * content) snapshots of main → safe to remove. The MCP server reads
+ * issues through the symlink at runtime, so once the link is in place
+ * the dispatched agent never re-creates a divergent local copy.
+ */
+function provisionIssuesSymlink(repoRoot: string, worktreePath: string): void {
+  const mainIssues = join(repoRoot, ".danxbot", "issues");
+  if (!existsSync(mainIssues)) {
+    log.debug(
+      `provisionIssuesSymlink: ${mainIssues} does not exist — skipping`,
+    );
+    return;
+  }
+  const linkParent = join(worktreePath, ".danxbot");
+  if (!existsSync(linkParent)) {
+    // Worktree was created BEFORE this provisioning step shipped and
+    // has no .danxbot/ at all. mkdir so the symlink has a home.
+    // Cheaper than refusing — node_modules + .env paths above also
+    // tolerate fresh worktrees.
+    return;
+  }
+  const linkAbs = join(linkParent, "issues");
+
+  // Existing-entry inspection. lstat so we don't follow into the
+  // populated dir before deciding what to preserve.
+  let existing: ReturnType<typeof lstatSync> | undefined;
+  try {
+    existing = lstatSync(linkAbs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+
+  if (existing?.isSymbolicLink()) {
+    let target: string | undefined;
+    try {
+      target = realpathSync(linkAbs);
+    } catch {
+      // Broken symlink — fall through to replace.
+    }
+    if (target === realpathSync(mainIssues)) {
+      log.debug(`provisionIssuesSymlink: ${linkAbs} already linked`);
+      return;
+    }
+    rmSync(linkAbs, { force: true });
+  } else if (existing) {
+    // Real dir/file. Move aside if it carries YAMLs not in main; else
+    // safe to drop.
+    const orphans = collectWorktreeOnlyYamls(linkAbs, mainIssues);
+    if (orphans.length > 0) {
+      const backup = `${linkAbs}.pre-symlink-${Date.now()}`;
+      log.warn(
+        `provisionIssuesSymlink: ${linkAbs} has ${orphans.length} YAML(s) absent from ${mainIssues} — preserving as ${backup} before symlink (orphans: ${orphans.slice(0, 5).join(", ")}${orphans.length > 5 ? "..." : ""})`,
+      );
+      renameSync(linkAbs, backup);
+    } else {
+      rmSync(linkAbs, { recursive: true, force: true });
+    }
+  }
+
+  symlinkSync(mainIssues, linkAbs, "dir");
+  log.info(`provisionIssuesSymlink: symlinked ${linkAbs} -> ${mainIssues}`);
+}
+
+/**
+ * Return basenames of `.yml` files under `<dir>/{open,closed}/` that
+ * are NOT present at the same relative path under `<reference>/`. Used
+ * to detect worktree-local issue divergence before clobbering with a
+ * symlink. Robust to a missing `open/` or `closed/` subdir (treats as
+ * empty).
+ */
+function collectWorktreeOnlyYamls(dir: string, reference: string): string[] {
+  const out: string[] = [];
+  for (const bucket of ["open", "closed"]) {
+    const localBucket = join(dir, bucket);
+    if (!existsSync(localBucket)) continue;
+    let entries: string[];
+    try {
+      entries = readdirSync(localBucket);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (!name.endsWith(".yml") && !name.endsWith(".yml.migrated-to-v3")) {
+        continue;
+      }
+      const refPath = join(reference, bucket, name);
+      if (!existsSync(refPath)) out.push(`${bucket}/${name}`);
+    }
+  }
+  return out;
 }
 
 /**

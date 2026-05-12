@@ -1,0 +1,94 @@
+schema_version: 6
+tracker: memory
+id: DX-285
+external_id: 6a017dd5090564d8d8baedd7
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: "Fix: launch-all-workers integration test flake from host port 5560 contention"
+description: |-
+  ## Symptom
+
+  `src/__tests__/integration/launch-all-workers.test.ts > make launch-all-workers > make launch-worker REPO=<name> still reads the per-repo .env (no regression in single-repo target)` fails intermittently during full-suite runs with:
+
+  ```
+  Error: container 'danxbot-worker-platform' started but host port 5560 is NOT published.
+  Likely cause: docker-proxy failed to bind because something else holds host port 5560.
+  Stopping the container so the runtime is consistent. Investigate:
+    ss -ltnp 'sport = :5560'
+  ```
+
+  In isolation (`npx vitest run src/__tests__/integration/launch-all-workers.test.ts`) the suite passes cleanly. The flake reproduces during parallel full-suite execution.
+
+  ## Affects
+
+  - Full-suite `npx vitest run` invocations from the danxbot repo on the host runtime — observed ~1-in-2 runs.
+  - CI in any environment that runs the integration suite under parallel scheduling.
+  - Vitest's default `pool: forks` partial isolation does NOT prevent this — the contention is on **host** ports, not module state.
+
+  ## Env
+
+  - Vitest 4.x with default `pool` (forks).
+  - `src/__tests__/integration/launch-all-workers.test.ts` (lines ~290-314 for the failing case).
+  - `setupFakeProject([["platform", "5560"]])` allocates a real host port via the fake-project fixture in the same file.
+  - danxbot Makefile launch-worker target runs a post-spawn docker-port verification check that fails fast when the host port is not published.
+
+  ## Scenario (root cause hypothesis)
+
+  The integration test fixture maps each `[repo, port]` tuple in `setupFakeProject(...)` directly onto a real host port for the duration of the test. When the full suite runs multiple integration test files (or multiple `it` blocks in the same file) in parallel, two callers attempt to bind port `5560` simultaneously. The first wins; the second fails the post-spawn `docker port` verification. Vitest's fork isolation gives each FILE its own process but does NOT serialize the OS-level port allocation across files.
+
+  A separate path: a stale `danxbot-worker-platform` container on the host (visible via `docker ps -a`) holds a name-claim even when not actively bound — `make launch-worker`'s preflight may see this and short-circuit.
+
+  ## Expected
+
+  - Full-suite runs are deterministic.
+  - Either (a) the test fixture picks a per-process / per-test random port, (b) the test file marks itself `test.serial` so its `it` blocks do not race, or (c) the suite stops asserting on hardcoded ports.
+
+  ## Actual
+
+  - Flake rate ~50% on full-suite runs on this host (DX-280 dispatch hit it 2/3 times).
+  - Test passes in isolation, masking the problem in development.
+
+  ## NOT this card's scope
+
+  - Anything outside `launch-all-workers.test.ts` (other integration tests with their own port allocations).
+  - Reworking `make launch-worker` itself (the Makefile's post-spawn port check is correct — the test fixture is at fault).
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a017dd6a8b9aec28b763fdf
+    title: Identify the exact concurrency boundary that triggers the 5560 collision (file-vs-file parallel OR it-vs-it serial in the same file with stale state)
+    checked: false
+  - check_item_id: 6a017dd6b11d0b2a07066498
+    title: "Pick a fix: randomize fake-project ports per-test (preferred) OR mark the file `describe.serial` OR drop the literal-port assertion in favor of a wildcard match"
+    checked: false
+  - check_item_id: 6a017dd788fc7c7fae4ad2e8
+    title: Run `npx vitest run` 5 consecutive times against the fixed test — all pass without re-running
+    checked: false
+  - check_item_id: 6a017dd753bb18f2d2f7fa5a
+    title: Document the chosen fix in a code comment so a future port-related test follows the same pattern
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

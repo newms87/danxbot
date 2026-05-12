@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-124
 external_id: 69df29a292d99d588652a666
@@ -17,6 +17,7 @@ description: |
 
   **ICE Score:** 600 = 6 × 10 × 10 (I: 6 — CI will catch this and block merges; breaks test suite confidence. C: 10 — Root cause is trivially identified, fix is one field addition. E: 10 — Single file, single-line change.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -48,5 +49,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

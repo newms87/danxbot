@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-26
 external_id: 69f18828be5e39ad7ce889de
@@ -17,6 +17,7 @@ description: |-
 
   Discovered during the C7W1cEhh retro — test reviewer caught the gap, but the orchestrator should have drafted the integration test up front.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -36,5 +37,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

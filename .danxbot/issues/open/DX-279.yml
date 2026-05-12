@@ -1,0 +1,122 @@
+schema_version: 6
+tracker: memory
+id: DX-279
+external_id: 6a01759960b33370dd0754df
+parent_id: DX-275
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Skill-eval > Phase 4: Coverage expansion — eval-sets for 5 more priority skills + green sweep"
+description: |-
+  ## Goal
+
+  Authors eval-sets for the remaining 5 priority skills, runs the iteration loop on each in turn, brings the full priority set to green. Closes the epic.
+
+  ## Priority skills (excluding dev:debugging which lands in P2/P3)
+
+  | Skill | Why priority |
+  |---|---|
+  | `investigate:investigate` | Twin to dev:debugging; same self-trigger failure mode (read-only audits frame as "summarize") |
+  | `dev:testing` | First-test-of-session trigger is critical; we already saw `make test-system` runs without test discipline loaded |
+  | `dev:git-discipline` | Pre-commit / pre-stash / pre-restore — destructive ops gated; safety-critical |
+  | `base:process-kill` | Pre-kill-signal — destructive; this session has touched kill-adjacent flows |
+  | `danxbot:issue-card-workflow` | Epic-must-ship-phase-cards-same-turn rule; high-impact (this very epic creation triggers it) |
+
+  (`base:tool-discipline`, `pipeline:planning-discipline`, etc. excluded from V1 priority — covered later.)
+
+  ## Per-skill deliverable
+
+  For each of the 5 skills:
+  - Eval-set at `<danxbot>/tests/skill-evals/<plugin>-<skill>/eval-set.json` (20 queries, 10/10 split)
+  - Negatives reviewed by code-reviewer subagent for tricky-near-miss criterion
+  - `/skill-eval <plugin>:<skill> --iterate` driven to ≥95%/95% OR clean "no-improvement-found" report (escalate to operator-review subtask if no-improvement)
+  - Each green-state achievement committed to plugin repo as a discrete commit ("debugging: bring eval-set to 96%/97%")
+
+  ## Sweep mode
+
+  - `/skill-eval --all` — runs every eval-set sequentially (NOT in parallel — too costly + JSONL workspace contention), reports a roll-up table:
+
+    | Skill | Train | Test | Iterations | Cost | Status |
+    |---|---|---|---|---|---|
+    | dev:debugging | 96% | 97% | 3 | $1.50 | GREEN |
+    | investigate:investigate | 92% | 91% | 5 | $2.50 | NO IMPROVEMENT |
+    | ... | | | | | |
+
+  - Operator decision-loop: review `NO IMPROVEMENT` rows, either accept current best OR open follow-up cards to restructure skill body / rename / split.
+
+  ## Per-skill markdown report (P4 reporting deliverable)
+
+  `<danxbot>/tests/skill-evals/<plugin>-<skill>/REPORT.md` — auto-regenerated on every `/skill-eval` run:
+  - Headline: GREEN / NO IMPROVEMENT
+  - Trigger-rate matrix
+  - Per-iteration history (description diffs, train/test scores)
+  - Cost
+  - Last-run timestamp
+  - JSONL forensics paths for any remaining failures
+
+  ## Out of scope
+
+  - Hooks for scheduled regression sweep (post-epic; CI integration is its own card)
+  - Output-shape assertion (Phase 12 format check) — separate epic if needed
+  - Eval-sets for non-priority skills (covered as follow-on cards once V1 proves out)
+
+  ## Acceptance
+
+  - 5 priority eval-sets exist: investigate:investigate, dev:testing, dev:git-discipline, base:process-kill, danxbot:issue-card-workflow
+  - All negatives pass code-reviewer subagent's tricky-near-miss check
+  - `/skill-eval --all` runs sweep + emits roll-up markdown table
+  - ≥4 of 5 priority skills reach ≥95%/95% green; ≤1 is permitted "NO IMPROVEMENT" (with operator-review follow-up card auto-created)
+  - Every green-state commit pushed to plugin repo with clear "<skill>: bring eval-set to X%/Y%" subject
+  - Per-skill REPORT.md auto-generated + checked into <danxbot>/tests/skill-evals/<plugin>-<skill>/REPORT.md on every run
+  - Epic DX-275 acceptance: full sweep can be run by operator in one command + completes in <30 minutes + total cost <$25
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a01759a4af6f7ef7efccffa
+    title: Eval-sets exist for all 5 priority skills (investigate:investigate, dev:testing, dev:git-discipline, base:process-kill, danxbot:issue-card-workflow), 20 queries each, 10/10 split
+    checked: false
+  - check_item_id: 6a01759b0212e160b5d29d46
+    title: Negatives reviewed by code-reviewer subagent for tricky-near-miss criterion across all 5
+    checked: false
+  - check_item_id: 6a01759bf788b7004e6b51e3
+    title: /skill-eval --all sweep runs each eval-set sequentially, emits roll-up markdown table
+    checked: false
+  - check_item_id: 6a01759c065eafcc1d86a85c
+    title: ≥4 of 5 priority skills reach ≥95%/95% green; ≤1 'NO IMPROVEMENT' permitted with operator-review follow-up card auto-created
+    checked: false
+  - check_item_id: 6a01759c3cc2612f6c1d1b62
+    title: Each green-state achievement committed individually to plugin repo with conventional commit message
+    checked: false
+  - check_item_id: 6a01759cc4ec189aabee4b56
+    title: Per-skill REPORT.md auto-regenerated on every /skill-eval run, includes per-iteration history + JSONL forensics
+    checked: false
+  - check_item_id: 6a01759d2fbf21d3d5214294
+    title: Full sweep completes in <30 minutes wall-clock + costs <$25 total
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on:
+  reason: P4 expands coverage to 5 more priority skills + sweep mode using the iterate-loop primitive that lands in P3 (DX-278). Without P3, expansion is just authoring more eval-sets that can't auto-iterate to green.
+  timestamp: 2026-05-11T05:00:00Z
+  by:
+    - DX-278
+blocked: null
+requires_human: null

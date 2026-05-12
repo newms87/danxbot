@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-41
 external_id: 69ecf832ec92edc6c7d9079f
@@ -20,6 +20,7 @@ description: |-
 
   Source comment in scripts/worker-env.sh references the leak. Tests cover the override behavior end-to-end. This card is the "deeper fix" that the bug card explicitly deferred.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -61,5 +62,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

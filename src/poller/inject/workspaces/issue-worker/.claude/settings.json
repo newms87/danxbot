@@ -2,6 +2,19 @@
   "env": {
     "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}"
   },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/worktree-guard.mjs"
+          }
+        ]
+      }
+    ]
+  },
   "extraKnownMarketplaces": {
     "newms-plugins": {
       "source": {

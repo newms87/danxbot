@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-22
 external_id: 69f1b05433667651d550d0e7
@@ -40,6 +40,7 @@ description: |-
   - Lower priority than `Ajf79Lfp` (which it spun out of) — `script -q -f` doesn't typically rotate, but this is an unbounded silent-failure surface that should be closed before someone hits it in prod.
   - Related: the test reviewer also flagged "3+ append cycles" and "partial ANSI straddling" gaps. Those are lower priority still — bundle them into a follow-up if any of these surface in production.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -59,5 +60,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

@@ -1,0 +1,125 @@
+schema_version: 6
+tracker: memory
+id: DX-305
+external_id: 6a026d96e42d8ae6562bf56b
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Bug
+title: Picker has no single-flight guard → concurrent runPicker invocations spawn duplicate agent processes
+description: |-
+  ## Symptom
+
+  Two `Launching agent` jobs spawn for the same `(agent, card)` within ~60-115ms. Two real claude PIDs end up monitoring the same card. Observed twice in a single worker log window (DX-273 + DX-27 — see Evidence). Bug crosses with the lock-fail-keeps-agent-free bug (separate card) so a single Trello-429 storm can multiply the blast radius.
+
+  ## Affects
+
+  Every dispatched agent in multi-agent worker mode (`make launch-worker-host` / docker worker) with any repo running ≥1 agent. Risk = `N agents × 2 spawns` per double-poke window.
+
+  ## Env
+
+  Post-DX-288 event-driven scheduler. `bootScheduler` registers a `runPicker` callback per repo. Two debounce sets in `src/dispatch/scheduler.ts` — `pendingPokes` (reconcile-result poke) and `pendingRosterPokes` (roster-change poke) — coalesce within their OWN set but NOT against each other. Legacy `_poll` path also still calls `tryMultiAgentDispatch` directly (Phase 4b.3 / DX-290 will retire it). Net: up to three concurrent picker invocations possible.
+
+  ## Scenario
+
+  1. Reconcile fires `dispatchableChanged` → `onReconcileResult` schedules picker via `setImmediate`.
+  2. Same tick (or within the next macrotask), agent roster watcher fires → `onAgentRosterChange` schedules picker via a SECOND `setImmediate`.
+  3. Both `setImmediate` callbacks fire on consecutive macrotasks. Each invokes `runPicker → tryMultiAgentDispatch`.
+  4. Both runs reach `pickFreeAgent({roster, busy, now})` with an identical `busy` snapshot (the DB's `busyAgents` row for the FIRST run's claim has not landed yet, OR the first run's `stampAssignedAgent` write has not landed yet).
+  5. Both pick agent `murphy` for card `DX-27`. Both call `stampAssignedAgentAndWrite` (last writer wins on the YAML).
+  6. Both proceed past the pre-claim guards (the Trello-comment lock is the only cross-environment mutex, and on a 429 storm both paths fail it the same way — see Bug #2).
+  7. Both call `spawnAgent` → two claude processes, two PIDs, two JSONL watchers, two heartbeats, two stall detectors monitoring the same card.
+
+  ## Expected
+
+  Single in-flight picker per repo at any time. Pokes that arrive during an active run coalesce into ONE tail-trigger that fires after the current run resolves. No two concurrent `tryMultiAgentDispatch` invocations for the same repo.
+
+  ## Actual
+
+  Log pairs ~60-115ms apart, identical `(agent, card)`:
+
+  - `23:54:21.967 multi-agent pick: murphy → DX-273` + `23:54:22.030 multi-agent pick: murphy → DX-273`
+  - `23:54:41.916 Job cd069516 prompt for murphy /DX-27` + `23:54:42.033 Job 79c49b35 prompt for murphy /DX-27`
+
+  Both jobs `Opening terminal viewer` (`23:54:44.675` + `23:54:45.102`) → two host-mode terminals → two real PIDs (`69037`, `69053`).
+
+  ## Reproduce
+
+  Real-world: trigger reconcile + roster change in the same tick on a repo with ≥1 free agent. Easy via dashboard PATCH that changes both `status` and `agents.<name>` simultaneously, or a Trello 429 storm during the post-completion auto-sync window (drives many reconciles + retry-queue events in rapid succession).
+
+  Test-world: write an integration test that calls `onReconcileResult` + `onAgentRosterChange` synchronously back-to-back on a fixture worker. Assert `runPicker` invoked exactly once (current behavior: invoked twice).
+
+  ## Likely fix shape
+
+  Add a per-repo `Set<string>` `pickerInflight` to `src/dispatch/scheduler.ts`. Single mutex covers both pokes + the legacy `_poll` invocation (Phase 4b.3 will retire the latter but the mutex must protect against it until then). On poke:
+
+  - If `pickerInflight.has(repoName)` → set a per-repo `pendingTailRun` flag and return.
+  - Else mark inflight, run `runPicker`, clear inflight, fire one tail run if `pendingTailRun` set.
+
+  Wrap in try/finally so a thrown picker doesn't permanently lock out the repo. The two existing debounce sets (`pendingPokes`, `pendingRosterPokes`) stay — they're per-macrotask burst dedup, the inflight mutex is per-execution. Both layers needed.
+
+  Also wire the legacy `_poll` path: either it acquires the same mutex (interim) OR DX-290 lands first and deletes the `_poll` picker call (preferred — removes the third concurrency source for free).
+
+  ## Files
+
+  - `src/dispatch/scheduler.ts` — add `pickerInflight` + `pendingTailRun` maps; wrap both poke paths.
+  - `src/dispatch/scheduler.test.ts` — concurrent-poke test: two `setImmediate`-scheduled pokes resolve to one `runPicker` invocation + one tail. Cleanup-on-throw test.
+  - `src/poller/index.ts` _poll picker invocation — either bridge through the new mutex API or document the dependency on DX-290 landing first.
+
+  ## How to verify
+
+  - New unit test in `scheduler.test.ts`: arrange two concurrent pokes → assert exactly one `runPicker` call. Trigger a third poke during the run → assert it lands in tail trigger.
+  - Manual smoke: `make launch-worker-host REPO=danxbot`, trigger a Trello-429 storm (or simulate by mocking the lock-acquire to fail), grep for duplicate `multi-agent pick: <agent> → <card>` log lines within 200ms — should be zero after the fix.
+
+  ## NOT in scope
+
+  - Bug #2 (lock-acquire failure keeps agent in free pool) — separate root cause, separate card.
+  - DX-290 (retire `_poll` picker call) — independent, lands separately.
+  - Cross-worker single-flight (e.g. EC2 worker + local dev worker against the same Trello board) — handled by the existing tracker-comment lock, not in scope here.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a026d99334d03f7af729abf
+    title: scheduler.ts exposes a per-repo inflight mutex covering both onReconcileResult + onAgentRosterChange
+    checked: false
+  - check_item_id: 6a026d99abbc1d85dc9930d7
+    title: "Concurrent poke test: two setImmediate-scheduled pokes result in exactly ONE runPicker invocation"
+    checked: false
+  - check_item_id: 6a026d9a48e038fc1fcc3694
+    title: "Tail-run test: a poke arriving during an active runPicker fires exactly ONE follow-up run after completion"
+    checked: false
+  - check_item_id: 6a026d9be3f33f788ecd4a5c
+    title: "Cleanup test: a thrown picker clears the inflight flag (no permanent repo lockout)"
+    checked: false
+  - check_item_id: 6a026d9c4e7416a6e8b9a4c9
+    title: Legacy _poll picker invocation either bridges through the mutex OR DX-290 is a documented prereq
+    checked: false
+  - check_item_id: 6a026d9c16dbc1861a2ea9b4
+    title: "Manual smoke under simulated 429 storm: zero duplicate `multi-agent pick:` log line pairs within 200ms windows"
+    checked: false
+  - check_item_id: 6a026d9d809f454ab036dcdd
+    title: npx vitest run + npx tsc --noEmit green
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

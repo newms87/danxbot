@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-126
 external_id: 69df29d7c7fdf7db077dbda9
@@ -15,6 +15,7 @@ description: |
 
   **ICE Score:** 270 = 3 × 9 × 10 (I: 3 — Low probability misconfiguration but would cause runaway ideator spawning. C: 9 — Proven pattern — same numeric rules array, same structure. E: 10 — One rule addition, single file change.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -49,5 +50,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

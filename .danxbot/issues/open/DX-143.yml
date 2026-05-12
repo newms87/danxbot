@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-143
 external_id: 69fd75e5619a7efadfcb543c
@@ -89,6 +89,7 @@ description: |-
 
   Note: this validation is mechanical; do NOT perform it in production / deployed targets. Local platform worker is the validation harness.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -141,3 +142,4 @@ retro:
 assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

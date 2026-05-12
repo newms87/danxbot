@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-111
 external_id: 69e27d857fe435bba78e65e3
@@ -103,6 +103,7 @@ description: |-
   - Side-by-side comparison.
   - Downloading `prompt.md` as artifact — OK to ship only the JSONL download for now.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -146,5 +147,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

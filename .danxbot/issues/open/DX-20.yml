@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-20
 external_id: 69f2245603cbdd28c263c33e
@@ -33,6 +33,7 @@ description: |-
 
   Code review nitpick N1 on card uHECTOjj (commit `7dd4abb`). Reviewer noted "Not blocking today; cli.ts main() is the only setter."
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -52,5 +53,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

@@ -1,0 +1,123 @@
+schema_version: 5
+tracker: memory
+id: DX-226
+external_id: 6a00034df6906e44fd6b46dd
+parent_id: DX-225
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "SSE Phase 1: Issues tab — chokidar + `issue:updated` topic, drop 30s poll"
+description: |
+  ## Context
+
+  Phase 1 of DX-225. Replace the 30s `setInterval` reload loop in `dashboard/src/composables/useIssues.ts` with an SSE-driven feed identical in shape to `useDispatches` / `useAgents`. The dashboard process already RW-binds every repo's `.danxbot/issues/` via `docker-compose.override.yml`, so a chokidar watcher here is a clean local event source — no worker→dashboard channel, no Postgres LISTEN/NOTIFY.
+
+  ## Solution
+
+  ### Backend
+
+  1. New module `src/dashboard/issues-watcher.ts`
+     - On dashboard boot, for every entry in `repos`, watch `<repo.localPath>/.danxbot/issues/{open,closed}/*.yml` with chokidar (`ignoreInitial: true`).
+     - Debounce per file id (50ms — matches `issues-mirror.ts` to avoid double-fires from editor save patterns).
+     - On `add` / `change` / `unlink`, read through `issues-reader.ts` to get the canonical `IssueListItem` row + `repoName`, then `eventBus.publish({ topic: "issue:updated", data: { repoName, issue: <row>, removed?: true } })`.
+     - For `unlink` events (closed/cancelled) emit `removed: true` with just `{ repoName, id }`; no read.
+
+  2. Extend `src/dashboard/event-bus.ts`
+     - Add `IssueUpdatedEvent` to `EventBusEvent` union with topic literal `"issue:updated"` and a discriminated payload (`{ repoName, issue }` for live, `{ repoName, id, removed: true }` for delete).
+
+  3. Wire boot + shutdown
+     - `src/dashboard/server.ts` startup hook calls `startIssuesWatcher(repos, eventBus)` after `eventBus` exists; teardown closes it on `SIGTERM` like the existing watchers.
+
+  ### Frontend
+
+  4. `dashboard/src/composables/useIssues.ts`
+     - Drop `POLL_INTERVAL_MS`, `startTimer`, `stopTimer`, `timer`, all `setInterval` references.
+     - Mirror the `useAgents` shape: hydration via existing `fetchIssues`, then `useStream().subscribe("issue:updated", reducer)`.
+     - Reducer applies one event:
+       - `removed: true` → drop matching `id` from `issues.value`.
+       - else → upsert by `id`, sort by existing order key.
+       - Detail-cache invalidation logic the current code does on each poll moves into the reducer — invalidate cached `IssueDetail` when the new row's `updated_at !== cached.updated_at`.
+     - Filter events by `data.repoName === repo.value` so unrelated repos' events are ignored, mirroring the dispatch tab pattern (and `AgentsPage.vue`'s `matchesActiveRepo`).
+
+  ### Tests
+
+  Backend (mandatory):
+
+  1. `issues-watcher.test.ts` — fake chokidar driver:
+     - On `add` of a fresh YAML, publishes `issue:updated` once with the parsed row + `repoName`.
+     - On `change`, publishes one event per debounce window even with two close `change` callbacks.
+     - On `unlink`, publishes a `removed: true` event with only `{repoName, id}` and does NOT call the YAML reader.
+     - Multiple repos → each repo's events isolated to its `repoName`.
+  2. `event-bus.test.ts` — extend the topic-typing test to assert `issue:updated` payload shape compiles + dispatches.
+
+  Dashboard SPA (UI test exemption applies — type check required, tests optional except the source-check guard which is mandatory per existing project rule):
+
+  3. `useIssues.test.ts` — replace the 30s-tick test with the `useDispatches`-style suite:
+     - Hydrates from `fetchIssues` on mount.
+     - Applies an `issue:updated` event → upsert.
+     - Applies an `issue:updated` with `removed: true` → drop.
+     - Filters out events for a different `repoName`.
+     - **Source-check guard**: `expect(source).not.toMatch(/setInterval\s*\(/)` (parity with `useDispatches.test.ts:192` and `useAgents.test.ts:232`).
+
+  ### Manual smoke
+
+  5. With the dashboard running, open `http://localhost:5566`, edit a `.danxbot/issues/open/DX-N.yml` `status:` field on disk, observe the IssueBoard reflect the change in **<1s** without browser refresh.
+  6. Move a YAML from `open/` → `closed/` (Done flow) — observe row disappears live.
+
+  ## Acceptance
+
+  - `src/dashboard/issues-watcher.ts` ships with full chokidar lifecycle + debounce + per-repo event publication.
+  - `event-bus.ts` typed `issue:updated` topic added.
+  - `useIssues.ts` carries no `setInterval`; uses `useStream` like sibling composables.
+  - All new + updated tests pass; full `vitest run` (root) + `cd dashboard && vitest run` green; `tsc --noEmit` + `vue-tsc --noEmit` clean.
+  - Manual smoke: <1s YAML-edit-to-UI propagation in dev (5566).
+
+  ## Out of scope
+
+  - Codifying the rule + sweeping for other polling sites (Phase 2 / DX-227).
+  - Issue-detail drawer's per-tab live updates beyond the cache-invalidation behavior described above.
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a00034e2e45f4133738a1ca
+    title: "src/dashboard/issues-watcher.ts: chokidar watcher per repo, 50ms debounce, publishes issue:updated with repoName"
+    checked: false
+  - check_item_id: 6a00034eccc7d3979ad23922
+    title: "event-bus.ts: typed issue:updated topic with discriminated upsert/removed payload"
+    checked: false
+  - check_item_id: 6a00034e8ce1bec48f2c5c0d
+    title: Dashboard server boot wires watcher; SIGTERM closes it
+    checked: false
+  - check_item_id: 6a00034fa99ff2a44e2447a0
+    title: "useIssues.ts: drop setInterval, subscribe via useStream, reducer handles upsert + removed + repo filter"
+    checked: false
+  - check_item_id: 6a00034fcdc3d22dcd246dbd
+    title: "Source-check guard: useIssues.test.ts asserts no setInterval in compiled source"
+    checked: false
+  - check_item_id: 6a00034f322804dbf07c509f
+    title: All backend + dashboard tests green; tsc + vue-tsc clean
+    checked: false
+  - check_item_id: 6a000350464e7f952b5e785f
+    title: "Manual smoke: edit YAML on disk, board reflects change in <1s without refresh"
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null

@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-107
 external_id: 69e864a71c0955a355e7d731
@@ -41,6 +41,7 @@ description: |-
 
   `curl -sS -X POST https://danxbot.sageus.ai/api/launch -H "Authorization: Bearer $TOKEN" -d '{"repo":"gpt-manager","task":"List Trello lists","mcp":{"trello":true},"allowed_tools":["mcp__trello__*"]}'` — dispatched agent's claude has trello MCP available and can call `mcp__trello__get_lists`. Same curl WITHOUT `mcp.trello` — dispatched agent lacks trello MCP (confirm via its attempt + failure). Bad bearer → 401 unchanged. Unknown mcp key (e.g. `mcp.foo=true`) → 400.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -84,5 +85,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

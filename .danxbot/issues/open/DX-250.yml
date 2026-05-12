@@ -1,0 +1,71 @@
+schema_version: 6
+tracker: memory
+id: DX-250
+external_id: 6a025ef2857d0354bd208204
+parent_id: DX-247
+children: []
+dispatch: null
+status: Review
+type: Chore
+title: "Danx UI > Phase 3: Publish @thehammer/danx-ui w/ Toggle + RangeSlider"
+description: |-
+  ## Context
+
+  Phase 3 of DX-247. After DX-248 (Toggle) and DX-249 (RangeSlider) merge, the new components must reach npm before DX-251 can swap them into danxbot. This card owns the publish.
+
+  `@thehammer/danx-ui` is owned by danxbot per `~/.claude/CLAUDE.md` "@thehammer/* npm publish" rule. The `thehammer-publish` skill carries STANDING AUTHORIZATION for autonomous publishing — no operator gate, no Blocked card, no "human will publish later." Defer ONLY on transient registry network failures.
+
+  ## Solution
+
+  1. Confirm `~/web/danx-ui` `main` contains both `DanxToggle` (DX-248) and `DanxRangeSlider` (DX-249) merged + tests + demo + docs landed.
+  2. Bump `package.json#version` (minor — new components are additive, no breaking change).
+  3. Verify `package.json#exports` exposes:
+     - `./components/toggle` + `./components/toggle/styles`
+     - `./components/range-slider` + `./components/range-slider/styles`
+  4. Run `yarn build`. Verify `dist/components/toggle/` and `dist/components/range-slider/` exist + contain `.js` + `.d.ts` + `.css`.
+  5. Run `yarn test:coverage` one more time (clean working tree).
+  6. Publish via the danxbot Make target: `cd ~/web/danxbot && make publish-danx-ui` (or whatever target the danxbot Makefile exposes for danx-ui publishing — check `grep "^publish" ~/web/danxbot/Makefile` first per the `thehammer-publish` skill's pre-publish check).
+  7. Wait for `npm view @thehammer/danx-ui versions` to surface the new minor (the publish target should already do this — confirm exit-zero).
+  8. Smoke check: `npm view @thehammer/danx-ui@<new-version> dist.tarball` returns a URL; download + inspect that `package/dist/components/toggle/index.js` and `package/dist/components/range-slider/index.js` are present.
+
+  ## Files
+
+  - **EDIT** `~/web/danx-ui/package.json` — version bump
+  - **EDIT** `~/web/danx-ui/CHANGELOG.md` (if it exists; create if not) — note the new components
+  - **NO** edits to danxbot source in this card — DX-251 owns the consumer-side bump.
+
+  ## Acceptance
+
+  - [ ] `~/web/danx-ui/package.json#version` bumped (minor)
+  - [ ] `package.json#exports` lists both new component paths + their `/styles` siblings
+  - [ ] `yarn build` produces `dist/components/{toggle,range-slider}/{index.js,index.d.ts,*.css}`
+  - [ ] `yarn test:coverage` clean on the publish commit
+  - [ ] `make publish-danx-ui` (or equivalent danxbot Make target) exits 0
+  - [ ] `npm view @thehammer/danx-ui@<new-version>` resolves (registry propagation confirmed)
+  - [ ] Tarball inspection confirms both compiled components ship
+  - [ ] No agent-side cache poisoning: `~/.npm/_npx/` clear runs as part of the publish target (or manually)
+priority: 4
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

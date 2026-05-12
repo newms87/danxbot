@@ -1,0 +1,70 @@
+schema_version: 6
+tracker: memory
+id: DX-225
+external_id: 6a000347f6481a30c1d974cf
+parent_id: null
+children:
+  - DX-226
+  - DX-227
+dispatch: null
+status: Review
+type: Epic
+title: "[Dashboard] Convert remaining poll-based UI state to SSE (kill setInterval reload loops)"
+description: |
+  ## Context
+
+  Most dashboard panels are SSE-driven (`dispatches`, `agents`, `system-errors`, `dispatch:jsonl:*`) via the `/api/stream` multiplex defined in `src/dashboard/event-bus.ts`. One holdout: the **Issues tab** (`dashboard/src/composables/useIssues.ts:80`) reloads the roster every 30s with `setInterval`. Verified empirically — chokidar in `src/db/issues-mirror.ts` mirrors a YAML edit to Postgres in **sub-second** time, but the UI lags up to 30s because the SPA only re-fetches on its own clock.
+
+  A previous regression (now removed in this branch) had a parallel 5s `busyTimer` reload in `AgentsPage.vue` for the same "I don't trust SSE alone" reason. We want one consistent posture across every tab: **server is the source of truth, SSE is the delivery mechanism, no client-side polling for state that the server can push.**
+
+  This epic also codifies the rule so the next contributor doesn't reintroduce a third polling tab.
+
+  ## Architecture (one screen)
+
+  ```
+  worker process                                dashboard process                   browser
+  ─────────────────                             ─────────────────                   ───────
+  chokidar(<repo>/.danxbot/issues/) ──► PG ──►  chokidar(same dirs)  ──► eventBus ──► SSE /api/stream?topics=issue:updated
+                                                publish "issue:updated"            ──► useIssues reducer ──► IssueBoard render
+     │
+     └── (existing) PG mirror is unchanged — read path still goes through issues-reader.ts
+  ```
+
+  The dashboard process already RW-binds every connected repo's `.danxbot/` (per `docker-compose.override.yml`), so a chokidar watcher there sees the same file events the worker does. Lower-cost than a Postgres LISTEN/NOTIFY round-trip and matches how `useDispatches` / `useAgents` already work (in-process eventBus → SSE).
+
+  ## Phases
+
+  1. **Phase 1 — Issues SSE (DX-226)** — chokidar watcher in dashboard process, `issue:updated` topic on `eventBus`, `useIssues` SSE consumer with the same `createHydrationBuffer` pattern as `useDispatches`. Drop `POLL_INTERVAL_MS` + the `setInterval` from `useIssues.ts`. Add the source-check test (`expect(source).not.toMatch(/setInterval/)`) like `useDispatches.test.ts` and `useAgents.test.ts` already have.
+
+  2. **Phase 2 — Codify the rule + audit (DX-227)** — add a "Real-time Updates Are Mandatory" section to `.claude/rules/dashboard.md`: every composable that owns server state subscribes to SSE; cosmetic-only local timers (e.g. `AgentCard.vue`'s 60s elapsed-tick re-render) are explicitly allowed; no `setInterval` may call into `api.ts`. Sweep the codebase, confirm Phase 1 closed the only violation, document the escape hatch.
+
+  ## Out of scope
+
+  - Changing the existing SSE topics or hydration semantics for `dispatches` / `agents`.
+  - Migrating to LISTEN/NOTIFY or any cross-process bus (in-process chokidar + eventBus is enough today).
+  - Issue-detail drawer real-time updates (the `fetchDetail` cache already invalidates on roster refresh; same hook applies after Phase 1 — no extra work needed).
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

@@ -31,7 +31,7 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
@@ -984,6 +984,19 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // URLs.
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const restartWorkerUrl = `http://localhost:${input.repo.workerPort}/api/restart/${dispatchId}`;
+  // DX-309: agent-bound dispatches swap every "this dispatch's repo
+  // root" reference from the main checkout to the agent's worktree. The
+  // resolver uses `agentName` to swap `cwd` (so the spawned process's
+  // git context follows the agent's branch); `DANX_REPO_ROOT` flips so
+  // the danx-issue MCP server reads issue YAMLs from the worktree (via
+  // a symlink provisioned by WorktreeManager, so files land in main);
+  // `DANX_AGENT_WORKTREE` is the boundary the PreToolUse hook uses to
+  // reject writes outside the worktree. Non-agent dispatches leave all
+  // three unset/at-main — legacy behavior preserved.
+  const agentName = input.agent?.name;
+  const worktreeLocalPath = agentName
+    ? resolve(input.repo.localPath, ".danxbot", "worktrees", agentName)
+    : null;
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
     // `DANXBOT_WORKER_PORT` is auto-injected from `repo.workerPort` so
@@ -1006,7 +1019,13 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // creds; the worker's poll loop owns the YAML → Trello mirror
     // asynchronously. Workspaces that don't reference `DANX_REPO_ROOT`
     // simply ignore the extra overlay key.
-    DANX_REPO_ROOT: input.repo.localPath,
+    DANX_REPO_ROOT: worktreeLocalPath ?? input.repo.localPath,
+    // DX-309: only present for agent-bound dispatches. The PreToolUse
+    // worktree-guard hook reads this as its allowlist root — absent →
+    // hook no-ops (legacy/non-agent dispatch). Setting this on overlay
+    // (not just env) so resolver placeholder substitution can reference
+    // it from workspace settings.json if needed.
+    ...(worktreeLocalPath ? { DANX_AGENT_WORKTREE: worktreeLocalPath } : {}),
     // Auto-inject the dispatch id so workspaces that need a per-dispatch
     // staging path (`staging-paths: - "/tmp/conflict-check/${DANXBOT_DISPATCH_ID}/"`)
     // can reference it directly without forcing every caller to plumb
@@ -1019,6 +1038,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     repo: input.repo,
     workspaceName: input.workspace,
     overlay,
+    agentName,
   });
 
   // Merge the danxbot infrastructure server. The workspace's `.mcp.json`

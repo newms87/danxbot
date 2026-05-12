@@ -1,0 +1,163 @@
+schema_version: 6
+tracker: memory
+id: DX-295
+external_id: 6a023abb05298415262514a6
+parent_id: DX-291
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "DX-291 > Phase 4: danx-prep skill body — branch sync, WIP recovery, conflict-check, verdict"
+description: |-
+  ## Context
+
+  Parent epic: DX-291. Waits on P3 (DX-294) — the MCP tool the skill emits its verdict through must exist first.
+
+  This phase writes the actual prep skill body that the dispatched Claude agent reads + executes on its worktree. Lives in the inject path so every connected repo's `issue-worker` workspace receives it on each poll tick.
+
+  ## Path
+
+  `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.md`
+
+  The poller's `injectDanxWorkspaces` step copies this into `<repo>/.danxbot/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.md` every tick.
+
+  ## Skill body — required sections
+
+  ### Trigger (in frontmatter `description`)
+
+  MANDATORY when the dispatch prompt begins with `/danx-prep <ISS-N>`. The combined-mode prompt body (P5) is `/danx-prep <ISS-N>\n\n/danx-next` — the agent runs prep first, emits the verdict via `danxbot_prep_verdict`, and on `ok` continues into the `/danx-next` body in the same session. The separate-mode prompt body is `/danx-prep <ISS-N>` only — verdict + `danxbot_complete`.
+
+  ### Step 1 — Read context
+
+  - Read the candidate YAML at `<repo>/.danxbot/issues/open/<ISS-N>.yml` to learn the work scope.
+  - `git status --porcelain` + `git rev-list --left-right --count origin/main...HEAD` after `git fetch origin`.
+  - Read every `<repo>/.danxbot/issues/open/*.yml` with `status: "In Progress"` (exclude self). Cap at 20 (defensive).
+
+  ### Step 2 — Uncommitted work recovery
+
+  If `git status --porcelain` is non-empty:
+
+  1. Compute the set of modified paths.
+  2. Score every YAML (open + closed) on overlap with the changed paths:
+     - Direct mention of any path in `description` / `comments[].text` / `ac[].title` → +3 each
+     - Assigned_agent equals current agent name → +2
+     - Recent activity timestamp (within last 24h) → +1
+  3. Pick the highest-scoring YAML.
+  4. **Commit the work as-is** — `git add -A && git commit -m "wip: recovered uncommitted work — see ISS-N comment"`. NEVER `git stash`, NEVER `git reset --hard`, NEVER `git checkout <path>`. The commit is the recoverable trail.
+  5. **Append a comment** to the selected YAML (`Edit` tool):
+     - Title: `## Recovered uncommitted work — Phase 4 prep`
+     - Body: list of changed paths + the prior session info (if knowable from JSONL hints) + the commit sha.
+  6. **No card scored high enough** → create a fresh Action Items card via `mcp__danx-issue__danx_issue_create({type: "Bug", title: "Investigate orphan uncommitted work", description: "..."})`, commit the WIP, comment the new card with the sha + paths.
+
+  ### Step 3 — Branch sync
+
+  Read the P2 helper contract — but the agent CALLS the worker (no — the agent runs git directly on its worktree). Concrete commands:
+
+  - `ahead=0, behind=0` → no-op.
+  - `ahead=0, behind>0` → `git pull --ff-only origin/main`. Verify it succeeded; if it refused (history diverged surprisingly), emit verdict `abort` w/ reason.
+  - `ahead>0` → `git rebase origin/main`. Conflict → `git rebase --abort` → emit verdict `abort` w/ reason `"rebase conflict against origin/main"` + suggested_steps `["inspect the worktree by hand", "resolve conflicts manually", "clear the broken record via the dashboard"]`.
+
+  **ABSOLUTE BAN** — never run `git reset --hard`, `git checkout <ref> -- <path>`, `git restore`, `git clean -f`, `git stash`, or any other destructive primitive. If a sync step needs more than fetch/ff/rebase, abort. The user-facing rule: `~/web/claude-plugins/dev/skills/git-discipline/SKILL.md` "Never Destroy Work. Ever."
+
+  ### Step 4 — Conflict check
+
+  For each in-progress sibling YAML, reason about file-scope overlap with the candidate (file paths mentioned in description / AC / comments; module / domain proximity). If overlap detected:
+
+  - Emit verdict `waiting_on` with `blocked_by: ["DX-N", ...]` listing the overlapping sibling ids.
+
+  If no overlap → continue to step 5.
+
+  ### Step 5 — Card-itself sanity check
+
+  Does the candidate describe work the agent can perform?
+
+  - Spec ambiguous, AC impossible, scope crosses red-line architectural decisions, hard-gate criteria match (see `danxbot:issue-card-workflow` "Blocked — Hard Gate Before Saving") → emit verdict `blocked` w/ a clear reason.
+  - Otherwise → emit verdict `ok`.
+
+  ### Step 6 — Emit verdict
+
+  Call `mcp__danxbot__danxbot_prep_verdict({verdict, reason, ...})`. The MCP tool returns the worker's ack including the applied side-effects.
+
+  ### Step 7 — Continuation
+
+  - **Combined mode** (prompt contained `/danx-next` after prep) → on `ok` verdict, proceed with the work body. On any non-ok verdict, DO NOT begin the work — the worker has already stopped the dispatch via the verdict route.
+  - **Separate mode** → call `danxbot_complete({status: "completed", summary: "prep <verdict>: <reason>"})` and exit.
+
+  ## Forbidden patterns inside the skill
+
+  Enumerate these in the SKILL.md so future agents reading the body never reach for them:
+
+  - `git stash` / `git checkout <ref>` / `git reset --hard` / `git restore` / `git clean -f`
+  - `git push --force` / `--force-with-lease`
+  - Writing to any path outside the worktree (no `/tmp/...` skill-state, no `.danxbot/` writes other than YAML edits and the new Action Items card creation)
+  - Calling `mcp__trello__*` (Trello is background infra; never agent path)
+  - Returning verdict without actually inspecting the in-progress YAMLs (no "I assume no conflict")
+
+  ## Key files
+
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.md` (new file — the skill body)
+  - `src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.test.md` is NOT a thing; the skill itself has no tests (text content). Its consumers (P5) have integration tests that exercise the verdict flow.
+
+  ## AC
+
+  - Skill body covers all 7 steps above with concrete commands.
+  - Forbidden-patterns section explicit + enumerated.
+  - Frontmatter description triggers on the `/danx-prep <ISS-N>` slash command.
+  - Skill renders correctly into a workspace dir (manual smoke: poke at a connected repo workspace tree post-tick).
+  - Lint pass for any embedded code blocks.
+
+  ## Test plan
+
+  - Smoke: render the skill into a workspace dir, confirm presence + frontmatter parse.
+  - Visual review of the skill body — agent-prose, no dead links, paths cwd-relative.
+  - Integration coverage in P5.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a023abcde39e63bcdbb18fc
+    title: src/poller/inject/workspaces/issue-worker/.claude/skills/danx-prep/SKILL.md exists with the 7-step body
+    checked: false
+  - check_item_id: 6a023abd9b5e801ef57d11b5
+    title: Frontmatter description triggers on /danx-prep <ISS-N>
+    checked: false
+  - check_item_id: 6a023abd51a71c087cf4f824
+    title: WIP recovery section explicitly bans git stash + git reset --hard + git checkout <ref> + git restore + git clean -f and prescribes commit-first
+    checked: false
+  - check_item_id: 6a023abee05d675434347879
+    title: Branch sync section explicitly bans destructive ops and prescribes fetch + ff-only or rebase or abort
+    checked: false
+  - check_item_id: 6a023abe6f4c790b3ed33183
+    title: Verdict emission section references mcp__danxbot__danxbot_prep_verdict with the four shapes
+    checked: false
+  - check_item_id: 6a023abe33f2718a1b07c957
+    title: Forbidden-patterns enumerated section present
+    checked: false
+  - check_item_id: 6a023abf00bccfba00e58c38
+    title: Skill renders into a workspace dir via the poller's inject step
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on:
+  reason: Prep skill body depends on the MCP verdict tool from P3 (DX-294) being callable.
+  timestamp: 2026-05-11T13:00:00.000Z
+  by:
+    - DX-294
+blocked: null
+requires_human: null

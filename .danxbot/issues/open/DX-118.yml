@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-118
 external_id: 69df24dc32dfa2044ef76c04
@@ -15,6 +15,7 @@ description: |
 
   **ICE Score:** 480 = 8 x 8 x 7 (I: 8 — every multi-repo dashboard user is affected; spurious updates confuse the UI and waste bandwidth. C: 8 — the broadcast function is a single place and the pattern is identical to what /api/events already does. E: 7 — touches events.ts broadcast/addSSEClient/removeSSEClient and server.ts SSE handler, isolated to 2 files.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -58,5 +59,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

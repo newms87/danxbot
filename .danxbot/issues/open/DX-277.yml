@@ -1,0 +1,136 @@
+schema_version: 6
+tracker: memory
+id: DX-277
+external_id: 6a0175996e5da10e80f83942
+parent_id: DX-275
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: "Skill-eval > Phase 2: Eval-set format + first eval-set for dev:debugging (20 queries, train/test split)"
+description: |-
+  ## Goal
+
+  Adopt skill-creator's JSON eval-set format. Author the first eval-set (`dev:debugging`, 20 queries: 10 should-trigger + 10 should-NOT-trigger). Extend `/skill-eval` to consume an eval-set file, run each query 3× for stable trigger-rate, split 60/40 train/test, report accuracy matrix with per-query failure samples.
+
+  ## Why second
+
+  P1 proves the trigger-detection primitive. P2 layers the standard eval-set shape on top so downstream phases (iteration, expansion) plug in without rework. Picks `dev:debugging` first because it's the skill we already have empirical evidence is broken.
+
+  ## Eval-set format
+
+  `<danxbot>/tests/skill-evals/<plugin>-<skill>/eval-set.json`:
+
+  ```json
+  [
+    {"query": "Look at /tmp/X.log and tell me what the test results were.", "should_trigger": true},
+    {"query": "Summarize the failures from this build output", "should_trigger": true},
+    {"query": "Why is the dispatch agent stuck on DX-244?", "should_trigger": true},
+    {"query": "Rename function foo to bar in src/baz.ts", "should_trigger": false},
+    {"query": "List the files in src/agent/", "should_trigger": false},
+    ...
+  ]
+  ```
+
+  Format constraints (per skill-creator + Anthropic guidance):
+  - 20 queries total (skill-creator-recommended)
+  - 8-10 should_trigger, 8-10 should_NOT_trigger
+  - Negatives must be GENUINELY tricky (near-misses), not obvious irrelevant ("write a fibonacci"). Negatives that are obviously off-topic don't test the description.
+  - Queries must be realistic + concrete (specific paths, names, context). No abstract "ask about X" placeholders.
+
+  ## dev:debugging eval-set seed (P2 deliverable)
+
+  10 should_trigger queries covering:
+  1-3. Bug-language reporting (test-log summary, post-build report, "what is broken")
+  4-5. Investigation framing (why-X, dig-into-Y) WITHOUT explicit "bug" word
+  6-7. Factual assertion about runtime behavior ("how does Y work", "what config value is used for Z")
+  8-10. Failing-test recovery + post-mortem framings
+
+  10 should_NOT_trigger queries covering:
+  1-3. Pure read tasks (list dirs, grep for symbol, show file contents) — orientation only
+  4-5. Pure rename/refactor with no failure context
+  6-7. Documentation edits / typo fixes
+  8-9. New feature requests where no bug exists yet
+  10. Test-log summaries that explicitly contain ONLY passes (no `✗` / `Failed:` tokens)
+
+  ## Runner extensions (on top of P1 skeleton)
+
+  - `/skill-eval <plugin>:<skill>` (no --query — discovers eval-set by convention path)
+  - Run each query 3× (skill-creator default); count as "triggered" if ≥2/3 fire
+  - 60/40 split: first 12 queries = train, last 8 = held-out test (deterministic shuffle by seed for reproducibility)
+  - Aggregate report (markdown):
+    - Trigger rate on train (should-trigger / should-NOT-trigger)
+    - Trigger rate on held-out test
+    - Per-failed-query: prompt + 3-run trigger result + JSONL paths
+    - Cost: total tokens × pricing
+  - Bounded parallelism: default 3 concurrent dispatches (configurable)
+
+  ## NOT in scope (P3+)
+
+  - Iteration loop (P3)
+  - Description-edit proposal generation (P3)
+  - Coverage beyond dev:debugging (P4)
+
+  ## Acceptance
+
+  - Eval-set JSON shape matches skill-creator's format exactly (drop-in compatible if Anthropic ships #36570/#556 fixes)
+  - <danxbot>/tests/skill-evals/dev-debugging/eval-set.json exists with 20 queries (10/10 split)
+  - Negatives are genuinely tricky — code-reviewer subagent verifies "no obvious-irrelevant negatives" before AC tick
+  - /skill-eval <plugin>:<skill> runs full eval-set, reports train + test accuracy, exits 0 if both ≥95% / 1 otherwise
+  - 3× runs per query with ≥2/3 majority threshold
+  - Bounded parallelism (default 3, --parallel N override)
+  - Markdown report includes per-failure forensics (prompt + JSONL excerpt link)
+  - Cost reported per run
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a01759ab01800f6323a7271
+    title: "Eval-set JSON format matches skill-creator schema exactly: [{query, should_trigger}]"
+    checked: false
+  - check_item_id: 6a01759ae6ab316db040510c
+    title: <danxbot>/tests/skill-evals/dev-debugging/eval-set.json exists with 20 queries (10 should_trigger + 10 should_NOT_trigger)
+    checked: false
+  - check_item_id: 6a01759bd4fb57233e8e1d75
+    title: Negative cases are tricky near-misses (verified by code-reviewer subagent), not obvious irrelevant
+    checked: false
+  - check_item_id: 6a01759c574552f67e28332d
+    title: /skill-eval <plugin>:<skill> consumes eval-set by convention path, runs each query 3×
+    checked: false
+  - check_item_id: 6a01759cf6a2dab1c5c66a23
+    title: 60/40 train/test split with deterministic seed; report shows both halves
+    checked: false
+  - check_item_id: 6a01759df92e8058bbfab760
+    title: Bounded parallelism, default 3 concurrent dispatches, --parallel N override
+    checked: false
+  - check_item_id: 6a01759d1fc5d5f857e7727c
+    title: "Markdown report: pass/fail matrix, per-failure forensics (prompt + JSONL link), total cost"
+    checked: false
+  - check_item_id: 6a01759ef4a535fc88bad1e8
+    title: Exit 0 if train AND test both ≥95%, exit 1 otherwise
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on:
+  reason: P2 builds the eval-set format on top of the trigger-detection primitive that lands in P1 (DX-276). Authoring eval-sets before the runner exists would orphan the JSON files.
+  timestamp: 2026-05-11T05:00:00Z
+  by:
+    - DX-276
+blocked: null
+requires_human: null

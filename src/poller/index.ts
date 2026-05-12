@@ -1744,11 +1744,39 @@ function injectDanxWorkspaces(workspacesTargetDir: string): void {
     if (!statSync(workspaceDir).isDirectory()) continue;
     injectMcpServers(workspaceDir);
     stripHostUnreachableMcpServers(workspaceDir);
+    injectSharedWorktreeGuardHook(workspaceDir);
     pruneStaleDanxArtifactsInWorkspace(
       resolve(injectWorkspacesDir, entry),
       workspaceDir,
     );
   }
+}
+
+/**
+ * DX-309: copy the shared `worktree-guard.mjs` PreToolUse hook into
+ * `<workspace>/.claude/hooks/`. Single source of truth at
+ * `src/poller/inject/_shared/hooks/worktree-guard.mjs`; the workspace's
+ * own `.claude/settings.json` references the hook by relative path.
+ * Cross-workspace sharing avoided the drift that copying-by-hand into
+ * every workspace fixture would have caused.
+ *
+ * Idempotent via `writeIfChanged`. Exec bit stamped because some host
+ * file systems lose it across copies; the hook is invoked as `node
+ * <path>` so the bit is belt-and-suspenders rather than load-bearing.
+ */
+function injectSharedWorktreeGuardHook(workspaceDir: string): void {
+  const source = resolve(
+    injectDir,
+    "_shared",
+    "hooks",
+    "worktree-guard.mjs",
+  );
+  if (!existsSync(source)) return;
+  const targetDir = resolve(workspaceDir, ".claude", "hooks");
+  mkdirSync(targetDir, { recursive: true });
+  const targetPath = resolve(targetDir, "worktree-guard.mjs");
+  writeIfChanged(targetPath, readFileSync(source, "utf-8"));
+  chmodExecutable(targetPath);
 }
 
 /**
@@ -2059,6 +2087,15 @@ export function syncRepoFiles(repo: RepoContext): void {
   // Stage 2: per-repo render into every plural workspace.
   renderPerRepoFilesIntoWorkspaces(repo, danxbotConfigDir, cfg, workspacesDir);
 
+  // Stage 2b (DX-309): mirror the fully-populated workspaces tree into
+  // each agent worktree's `<worktree>/.danxbot/workspaces/`. Real-dir
+  // copy, NOT symlink — a symlinked workspaces dir would make the
+  // spawned agent's cwd resolve (via the kernel's physical-path swap)
+  // back to the main checkout, defeating the per-agent git-context
+  // isolation. `mirrorWorkspaceTree` + `writeIfChanged` keep the I/O
+  // cost proportional to actual content changes between ticks.
+  mirrorWorkspacesIntoWorktrees(repo, danxbotConfigDir, cfg);
+
   // Stage 3: scrubs. Remove the legacy singular `<repo>/.danxbot/workspace/`
   // (workspace-dispatch epic retired it) and any `danx-*` artifacts at
   // repo-root `.claude/` (dev-territory contract).
@@ -2137,6 +2174,71 @@ function renderPerRepoFilesIntoWorkspaces(
     writeIssuePrefixRule(repo.issuePrefix, target);
     copyRepoToolsDoc(danxbotConfigDir, target);
     copyRepoToolScripts(danxbotConfigDir, target);
+  }
+}
+
+/**
+ * DX-309: for each agent worktree under `<repo>/.danxbot/worktrees/`,
+ * ensure `<worktree>/.danxbot/workspaces/` mirrors `<repo>/.danxbot/
+ * workspaces/`. The dispatch layer cwd-swaps agent-bound dispatches to
+ * a worktree-rooted workspace dir; the dir MUST exist on disk before
+ * `resolveWorkspace` runs or it throws `WorkspaceNotFoundError`.
+ *
+ * Cost: poll-tick I/O proportional to actual content change, not
+ * worktree count — `writeIfChanged` short-circuits on byte-identical
+ * writes and the inject sources are tiny. Three worktrees × five
+ * workspaces × ~20 files each = ~300 stat+hash ops per tick, all
+ * cached by the OS page cache. Acceptable.
+ *
+ * The per-repo render layer (`renderPerRepoFilesIntoWorkspaces`) is
+ * re-run against each worktree's workspaces tree so worktree-scoped
+ * skills + per-repo rules + tools docs resolve cwd-relatively when the
+ * agent is sitting inside the worktree. Without this, the agent would
+ * still resolve `.claude/rules/danx-repo-config.md` upward through the
+ * worktree's own `.claude/` (developer territory) and miss the per-
+ * repo render entirely.
+ */
+function mirrorWorkspacesIntoWorktrees(
+  repo: RepoContext,
+  danxbotConfigDir: string,
+  cfg: Record<string, string>,
+): void {
+  const worktreesRoot = resolve(repo.localPath, ".danxbot", "worktrees");
+  if (!existsSync(worktreesRoot)) return;
+  const mainWorkspaces = resolve(repo.localPath, ".danxbot", "workspaces");
+  if (!existsSync(mainWorkspaces)) return;
+
+  let agentDirs: string[];
+  try {
+    agentDirs = readdirSync(worktreesRoot);
+  } catch {
+    return;
+  }
+
+  for (const agentName of agentDirs) {
+    const worktree = resolve(worktreesRoot, agentName);
+    try {
+      if (!statSync(worktree).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const workspacesTarget = resolve(worktree, ".danxbot", "workspaces");
+    mkdirSync(workspacesTarget, { recursive: true });
+    for (const entry of readdirSync(mainWorkspaces)) {
+      const src = resolve(mainWorkspaces, entry);
+      try {
+        if (!statSync(src).isDirectory()) continue;
+      } catch {
+        continue;
+      }
+      mirrorWorkspaceTree(src, resolve(workspacesTarget, entry), []);
+    }
+    renderPerRepoFilesIntoWorkspaces(
+      repo,
+      danxbotConfigDir,
+      cfg,
+      workspacesTarget,
+    );
   }
 }
 

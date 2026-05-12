@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-113
 external_id: 69e27d354cff69d3df37e14f
@@ -78,6 +78,7 @@ description: |-
   - Cross-repo aggregations or analytics endpoints.
   - Export/CSV.
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -121,5 +122,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

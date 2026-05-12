@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-119
 external_id: 69df2751f06ebee25bed3316
@@ -15,6 +15,7 @@ description: |-
 
   **ICE Score:** 567 = 7 × 9 × 9 (I: 7 — prevents agents from picking up unfixable error cards and wasting budget; keeps the workflow clean. C: 9 — single-line default change with very clear path. E: 9 — isolated to one file, under 5 lines changed.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -46,5 +47,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

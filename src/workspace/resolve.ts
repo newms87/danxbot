@@ -142,6 +142,23 @@ export interface ResolveWorkspaceOptions {
   repo: RepoContext;
   workspaceName: string;
   overlay: Readonly<Record<string, string>>;
+  /**
+   * Agent identity for worktree-scoped dispatches (DX-309). When set,
+   * the resolver swaps `cwd` from the main checkout's workspace dir
+   * (`<repo>/.danxbot/workspaces/<name>`) to the agent worktree's
+   * workspace dir (`<repo>/.danxbot/worktrees/<agentName>/.danxbot/
+   * workspaces/<name>`). Loadbearing: the spawned agent's git context
+   * follows physical cwd path; without this swap, a worktree agent
+   * lands in the main checkout's git tree and edits land on `main`
+   * instead of the agent's branch. The worktree's workspaces tree is
+   * materialized by `injectDanxWorkspaces` per tick — real dirs, NOT
+   * symlinks (symlinks defeat the cwd swap because the kernel resolves
+   * cwd to physical path on attach).
+   *
+   * Omit for non-agent dispatches (Slack, system-test, ad-hoc
+   * `/api/launch` without an agent persona).
+   */
+  agentName?: string;
 }
 
 export interface ResolvedWorkspace {
@@ -197,9 +214,30 @@ const GATE_REGISTRY: Readonly<Record<string, GateEvaluator>> = Object.freeze({
     isFeatureEnabled(repo, "issuePoller"),
 });
 
-function workspaceRoot(repo: RepoContext, name: string): string {
+function workspaceRoot(
+  repo: RepoContext,
+  name: string,
+  agentName?: string,
+): string {
   // Canonical hostPath → spawn cwd identical across runtimes → JSONL
   // encoded-cwd portable. See `src/agent/portable-path.ts`.
+  //
+  // Agent-bound dispatches (DX-309) swap to the agent's worktree so the
+  // spawned process's git context is the agent's branch, not main. The
+  // worktree's workspaces subtree is materialized by
+  // `injectDanxWorkspaces` (real dirs, not symlinks) — the cwd value
+  // returned here must point at a real path on disk.
+  if (agentName) {
+    return resolve(
+      repo.hostPath,
+      ".danxbot",
+      "worktrees",
+      agentName,
+      ".danxbot",
+      "workspaces",
+      name,
+    );
+  }
   return resolve(repo.hostPath, ".danxbot", "workspaces", name);
 }
 
@@ -345,8 +383,8 @@ export function cleanupWorkspaceSettings(settingsPath: string): void {
 export function resolveWorkspace(
   options: ResolveWorkspaceOptions,
 ): ResolvedWorkspace {
-  const { repo, workspaceName, overlay } = options;
-  const cwd = workspaceRoot(repo, workspaceName);
+  const { repo, workspaceName, overlay, agentName } = options;
+  const cwd = workspaceRoot(repo, workspaceName, agentName);
 
   if (!existsSync(cwd)) {
     throw new WorkspaceNotFoundError(

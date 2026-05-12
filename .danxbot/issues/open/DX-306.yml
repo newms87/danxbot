@@ -1,0 +1,134 @@
+schema_version: 6
+tracker: memory
+id: DX-306
+external_id: 6a026daf1ff76e8132a00194
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Bug
+title: Lock-acquire 429 keeps agent in free pool → same agent walks through every remaining card per tick
+description: |-
+  ## Symptom
+
+  During a Trello 429 storm, the picker burns the SAME agent across every remaining dispatchable card in a single tick. Each `tryAcquireLock` throws 429, the catch block splices the card but never marks the agent busy, the outer `while` loop calls `pickFreeAgent` again, gets the same agent, picks the next card, 429s, repeats. Wastes Trello quota during the exact window the API is asking for backoff, and crosses with Bug #1 (no picker single-flight) to amplify the duplicate-spawn risk.
+
+  ## Affects
+
+  Every tick that hits a transient tracker error (Trello 429, network blip, DNS failure) during `tryAcquireLock`. Severity scales with `dispatchable_cards × agents` because every agent walks every card.
+
+  ## Env
+
+  `src/poller/multi-agent-pick.ts` lines 380-392 — catch block for `tryAcquireLock` failures. Reproducible whenever Trello returns 429 on `PUT/GET .../cards/.../actions` (the lock-acquire path uses Trello comments as the cross-env mutex).
+
+  ## Scenario
+
+  1. Picker enters the `while (remainingCards.length > 0)` loop.
+  2. `pickFreeAgent({roster, busy, now})` returns `dani` — dani is in `roster`, not in `busy`.
+  3. `pickCardForAgent` returns `DX-267`.
+  4. `tryAcquireLock(tracker, DX-267.external_id, ...)` throws 429.
+  5. Catch block at `multi-agent-pick.ts:380-392`: logs the warning, splices `DX-267` from `remainingCards`, `continue`s.
+  6. **`busy` set is never mutated.** Next loop iteration: `pickFreeAgent` returns `dani` again. `DX-290` next eligible. 429. Repeat for `DX-292`, `DX-281`. Eventually ANY card that doesn't 429 → dani actually spawns.
+  7. Trello quota burned across 4-N attempts within ~700ms during a window the server is explicitly asking for backoff.
+
+  ## Expected
+
+  A transient lock-acquire failure removes THIS AGENT from the picker's eligible pool for the current tick. The agent retries on the next tick (the scheduler/poller re-arms naturally; the agent doesn't need to be claimed and the cards stay dispatchable). Effect: one 429 per agent per tick instead of one 429 per (agent, card) per tick.
+
+  Alternative shape: count consecutive lock-acquire failures and apply per-repo exponential backoff to the picker itself (defers the next tick). Simpler shape preferred — per-tick skip is enough.
+
+  ## Actual
+
+  `make launch-worker-host` log on 2026-05-11 23:54:14-16 (Trello 429 storm window):
+
+  - `23:54:14.979 dani → DX-267` (lock 429 skip)
+  - `23:54:15.198 dani → DX-290` (lock 429 skip)
+  - `23:54:15.422 dani → DX-292` (lock 429 skip)
+  - `23:54:15.662 dani → DX-281` (lock 429 skip)
+  - Same chain for `murphy` (same four cards).
+  - Retry-queue emits ~30 simultaneous 429-failed retry stamps in the same window — quota was already exhausted.
+
+  ## Reproduce
+
+  Test-world (fast): write a `multi-agent-pick.test.ts` test where `tryAcquireLock` mock throws on the first card and resolves on the second. With one agent + two cards, assert ONE call to `tryAcquireLock` (current behavior: TWO — same agent walks both cards).
+
+  Real-world (slow): generate a Trello 429 storm by running ~25 `mcp__trello__*`-equivalent reads in parallel from the worker. The worker's retry-queue + poller's lock-acquire path will both hit 429; the symptom appears in the next tick.
+
+  ## Likely fix shape
+
+  In `src/poller/multi-agent-pick.ts:380-392`, add the agent to a tick-local `Set<string>` (call it `skipAgents`) when `tryAcquireLock` throws. Extend the `pickFreeAgent` filter at the loop top to exclude this set in addition to `busy`. Cheap, ~5 lines:
+
+  ```ts
+  } catch (err) {
+    log.warn(...);
+    skipAgents.add(agent.name);
+    remainingCards.splice(remainingCards.indexOf(card), 1);
+    continue;
+  }
+  ```
+
+  Pass `skipAgents` into `pickFreeAgent` (or apply at call site via `busy ∪ skipAgents`).
+
+  Consider the `!lockResult.acquired` branch (`:393-403`) — that's "another holder owns the lock," NOT a tracker error. The agent is fine; the card is just owned. Current splice-and-continue is correct there. Do NOT add the agent to `skipAgents` in that branch.
+
+  ## Files
+
+  - `src/poller/multi-agent-pick.ts` — catch block at lines 380-392.
+  - `src/poller/multi-agent-pick.test.ts` — new test for the per-tick agent skip.
+
+  ## How to verify
+
+  - New unit test asserts ONE `tryAcquireLock` call when the first attempt throws.
+  - Manual smoke under simulated 429 storm: log shows at most one `lock acquire threw for ... → <agent>` per agent per tick (current: 4+).
+
+  ## NOT in scope
+
+  - Bug #1 (concurrent runPicker spawns duplicates) — separate root cause + file, separate card.
+  - Trello rate-limit budgeting at a higher layer (request batching, global circuit breaker) — DX-300 covers that direction.
+  - The retry-queue's own 429 handling — already has exponential backoff, not the same code path.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac:
+  - check_item_id: 6a026db099306d4cf99d379c
+    title: Catch block at multi-agent-pick.ts:380-392 adds the agent to a tick-local skip set
+    checked: false
+  - check_item_id: 6a026db07248604269099c1d
+    title: Picker's pickFreeAgent excludes (busy ∪ skipAgents) so the same agent isn't re-picked within a tick after a lock-acquire throw
+    checked: false
+  - check_item_id: 6a026db1b32584f8aebc52b2
+    title: The `lock held by another holder` branch (lockResult.acquired === false) is unchanged — agent stays eligible for other cards
+    checked: false
+  - check_item_id: 6a026db16aae2060b6955258
+    title: "Unit test: tryAcquireLock throws on card #1 → assert ONE invocation, not N"
+    checked: false
+  - check_item_id: 6a026db232bd7c765ac960ae
+    title: "Unit test: lockResult.acquired === false on card #1 → agent still tries card #2 (unchanged behavior)"
+    checked: false
+  - check_item_id: 6a026db207a8919eb1e5c187
+    title: "Manual smoke under simulated 429 storm: each agent appears in at most one `lock acquire threw` line per tick"
+    checked: false
+  - check_item_id: 6a026db39105349d7564fcaa
+    title: npx vitest run + npx tsc --noEmit green
+    checked: false
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-120
 external_id: 69df2763a1f0c258f30f841c
@@ -15,6 +15,7 @@ description: |-
 
   **ICE Score:** 336 = 6 × 8 × 7 (I: 6 — prevents disk-full crashes in production; all deployments accumulate logs indefinitely today. C: 8 — proven pattern already used by `events-db.ts` and `threads-db.ts` cleanup. E: 7 — new `log-cleaner.ts` utility + hook into shutdown.ts, a few hours of work.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -52,5 +53,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

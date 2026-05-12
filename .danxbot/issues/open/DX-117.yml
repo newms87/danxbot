@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-117
 external_id: 69df24845335a140e70b701d
@@ -15,6 +15,7 @@ description: |
 
   **ICE Score:** 420 = 7 x 6 x 10 (I: 7 - the worker server handles all agent dispatch; a regression here would silently break connected repo integrations. C: 6 - test patterns are well-established but requires mocking the child-process-based launcher. E: 10 - isolated to one new file, under 300 lines.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -64,5 +65,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

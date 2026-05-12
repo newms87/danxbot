@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-123
 external_id: 69df2789129ccb053fba6a4d
@@ -15,6 +15,7 @@ description: |-
 
   **ICE Score:** 224 = 4 × 8 × 7 (I: 4 — meaningful for high-traffic deployments; for current usage the 500-event cap keeps payloads manageable but this is a growth concern. C: 8 — REST pagination is a well-understood pattern with clear implementation path. E: 7 — API change is trivial; Vue composable update takes ~2 hours.)
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -55,5 +56,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

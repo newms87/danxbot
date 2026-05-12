@@ -1,0 +1,90 @@
+schema_version: 6
+tracker: trello
+id: DX-299
+external_id: 6a023c1ada1908c9438f5fa5
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: Dashboard suite-wide CPU-contention flake class — apply DX-262 vi.waitFor pattern to remaining vulnerable tests
+description: |-
+  ## Symptom
+
+  Surfaced during DX-262 stress reproduction (May 2026). Under heavy full-suite CPU contention (15-20 background `yes` procs), the same `await trigger("click") + await flushPromises() + expect(spy).toHaveBeenCalled...` race that flaked `RequiresHumanPanel.test.ts` also flakes a class of other dashboard tests:
+
+  | Test file | Flaking test | Symptom |
+  |---|---|---|
+  | `dashboard/src/components/issues/IssueBoard.test.ts` | `IssueBoard — drag and drop > dragging a card from ToDo and dropping on In Progress emits move with target status` | `moveSpy` expected called once, got 0 times |
+  | `dashboard/src/components/issues/IssueBoard.test.ts` | `IssueBoard — drag and drop > hovered drop target gets the drop-hover class while a drag is active` | `expected [ 'column' ] to include 'drop-hover'` (under load) and the inverse on dragend |
+  | `dashboard/src/components/issues/IssueBoard.test.ts` | `IssueBoard — drag and drop > cards in different columns each get their own drag binding` | spy expected called once, got 0 times |
+  | `dashboard/src/components/issues/DrawerHeader.test.ts` | `DrawerHeader title editor > Enter saves: calls patchIssue with the new title and emits update:issue` | `Unable to get [data-test="drawer-title-input"]` (v-if mount race) |
+  | `dashboard/src/components/issues/OverviewTab.test.ts` | `OverviewTab description editor > clicking Edit mounts the MarkdownEditor in edit mode pre-filled with the current description` | `Unable to get [data-test="overview-description-editor"]` |
+  | `dashboard/src/components/SettingsPage.test.ts` | `SettingsPage > calls resetAllData when the dialog confirm fires and shows the success summary` | similar PATCH-call-count race |
+  | `dashboard/src/components/auth/Login.test.ts` | `Login.vue > disables the submit button AND both inputs while the request is in flight` | `expected undefined to be defined` — disabled state has not flushed |
+
+  Observed rate at heavy stress: ~5-10% per full-suite run, with 1 of those tests typically the failing one. Operator-machine baseline (no artificial stress) appears clean — these flakes are rare on developer machines but real, and they will erode confidence in CI as the suite grows.
+
+  ## Root cause (shared with DX-262)
+
+  `await trigger(...)` in `@vue/test-utils` returns after one `nextTick`, which gates ONE Vue render flush. `await flushPromises()` is one `setTimeout(0)` macrotask tick. Neither bounds the chained reactive cascade that follows a click — under CPU contention the cascade can split across multiple micro/macrotask cycles and the test's call-count / DOM-presence assertion fires before the cascade completes.
+
+  ## Solution
+
+  Apply the same `vi.waitFor` pattern DX-262 used in `RequiresHumanPanel.test.ts`:
+
+  - **Post-click call-count assertions** — replace `await flushPromises(); expect(spy).toHaveBeenCalled(...)` with `await vi.waitFor(() => expect(spy).toHaveBeenCalled(...))`.
+  - **Post-click DOM mount assertions** — replace bare `const el = w.get("[data-test='...']")` after a click with `await vi.waitFor(() => expect(w.find("[data-test='...']").exists()).toBe(true))` and only then read the element.
+  - **Post-click DOM state assertions** — replace `expect(el.classes()).toContain("...")` with `await vi.waitFor(() => expect(w.find(...).classes()).toContain("..."))`.
+  - **Keep `flushPromises` for negative assertions** (`not.toHaveBeenCalled` / element should NOT mount) — `vi.waitFor` can't gate on a negative; add an explanatory comment.
+
+  Out of scope: pool / isolation / vitest config changes. The targeted per-test fix is the right scope per DX-262's findings (the other 14 `flushPromises` sites across `src/` are not flaking, so a global setup-file fix would hide real synchronous-assertion failures behind a 5s wait).
+
+  ## Key files
+
+  - `dashboard/src/components/issues/IssueBoard.test.ts`
+  - `dashboard/src/components/issues/DrawerHeader.test.ts`
+  - `dashboard/src/components/issues/OverviewTab.test.ts`
+  - `dashboard/src/components/SettingsPage.test.ts`
+  - `dashboard/src/components/auth/Login.test.ts`
+  - Reference / template: `dashboard/src/components/issues/RequiresHumanPanel.test.ts` (DX-262 — see the `// DX-262: ...` comment trail for the mechanism description and the consistent `vi.waitFor` shape).
+
+  ## How to verify
+
+  1. Pick one file, apply the pattern, run that file in isolation: `cd dashboard && npx vitest run <path>` → all green.
+  2. Stress test that file under heavy load: `(for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do yes > /dev/null & done); for i in $(seq 1 30); do npx vitest run > /tmp/stress-$i.log 2>&1; ec=$?; if [ $ec -ne 0 ]; then echo "Run $i FAIL"; fi; done` — should show zero failures in the target file.
+  3. After all files fixed, repeat the same stress recipe against the full suite; should show 0 of the listed tests in failure output.
+
+  ## Why now
+
+  DX-262 fixed RequiresHumanPanel.test.ts. Same class of bug surfaces in the listed tests but operator never explicitly named them — they were spotted incidentally during DX-262's stress repro. Filing one card per file would be churn; one card covering the consistent fix pattern across all files is the right shape.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history:
+  - timestamp: 2026-05-11T20:29:35.265Z
+    actor: tracker:trello
+    event: created
+    to: Review
+    note: Hydrated from tracker external_id 6a023c1ada1908c9438f5fa5
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

@@ -1,4 +1,4 @@
-schema_version: 5
+schema_version: 6
 tracker: trello
 id: DX-115
 external_id: 69e27ce506fbcea19b94f4e5
@@ -82,6 +82,7 @@ description: |-
   - API routes or dashboard UI (Phases 4-6).
   - Retention cron (Phase 4).
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -128,5 +129,7 @@ retro:
   bad: ""
   action_item_ids: []
   commits: []
+assigned_agent: null
 waiting_on: null
 blocked: null
+requires_human: null

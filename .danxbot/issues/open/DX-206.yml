@@ -42,6 +42,7 @@ description: |-
   - Renaming `TrelloConfig.needsHelpListId` field name in TypeScript (separate code refactor; can be a follow-up action item if operator wants a clean rename)
   - Adding a new dedicated "Waiting On" Trello label for cards with non-null `waiting_on` — by design, waiting_on does NOT auto-paint a Trello label; the dashboard renders it
 priority: 3
+position: null
 triage:
   expires_at: ""
   reassess_hint: ""

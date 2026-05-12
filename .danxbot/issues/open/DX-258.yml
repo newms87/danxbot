@@ -1,0 +1,95 @@
+schema_version: 6
+tracker: trello
+id: DX-258
+external_id: 6a0143bcf75b0972afb38bbc
+parent_id: DX-257
+children: []
+dispatch: null
+status: Review
+type: Feature
+title: "Browser tool toggle > Phase 1: Investigate options + draft epic implementation plan"
+description: |-
+  ## Context
+
+  Phase 1 of DX-257 (Dashboard toggle: Playwright MCP vs Claude-in-Chrome for host-mode dispatch). Parent epic body has the goal + acceptance shape. This card is investigation-only — its output is the rest of the epic's phase children.
+
+  ## What to investigate
+
+  1. **Claude-in-Chrome tool surface (host-mode)** — enumerate the `mcp__claude-in-chrome__*` tools available in host-mode dispatch. Confirm they require nothing more than the operator's Chrome extension (no per-workspace config). Note any auth / tab-context lifecycle constraints (`tabs_context_mcp` at session start, etc.) that the workspace SKILL prompts will need to reference so agents use the tools correctly.
+
+  2. **Playwright accessibility from host** — choose a host-mode access path. Candidates:
+     - (a) Add host port-binding `3000:3000` to `danxbot-playwright-1` compose service. Cheapest. Operator still runs full danxbot infra to use playwright.
+     - (b) Join the host worker to a docker network so DNS for `playwright` resolves. Heavier; requires `make launch-worker-host` to wire `--network=container:danxbot-playwright-1` or similar.
+     - (c) Operator-supplied remote URL (per-repo settings field). Lets `playwright` live anywhere — managed VM, fly.io instance, etc. Most flexible.
+
+     Document the pros / cons / setup cost of each. Recommend one for the toggle's `playwright`-mode default; the others remain as documented operator options.
+
+  3. **Inject pipeline gate** — where should the runtime + toggle gate live? Options:
+     - Post-mirror mutation in `injectDanxWorkspaces` (current `injectMcpServers` lives here). Lowest blast radius. Existing pattern.
+     - Source-tree split — separate inject `.mcp.json` files per `{runtime, toggle}` combo. Cleanest separation but multiplies inject files.
+     - Runtime helper that rewrites `.mcp.json` in-place. Same as option A but factored as a standalone helper for tests.
+
+     Recommend the lightest-touch approach that survives Phase 4 / Phase 5 (DX-220 / DX-221) of the Event-Driven Worker epic — the cron sweep gets retired, so any helper hooked into the per-tick re-inject must also work from `reconcileIssue`.
+
+  4. **Settings file shape** — extend `<repo>/.danxbot/settings.json` `overrides` with a new `browserTool` key. Three-valued: `"playwright" | "claude-in-chrome" | null` (null = env default driven by runtime). Wire a reader analogous to `isFeatureEnabled` in `src/settings-file.ts`. Verify the merge invariant (display-only patches never clobber `overrides`, vice versa) per `.claude/rules/settings-file.md`.
+
+  5. **Dashboard UI** — toggle lives on the Agents tab per-repo settings panel. Should match the visual + interaction shape of the existing `slack` / `issuePoller` / `dispatchApi` toggles. Confirm the `PATCH /api/settings/:repo` (or equivalent) endpoint accepts the new field; if not, list the wiring required.
+
+  6. **Runtime defaults + migration** — confirm the auto-default-by-runtime rule: docker → `playwright`, host → `claude-in-chrome`. Document how `null` resolves on a repo that switches runtime mid-session (e.g. operator runs `make launch-worker-host` for dev but `make deploy TARGET=...` for prod — same settings file, different runtime). The reader MUST consult `config.isHost` at every settings read, not at boot.
+
+  7. **Agent prompt / skill awareness** — does any dispatched-agent skill currently hardcode `playwright_*` tool usage? Grep `src/poller/inject/workspaces/issue-worker/.claude/skills/` for browser-tool references. If yes, the inject pipeline must also swap the skill text (or the skill must read the toggle and branch).
+
+  ## Output
+
+  Replace the parent epic's acceptance list with concrete phase children. Each phase = one new card with `type: Feature` + `parent_id: DX-257`. Expected shape:
+
+  - **Phase 2** — Settings file: `browserTool` override field + reader + migration.
+  - **Phase 3** — Inject pipeline gate: workspace `.mcp.json` shape under each `{runtime, toggle}` combo + tests.
+  - **Phase 4** — Dashboard UI toggle on Agents tab + backend write path.
+  - **Phase 5** — (only if recommended in step 2) playwright host-mode access path (port-map / network join / remote URL).
+  - **Phase 6** — Cleanup + docs (`.claude/rules/docker-runtime.md`, `agent-dispatch.md`) + epic acceptance verification.
+
+  For each phase write a card body following the issue-card-workflow skill style (Context / Solution / Acceptance, markdown headers, fenced code, etc.). Set the parent epic's `children` array to include every phase card created.
+
+  ## Acceptance
+
+  - [ ] Investigation findings written into this card's `comments[]` (one comment per numbered step above, with conclusions + chosen direction).
+  - [ ] Parent epic DX-257 body updated with a concrete phase plan that replaces the placeholder Phase 1 bullet in its acceptance list.
+  - [ ] Each phase card created under DX-257 (`children` set on epic, `parent_id` set on each phase).
+  - [ ] Plan reviewed by the operator before any Phase 2+ card moves out of Review.
+  - [ ] This card moves to Done with a retro summarising recommendations + the option NOT taken (for future reference).
+
+  ## Out of scope
+
+  - Building any of Phase 2 / 3 / 4 / 5 / 6. This card is plan-only.
+  - Removing playwright from the inject `.mcp.json` as a quick-fix workaround. The 2026-05-11 incident already proved the cosmetic-only impact; the toggle is the durable path.
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments: []
+history:
+  - timestamp: 2026-05-11T02:49:38.955Z
+    actor: tracker:trello
+    event: created
+    to: Review
+    note: Hydrated from tracker external_id 6a0143bcf75b0972afb38bbc
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null

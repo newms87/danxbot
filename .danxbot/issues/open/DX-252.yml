@@ -1,0 +1,138 @@
+schema_version: 6
+tracker: memory
+id: DX-252
+external_id: 6a00c47c5ba63360add11c55
+parent_id: null
+children: []
+dispatch: null
+status: Review
+type: Bug
+title: Poller teamRunning state stuck true after /api/cancel + /api/resume race — silent halt of all dispatches
+description: |-
+  ## Repro (observed 2026-05-10 14:18 BRT)
+
+  1. Poller dispatched murphy on DX-235 (job `6e9bd777`) — `state.teamRunning = true` set in `src/poller/index.ts:2108`.
+  2. Operator (monitor agent) called `POST /api/cancel/6e9bd777` to clear an API-error stalled session.
+  3. Operator immediately called `POST /api/resume {job_id: 6e9bd777}` → spawned new dispatch `61ade562` via `dispatch()` directly (NOT via poller path).
+  4. The cancelled `6e9bd777` job's `_cleanup` ran → `onComplete` callback fired → poller set `state.teamRunning = false` ✓
+  5. Resumed dispatch `61ade562` ran + completed at 14:22 → BUT `61ade562` has no poller `onComplete` hook (it bypassed the poller path) — irrelevant since `teamRunning` was already false.
+  6. Poller's NEXT tick (~14:23) dispatched `87174bb3` (recovery agent on DX-235) — set `teamRunning = true`.
+  7. `87174bb3` completed 14:23 → poller `onComplete` should set `teamRunning = false` → BUT poller stayed silent for 21min.
+
+  ## Symptom
+
+  `/api/jobs` showed zero `running` rows from 14:23 → 14:44 (21min). 16 ToDo cards waiting. No `multi-agent pick` log lines. Poller tick happens every 60s (`POLLER_INTERVAL_MS`) so 20+ ticks were silently skipped.
+
+  Worker restart cleared in-memory `state.teamRunning` → poller dispatched 2 agents within 4s of boot. Confirms state-stuck root cause.
+
+  ## Root cause hypothesis
+
+  `src/poller/index.ts:474` — `if (state.teamRunning || state.polling) return` early-return guard. Either:
+
+  A) `teamRunning` was set true by a non-poller path that does NOT register an onComplete hook. The `87174bb3` recovery dispatch went through `tryMultiAgentDispatch` → `dispatchWithRecovery` → `dispatch()` and the onComplete poller hook didn't release the flag because of a missing wire-up.
+
+  B) An exception thrown inside the dispatch path skipped the `state.teamRunning = false` reset (line 2418) — the function exits via early return before reaching the cleanup block.
+
+  C) `state.polling` got stuck true (the OTHER half of the line 474 guard) — possible if a tick threw inside `_poll` after setting `polling = true` but before clearing it.
+
+  Need to instrument: log every transition of `teamRunning` and `polling` (timestamp + caller stack) so the next stuck-state incident pinpoints which transition was missed.
+
+  ## Solution
+
+  ### 1. Convert `teamRunning` to a per-dispatch counter
+
+  Today: `teamRunning: boolean` — single flag, one lost transition deadlocks the poller.
+
+  Replace with `runningDispatchIds: Set<string>` populated on every dispatch (poller path AND HTTP /api/launch /api/resume) and drained by `dispatch()` in its terminal status hook (single source of truth: `mapCompleteToTerminalStatus` in `src/worker/dispatch.ts`).
+
+  Guard becomes `runningDispatchIds.size >= maxAgents` (rather than boolean). Lost transitions self-correct on the next dispatch's terminal because the Set holds the dispatchId, not a refcount → idempotent removal.
+
+  ### 2. Self-healing recovery in the poll-loop guard
+
+  When the guard sees `runningDispatchIds.size >= maxAgents`, ALSO scan for stale entries:
+  - For each `dispatchId` in the set, query `/api/jobs` (or in-memory `activeJobs`) → if status is terminal → drop from set, log warning.
+  - Cap the scan to once per N ticks (e.g. every 5min) to avoid per-tick overhead.
+
+  Outcome: even if a transition is missed somewhere, the next cycle reconciles automatically. No manual worker restart required.
+
+  ### 3. Telemetry
+
+  - Log every `teamRunning` / `runningDispatchIds` mutation with `{prev, next, callsite}`.
+  - Surface `runningDispatchIds.size` on dashboard health endpoint.
+  - Alert (dashboard banner) when poller hasn't dispatched in >5min AND ToDo queue >0.
+
+  ### 4. /api/resume contract clarification
+
+  If a `/api/resume` is invoked on a parent that was poller-dispatched, the resumed dispatch should ALSO register on `runningDispatchIds` (replaces parent slot). Today it doesn't, because `/api/resume` calls `dispatch()` directly without the poller's onComplete-bookkeeping wrapper.
+
+  Either:
+  - (a) Move bookkeeping out of poller and into `dispatch()` itself — every dispatch (regardless of trigger) registers + deregisters on the canonical `runningDispatchIds` set.
+  - (b) Have `/api/resume` look up the parent dispatch's trigger; if it was poller-originated, register the resumed dispatch in the poller's set.
+
+  (a) is the cleaner architecture (single ownership) and matches the resume-trigger metadata already plumbed through `dispatch()` (`endpoint: "/api/resume"`).
+
+  ## Files
+
+  - `src/poller/index.ts` (`teamRunning` → `runningDispatchIds`, line 116/377/474/2108/2277/2418/2871/2878 sweep)
+  - `src/dispatch/core.ts` (canonical dispatch start/end registration)
+  - `src/worker/dispatch.ts` (handleStop already calls into dispatch core; verify removal happens there)
+  - `src/worker/health.ts` (surface set size)
+  - `src/poller/index.test.ts` (state transition coverage; concurrent cancel+resume race)
+  - `dashboard/src/components/HealthBanner.vue` (stuck-poller alert)
+
+  ## Acceptance Criteria
+
+  - [ ] `teamRunning` boolean replaced with `runningDispatchIds: Set<string>` (or equivalent counter that survives lost transitions).
+  - [ ] Single registration site in `dispatch()` (start) + single deregistration site in `dispatch()` terminal hook (end). Poller no longer mutates the set directly.
+  - [ ] `/api/resume` of a poller-originated dispatch correctly transitions the slot from parent to child (no double-count, no leak).
+  - [ ] Self-healing scan: stale entries reconciled against `activeJobs` periodically.
+  - [ ] Repro test: simulate the cancel+resume race + a thrown exception mid-dispatch; assert poller dispatches the next ToDo within 2 ticks (not deadlocked).
+  - [ ] Telemetry: state mutations logged; dashboard surfaces `runningDispatchIds.size`; alert fires after 5min idle with non-empty ToDo queue.
+  - [ ] Manual smoke: cancel a running poller dispatch, immediately resume, verify next tick dispatches a fresh agent (without restarting the worker).
+priority: 3
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice:
+    total: 0
+    i: 0
+    c: 0
+    e: 0
+  history: []
+ac: []
+comments:
+  - id: 6a014410512906b06b8cd8ad
+    author: danxbot
+    timestamp: 2026-05-11T02:50:56.092Z
+    text: |-
+      <!-- danxbot -->
+
+      ## Related fixes landed 2026-05-11 — re-evaluate this card after they're in effect
+
+      A poller-idle-with-ToDo-queue stall was observed today with the SAME symptom (zero dispatches, queue full, no `multi-agent pick` log lines) but a DIFFERENT root cause than the teamRunning hypothesis here.
+
+      **Root cause this time**: 6 ToDo YAMLs carried stale `dispatch:` blocks from previous failed dispatches. `listDispatchableYamls` filters every card with non-null `dispatch` (`if (i.dispatch !== null) return false`), so all 6 cards became invisible to the picker. Stamps accumulated because:
+
+      1. `multi-agent-pick.ts` catch on dispatch failure logged + continued — it did NOT clear the just-stamped YAML.
+      2. `serializeIssue` crashed (`Cannot read properties of undefined (reading 'reason')`) on YAMLs predating DX-231 that lacked the `requires_human` field, so boot reattach couldn't clean up the stamps either.
+
+      Either bug alone would have prevented the wedge; together they made it self-sustaining.
+
+      **Commits**:
+      - `3bb361e` — fix(poller): clear stamped YAML on dispatch failure + tolerate missing requires_human
+      - `0665a35` — refactor(poller): derive effective waiting_on at read time (DX-219 follow-up, unrelated to this bug but landed in the same session)
+
+      **Action for this card**: re-evaluate whether the teamRunning-stuck path is still reproducible. If the original 2026-05-10 14:18 incident might have been the YAML-stamp variant (the `87174bb3` recovery dispatch could have failed post-stamp without clearing) — root-cause hypothesis A above stops applying. If teamRunning is provably still stuck via a different path, keep this card and the diagnostics it proposes; if not, move to Done with a retro noting that the YAML-stamp fixes likely closed the same window.
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null
