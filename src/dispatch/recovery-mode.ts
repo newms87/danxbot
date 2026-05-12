@@ -5,15 +5,16 @@
  * host clone's `refs/remotes/origin/main`, fast-forwards (or rebases)
  * the agent's worktree to that tip, and hands off to `deps.dispatch`.
  * The prep skill (DX-291 P4 / `danxbot:danx-prep`) is the new authority
- * on agent-readiness — WIP recovery, validate, conflict reasoning, and
- * branch-state inspection ALL live on the agent's worktree as the first
- * step of every dispatch.
+ * on agent-readiness — WIP recovery, conflict reasoning, and branch-
+ * state inspection ALL live on the agent's worktree as the first step
+ * of every dispatch.
  *
  * DX-297 deleted the legacy `validate → dispatchInRecoveryMode` dirty
  * branch (recovery prompt, last-modified-card scan, Needs Help comment
  * append) — the prep skill's `verdict: "abort"` path now handles every
  * blocked-worktree scenario via the prep-verdict route's
- * `agents.<name>.broken` stamp.
+ * `agents.<name>.broken` stamp. DX-333 retired the `validate()` method
+ * itself.
  *
  * On `syncWorktree.kind === "abort"` (ff-only refused, fetch mid-failure)
  * this wrapper stamps `agents.<name>.broken` persistently so the picker

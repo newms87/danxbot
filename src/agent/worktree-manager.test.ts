@@ -261,211 +261,6 @@ describe("WorktreeManager", () => {
   });
 
   // ============================================================
-  // validate
-  // ============================================================
-
-  describe("validate", () => {
-    it("returns clean on a clean tree on origin/main", async () => {
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: { stdout: "" },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "0\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toEqual({ state: "clean" });
-    });
-
-    it("returns dirty with reason 'uncommitted changes' on porcelain output", async () => {
-      const porcelain = " M src/file.ts\n?? newfile.txt";
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: porcelain } },
-          {
-            match: "cherry origin/main HEAD",
-            response: { stdout: "" },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "0\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toMatchObject({
-        state: "dirty",
-        reason: "uncommitted changes",
-        details: { porcelain: porcelain.trim(), ahead: 0, behind: 0 },
-      });
-    });
-
-    it("returns dirty with reason 'branch has unmerged commits' when ahead > 0 (cherry `+` lines)", async () => {
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: {
-              stdout: [
-                "+ aaaaaaa1111111111111111111111111111111111",
-                "+ bbbbbbb2222222222222222222222222222222222",
-                "+ ccccccc3333333333333333333333333333333333",
-                "",
-              ].join("\n"),
-            },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "1\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toMatchObject({
-        state: "dirty",
-        reason: "branch has unmerged commits",
-        details: { porcelain: "", ahead: 3, behind: 1 },
-      });
-    });
-
-    it("DX-330 patch-id-equivalent ahead → CLEAN (cherry emits only `-` lines)", async () => {
-      // The wedge scenario: branch rebased onto current origin/main, ahead
-      // commits' patch-ids all already on main under different shas. The
-      // bare rev-list contract pre-DX-330 flagged this as dirty and kicked
-      // off a recovery-dispatch loop that could never push (force-push was
-      // forbidden). The new cherry-based contract counts only `+` lines —
-      // `-` lines are patch-id-matched and treated as merged.
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: {
-              stdout: [
-                "- 608b8b777777777777777777777777777777777b",
-                "- 6712aa6666666666666666666666666666666666",
-                "",
-              ].join("\n"),
-            },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "0\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toEqual({ state: "clean" });
-    });
-
-    it("DX-330 cherry parser: tolerates CRLF + blank lines + malformed `+`-without-space (counts only well-formed `+ <sha>` lines)", async () => {
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: {
-              // CRLF + trailing blank + a malformed `+sha` (no space) +
-              // `++ sha` (looks like a + line but isn't) — only well-
-              // formed `+ <sha>` should count.
-              stdout: "+ aaa111\r\n+ bbb222\r\n+ccc333\r\n++ ddd444\r\n\r\n",
-            },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "0\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toMatchObject({
-        state: "dirty",
-        details: { ahead: 2 },
-      });
-    });
-
-    it("DX-330 mixed ahead → dirty with ahead = `+` count only (drops `-` lines from real-ahead total)", async () => {
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: {
-              stdout: [
-                "+ aaaaaaa1111111111111111111111111111111111",
-                "- bbbbbbb2222222222222222222222222222222222",
-                "+ ccccccc3333333333333333333333333333333333",
-                "- ddddddd4444444444444444444444444444444444",
-                "",
-              ].join("\n"),
-            },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "0\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toMatchObject({
-        state: "dirty",
-        reason: "branch has unmerged commits",
-        details: { porcelain: "", ahead: 2, behind: 0 },
-      });
-    });
-
-    it("returns clean when only behind origin/main (reset will fast-forward)", async () => {
-      const runner = fakeRunner({
-        responses: [
-          { match: "status --porcelain", response: { stdout: "" } },
-          {
-            match: "cherry origin/main HEAD",
-            response: { stdout: "" },
-          },
-          {
-            match: "rev-list --count HEAD..origin/main",
-            response: { stdout: "5\n" },
-          },
-        ],
-      });
-      const wm = createWorktreeManager(runner);
-
-      const result = await wm.validate(ctx, "alice");
-      expect(result).toEqual({ state: "clean" });
-    });
-
-    it("does not call `git fetch` (validation is purely local against cached refs)", async () => {
-      const runner = fakeRunner();
-      const wm = createWorktreeManager(runner);
-
-      await wm.validate(ctx, "alice");
-
-      expect(
-        runner.calls.some((c) => c.args[0] === "fetch"),
-      ).toBe(false);
-    });
-  });
-
-  // ============================================================
   // syncWorktree (DX-293) — non-destructive replacement for resetClean
   // ============================================================
 
@@ -812,7 +607,6 @@ describe("WorktreeManager", () => {
       for (const name of bad) {
         await expect(wm.bootstrap(ctx, name)).rejects.toThrow(WorktreeError);
         await expect(wm.teardown(ctx, name)).rejects.toThrow(WorktreeError);
-        await expect(wm.validate(ctx, name)).rejects.toThrow(WorktreeError);
         await expect(wm.syncWorktree(ctx, name)).rejects.toThrow(WorktreeError);
         expect(() => wm.worktreePath(ctx, name)).toThrow(WorktreeError);
       }
@@ -1620,10 +1414,18 @@ describe("WorktreeManager", () => {
       }
     });
 
-    it("validate runs git with cwd=worktreePath (rooted under hostPath)", async () => {
-      const runner = fakeRunner();
+    it("syncWorktree runs git with cwd=worktreePath (rooted under hostPath)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          { match: "fetch origin", response: { stdout: "" } },
+          {
+            match: "rev-list --left-right --count",
+            response: { stdout: "0\t0\n" },
+          },
+        ],
+      });
       const wm = createWorktreeManager(runner);
-      await wm.validate(splitCtx, "alice");
+      await wm.syncWorktree(splitCtx, "alice");
       for (const call of runner.calls) {
         expect(call.cwd).toBe(splitWorktree);
       }

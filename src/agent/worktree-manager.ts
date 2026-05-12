@@ -11,37 +11,24 @@
  *     `node_modules` (DX-242) + `.env` (DX-244) symlink provisioning.
  *     Called on `POST /api/agents` and lazily on first dispatch (in
  *     case an agent was hand-edited into `settings.json`).
- *   - `validate` and `syncWorktree` ALSO re-provision both symlinks
- *     (silently in `validate`, post-sync in `syncWorktree`) via the
- *     `provisionWorktreeArtifacts` umbrella so every dispatch path
- *     that funnels through them is self-healing on its own —
- *     `ensureProvisioned` is the EXTRA seam for callers (today: the
- *     worker boot path) that want the repair WITHOUT triggering git
- *     work.
- *   - `validate(ctx, name)` — diagnostic-only sanity check. Returns `clean`
- *     when the worktree has no uncommitted changes and zero local commits
- *     ahead of `origin/main`; otherwise `dirty` with `{porcelain, ahead,
- *     behind}`. **No production code paths read this any more** since
- *     DX-297 retired the dirty-routing recovery dispatch — the prep skill
- *     (DX-291 P4) inspects branch state on the agent's worktree itself
- *     via Bash. Kept for diagnostic seams (boot health, ad-hoc operator
- *     queries) and exercised by `worktree-manager.test.ts`.
  *   - `syncWorktree(ctx, name)` — non-destructive branch sync (DX-293).
  *     Fetches origin, then either no-ops, fast-forwards via `git pull
  *     --ff-only`, or rebases the agent branch onto `origin/main`. On
  *     rebase conflict the rebase is aborted and the worktree is left
  *     at HEAD (no destructive cleanup). Replaces the retired
  *     `resetClean` (which used `git reset --hard origin/main` and
- *     could destroy uncommitted work if the caller's `validate()`
- *     raced with a concurrent writer). Re-provisions `node_modules` +
- *     `.env` after a successful sync so an operator-driven `git clean
- *     -fdx` heals on the next dispatch. See `SyncResult` for the
- *     returned shape.
- *
+ *     could destroy uncommitted work under concurrent-writer races).
+ *     Re-provisions `node_modules` + `.env` after a successful sync
+ *     (via the `provisionWorktreeArtifacts` umbrella) so an operator-
+ *     driven `git clean -fdx` heals on the next dispatch. See
+ *     `SyncResult` for the returned shape.
  *   - `ensureProvisioned(ctx, name)` — repair-only entry point for
  *     `node_modules` + `.env` provisioning on existing worktrees that
  *     pre-date a bootstrap fix. Called from the worker boot path so
  *     every existing agent inherits the fixes without operator action.
+ *     The EXTRA seam for callers that want the repair WITHOUT
+ *     triggering git work; `bootstrap` and `syncWorktree` already run
+ *     the same umbrella as part of their normal flow.
  *   - `teardown(ctx, name)` — `git worktree remove --force <path>` plus
  *     best-effort branch deletion (local + remote). Called on
  *     `DELETE /api/agents/:name`.
@@ -55,7 +42,8 @@
  * `<repo>/.danxbot/settings.json` so the picker excludes the agent on
  * subsequent ticks). The retired alternative (`dispatchInRecoveryMode`
  * with a separate recovery prompt and a post-completion `validate()`
- * re-check) was deleted in DX-297 — do NOT reintroduce.
+ * re-check) was deleted in DX-297; the `validate()` method itself
+ * was retired in DX-333 — do NOT reintroduce either.
  *
  * Git execution is injected via `GitRunner` so unit tests can stub commands
  * deterministically while integration tests run against real git tmpdirs.
@@ -103,40 +91,15 @@ const execFile = promisify(execFileCb);
 const log = createLogger("worktree-manager");
 
 /**
- * Validation outcome surfaced to the dispatch layer.
- *
- * - `clean` — worktree has no uncommitted changes AND zero commits ahead of
- *   `origin/main`. Behind-only is still clean (caller's `syncWorktree`
- *   will fast-forward without losing work).
- * - `dirty` — caller MUST NOT touch the working tree. The recovery-mode
- *   dispatch reads `details` to render the porcelain + ahead/behind context
- *   into the prompt so the agent knows exactly what to finish.
- */
-export type ValidationResult =
-  | { state: "clean" }
-  | {
-      state: "dirty";
-      reason: string;
-      details: {
-        /** Verbatim `git status --porcelain` output (may be empty when ahead-only). */
-        porcelain: string;
-        /** Commits on the agent's branch not on `origin/main`. */
-        ahead: number;
-        /** Commits on `origin/main` not on the agent's branch. */
-        behind: number;
-      };
-    };
-
-/**
  * Result of `syncWorktree` (DX-293).
  *
  * Replaces the retired `resetClean` which used `git reset --hard
- * origin/main` and could destroy uncommitted work if a caller's
- * `validate()` raced with a concurrent writer. `syncWorktree` uses ONLY
- * non-destructive git ops: `fetch`, `pull --ff-only`, and `rebase`. On
- * rebase conflict the rebase is aborted (returning the working tree to
- * its pre-rebase state at HEAD) and the kind=`abort` shape is returned
- * for the caller to route.
+ * origin/main` and could destroy uncommitted work under concurrent-
+ * writer races. `syncWorktree` uses ONLY non-destructive git ops:
+ * `fetch`, `pull --ff-only`, and `rebase`. On rebase conflict the
+ * rebase is aborted (returning the working tree to its pre-rebase
+ * state at HEAD) and the kind=`abort` shape is returned for the
+ * caller to route.
  *
  * - `noop` — already at `origin/main`. Nothing to do.
  * - `ff` — branch was behind-only; fast-forwarded via `git pull
@@ -148,10 +111,10 @@ export type ValidationResult =
  *   rejected, or fetch network failure). `reason` is a short human
  *   label; `details` is the verbatim git stderr (or a code-only
  *   string when stderr was empty). The worktree is left at HEAD —
- *   no destructive cleanup. Caller routes abort to the verdict path
- *   that flips `agents.<name>.broken` (Phase 3+); until P3 ships, the
- *   `dispatchWithRecovery` clean-validate branch throws
- *   `WorktreeError` so the dispatch fails loud.
+ *   no destructive cleanup. `dispatchWithRecovery` (DX-297 / DX-291
+ *   P6) routes abort through the prep-verdict flow that flips
+ *   `agents.<name>.broken` on settings.json + throws so the multi-
+ *   agent caller's dispatch-cleanup bookkeeping fires.
  */
 export type SyncResult =
   | { kind: "noop" }
@@ -171,14 +134,6 @@ export interface WorktreeManager {
    */
   teardown(ctx: WorktreeRepo, agentName: string): Promise<void>;
   /**
-   * Never throws on a recoverable git state — returns `dirty` instead.
-   * MAY throw `WorktreeError` when `<repoRoot>/node_modules` exists
-   * but lacks `.bin/tsx` (half-installed repo); the worker can't run
-   * agents in that state regardless, so surfacing here keeps silent
-   * dispatch-time failures off the table.
-   */
-  validate(ctx: WorktreeRepo, agentName: string): Promise<ValidationResult>;
-  /**
    * Non-destructive branch sync (DX-293). Replaces the retired
    * `resetClean` (which used `git reset --hard origin/main`). Fetches
    * origin, then either no-ops, fast-forwards via `git pull --ff-only`,
@@ -189,10 +144,10 @@ export interface WorktreeManager {
    * non-abort sync so an operator-driven `git clean -fdx` heals on
    * the next dispatch.
    *
-   * Caller decides whether to proceed on `abort` — for the current
-   * `dispatchWithRecovery` path (P2), abort throws `WorktreeError`
-   * because the caller has no agent-broken plumbing yet. P3+ routes
-   * abort through the prep-verdict flow that flips `agents.<name>.broken`.
+   * `dispatchWithRecovery` (DX-297 / DX-291 P6) routes abort through
+   * the prep-verdict flow that flips `agents.<name>.broken` on
+   * settings.json so the picker excludes the agent until the operator
+   * clears the field.
    */
   syncWorktree(ctx: WorktreeRepo, agentName: string): Promise<SyncResult>;
   /**
@@ -201,8 +156,8 @@ export interface WorktreeManager {
    * provisioning runs unconditionally inside `bootstrap()`, but
    * existing worktrees that pre-date a fix lack the corresponding
    * symlink. Callers that operate on a possibly-stale worktree (the
-   * worker boot path, `validate`, `syncWorktree`) call this directly
-   * to repair without forcing a full bootstrap. No-op when the
+   * worker boot path, `syncWorktree`) call this directly to repair
+   * without forcing a full bootstrap. No-op when the
    * worktree directory does not yet exist — bootstrap is the right
    * entry point in that case. Silent skip when a corresponding source
    * (`<repoRoot>/node_modules`, `<repoRoot>/.env`) is missing (CI /
@@ -215,11 +170,11 @@ export interface WorktreeManager {
   ensureProvisioned(ctx: WorktreeRepo, agentName: string): Promise<void>;
   /**
    * Refresh the host clone's cached `refs/remotes/origin/main` so the
-   * subsequent `validate()` + `syncWorktree()` pair operates on the
-   * truly latest upstream sha. Called once by `dispatchWithRecovery`
-   * per dispatch so external pushes (PR-merge via the GitHub web UI,
-   * peer dev pushes, this host's own non-finalize pushes) take effect
-   * on the NEXT dispatch without manual operator intervention.
+   * subsequent `syncWorktree()` operates on the truly latest upstream
+   * sha. Called once by `dispatchWithRecovery` per dispatch so external
+   * pushes (PR-merge via the GitHub web UI, peer dev pushes, this
+   * host's own non-finalize pushes) take effect on the NEXT dispatch
+   * without manual operator intervention.
    *
    * Returns false on transient network failure — `dispatchWithRecovery`
    * logs and proceeds with the stale cached ref (better to dispatch on
@@ -316,8 +271,8 @@ export function createWorktreeManager(
     },
 
     async fetchOrigin(ctx) {
-      // Refresh `refs/remotes/origin/main` so the next validate/reset
-      // pair sees post-merge upstream commits. `--quiet` suppresses
+      // Refresh `refs/remotes/origin/main` so the next syncWorktree
+      // sees post-merge upstream commits. `--quiet` suppresses
       // chatty FETCH output; `--prune` keeps stale remote-tracking
       // refs from accumulating. Run against the host clone (shared
       // .git for all worktrees) — fetching once updates every
@@ -489,65 +444,6 @@ export function createWorktreeManager(
       log.info(`teardown(${agentName}): removed worktree at ${path}`);
     },
 
-    async validate(ctx, agentName) {
-      assertAgentName(agentName);
-      const path = this.worktreePath(ctx, agentName);
-
-      // DX-242 + DX-244: silently repair node_modules + .env before
-      // reading git state. Existing worktrees from before each fix
-      // lack the corresponding symlink, and a dispatch following
-      // validate would still fail (ENOENT on tsx lookups, or
-      // module-load env-var errors). Repair here so every dispatch
-      // path that funnels through validate is covered.
-      provisionWorktreeArtifacts(ctx.hostPath, path);
-
-      // No `git fetch` here. Validation is purely local — porcelain +
-      // rev-list against the cached `origin/main` ref is enough to
-      // decide clean/dirty for the next dispatch. GitHub connectivity is
-      // the agent's concern at push/pull time, not ours. Behind-only
-      // (cached `origin/main` newer than HEAD) is still clean and
-      // `syncWorktree` fast-forwards without touching local work.
-      const porcelainResult = await runner.run(path, [
-        "status",
-        "--porcelain",
-      ]);
-      const porcelain = porcelainResult.stdout.trim();
-
-      // Patch-id-aware ahead count; see `countCherryPlus` (DX-330).
-      const cherryResult = await runner.run(path, [
-        "cherry",
-        "origin/main",
-        "HEAD",
-      ]);
-      const behindResult = await runner.run(path, [
-        "rev-list",
-        "--count",
-        "HEAD..origin/main",
-      ]);
-      const ahead = countCherryPlus(cherryResult.stdout);
-      const behind = parseCount(behindResult.stdout);
-
-      const details = { porcelain, ahead, behind };
-
-      if (porcelain.length > 0) {
-        return {
-          state: "dirty",
-          reason: "uncommitted changes",
-          details,
-        };
-      }
-      if (ahead > 0) {
-        return {
-          state: "dirty",
-          reason: "branch has unmerged commits",
-          details,
-        };
-      }
-      // Behind-only is clean — `syncWorktree` will fast-forward without
-      // touching local work.
-      return { state: "clean" };
-    },
-
     async syncWorktree(ctx, agentName) {
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
@@ -674,32 +570,6 @@ async function rebaseOnto(
   return { kind: "rebased", commits: ahead };
 }
 
-/**
- * Count `+`-prefixed lines in `git cherry <upstream> <head>` output.
- *
- * `git cherry` emits one line per commit on `<head>` not on `<upstream>`:
- *   `+ <sha>` — patch-id-unique (commit's diff has no twin on `<upstream>`)
- *   `- <sha>` — patch-id-matched on `<upstream>` (already merged under a
- *               different sha; typical of rebase-and-merge workflows)
- *
- * Only `+` lines represent real outstanding work. Counting them gives
- * "real ahead" — the metric `validate()` uses to decide whether the
- * branch carries unmerged commits. See DX-330 for the rebase-loop
- * failure mode this replaces.
- *
- * Edge: `git cherry` skips merge commits — it walks linear left-side
- * history only. Agents never merge `main` into their branch (workflow
- * uses rebase), so this is fine in practice; if that invariant ever
- * breaks, merge commits would silently under-count ahead.
- */
-function countCherryPlus(stdout: string): number {
-  let n = 0;
-  for (const line of stdout.split("\n")) {
-    if (line.startsWith("+ ")) n++;
-  }
-  return n;
-}
-
 /** Parse `git rev-list --count` stdout to an integer; 0 on parse failure. */
 function parseCount(stdout: string): number {
   const trimmed = stdout.trim();
@@ -722,9 +592,9 @@ function worktreeListIncludes(stdout: string, path: string): boolean {
 
 /**
  * Provision every worktree-shared artifact in one place. Callers
- * (bootstrap / validate / syncWorktree / ensureProvisioned) invoke
- * this and don't track which provisioners exist; adding a new artifact
- * is one line here, not touch-ups across four callsites. Current
+ * (bootstrap / syncWorktree / ensureProvisioned) invoke this and
+ * don't track which provisioners exist; adding a new artifact is
+ * one line here, not touch-ups across three callsites. Current
  * artifacts:
  *
  *   - root `node_modules` symlink (DX-242)
@@ -800,8 +670,8 @@ function provisionDashboardNodeModules(
  * checkout and defeat the entire isolation contract.
  *
  * Called from `provisionWorktreeArtifacts` so every lifecycle hook
- * (bootstrap, validate, syncWorktree, ensureProvisioned) leaves the
- * worktree dispatch-ready. Closes the race where `POST /api/agents`
+ * (bootstrap, syncWorktree, ensureProvisioned) leaves the worktree
+ * dispatch-ready. Closes the race where `POST /api/agents`
  * creates a worktree and a dispatch fires before the poller's per-tick
  * `mirrorWorkspacesIntoWorktrees` step has copied the workspaces tree
  * in.

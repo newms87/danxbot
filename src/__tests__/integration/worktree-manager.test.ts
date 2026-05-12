@@ -140,88 +140,6 @@ D("WorktreeManager (integration, real git)", () => {
   });
 
   // ============================================================
-  // validate — clean / dirty
-  // ============================================================
-
-  it("validate returns clean immediately after bootstrap", async () => {
-    const wm = createWorktreeManager(defaultGitRunner);
-    await wm.bootstrap(ctx(), "alice");
-
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("clean");
-  });
-
-  it("validate returns dirty (uncommitted changes) when a file is modified", async () => {
-    const wm = createWorktreeManager(defaultGitRunner);
-    await wm.bootstrap(ctx(), "alice");
-    const wtPath = wm.worktreePath(ctx(), "alice");
-
-    writeFileSync(join(wtPath, "wip.txt"), "in progress\n");
-
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("dirty");
-    if (result.state === "dirty") {
-      expect(result.reason).toBe("uncommitted changes");
-      expect(result.details.porcelain).toContain("wip.txt");
-    }
-  });
-
-  it("validate returns dirty (branch ahead) when a commit is added on the agent branch", async () => {
-    const wm = createWorktreeManager(defaultGitRunner);
-    await wm.bootstrap(ctx(), "alice");
-    const wtPath = wm.worktreePath(ctx(), "alice");
-
-    writeFileSync(join(wtPath, "feature.txt"), "feature\n");
-    git(wtPath, "add", ".");
-    git(wtPath, "commit", "-m", "wip feature");
-
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("dirty");
-    if (result.state === "dirty") {
-      expect(result.reason).toBe("branch has unmerged commits");
-      expect(result.details.ahead).toBe(1);
-      expect(result.details.behind).toBe(0);
-      expect(result.details.porcelain).toBe("");
-    }
-  });
-
-  it("validate returns clean when only behind origin/main (reset will fast-forward)", async () => {
-    const wm = createWorktreeManager(defaultGitRunner);
-    await wm.bootstrap(ctx(), "alice");
-    const wtPath = wm.worktreePath(ctx(), "alice");
-
-    // Add a commit on origin/main via a sibling clone, then push.
-    const sib = join(workArea, "sib");
-    execFileSync("git", ["clone", originDir, sib], { stdio: "ignore" });
-    execFileSync("git", ["config", "user.email", "test@example.com"], {
-      cwd: sib,
-      stdio: "ignore",
-    });
-    execFileSync("git", ["config", "user.name", "test"], {
-      cwd: sib,
-      stdio: "ignore",
-    });
-    writeFileSync(join(sib, "extra.txt"), "extra\n");
-    execFileSync("git", ["add", "."], { cwd: sib, stdio: "ignore" });
-    execFileSync("git", ["commit", "-m", "extra"], { cwd: sib, stdio: "ignore" });
-    execFileSync("git", ["push", "origin", "main"], { cwd: sib, stdio: "ignore" });
-
-    // Refresh alice's cached `origin/main` — the manager doesn't fetch
-    // (worktree mgmt is purely local; GitHub connectivity is the agent's
-    // concern), so the caller does it explicitly when it needs to see
-    // newly-pushed remote commits.
-    execFileSync("git", ["fetch", "origin"], {
-      cwd: wtPath,
-      stdio: "ignore",
-    });
-
-    // Verify alice's worktree is now strictly behind origin/main.
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("clean");
-    expect(existsSync(join(wtPath, "extra.txt"))).toBe(false);
-  });
-
-  // ============================================================
   // syncWorktree (DX-293) — non-destructive replacement for resetClean
   // ============================================================
 
@@ -254,9 +172,13 @@ D("WorktreeManager (integration, real git)", () => {
     // After ff, alice's tree should contain the new file.
     expect(existsSync(join(wtPath, "next.txt"))).toBe(true);
 
-    // And validate should report clean.
-    const v = await wm.validate(ctx(), "alice");
-    expect(v.state).toBe("clean");
+    // Post-condition: working tree clean, branch at origin/main.
+    const porcelain = execFileSync(
+      "git",
+      ["status", "--porcelain"],
+      { cwd: wtPath, encoding: "utf-8" },
+    );
+    expect(porcelain.trim()).toBe("");
   });
 
   it("syncWorktree returns noop when worktree is already at origin/main", async () => {
@@ -530,15 +452,12 @@ D("WorktreeManager (integration, real git)", () => {
     expect(stdout.trim()).toBe("fake-tsx-ok");
   });
 
-  it("DX-242: validate() silently re-provisions a missing node_modules symlink before reading git state", async () => {
-    // Production repos gitignore `node_modules` so the worktree's
-    // symlink is never untracked. Mirror that in the test fixture so
-    // validate() can return clean after re-provisioning.
-    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n");
-    git(repoDir, "add", ".gitignore");
-    git(repoDir, "commit", "-m", "ignore node_modules");
-    git(repoDir, "push", "origin", "main");
-
+  it("DX-242 / DX-333: ensureProvisioned silently re-provisions a missing node_modules symlink", async () => {
+    // The boot-side repair path. ensureProvisioned (called by
+    // bootstrap + syncWorktree via the `provisionWorktreeArtifacts`
+    // umbrella) heals a missing symlink without re-running git
+    // worktree add. DX-333 retired the validate() seam that
+    // previously carried the same side effect.
     mkdirSync(join(repoDir, "node_modules", ".bin"), { recursive: true });
     writeFileSync(
       join(repoDir, "node_modules", ".bin", "tsx"),
@@ -559,13 +478,7 @@ D("WorktreeManager (integration, real git)", () => {
     rmSync(link, { force: true });
     expect(existsSync(link)).toBe(false);
 
-    // validate is supposed to be read-only at the contract level, but
-    // it ALSO calls `provisionWorktreeArtifacts` internally to
-    // self-heal before reading git state (node_modules here, .env via
-    // the umbrella's second leg — see DX-244 tests below). The return
-    // value remains the git-state shape; the side effect is repair.
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("clean");
+    await wm.ensureProvisioned(ctx(), "alice");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
   });
 
@@ -700,15 +613,13 @@ D("WorktreeManager (integration, real git)", () => {
     expect(realpathSync(link)).toBe(targetBefore);
   });
 
-  it("DX-244: validate() silently re-provisions a missing .env symlink before reading git state", async () => {
-    // Mirror the DX-242 .gitignore-based fixture so the worktree
-    // stays clean after the symlink is in place.
-    writeFileSync(join(repoDir, ".gitignore"), "node_modules\n.env\n");
-    git(repoDir, "add", ".gitignore");
-    git(repoDir, "commit", "-m", "ignore node_modules + .env");
-    git(repoDir, "push", "origin", "main");
-
-    writeFileSync(join(repoDir, ".env"), "DXTEST_VALIDATE=ok\n");
+  it("DX-244 / DX-333: ensureProvisioned silently re-provisions a missing .env symlink", async () => {
+    // The boot-side repair path. ensureProvisioned (called by
+    // bootstrap + syncWorktree via the `provisionWorktreeArtifacts`
+    // umbrella) heals a missing symlink without re-running git
+    // worktree add. DX-333 retired the validate() seam that
+    // previously carried the same side effect.
+    writeFileSync(join(repoDir, ".env"), "DXTEST_ENSURE_ENV=ok\n");
 
     const wm = createWorktreeManager(defaultGitRunner);
     await wm.bootstrap(ctx(), "alice");
@@ -717,8 +628,7 @@ D("WorktreeManager (integration, real git)", () => {
     rmSync(link, { force: true });
     expect(existsSync(link)).toBe(false);
 
-    const result = await wm.validate(ctx(), "alice");
-    expect(result.state).toBe("clean");
+    await wm.ensureProvisioned(ctx(), "alice");
     expect(lstatSync(link).isSymbolicLink()).toBe(true);
     expect(realpathSync(link)).toBe(realpathSync(join(repoDir, ".env")));
   });
@@ -767,9 +677,10 @@ D("WorktreeManager (integration, real git)", () => {
 
     // Operator (or a buggy script) replaced the symlink with a real
     // file containing stale content. The next ensureProvisioned (or
-    // validate / syncWorktree) must replace it with the symlink —
-    // leaving the stale file would mean the worktree's env values
-    // diverge from the canonical .env every time a secret rotates.
+    // syncWorktree, which invokes the same umbrella) must replace it
+    // with the symlink — leaving the stale file would mean the
+    // worktree's env values diverge from the canonical .env every
+    // time a secret rotates.
     const link = join(repoDir, ".danxbot", "worktrees", "alice", ".env");
     rmSync(link, { force: true });
     writeFileSync(link, "DXTEST_REPLACE=stale\n");
@@ -795,10 +706,12 @@ D("WorktreeManager (integration, real git)", () => {
   it("DX-309: provisioned issues symlink is gitignored — `status --porcelain` stays empty", async () => {
     // Architectural invariant: after `provisionIssuesSymlink` swaps
     // <worktree>/.danxbot/issues to a symlink, `.danxbot/.gitignore`
-    // MUST match it so the validate() porcelain check stays empty.
-    // Drift here puts every worktree back in recovery mode (the bug
-    // this test pins). The load-bearing rule is the no-slash `issues`
-    // pattern — `issues/` alone matches dirs only, not symlinks.
+    // MUST match it so `git status --porcelain` stays empty. Drift
+    // here puts every worktree back in the dirty-state class that
+    // used to kick off the legacy recovery dispatch (this test pins
+    // the gitignore pattern alongside the symlink swap). The load-
+    // bearing rule is the no-slash `issues` pattern — `issues/`
+    // alone matches dirs only, not symlinks.
     mkdirSync(join(repoDir, ".danxbot"), { recursive: true });
     writeFileSync(
       join(repoDir, ".danxbot", ".gitignore"),

@@ -33,7 +33,6 @@ function stubManager(opts: StubManagerOptions): {
     worktreePath: () => "/unused",
     bootstrap: async () => {},
     teardown: async () => {},
-    validate: async () => ({ state: "clean" }),
     syncWorktree: async () => ({ kind: "noop" }),
     fetchOrigin: async () => true,
     async ensureProvisioned(_ctx, agentName) {

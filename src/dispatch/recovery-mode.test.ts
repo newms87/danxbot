@@ -2,10 +2,10 @@
  * Unit tests for `dispatchWithRecovery` (DX-291 P6 — collapsed wrapper).
  *
  * The dirty-routing + recovery-prompt branch was retired in DX-297; the
- * prep skill (DX-291 P4) now owns WIP recovery, validate, and branch-state
- * inspection. This file covers the slimmer surface: fetch → syncWorktree →
- * spawn; on syncWorktree abort, persistent `agents.<name>.broken` stamp +
- * throw.
+ * prep skill (DX-291 P4) now owns WIP recovery + branch-state inspection
+ * (the `validate()` interface method itself was retired in DX-333). This
+ * file covers the slimmer surface: fetch → syncWorktree → spawn; on
+ * syncWorktree abort, persistent `agents.<name>.broken` stamp + throw.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -15,7 +15,6 @@ import { join } from "node:path";
 import { dispatchWithRecovery } from "./recovery-mode.js";
 import type {
   SyncResult,
-  ValidationResult,
   WorktreeManager,
 } from "../agent/worktree-manager.js";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
@@ -32,12 +31,10 @@ vi.mock("../logger.js", () => ({
 }));
 
 function mkManager(opts: {
-  validate?: () => Promise<ValidationResult>;
   syncWorktree?: () => Promise<SyncResult>;
   fetchOrigin?: () => Promise<boolean>;
 }): WorktreeManager & {
   calls: {
-    validate: number;
     syncWorktree: number;
     bootstrap: number;
     teardown: number;
@@ -45,7 +42,6 @@ function mkManager(opts: {
   };
 } {
   const calls = {
-    validate: 0,
     syncWorktree: 0,
     bootstrap: 0,
     teardown: 0,
@@ -59,10 +55,6 @@ function mkManager(opts: {
     },
     teardown: async () => {
       calls.teardown++;
-    },
-    validate: async () => {
-      calls.validate++;
-      return opts.validate ? opts.validate() : { state: "clean" };
     },
     syncWorktree: async () => {
       calls.syncWorktree++;
@@ -170,7 +162,6 @@ describe("dispatchWithRecovery", () => {
 
     expect(manager.calls.fetchOrigin).toBe(1);
     expect(manager.calls.syncWorktree).toBe(1);
-    expect(manager.calls.validate).toBe(0); // validate is now retired — prep skill owns it
     expect(dispatchMock).toHaveBeenCalledTimes(1);
     expect(dispatchMock.mock.calls[0][0].task).toBe("do the thing");
     expect(result.dispatchId).toBe("id-happy");
@@ -224,24 +215,6 @@ describe("dispatchWithRecovery", () => {
     expect(manager.calls.fetchOrigin).toBe(1);
     expect(manager.calls.syncWorktree).toBe(1);
     expect(result.dispatchId).toBe("id-flaky");
-  });
-
-  it("does not call manager.validate (prep skill owns state inspection)", async () => {
-    const dispatchMock = vi.fn(
-      async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "id-skip-validate",
-        job: fakeJob(),
-      }),
-    );
-    const manager = mkManager({});
-
-    await dispatchWithRecovery(
-      mkInput(),
-      { agentName: "alice", manager },
-      { dispatch: dispatchMock },
-    );
-
-    expect(manager.calls.validate).toBe(0);
   });
 
   it("deps.dispatch rejection propagates AS-IS — no agents.<name>.broken stamp on downstream spawn failure", async () => {

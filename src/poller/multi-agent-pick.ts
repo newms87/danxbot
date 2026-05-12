@@ -2,7 +2,7 @@
  * Multi-agent pick + dispatch loop (DX-200 / multi-worker dispatch
  * epic DX-158 Phase 5; rewired by DX-291 Phase 5 / DX-296).
  *
- * Glues together every roster + worktree-validate + persona deliverable
+ * Glues together every roster + worktree-sync + persona deliverable
  * into the per-tick path the poller calls when its repo has at least
  * one configured agent:
  *

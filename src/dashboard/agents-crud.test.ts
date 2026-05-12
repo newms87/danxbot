@@ -827,7 +827,6 @@ function mkWorktreeManager(opts: {
       teardownCalls.push({ localPath: ctx.localPath, agentName: name });
       if (opts.teardownImpl) await opts.teardownImpl();
     },
-    validate: async () => ({ state: "clean" }),
     syncWorktree: async () => ({ kind: "noop" }),
     ensureProvisioned: async () => {},
     fetchOrigin: async () => true,
