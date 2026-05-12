@@ -1,0 +1,82 @@
+[
+  {
+    "query": "Look at /tmp/danxbot-test-system6.log and tell me what the test results were.",
+    "should_trigger": true
+  },
+  {
+    "query": "Summarize the failures from the latest CI run on PR #142 — the build-log artifact is at /tmp/ci-build-log.txt.",
+    "should_trigger": true
+  },
+  {
+    "query": "What is broken about the dispatch round-trip for DX-244 — the JSONL shows the agent stopped responding but the worker still reports running.",
+    "should_trigger": true
+  },
+  {
+    "query": "Why is the dispatch agent stuck on DX-244?",
+    "should_trigger": true
+  },
+  {
+    "query": "Dig into why src/__tests__/system/run-system-tests.sh is taking 8 minutes instead of the usual 2 — the change landed yesterday.",
+    "should_trigger": true
+  },
+  {
+    "query": "How does SessionLogWatcher detect a stalled agent?",
+    "should_trigger": true
+  },
+  {
+    "query": "What config value is used for the worker port in production — is it the same DANXBOT_WORKER_PORT env var or does the deploy target override it?",
+    "should_trigger": true
+  },
+  {
+    "query": "Three tests in src/poller/index.test.ts are failing — figure out what changed.",
+    "should_trigger": true
+  },
+  {
+    "query": "The deploy to gpt this morning introduced a regression in the dashboard auth flow — login returns 401 for the monitor account. What happened?",
+    "should_trigger": true
+  },
+  {
+    "query": "Report on the failed dispatches over the last 24 hours — the dashboard shows 7 with status=failed and 2 with status=critical_failure.",
+    "should_trigger": true
+  },
+  {
+    "query": "List the files in src/agent/.",
+    "should_trigger": false
+  },
+  {
+    "query": "Grep for 'spawnAgent' across the codebase to see every callsite.",
+    "should_trigger": false
+  },
+  {
+    "query": "Show me lines 100-200 of src/poller/index.ts.",
+    "should_trigger": false
+  },
+  {
+    "query": "Rename the function `foo` to `bar` in src/baz.ts and update every callsite.",
+    "should_trigger": false
+  },
+  {
+    "query": "Move dispatchTagFor from src/skill-eval/run.ts to a new module src/skill-eval/tags.ts — keep the same signature.",
+    "should_trigger": false
+  },
+  {
+    "query": "Fix the typo 'recieved' → 'received' in the comments of src/dispatch/core.ts.",
+    "should_trigger": false
+  },
+  {
+    "query": "Update the JSDoc on getJobStatus to document the four cache-related token fields it returns.",
+    "should_trigger": false
+  },
+  {
+    "query": "Add a new --dry-run flag to the skill-eval runner that prints the dispatch payload without POSTing it.",
+    "should_trigger": false
+  },
+  {
+    "query": "Build a new dashboard tab that shows per-skill trigger rates from the latest eval-set runs.",
+    "should_trigger": false
+  },
+  {
+    "query": "Tell me the test results from /tmp/danxbot-all-passing.log — it should show 145 tests, 0 failures, 0 errors.",
+    "should_trigger": false
+  }
+]

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type { AgentSnapshot, Feature } from "../../types";
+import { envDefaultForFeature } from "../../featureDefaults";
 import FeatureToggle from "./FeatureToggle.vue";
 import ConfigTable from "./ConfigTable.vue";
 import CriticalFailureBanner from "./CriticalFailureBanner.vue";
@@ -42,23 +43,13 @@ function onSavePrefix(): void {
 }
 
 // The env default each feature falls back to when the override is null.
-// For slack, configured === slack.enabled on the backend. For
-// issuePoller, `display.trello.configured` is a good proxy; for
-// dispatchApi the default is always true; for ideator and autoTriage
-// the default is false (explicit opt-in — see
-// `src/settings-file.ts#envDefault`).
-const envDefaults = computed<Record<Feature, boolean>>(() => ({
-  slack: !!props.agent.settings.display.slack?.configured,
-  issuePoller: !!props.agent.settings.display.trello?.configured,
-  dispatchApi: true,
-  ideator: false,
-  autoTriage: false,
-  // DX-302 — `trelloSync`'s env default mirrors `issuePoller`'s proxy:
-  // when Trello creds are present the worker registers a Trello tracker
-  // and inbound + outbound sync run by default. Operators flip the
-  // explicit override to disable both directions without rotating env.
-  trelloSync: !!props.agent.settings.display.trello?.configured,
-}));
+// `envDefaultForFeature` is the single SPA-side authority — mirrored
+// in `TrelloConfigPanel.vue` and any future per-feature surface so the
+// `null → boolean` collapse rule lives in exactly one place. `trelloSync`
+// no longer renders here (DX-304 moved it to `TrelloConfigPanel`).
+function envDefaultFor(feature: Feature): boolean {
+  return envDefaultForFeature(props.agent, feature);
+}
 
 const slackSub = computed(
   () => `${props.agent.counts.total.slack} total / ${props.agent.counts.last24h.slack} last 24h`,
@@ -155,7 +146,7 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         feature="slack"
         label="Slack"
         :enabled="agent.settings.overrides.slack.enabled"
-        :env-default="envDefaults.slack"
+        :env-default="envDefaultFor('slack')"
         :subline="slackSub"
         :busy="busyFeature === 'slack'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
@@ -164,7 +155,7 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         feature="issuePoller"
         label="Issue poller"
         :enabled="agent.settings.overrides.issuePoller.enabled"
-        :env-default="envDefaults.issuePoller"
+        :env-default="envDefaultFor('issuePoller')"
         :subline="trelloSub"
         :busy="busyFeature === 'issuePoller'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
@@ -173,7 +164,7 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         feature="dispatchApi"
         label="Dispatch API"
         :enabled="agent.settings.overrides.dispatchApi.enabled"
-        :env-default="envDefaults.dispatchApi"
+        :env-default="envDefaultFor('dispatchApi')"
         :subline="apiSub"
         :busy="busyFeature === 'dispatchApi'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
@@ -182,7 +173,7 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         feature="ideator"
         label="Ideator"
         :enabled="agent.settings.overrides.ideator.enabled"
-        :env-default="envDefaults.ideator"
+        :env-default="envDefaultFor('ideator')"
         subline="generates feature cards when Review is short"
         :busy="busyFeature === 'ideator'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
@@ -191,18 +182,9 @@ const links = computed(() => props.agent.settings.display.links ?? {});
         feature="autoTriage"
         label="Auto-triage"
         :enabled="agent.settings.overrides.autoTriage.enabled"
-        :env-default="envDefaults.autoTriage"
+        :env-default="envDefaultFor('autoTriage')"
         subline="triages Action Items + Review when ToDo is empty"
         :busy="busyFeature === 'autoTriage'"
-        @change="(f, e) => $emit('toggle', agent.name, f, e)"
-      />
-      <FeatureToggle
-        feature="trelloSync"
-        label="Trello sync"
-        :enabled="agent.settings.overrides.trelloSync.enabled"
-        :env-default="envDefaults.trelloSync"
-        subline="inbound + outbound Trello calls"
-        :busy="busyFeature === 'trelloSync'"
         @change="(f, e) => $emit('toggle', agent.name, f, e)"
       />
     </div>

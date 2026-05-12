@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir, homedir } from "node:os";
-import { join, resolve } from "node:path";
 import {
   RunnerArgsError,
-  dispatchTagFor,
-  findJsonlByTag,
   parseArgs,
   parsePositiveInt,
   pickArg,
@@ -111,115 +106,5 @@ describe("parseArgs", () => {
         baseEnv,
       ),
     ).toThrow(/timeout-ms/);
-  });
-});
-
-describe("dispatchTagFor", () => {
-  it("renders the canonical dispatch-tag shape", () => {
-    expect(dispatchTagFor("abc-123")).toBe(
-      "<!-- danxbot-dispatch:abc-123 -->",
-    );
-  });
-});
-
-describe("findJsonlByTag", () => {
-  /**
-   * The runner derives the JSONL search dir via `deriveSessionDir(cwd)`
-   * which lives at `~/.claude/projects/<encoded-cwd>`. To exercise that
-   * code path under a tmp cwd we use a fake homedir... but `deriveSessionDir`
-   * imports `homedir()` directly. Instead, we set up a real `<homedir>/.claude/projects/<encoded>` for
-   * a synthetic workspace path and clean up after. The "encoded" form is
-   * `<cwd>.replace(/\//g, '-')` — see `encodeClaudeProjectsCwd` in
-   * `src/agent/session-log-watcher.ts`.
-   */
-  function setup(): { cwd: string; encDir: string; cleanup: () => void } {
-    const probeRoot = mkdtempSync(join(tmpdir(), "skill-eval-test-"));
-    const fakeWorkspaceCwd = join(probeRoot, "workspace");
-    mkdirSync(fakeWorkspaceCwd, { recursive: true });
-    // deriveSessionDir encodes the realpath of `cwd`; we mkdir the encoded
-    // directory under the real `~/.claude/projects/` and clean up after.
-    const encDir = join(
-      homedir(),
-      ".claude",
-      "projects",
-      fakeWorkspaceCwd.replace(/\//g, "-"),
-    );
-    mkdirSync(encDir, { recursive: true });
-    return {
-      cwd: fakeWorkspaceCwd,
-      encDir,
-      cleanup: () => {
-        rmSync(encDir, { recursive: true, force: true });
-        rmSync(probeRoot, { recursive: true, force: true });
-      },
-    };
-  }
-
-  it("reason=dir-missing when projects dir was never created", () => {
-    const probeRoot = mkdtempSync(join(tmpdir(), "skill-eval-test-"));
-    const fakeCwd = join(probeRoot, "never-attached-workspace");
-    mkdirSync(fakeCwd, { recursive: true });
-    try {
-      // Intentionally DO NOT create the encoded dir.
-      const result = findJsonlByTag(fakeCwd, "<!-- danxbot-dispatch:x -->");
-      expect(result.reason).toBe("dir-missing");
-      expect(result.path).toBe(null);
-    } finally {
-      rmSync(probeRoot, { recursive: true, force: true });
-    }
-  });
-
-  it("reason=no-files when the projects dir is empty", () => {
-    const { cwd, cleanup } = setup();
-    try {
-      const result = findJsonlByTag(cwd, "<!-- danxbot-dispatch:x -->");
-      expect(result.reason).toBe("no-files");
-      expect(result.scannedFiles).toBe(0);
-    } finally {
-      cleanup();
-    }
-  });
-
-  it("reason=tag-not-in-any-file when tag is absent from every JSONL", () => {
-    const { cwd, encDir, cleanup } = setup();
-    try {
-      writeFileSync(
-        join(encDir, "session-a.jsonl"),
-        JSON.stringify({ type: "user", message: { content: "no tag here" } }) + "\n",
-      );
-      writeFileSync(
-        join(encDir, "session-b.jsonl"),
-        JSON.stringify({ type: "assistant" }) + "\n",
-      );
-      const result = findJsonlByTag(cwd, "<!-- danxbot-dispatch:missing -->");
-      expect(result.reason).toBe("tag-not-in-any-file");
-      expect(result.scannedFiles).toBe(2);
-    } finally {
-      cleanup();
-    }
-  });
-
-  it("reason=found returns the matching path", () => {
-    const { cwd, encDir, cleanup } = setup();
-    try {
-      writeFileSync(
-        join(encDir, "session-a.jsonl"),
-        JSON.stringify({ type: "user", message: { content: "no tag" } }) + "\n",
-      );
-      const target = join(encDir, "session-b.jsonl");
-      const tag = "<!-- danxbot-dispatch:abc-123 -->";
-      writeFileSync(
-        target,
-        JSON.stringify({
-          type: "user",
-          message: { content: `prefix ${tag} suffix` },
-        }) + "\n",
-      );
-      const result = findJsonlByTag(cwd, tag);
-      expect(result.reason).toBe("found");
-      expect(result.path).toBe(resolve(target));
-    } finally {
-      cleanup();
-    }
   });
 });

@@ -1,31 +1,30 @@
 ---
 name: skill-eval
 description: |
-  Run a one-shot skill-trigger probe. Given a query string and an expected
-  `<plugin>:<skill>` name, dispatch the query into the isolated
-  `skill-eval` workspace via the local danxbot worker (host-mode interactive,
-  never `claude -p`), then assert whether the dispatched agent invoked the
-  expected skill BEFORE producing its first assistant text block. Prints a
-  single PASS/FAIL line plus the JSONL path. Intended use: skill-trigger
-  regression checks ("does `dev:debugging` still fire on bug-language
-  summary prompts?"). Invoke when the operator types `/skill-eval --query
-  "<prompt>" --expect-skill <plugin>:<skill>` OR explicitly requests a
-  one-shot probe for whether a particular skill loads on a given prompt.
+  Run skill-trigger probes against the local danxbot worker via host-mode
+  interactive dispatch (never `claude -p` — bypasses Anthropic bugs #36570
+  and #556). Two modes: (1) one-shot — `/skill-eval --query "<prompt>"
+  --expect-skill <plugin>:<skill>` returns a single PASS/FAIL + JSONL
+  path; (2) eval-set — `/skill-eval <plugin>:<skill>` runs the JSON
+  eval-set under `<repo>/tests/skill-evals/<plugin>-<skill>/eval-set.json`,
+  3× per query (configurable), 60/40 train/test split with deterministic
+  seed, markdown report with per-failure forensics + cost. Exits 0 if
+  train AND test ≥ 95% else 1. Invoke when the operator types either form
+  OR asks for a one-shot trigger probe / full eval sweep.
 ---
 
-# Skill-Eval — one-shot trigger probe
+# Skill-Eval — trigger regression harness
 
-Minimal harness. Its only job is to prove that a single prompt either DOES
-or DOES NOT cause a dispatched agent to load a given plugin skill. One
-input prompt, one expected skill, one PASS/FAIL verdict.
+Two CLI modes share the same dispatch primitive (`runProbe` in
+`src/skill-eval/probe.ts`) so a sweep is just N × single-probes.
 
-## Invocation
+## Mode 1 — single query
 
 ```
 /skill-eval --query "<prompt-text>" --expect-skill <plugin>:<skill>
 ```
 
-Optional flags (rarely needed):
+Optional flags:
 
 - `--workspace <name>` — defaults to `skill-eval`
 - `--repo <name>` — defaults to `danxbot`
@@ -34,10 +33,10 @@ Optional flags (rarely needed):
 - `--timeout-ms <n>` — defaults to 5 minutes
 - `--poll-interval-ms <n>` — defaults to 2 seconds
 
-## What to do when the skill is invoked
+### What to do when this form is invoked
 
-1. **Parse the arguments.** Pull `--query` and `--expect-skill` out of the
-   user's invocation. If either is missing, tell the operator the
+1. **Parse the arguments.** Pull `--query` and `--expect-skill` out of
+   the user's invocation. If either is missing, tell the operator the
    required form (see above) and stop — do NOT make up a default query
    or skill name.
 
@@ -67,6 +66,84 @@ Optional flags (rarely needed):
    runner error (worker unreachable, dispatch never reached terminal
    state, JSONL not found). Surface non-zero exits to the operator with
    the runner's stderr lines.
+
+## Mode 2 — eval-set sweep
+
+```
+/skill-eval <plugin>:<skill>   [--parallel N] [--seed N] [--runs-per-query N]
+```
+
+Runs every query in `<repo>/tests/skill-evals/<plugin>-<skill>/eval-set.json`
+(e.g. `tests/skill-evals/dev-debugging/eval-set.json`) three times each,
+in bounded parallel dispatch (default 3 concurrent). Splits the queries
+60/40 into train + held-out test with a deterministic seed
+(`--seed 1` by default — same seed produces the same split).
+
+Per-query "triggered" verdict is a strict majority vote of the 3 runs
+(2/3 fires → triggered). Per-side accuracy = correct / total. Exit `0`
+iff BOTH train AND test ≥ 95% accuracy; `1` otherwise. `2` if the
+runner itself errored (eval-set not found, parse error, etc.).
+
+### Eval-set JSON shape (drop-in compatible with skill-creator)
+
+```json
+[
+  {"query": "Look at /tmp/X.log and tell me what the test results were.", "should_trigger": true},
+  {"query": "Rename function foo to bar in src/baz.ts", "should_trigger": false},
+  ...
+]
+```
+
+Constraints enforced by `validateEvalSet` in `src/skill-eval/eval-set.ts`:
+
+- Top-level array.
+- ≥ 8 queries total.
+- ≥ 1 positive (should_trigger=true) AND ≥ 1 negative.
+- No duplicate `query` strings (duplicates skew the train/test split).
+
+### Available optional flags
+
+- `--parallel N` — bounded concurrency, default `3`
+- `--seed N` — deterministic shuffle seed, default `1`
+- `--runs-per-query N` — runs per query for majority vote, default `3`
+- `--pricing-model <model>` — model used for cost estimation, default
+  `claude-sonnet-4-6`. The dispatched agent's actual model is whatever
+  the host's `~/.claude` config defaults to; we estimate cost with this
+  flag because the JSONL doesn't surface a per-message model field at
+  aggregation time. Report the value back to the operator so they know
+  the cost is an estimate.
+- `--eval-set <path>` — override the convention-based path
+- `--workspace`, `--repo`, `--worker-port`, `--repo-root`,
+  `--workspace-cwd`, `--timeout-ms`, `--poll-interval-ms` — same as
+  Mode 1.
+
+### What to do when this form is invoked
+
+1. **Parse the arguments.** The first positional arg is `<plugin>:<skill>`
+   (or `--plugin-skill <name>` form).
+2. **Run the runner.** Single Bash call:
+
+   ```bash
+   npx tsx <repo-root>/src/skill-eval/run-eval-set.ts <plugin>:<skill>
+   ```
+
+   Add `--parallel`, `--seed`, `--runs-per-query` only if the operator
+   asked for non-default values.
+
+3. **Surface the markdown report verbatim.** The runner writes the
+   report to stdout. The report carries:
+   - `# Skill-eval report: <plugin>:<skill>`
+   - `**Overall: PASS|FAIL**`
+   - Parameters (eval-set path, seed, runs-per-query, pricing model,
+     elapsed, total cost USD)
+   - Accuracy table (train + test correct/total/percent)
+   - `## Failures` — per-failure forensics (prompt, vote count,
+     observed skills, first assistant text, JSONL path per run). Omitted
+     when nothing failed.
+
+4. **Exit codes.** `0` for PASS, `1` for FAIL (accuracy below 95% on
+   either side), `2` for runner errors (eval-set parse / not found,
+   worker unreachable on every probe, etc.).
 
 ## Architecture (read once)
 
@@ -98,20 +175,31 @@ Optional flags (rarely needed):
   `Skill` tool_use (`name: "Skill"`, `input.skill === expected`) against
   the first non-empty assistant text block.
 
-## Limitations
+- **Aggregation:** `src/skill-eval/aggregate.ts` is pure. Strict
+  majority vote (3 runs → 2/3 fires is triggered; 2/4 is NOT a
+  majority). Per-side accuracy = correct / total. Pass threshold is
+  0.95 on BOTH train and test.
 
-- One probe per invocation. Parallel runs are a future enhancement.
-- No eval-set format yet. The operator hand-supplies the query.
-- No accuracy aggregation. One PASS/FAIL per call.
-- Sub-agent skill calls (`isSidechain: true`) do not count — only the
-  top-level session.
+- **Concurrency:** `src/skill-eval/run-eval-set.ts` implements
+  bounded-parallel dispatch via a small cursor-based semaphore. A
+  transient `ProbeError` (worker timeout, JSONL missing) is recorded as
+  a "did-not-trigger" run with the error in the reason field — it does
+  NOT abort the sweep.
 
 ## Cost note
 
-Each probe is one real Claude API dispatch (roughly the cost of a single
-`/danx-next` pickup minus the implementation work — typically pennies
-for a short prompt). The default runner `--timeout-ms` is 5 minutes, so
-a stalled probe burns up to that wall-clock time waiting on the worker
-before giving up. Drop `--timeout-ms` for short probes against
-known-fast prompts. The budget cap is enforced upstream by the worker,
-not the runner.
+Each probe is one real Claude API dispatch (roughly pennies for a
+short prompt). A full 20-query × 3-runs eval-set is roughly $0.30 –
+$1.00 depending on the dispatched agent's default model — the report
+prints the actual total derived from observed token counts.
+
+## Limitations
+
+- One eval-set at a time. Batch mode across multiple plugin:skill names
+  is not implemented yet.
+- Sub-agent skill calls (`isSidechain: true`) do not count — only the
+  top-level session.
+- The dispatched agent's model is not pinned; cost is estimated using
+  the configured `--pricing-model` (Sonnet-4-6 by default). Future
+  enhancement: pull per-message model from the JSONL for an exact
+  cost.

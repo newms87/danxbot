@@ -948,7 +948,11 @@ export function buildDisplayFromContext(
     },
     trello: {
       apiKey: mask(ctx.trello.apiKey),
+      apiToken: mask(ctx.trello.apiToken),
       boardId: ctx.trello.boardId,
+      todoListId: ctx.trello.todoListId,
+      inProgressListId: ctx.trello.inProgressListId,
+      doneListId: ctx.trello.doneListId,
       configured: !!(ctx.trello.apiKey && ctx.trello.apiToken),
     },
     github: {

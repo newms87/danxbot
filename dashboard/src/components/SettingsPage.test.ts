@@ -14,19 +14,22 @@ vi.mock("../api", () => ({
 // DX-159 Phase 1: SettingsPage now imports `useAgents` (SSE-backed).
 // Mock the composable so the component renders without hitting the
 // stream layer in dashboard SFC tests.
+const mockAgentsRef: { value: unknown[] } = { value: [] };
+const mockRefresh = vi.fn();
 vi.mock("../composables/useAgents", () => ({
   useAgents: () => ({
-    agents: { value: [] },
+    agents: mockAgentsRef,
     loading: { value: false },
     error: { value: null },
     toggle: vi.fn(),
     clearCriticalFailure: vi.fn(),
     saveIssuePrefix: vi.fn(),
-    refresh: vi.fn(),
+    refresh: mockRefresh,
   }),
 }));
 
 import SettingsPage from "./SettingsPage.vue";
+import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 
 const REPOS: RepoInfo[] = [
   { name: "danxbot", url: "https://example.com/danxbot.git" },
@@ -47,6 +50,8 @@ beforeEach(() => {
     settings: { conflictCheckEnabled: true },
   });
   mockPatchAgentDefaults.mockReset();
+  mockAgentsRef.value = [];
+  mockRefresh.mockReset();
 });
 
 describe("SettingsPage", () => {
@@ -148,5 +153,109 @@ describe("SettingsPage", () => {
     await flushPromises();
 
     expect(mockPatchAgentDefaults).toHaveBeenCalledWith("danxbot", false);
+  });
+
+  // DX-304 — TrelloConfigPanel mounts as a sibling section under the
+  // active repo's RepoCard. Switching the selected repo re-mounts the
+  // panel with the new repo's snapshot, so the panel's masked values
+  // always match the operator's current pick.
+  describe("TrelloConfigPanel integration", () => {
+    function snapshot(name: string) {
+      return {
+        name,
+        url: `https://example.com/${name}.git`,
+        settings: {
+          overrides: {
+            slack: { enabled: null },
+            issuePoller: { enabled: null, pickupPrefix: null },
+            dispatchApi: { enabled: null },
+            ideator: { enabled: null },
+            autoTriage: { enabled: null },
+            trelloSync: { enabled: null },
+          },
+          display: {
+            trello: {
+              apiKey: `${name}-mask`,
+              apiToken: `${name}-mask-tok`,
+              boardId: `${name}-board`,
+              todoListId: `${name}-todo`,
+              configured: true,
+            },
+            links: {},
+          },
+          meta: { updatedAt: "2026-05-01T00:00:00Z", updatedBy: "test" },
+        },
+        counts: {
+          total: { total: 0, slack: 0, trello: 0, api: 0 },
+          last24h: { total: 0, slack: 0, trello: 0, api: 0 },
+          today: { total: 0, slack: 0, trello: 0, api: 0 },
+        },
+        worker: { reachable: true, lastSeenMs: Date.now() },
+        criticalFailure: null,
+        issuePrefix: "DX",
+      };
+    }
+
+    it("renders TrelloConfigPanel under the active repo's RepoCard", () => {
+      mockAgentsRef.value = [snapshot("danxbot")];
+      const w = mountPage();
+      const panel = w.find('[data-test="trello-config-panel"]');
+      expect(panel.exists()).toBe(true);
+      expect(w.get('[data-test="trello-board-id"]').text()).toBe(
+        "danxbot-board",
+      );
+    });
+
+    // AC #6 regression guard: the trelloSync row was moved into the
+    // panel; RepoCard must NOT render its own duplicate switch. Asserts
+    // exactly one role=switch with the "Trello sync" label exists in
+    // the rendered Settings page (the one inside TrelloConfigPanel).
+    it("renders exactly one Trello sync toggle (panel, not RepoCard duplicate)", async () => {
+      mockAgentsRef.value = [snapshot("danxbot")];
+      const w = mountPage();
+      await flushPromises();
+      // Iterate all switches; count those whose accessible label says Trello sync.
+      const trelloSwitches = w
+        .findAll('[role="switch"]')
+        .filter((s) => (s.attributes("aria-label") ?? "").includes("Trello sync"));
+      expect(trelloSwitches).toHaveLength(1);
+      // And the one that exists lives inside the panel.
+      const panel = w.get('[data-test="trello-config-panel"]');
+      expect(panel.find('[role="switch"]').exists()).toBe(true);
+    });
+
+    it("calls the composable's refresh() when the panel emits 'refresh'", async () => {
+      mockAgentsRef.value = [snapshot("danxbot")];
+      const w = mountPage();
+      await flushPromises();
+      const panel = w.findComponent(TrelloConfigPanel);
+      expect(panel.exists()).toBe(true);
+      panel.vm.$emit("refresh", "danxbot");
+      await flushPromises();
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+
+    it("re-mounts the panel with the new repo's snapshot when the selection changes", async () => {
+      mockAgentsRef.value = [snapshot("danxbot"), snapshot("other")];
+      const w = mount(SettingsPage, {
+        props: {
+          selectedRepo: "danxbot",
+          repos: [
+            { name: "danxbot", url: "" },
+            { name: "other", url: "" },
+          ],
+        },
+      });
+      await flushPromises();
+      expect(w.get('[data-test="trello-board-id"]').text()).toBe(
+        "danxbot-board",
+      );
+
+      await w.setProps({ selectedRepo: "other" });
+      await flushPromises();
+      expect(w.get('[data-test="trello-board-id"]').text()).toBe(
+        "other-board",
+      );
+    });
   });
 });
