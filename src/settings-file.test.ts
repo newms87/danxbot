@@ -696,6 +696,72 @@ describe("settings-file", () => {
       expect(display.github?.token).not.toBe("ghp_1234567890abcdef");
       expect(display.links?.trelloBoardUrl).toBe("https://trello.com/b/board123");
     });
+
+    // DX-304 — TrelloConfigPanel renders the ToDo list id read-only, so the
+    // panel's data source (`display.trello.todoListId`) must round-trip the
+    // value from RepoContext. The other workflow list ids are surfaced
+    // alongside it so the dashboard can grow them into the panel without a
+    // second schema bump.
+    it("surfaces trello list ids (todo/inProgress/done) for the dashboard panel", () => {
+      const ctx = makeRepoContext({
+        localPath,
+        trello: {
+          apiKey: "k",
+          apiToken: "t",
+          boardId: "board-1",
+          reviewListId: "r-list",
+          todoListId: "todo-list",
+          inProgressListId: "ip-list",
+          needsHelpListId: "nh-list",
+          doneListId: "done-list",
+          cancelledListId: "cx-list",
+          actionItemsListId: "ai-list",
+          bugLabelId: "",
+          featureLabelId: "",
+          epicLabelId: "",
+          needsHelpLabelId: "",
+          blockedLabelId: "",
+          requiresHumanLabelId: "",
+        },
+      });
+      const display = buildDisplayFromContext(ctx, "host");
+      expect(display.trello?.todoListId).toBe("todo-list");
+      expect(display.trello?.inProgressListId).toBe("ip-list");
+      expect(display.trello?.doneListId).toBe("done-list");
+    });
+
+    // DX-304 AC #3 — TrelloConfigPanel renders BOTH the api key and api
+    // token as masked rows. Pre-DX-304 the display only masked apiKey;
+    // the panel needs both to render its initial state without exposing
+    // the raw value.
+    it("masks BOTH apiKey and apiToken for the dashboard panel", () => {
+      const ctx = makeRepoContext({
+        localPath,
+        trello: {
+          apiKey: "1234567890abcdef",
+          apiToken: "token-abcdefghij",
+          boardId: "b",
+          reviewListId: "",
+          todoListId: "",
+          inProgressListId: "",
+          needsHelpListId: "",
+          doneListId: "",
+          cancelledListId: "",
+          actionItemsListId: "",
+          bugLabelId: "",
+          featureLabelId: "",
+          epicLabelId: "",
+          needsHelpLabelId: "",
+          blockedLabelId: "",
+          requiresHumanLabelId: "",
+        },
+      });
+      const display = buildDisplayFromContext(ctx, "host");
+      // Mask shape: `<first4>****<last4>` for tokens longer than 8 chars.
+      // Asserting the shape pins behavior — `.not.toBe(raw)` alone would
+      // also pass for an empty string.
+      expect(display.trello?.apiToken).toMatch(/^toke\*\*\*\*ghij$/);
+    });
   });
 
   describe("syncSettingsFileOnBoot", () => {

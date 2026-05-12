@@ -11,6 +11,7 @@ import {
 } from "../api";
 import { useAgents } from "../composables/useAgents";
 import RepoCard from "./agents/RepoCard.vue";
+import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 import type { Feature } from "../types";
 
 /**
@@ -87,6 +88,17 @@ async function onSaveIssuePrefix(repo: string, prefix: string): Promise<void> {
   } finally {
     savingIssuePrefix.value = false;
   }
+}
+
+// DX-304: TrelloConfigPanel handles its own credential PATCH and asks
+// us to re-hydrate when the rotation succeeds so the masked display
+// values update + the agent snapshot's overrides round-trip stays in
+// sync with the operator's view. `refreshAgents` is the existing
+// composable refresh — re-fetches every agent (one-per-worker today)
+// and patches `agents.value` so the panel's `:agent` prop receives the
+// new shape.
+async function onTrelloRefresh(_repo: string): Promise<void> {
+  await refreshAgents();
 }
 
 // agentDefaults.conflictCheckEnabled — fetched per-repo on mount + when
@@ -189,16 +201,23 @@ function dismissResult(): void {
         Repo "{{ activeRepoName }}" is not currently visible to the dashboard. The worker may be down, or the REPOS env var may need updating.
       </div>
 
-      <RepoCard
-        v-else
-        :agent="activeAgent"
-        :busy-feature="busyFeature"
-        :clearing-critical-failure="clearingCriticalFailure"
-        :saving-issue-prefix="savingIssuePrefix"
-        @toggle="onToggle"
-        @clear-critical-failure="onClearCriticalFailure"
-        @save-issue-prefix="onSaveIssuePrefix"
-      />
+      <template v-else>
+        <RepoCard
+          :agent="activeAgent"
+          :busy-feature="busyFeature"
+          :clearing-critical-failure="clearingCriticalFailure"
+          :saving-issue-prefix="savingIssuePrefix"
+          @toggle="onToggle"
+          @clear-critical-failure="onClearCriticalFailure"
+          @save-issue-prefix="onSaveIssuePrefix"
+        />
+        <TrelloConfigPanel
+          :agent="activeAgent"
+          :busy-feature="busyFeature"
+          @toggle="onToggle"
+          @refresh="onTrelloRefresh"
+        />
+      </template>
 
       <article
         class="rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 shadow-sm"
