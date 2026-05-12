@@ -1325,29 +1325,239 @@ describe("settings-file", () => {
       expect(Object.keys(s.agents ?? {})).toEqual(["ok"]);
     });
 
-    it("writeSettings({agents: {}}) clears every agent without touching defaults", async () => {
-      await writeSettings(localPath, {
-        agents: {
-          alice: validAgent({ bio: "A" }),
-          bob: validAgent({ bio: "B" }),
-        },
-        agentDefaults: { conflictCheckEnabled: false },
-        writtenBy: "dashboard:test",
-      });
-      // Confirm seeding worked.
-      expect(Object.keys(readSettings(localPath).agents ?? {})).toEqual([
-        "alice",
-        "bob",
-      ]);
+    // DX-281 — writer-merge invariant for agents{} map. Pre-DX-281 the
+    // writer wholesale-replaced agents on any `patch.agents` write; a
+    // second caller passing {alice} silently clobbered operator-added
+    // entries on disk (phil disappeared mid-`make test-system` runs).
+    // Post-DX-281, `patch.agents` merges per-key into the locked on-disk
+    // read; on-disk-only keys (operator additions) ALWAYS survive. The
+    // "clear all" semantic moves to `mutateAgents(p, () => ({}), w)` —
+    // the only API that can intentionally drop operator state, and only
+    // by explicitly returning an empty map from inside the lock.
+    describe("DX-281 agents merge invariant", () => {
+      it("writeSettings({agents}) merges per-key into on-disk agents — never clobbers operator additions", async () => {
+        // Operator state: phil exists on disk (added via mutateAgents,
+        // mirroring the dashboard POST /api/agents path).
+        await mutateAgents(
+          localPath,
+          (current) => {
+            current.phil = validAgent({ bio: "Phil's bio." });
+            return current;
+          },
+          "dashboard:operator",
+        );
+        expect(Object.keys(readSettings(localPath).agents ?? {})).toEqual([
+          "phil",
+        ]);
 
-      await writeSettings(localPath, {
-        agents: {},
-        writtenBy: "dashboard:test",
+        // Separate caller passes patch.agents = {alice}. Pre-fix this
+        // wholesale-replaced — phil was wiped. Post-fix the writer merges.
+        await writeSettings(localPath, {
+          agents: { alice: validAgent({ bio: "Alice's bio." }) },
+          writtenBy: "setup",
+        });
+
+        const s = readSettings(localPath);
+        expect(Object.keys(s.agents ?? {}).sort()).toEqual(["alice", "phil"]);
+        expect(s.agents?.phil.bio).toBe("Phil's bio.");
+        expect(s.agents?.alice.bio).toBe("Alice's bio.");
       });
-      const s = readSettings(localPath);
-      expect(s.agents).toEqual({});
-      // agentDefaults should NOT have been touched by an agents-only patch.
-      expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+
+      it("writeSettings({agents}) overwrites entries when keys collide (patch wins per-key)", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent({ bio: "v1" });
+            return c;
+          },
+          "dashboard:operator",
+        );
+
+        await writeSettings(localPath, {
+          agents: { alice: validAgent({ bio: "v2" }) },
+          writtenBy: "setup",
+        });
+
+        expect(readSettings(localPath).agents?.alice.bio).toBe("v2");
+      });
+
+      it("test-seed pattern (writeSettings({agents: {alice, bob, charlie}})) preserves operator additions", async () => {
+        // Mirror of the actual `_multi_worker_seed_agents` shell test
+        // seed path that bit us. Operator's phil is on disk; the test
+        // seed writes alice/bob/charlie via patch.agents. With the
+        // wholesale-replace bug, phil was wiped silently. With merge
+        // semantics, phil survives.
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.phil = validAgent({ bio: "phil" });
+            return c;
+          },
+          "dashboard:operator",
+        );
+
+        await writeSettings(localPath, {
+          agents: {
+            alice: validAgent({ bio: "alice" }),
+            bob: validAgent({ bio: "bob" }),
+            charlie: validAgent({ bio: "charlie" }),
+          },
+          writtenBy: "setup",
+        });
+
+        expect(Object.keys(readSettings(localPath).agents ?? {}).sort()).toEqual([
+          "alice",
+          "bob",
+          "charlie",
+          "phil",
+        ]);
+      });
+
+      it("concurrent display-only + agents-only writes both preserve pre-existing operator agents", async () => {
+        // Two concurrent writes simulate the reported race: worker's
+        // syncSettingsFileOnBoot (display-only) firing while a parallel
+        // setup-shaped agents-only write lands. The in-process queue
+        // (enqueueWrite) serializes them; the merge invariant keeps phil.
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.phil = validAgent({ bio: "phil" });
+            return c;
+          },
+          "dashboard:operator",
+        );
+
+        await Promise.all([
+          writeSettings(localPath, {
+            display: { worker: { port: 9999, runtime: "host" } },
+            writtenBy: "worker",
+          }),
+          writeSettings(localPath, {
+            agents: { alice: validAgent({ bio: "alice" }) },
+            writtenBy: "setup",
+          }),
+        ]);
+
+        const s = readSettings(localPath);
+        expect(Object.keys(s.agents ?? {}).sort()).toEqual(["alice", "phil"]);
+        expect(s.display.worker?.port).toBe(9999);
+      });
+
+      it("5 sequential agents-bearing writes (AC5 stand-in) all preserve the operator-added agent", async () => {
+        // AC5 calls for "phil added → 5 consecutive dispatches → phil
+        // still present". The agents-bearing writes are the worst case
+        // (a display-only write never touches `agents`), so the
+        // stand-in fires 5 writes that each pass a fresh `patch.agents`
+        // and asserts phil survives every one.
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.phil = validAgent({ bio: "phil" });
+            return c;
+          },
+          "dashboard:operator",
+        );
+
+        for (let i = 0; i < 5; i++) {
+          await writeSettings(localPath, {
+            agents: { alice: validAgent({ bio: `alice-v${i}` }) },
+            writtenBy: "setup",
+          });
+          const s = readSettings(localPath);
+          expect(s.agents?.phil?.bio).toBe("phil");
+          expect(s.agents?.alice?.bio).toBe(`alice-v${i}`);
+        }
+      });
+
+      it("writeSettings({agents: {}}) is a no-op for agents (merge of empty); use mutateAgents to clear", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent({ bio: "A" });
+            c.bob = validAgent({ bio: "B" });
+            return c;
+          },
+          "dashboard:test",
+        );
+        await writeSettings(localPath, {
+          agentDefaults: { conflictCheckEnabled: false },
+          writtenBy: "dashboard:test",
+        });
+
+        // Empty patch.agents merges into on-disk agents → no-op for agents.
+        await writeSettings(localPath, {
+          agents: {},
+          writtenBy: "dashboard:test",
+        });
+        expect(Object.keys(readSettings(localPath).agents ?? {}).sort()).toEqual([
+          "alice",
+          "bob",
+        ]);
+
+        // To clear, callers must use mutateAgents — the only API that
+        // can intentionally drop on-disk entries (return value replaces
+        // the map inside the lock).
+        await mutateAgents(localPath, () => ({}), "dashboard:test");
+        const s = readSettings(localPath);
+        expect(s.agents).toEqual({});
+        expect(s.agentDefaults?.conflictCheckEnabled).toBe(false);
+      });
+
+      it("merge respects AGENTS_MAX cap — patch entries dropped (operator-first insertion order) when combined exceed cap", async () => {
+        // AGENTS_MAX is 5. Seed 5 operator agents first; a patch
+        // adding a 6th entry should drop the new entry (insertion
+        // order preserves operator agents). This pins the safety net
+        // the shell-helper comment names: "exceeded cap drops trailing
+        // entries via normalizeAgents on the next read — surfaces as
+        // a visible failure rather than silent operator data loss."
+        await mutateAgents(
+          localPath,
+          (c) => {
+            for (let i = 0; i < 5; i++) {
+              c[`op${i}`] = validAgent({ bio: `operator-${i}` });
+            }
+            return c;
+          },
+          "dashboard:operator",
+        );
+        expect(Object.keys(readSettings(localPath).agents ?? {})).toHaveLength(5);
+
+        await writeSettings(localPath, {
+          agents: { newcomer: validAgent({ bio: "newcomer" }) },
+          writtenBy: "setup",
+        });
+
+        const s = readSettings(localPath);
+        const names = Object.keys(s.agents ?? {}).sort();
+        expect(names).toEqual(["op0", "op1", "op2", "op3", "op4"]);
+        expect(s.agents?.newcomer).toBeUndefined();
+      });
+
+      it("merge stamps meta.updatedBy from the latest patch (not the prior writer)", async () => {
+        // Diagnostic invariant from the original bug — `meta.updatedBy`
+        // was the smoking gun that pinned the wipe to the worker.
+        // After the merge fix, the LATEST writer still wins the stamp;
+        // the merge doesn't accidentally inherit the prior writer.
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.phil = validAgent({ bio: "phil" });
+            return c;
+          },
+          "dashboard:operator",
+        );
+        expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:operator");
+
+        await writeSettings(localPath, {
+          agents: { alice: validAgent({ bio: "alice" }) },
+          writtenBy: "setup",
+        });
+
+        const s = readSettings(localPath);
+        expect(s.meta.updatedBy).toBe("setup");
+        // phil still present — the writer stamp changed, the data didn't.
+        expect(s.agents?.phil?.bio).toBe("phil");
+      });
     });
 
     it("does not throw on totally bogus agents shape — degrades to empty map", () => {

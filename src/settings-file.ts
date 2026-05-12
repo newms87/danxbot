@@ -287,10 +287,17 @@ export interface WriteSettingsPatch {
   overrides?: WriteSettingsPatchOverrides;
   display?: SettingsDisplay;
   /**
-   * Replace the entire agents map. Pass an empty object to clear all
-   * agents. Pass `undefined` (or omit the field) to leave the existing
-   * map untouched. Per-record patching lives in DX-160's CRUD routes;
-   * the schema-level write is a wholesale replace by design.
+   * Merge entries into the agents map per-key. Patch entries win for
+   * colliding keys; on-disk keys absent from the patch are PRESERVED.
+   * Pass `undefined` (or omit the field) to leave the existing map
+   * untouched. Empty `{}` is a no-op (nothing to merge).
+   *
+   * DX-281 — pre-DX-281 this was a wholesale replace, which silently
+   * wiped operator-added agents whenever a setup-shaped caller passed
+   * a fresh roster. Intentional clear (the only "drop on-disk entries"
+   * use case) MUST go through `mutateAgents(p, () => ({}), w)` — the
+   * mutator runs inside the lock and its return value replaces the map
+   * verbatim, so the caller has explicitly consented to the drop.
    */
   agents?: Record<string, AgentRecord>;
   /** Patch a subset of agentDefaults; missing keys are preserved. */
@@ -645,8 +652,16 @@ export async function writeSettings(
   return enqueueWrite(localPath, () => runWrite(localPath, patch));
 }
 
-/** One promise chain per absolute file path, so concurrent writes from
- * the same process serialize before they even reach the file lock. */
+/**
+ * Per-file (== per-repo, since there is exactly one settings.json per
+ * connected repo) mutex around every settings write. Mirrors the
+ * dashboard's DX-236 per-issue-id mutex pattern: one promise chain per
+ * file path, so concurrent writes from the same process serialize
+ * before they even reach the cross-process `.settings.lock` file. The
+ * combined guarantee — in-process queue + file lock + atomic
+ * tmp+rename — satisfies the DX-281 "worker-side per-id mutex around
+ * settings writes" AC.
+ */
 const inProcessQueues = new Map<string, Promise<unknown>>();
 
 function enqueueWrite<T>(
@@ -700,9 +715,20 @@ async function runWrite(
       display: patch.display
         ? { ...existing.display, ...patch.display }
         : existing.display,
+      // DX-281 — merge `patch.agents` per-key into the locked on-disk
+      // read instead of wholesale-replacing. Pre-DX-281 the writer
+      // replaced the whole map, so a caller passing {alice} silently
+      // wiped operator-added entries on disk (phil disappeared mid-
+      // test-system runs). Post-DX-281 patch wins per-key but on-disk-
+      // only keys (operator additions) ALWAYS survive. The empty-patch
+      // ({agents: {}}) case becomes a no-op for agents; intentional
+      // clear goes through `mutateAgents(p, () => ({}), w)` — the only
+      // API that can drop on-disk entries, and only by explicitly
+      // returning an empty map from inside the lock. See
+      // `.claude/rules/settings-file.md` writer-merge invariant.
       agents:
         patch.agents !== undefined
-          ? normalizeAgents(patch.agents)
+          ? normalizeAgents({ ...(existing.agents ?? {}), ...patch.agents })
           : (existing.agents ?? {}),
       agentDefaults: patch.agentDefaults
         ? {
@@ -885,25 +911,26 @@ export function getIssuePollerPickupPrefix(
  * Atomic per-agent mutation. Runs `read → mutate → write` INSIDE the
  * per-file lock so concurrent CRUD on the agents map can't lose data.
  *
- * The base `writeSettings({agents})` patch shape is a wholesale
- * replace — fine for setup/seed flows but unsafe for per-agent CRUD,
- * because the read used to compute the new map happens OUTSIDE the
- * lock. Two near-simultaneous `POST /api/agents` calls would each
- * read `{}`, each compute a one-entry map containing their own
- * agent, and the second write would silently clobber the first.
+ * Post-DX-281 `writeSettings({agents})` is a per-key MERGE (patch wins
+ * for colliding keys, on-disk-only keys preserved). That covers
+ * setup/seed flows and concurrent dashboard add/update — both safe
+ * under the file lock + in-process queue. `mutateAgents` exists for
+ * the two cases the merge shape cannot express:
+ *   1. INTENTIONAL DROP of on-disk entries — return value replaces
+ *      the map verbatim, so `() => ({})` clears it, `(c) => { delete
+ *      c.alice; return c }` removes one entry.
+ *   2. REJECT mid-mutation based on existing state — throwing from
+ *      the mutator (e.g. for `409 duplicate name` after seeing the
+ *      key already on disk) propagates the error without writing.
  *
- * `mutateAgents` closes that window: the lock is acquired BEFORE the
- * read, held across the mutator, and released after the write. The
- * mutator function is given the on-disk agents map (a fresh object;
- * mutations are safe) and returns the next map. Throwing from the
- * mutator (e.g. for `409 duplicate name`) propagates the error
- * without writing — the caller's response shape carries the rejection.
- *
- * The mutator's return value is normalized through the same
- * validation pipeline as the public write surface; passing a record
- * with garbage in `capabilities` results in the record being dropped
- * exactly as a hand-edited bad JSON file would. Callers should
- * validate at the HTTP boundary BEFORE the mutator runs.
+ * Lock semantics: acquired BEFORE the read, held across the mutator,
+ * released after the write. The mutator is given the on-disk agents
+ * map (a fresh shallow copy; mutations are safe) and returns the next
+ * map. The return value is normalized through the same validation
+ * pipeline as the public write surface; passing a record with garbage
+ * in `capabilities` results in the record being dropped exactly as a
+ * hand-edited bad JSON file would. Callers should validate at the
+ * HTTP boundary BEFORE the mutator runs.
  */
 export async function mutateAgents(
   localPath: string,

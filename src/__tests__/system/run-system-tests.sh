@@ -1282,13 +1282,21 @@ _multi_worker_seed_agents() {
       mon: ["00:00-23:59"], tue: ["00:00-23:59"], wed: ["00:00-23:59"],
       thu: ["00:00-23:59"], fri: ["00:00-23:59"], sat: ["00:00-23:59"], sun: ["00:00-23:59"],
     };
-    // Replace the agents map wholesale so the test owns the full
-    // roster surface during execution. Pre-existing operator agents
-    // (real names like dani/murphy/phil) collide with the AGENTS_MAX=5
-    // cap when combined with the 3 seeded names — the 6th entry gets
-    // silently dropped by `normalizeAgents`. Backup is restored on
-    // EXIT (see _multi_worker_restore_settings + cleanup trap).
-    cur.agents = {};
+    // DX-281 — MERGE alice/bob/charlie into the existing agents map.
+    // Pre-DX-281 this helper wholesale-replaced `cur.agents = {}` to
+    // avoid the AGENTS_MAX=5 cap when combined with operator agents.
+    // The raw fs.writeFileSync below bypasses the writer-merge lock,
+    // so the wipe raced the worker's `syncSettingsFileOnBoot` between
+    // the wipe and the EXIT restore — the worker became the last
+    // writer post-wipe (confirmed via `meta.updatedBy: "worker"`
+    // stamp) and re-cemented the empty agents map under its own
+    // writer tag, surviving the trap restore in some interleavings.
+    // Operator-added agents now survive every `make test-system`
+    // invocation; the cap (if exceeded by operator + seeded entries
+    // combined) drops the trailing seeded names via `normalizeAgents`
+    // on the next read, which surfaces as a visible test failure
+    // rather than silent operator data loss.
+    cur.agents = cur.agents || {};
     for (const name of ["alice", "bob", "charlie"]) {
       cur.agents[name] = {
         type: "agent",
