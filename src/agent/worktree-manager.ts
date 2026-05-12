@@ -505,17 +505,18 @@ export function createWorktreeManager(
       ]);
       const porcelain = porcelainResult.stdout.trim();
 
-      const aheadResult = await runner.run(path, [
-        "rev-list",
-        "--count",
-        "origin/main..HEAD",
+      // Patch-id-aware ahead count; see `countCherryPlus` (DX-330).
+      const cherryResult = await runner.run(path, [
+        "cherry",
+        "origin/main",
+        "HEAD",
       ]);
       const behindResult = await runner.run(path, [
         "rev-list",
         "--count",
         "HEAD..origin/main",
       ]);
-      const ahead = parseCount(aheadResult.stdout);
+      const ahead = countCherryPlus(cherryResult.stdout);
       const behind = parseCount(behindResult.stdout);
 
       const details = { porcelain, ahead, behind };
@@ -663,6 +664,32 @@ async function rebaseOnto(
   }
   provisionWorktreeArtifacts(ctx.hostPath, path);
   return { kind: "rebased", commits: ahead };
+}
+
+/**
+ * Count `+`-prefixed lines in `git cherry <upstream> <head>` output.
+ *
+ * `git cherry` emits one line per commit on `<head>` not on `<upstream>`:
+ *   `+ <sha>` — patch-id-unique (commit's diff has no twin on `<upstream>`)
+ *   `- <sha>` — patch-id-matched on `<upstream>` (already merged under a
+ *               different sha; typical of rebase-and-merge workflows)
+ *
+ * Only `+` lines represent real outstanding work. Counting them gives
+ * "real ahead" — the metric `validate()` uses to decide whether the
+ * branch carries unmerged commits. See DX-330 for the rebase-loop
+ * failure mode this replaces.
+ *
+ * Edge: `git cherry` skips merge commits — it walks linear left-side
+ * history only. Agents never merge `main` into their branch (workflow
+ * uses rebase), so this is fine in practice; if that invariant ever
+ * breaks, merge commits would silently under-count ahead.
+ */
+function countCherryPlus(stdout: string): number {
+  let n = 0;
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("+ ")) n++;
+  }
+  return n;
 }
 
 /** Parse `git rev-list --count` stdout to an integer; 0 on parse failure. */

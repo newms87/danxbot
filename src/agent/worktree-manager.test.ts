@@ -270,8 +270,8 @@ describe("WorktreeManager", () => {
         responses: [
           { match: "status --porcelain", response: { stdout: "" } },
           {
-            match: "rev-list --count origin/main..HEAD",
-            response: { stdout: "0\n" },
+            match: "cherry origin/main HEAD",
+            response: { stdout: "" },
           },
           {
             match: "rev-list --count HEAD..origin/main",
@@ -291,8 +291,8 @@ describe("WorktreeManager", () => {
         responses: [
           { match: "status --porcelain", response: { stdout: porcelain } },
           {
-            match: "rev-list --count origin/main..HEAD",
-            response: { stdout: "0\n" },
+            match: "cherry origin/main HEAD",
+            response: { stdout: "" },
           },
           {
             match: "rev-list --count HEAD..origin/main",
@@ -310,13 +310,20 @@ describe("WorktreeManager", () => {
       });
     });
 
-    it("returns dirty with reason 'branch has unmerged commits' when ahead > 0", async () => {
+    it("returns dirty with reason 'branch has unmerged commits' when ahead > 0 (cherry `+` lines)", async () => {
       const runner = fakeRunner({
         responses: [
           { match: "status --porcelain", response: { stdout: "" } },
           {
-            match: "rev-list --count origin/main..HEAD",
-            response: { stdout: "3\n" },
+            match: "cherry origin/main HEAD",
+            response: {
+              stdout: [
+                "+ aaaaaaa1111111111111111111111111111111111",
+                "+ bbbbbbb2222222222222222222222222222222222",
+                "+ ccccccc3333333333333333333333333333333333",
+                "",
+              ].join("\n"),
+            },
           },
           {
             match: "rev-list --count HEAD..origin/main",
@@ -334,13 +341,105 @@ describe("WorktreeManager", () => {
       });
     });
 
+    it("DX-330 patch-id-equivalent ahead → CLEAN (cherry emits only `-` lines)", async () => {
+      // The wedge scenario: branch rebased onto current origin/main, ahead
+      // commits' patch-ids all already on main under different shas. The
+      // bare rev-list contract pre-DX-330 flagged this as dirty and kicked
+      // off a recovery-dispatch loop that could never push (force-push was
+      // forbidden). The new cherry-based contract counts only `+` lines —
+      // `-` lines are patch-id-matched and treated as merged.
+      const runner = fakeRunner({
+        responses: [
+          { match: "status --porcelain", response: { stdout: "" } },
+          {
+            match: "cherry origin/main HEAD",
+            response: {
+              stdout: [
+                "- 608b8b777777777777777777777777777777777b",
+                "- 6712aa6666666666666666666666666666666666",
+                "",
+              ].join("\n"),
+            },
+          },
+          {
+            match: "rev-list --count HEAD..origin/main",
+            response: { stdout: "0\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.validate(ctx, "alice");
+      expect(result).toEqual({ state: "clean" });
+    });
+
+    it("DX-330 cherry parser: tolerates CRLF + blank lines + malformed `+`-without-space (counts only well-formed `+ <sha>` lines)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          { match: "status --porcelain", response: { stdout: "" } },
+          {
+            match: "cherry origin/main HEAD",
+            response: {
+              // CRLF + trailing blank + a malformed `+sha` (no space) +
+              // `++ sha` (looks like a + line but isn't) — only well-
+              // formed `+ <sha>` should count.
+              stdout: "+ aaa111\r\n+ bbb222\r\n+ccc333\r\n++ ddd444\r\n\r\n",
+            },
+          },
+          {
+            match: "rev-list --count HEAD..origin/main",
+            response: { stdout: "0\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.validate(ctx, "alice");
+      expect(result).toMatchObject({
+        state: "dirty",
+        details: { ahead: 2 },
+      });
+    });
+
+    it("DX-330 mixed ahead → dirty with ahead = `+` count only (drops `-` lines from real-ahead total)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          { match: "status --porcelain", response: { stdout: "" } },
+          {
+            match: "cherry origin/main HEAD",
+            response: {
+              stdout: [
+                "+ aaaaaaa1111111111111111111111111111111111",
+                "- bbbbbbb2222222222222222222222222222222222",
+                "+ ccccccc3333333333333333333333333333333333",
+                "- ddddddd4444444444444444444444444444444444",
+                "",
+              ].join("\n"),
+            },
+          },
+          {
+            match: "rev-list --count HEAD..origin/main",
+            response: { stdout: "0\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.validate(ctx, "alice");
+      expect(result).toMatchObject({
+        state: "dirty",
+        reason: "branch has unmerged commits",
+        details: { porcelain: "", ahead: 2, behind: 0 },
+      });
+    });
+
     it("returns clean when only behind origin/main (reset will fast-forward)", async () => {
       const runner = fakeRunner({
         responses: [
           { match: "status --porcelain", response: { stdout: "" } },
           {
-            match: "rev-list --count origin/main..HEAD",
-            response: { stdout: "0\n" },
+            match: "cherry origin/main HEAD",
+            response: { stdout: "" },
           },
           {
             match: "rev-list --count HEAD..origin/main",

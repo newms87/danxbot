@@ -222,6 +222,68 @@ describe("dispatchWithRecovery", () => {
     expect(dispatchMock).not.toHaveBeenCalled();
   });
 
+  it("DX-330 integration: wedged-state worktree → dispatched recovery prompt enumerates three locks in order (cherry audit → EXPECTED_SHA → tag-push-then-ls-remote-then-force-with-lease) AND the abort path forbids bare --force fallback", async () => {
+    const wedged: DirtyValidation = {
+      state: "dirty",
+      reason: "branch has unmerged commits",
+      details: { porcelain: "", ahead: 2, behind: 0 },
+    };
+    const dispatchMock = vi.fn(
+      async (_input: DispatchInput): Promise<DispatchResult> => ({
+        dispatchId: "wedge-id",
+        job: fakeJob(),
+      }),
+    );
+    const manager = mkManager({ validate: async () => wedged });
+
+    await dispatchWithRecovery(
+      mkInput(),
+      { agentName: "phil", manager },
+      { dispatch: dispatchMock },
+    );
+
+    const prompt = dispatchMock.mock.calls[0][0].task as string;
+
+    // Lock ordering inside the dispatched prompt.
+    const lock1 = prompt.indexOf("git cherry origin/main origin/phil");
+    const lock2 = prompt.indexOf('EXPECTED_SHA="$(git rev-parse origin/phil)"');
+    const tagPush = prompt.indexOf('git push origin "refs/tags/$TAG"');
+    const lsRemote = prompt.indexOf(
+      'git ls-remote origin "refs/tags/$TAG" | grep -q .',
+    );
+    const forcePush = prompt.indexOf(
+      'git push --force-with-lease="phil:$EXPECTED_SHA" origin "phil"',
+    );
+
+    expect(lock1).toBeGreaterThan(0);
+    expect(lock2).toBeGreaterThan(0);
+    expect(tagPush).toBeGreaterThan(0);
+    expect(lsRemote).toBeGreaterThan(0);
+    expect(forcePush).toBeGreaterThan(0);
+
+    expect(lock1).toBeLessThan(lock2);
+    expect(lock2).toBeLessThan(tagPush);
+    expect(tagPush).toBeLessThan(lsRemote);
+    expect(lsRemote).toBeLessThan(forcePush);
+
+    expect(prompt).toContain("Abort path");
+    expect(prompt).toContain(
+      "Branch graduation aborted — operator action required",
+    );
+    expect(prompt).toContain("Do NOT fall back to bare");
+    expect(prompt).toContain(
+      'danxbot_complete({status: "failed", summary: "Recovery aborted',
+    );
+
+    // Force-push restrictions hold for the other-than-self surface.
+    expect(prompt).toMatch(
+      /`git push --force-with-lease` against `main`.*forbidden/,
+    );
+    expect(prompt).toMatch(
+      /`git push --force-with-lease` against any branch other than your own \(`phil`\)/,
+    );
+  });
+
   it("dirty validation → routes to recovery-mode dispatch with recovery prompt + 'internal:recovery' endpoint", async () => {
     const dispatchMock = vi.fn(
       async (_input: DispatchInput): Promise<DispatchResult> => ({

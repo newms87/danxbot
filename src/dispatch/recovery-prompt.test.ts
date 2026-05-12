@@ -75,6 +75,120 @@ describe("buildRecoveryPrompt", () => {
     expect(prompt).toContain("Re-run `git fetch origin`");
   });
 
+  describe("DX-330 — branch graduation via three-lock force-with-lease", () => {
+    const aheadDirty: DirtyValidation = {
+      state: "dirty",
+      reason: "branch has unmerged commits",
+      details: { porcelain: "", ahead: 2, behind: 0 },
+    };
+
+    it("forbidden list specifies the three distinct push restrictions (no-lease bare force, lease-against-main, lease-against-other-branch)", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      // (a) Bare --force is always forbidden, no exceptions.
+      expect(prompt).toMatch(
+        /`git push --force`.*no-lease.*forbidden/i,
+      );
+      // (b) --force-with-lease against main is forbidden.
+      expect(prompt).toMatch(
+        /`git push --force-with-lease` against `main`.*forbidden/,
+      );
+      // (c) --force-with-lease against ANY branch other than self is forbidden.
+      expect(prompt).toMatch(
+        /`git push --force-with-lease` against any branch other than your own \(`phil`\)/,
+      );
+    });
+
+    it("allowed-operations section advertises branch graduation against own branch only", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      expect(prompt).toContain("Allowed operations");
+      expect(prompt).toMatch(
+        /Graduate `origin\/phil` via `--force-with-lease` against YOUR OWN branch ONLY/,
+      );
+    });
+
+    it("renders all three locks in order: (1) cherry patch-id audit on remote, (2) capture EXPECTED_SHA, (3) backup tag pushed + verified BEFORE the force-push fires", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+
+      // Lock 1: patch-id audit
+      const lock1 = prompt.indexOf("git cherry origin/main origin/phil");
+      expect(lock1).toBeGreaterThan(0);
+
+      // Lock 2: capture expected sha
+      const lock2 = prompt.indexOf('EXPECTED_SHA="$(git rev-parse origin/phil)"');
+      expect(lock2).toBeGreaterThan(lock1);
+
+      // Lock 3a: tag push
+      const tagPush = prompt.indexOf('git push origin "refs/tags/$TAG"');
+      expect(tagPush).toBeGreaterThan(lock2);
+
+      // Lock 3b: ls-remote confirmation
+      const lsRemote = prompt.indexOf(
+        'git ls-remote origin "refs/tags/$TAG" | grep -q .',
+      );
+      expect(lsRemote).toBeGreaterThan(tagPush);
+
+      // The actual force-push MUST appear AFTER ls-remote confirmation.
+      const forcePush = prompt.indexOf(
+        'git push --force-with-lease="phil:$EXPECTED_SHA" origin "phil"',
+      );
+      expect(forcePush).toBeGreaterThan(lsRemote);
+
+      // The backup tag template uses the agent name + ISO timestamp.
+      expect(prompt).toContain('TAG="recovery/phil-pre-force-$TS"');
+      // Pin the timestamp format spec (DX-330 — drift to unix-epoch or
+      // localized format breaks the recovery-tag naming contract).
+      expect(prompt).toContain('TS="$(date -u +%Y%m%dT%H%M%SZ)"');
+    });
+
+    it("abort path: failed lock → file Needs Help comment + danxbot_complete failed (no force-push, no bare --force fallback)", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "phil",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+
+      expect(prompt).toContain("Abort path");
+      expect(prompt).toContain(
+        "Branch graduation aborted — operator action required",
+      );
+      expect(prompt).toContain("Do NOT fall back to bare");
+      expect(prompt).toContain("`git push --force`");
+      expect(prompt).toContain("Do NOT skip the patch-id audit");
+      expect(prompt).toContain(
+        'danxbot_complete({status: "failed", summary: "Recovery aborted',
+      );
+    });
+
+    it("agent name flows into every graduation surface (no hard-coded names; works for any agent)", () => {
+      const prompt = buildRecoveryPrompt({
+        agentName: "murphy",
+        worktreePath: "/w",
+        validation: aheadDirty,
+      });
+      expect(prompt).toContain("git cherry origin/main origin/murphy");
+      expect(prompt).toContain('EXPECTED_SHA="$(git rev-parse origin/murphy)"');
+      expect(prompt).toContain('TAG="recovery/murphy-pre-force-$TS"');
+      expect(prompt).toContain(
+        'git push --force-with-lease="murphy:$EXPECTED_SHA" origin "murphy"',
+      );
+      expect(prompt).toContain("origin/murphy");
+      // Sanity: another agent's name does not leak in.
+      expect(prompt).not.toContain("origin/phil");
+    });
+  });
+
   it("preserves a very long porcelain block intact (no truncation)", () => {
     const lines = Array.from({ length: 200 }, (_, i) => ` M file${i}.ts`).join("\n");
     const prompt = buildRecoveryPrompt({
