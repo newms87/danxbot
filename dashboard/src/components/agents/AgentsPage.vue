@@ -20,8 +20,7 @@ import type {
 import { useStream } from "../../composables/useStream";
 import AgentCard from "./AgentCard.vue";
 import AgentEditDrawer from "./AgentEditDrawer.vue";
-import AgentDeleteModal from "./AgentDeleteModal.vue";
-import AgentResolveModal from "./AgentResolveModal.vue";
+import AgentConfirmModal from "./AgentConfirmModal.vue";
 
 /**
  * DX-160 Phase 2 — Agents tab CRUD UI.
@@ -420,22 +419,55 @@ async function confirmResolve(): Promise<void> {
       @submit="onSubmit"
     />
 
-    <AgentDeleteModal
+    <AgentConfirmModal
       v-if="deleteTarget"
-      :agent="deleteTarget"
       :busy="deleteBusy"
       :error="deleteError"
+      :title="`Delete agent “${deleteTarget.name}”?`"
+      :ariaLabel="`Delete ${deleteTarget.name}`"
+      confirm-label="Delete"
+      busy-label="Deleting…"
+      test-prefix="agent-delete"
+      variant="danger"
       @cancel="cancelDelete"
       @confirm="confirmDelete"
-    />
+    >
+      <template #body>
+        <p class="warn">
+          This will remove the agent's record from
+          <code>.danxbot/settings.json</code> and tear down its worktree +
+          branch when the agent is idle. Avatar files under
+          <code>.danxbot/agents/{{ deleteTarget.name }}/</code> are also removed.
+        </p>
+        <p class="warn">
+          This action is <strong>irreversible</strong>.
+        </p>
+      </template>
+    </AgentConfirmModal>
 
-    <AgentResolveModal
+    <AgentConfirmModal
       v-if="resolveTarget"
-      :agent="resolveTarget"
       :busy="resolveBusy"
       :error="resolveError"
+      :title="`Mark “${resolveTarget.name}” resolved?`"
+      :ariaLabel="`Mark ${resolveTarget.name} resolved`"
+      confirm-label="Yes, mark resolved"
+      busy-label="Clearing…"
+      test-prefix="agent-resolve"
+      variant="success"
       @cancel="cancelResolve"
       @confirm="confirmResolve"
-    />
+    >
+      <template #body>
+        <p class="warn">
+          Confirm the agent's environment is fixed. Cleared records cannot
+          be recovered without a re-stamp from a future prep dispatch.
+        </p>
+        <p class="warn">
+          The agent rejoins the dispatchable pool on the poller's next
+          tick.
+        </p>
+      </template>
+    </AgentConfirmModal>
   </section>
 </template>

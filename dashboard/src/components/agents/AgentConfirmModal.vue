@@ -1,19 +1,13 @@
 <script setup lang="ts">
-/**
- * AgentDeleteModal — DX-160 Phase 2.
- *
- * Confirms agent deletion with a clear warning that the worktree +
- * branch will be torn down (Phase 3 owns the actual teardown wiring;
- * Phase 2 only removes the settings record + per-agent dir). The copy
- * matches the long-term contract so operators see the same warning
- * regardless of when teardown lands.
- */
-import type { AgentRecordWithName } from "../../types";
-
 defineProps<{
-  agent: AgentRecordWithName;
   busy: boolean;
   error: string | null;
+  title: string;
+  ariaLabel: string;
+  confirmLabel: string;
+  busyLabel: string;
+  testPrefix: string;
+  variant: "danger" | "success";
 }>();
 defineEmits<{ confirm: []; cancel: [] }>();
 </script>
@@ -23,36 +17,34 @@ defineEmits<{ confirm: []; cancel: [] }>();
     class="overlay"
     role="dialog"
     aria-modal="true"
-    :aria-label="`Delete ${agent.name}`"
-    data-test="agent-delete-modal"
+    :aria-label="ariaLabel"
+    :data-test="`${testPrefix}-modal`"
   >
     <div class="modal">
-      <h2 class="title">Delete agent “{{ agent.name }}”?</h2>
-      <p class="warn">
-        This will remove the agent's record from
-        <code>.danxbot/settings.json</code> and tear down its worktree +
-        branch when the agent is idle. Avatar files under
-        <code>.danxbot/agents/{{ agent.name }}/</code> are also removed.
-      </p>
-      <p class="warn">
-        This action is <strong>irreversible</strong>.
-      </p>
-      <div v-if="error" class="error" data-test="agent-delete-error">{{ error }}</div>
+      <h2 class="title">{{ title }}</h2>
+      <!-- Body slot: pass <p class="warn">…</p> blocks for the documented prose styling. -->
+      <slot name="body" />
+      <div
+        v-if="error"
+        class="error"
+        :data-test="`${testPrefix}-error`"
+      >{{ error }}</div>
       <footer class="actions">
         <button
           type="button"
           class="btn btn-cancel"
           :disabled="busy"
-          data-test="agent-delete-cancel"
+          :data-test="`${testPrefix}-cancel`"
           @click="$emit('cancel')"
         >Cancel</button>
         <button
           type="button"
           class="btn btn-confirm"
+          :class="variant === 'danger' ? 'btn-danger' : 'btn-success'"
           :disabled="busy"
-          data-test="agent-delete-confirm"
+          :data-test="`${testPrefix}-confirm`"
           @click="$emit('confirm')"
-        >{{ busy ? "Deleting…" : "Delete" }}</button>
+        >{{ busy ? busyLabel : confirmLabel }}</button>
       </footer>
     </div>
   </div>
@@ -84,13 +76,13 @@ defineEmits<{ confirm: []; cancel: [] }>();
   font-weight: 700;
   color: #f1f5f9;
 }
-.warn {
+.modal :slotted(.warn) {
   margin: 0;
   font-size: 13px;
   color: #cbd5e1;
   line-height: 1.55;
 }
-.warn code {
+.modal :slotted(.warn code) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   background: rgba(15, 23, 42, 0.7);
@@ -126,13 +118,22 @@ defineEmits<{ confirm: []; cancel: [] }>();
   background: #1e293b;
 }
 .btn-confirm {
-  background: #ef4444;
   color: white;
-  border-color: #ef4444;
   font-weight: 600;
 }
-.btn-confirm:hover {
+.btn-danger {
+  background: #ef4444;
+  border-color: #ef4444;
+}
+.btn-danger:hover {
   background: #dc2626;
+}
+.btn-success {
+  background: #22c55e;
+  border-color: #22c55e;
+}
+.btn-success:hover {
+  background: #16a34a;
 }
 .btn:disabled {
   opacity: 0.6;
