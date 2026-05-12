@@ -1002,6 +1002,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // URLs.
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const restartWorkerUrl = `http://localhost:${input.repo.workerPort}/api/restart/${dispatchId}`;
+  const prepVerdictUrl = `http://localhost:${input.repo.workerPort}/api/prep-verdict/${dispatchId}`;
   // DX-309: agent-bound dispatches swap every "this dispatch's repo
   // root" reference from the main checkout to the agent's worktree.
   // TWO worktree paths are kept in lockstep because the
@@ -1043,6 +1044,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     DANXBOT_SLACK_UPDATE_URL: `http://localhost:${input.repo.workerPort}/api/slack/update/${dispatchId}`,
     DANXBOT_ISSUE_CREATE_URL: issueCreateUrl,
     DANXBOT_RESTART_WORKER_URL: restartWorkerUrl,
+    DANXBOT_PREP_VERDICT_URL: prepVerdictUrl,
     // Auto-inject the value the per-workspace `danx-issue` MCP server
     // (`@thehammer/danx-issue-mcp`) needs to find its own repo's
     // `.danxbot/issues/` store. `DANX_REPO_ROOT` is required (the MCP
@@ -1118,6 +1120,12 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // in `tools/list`.
   const restartWorker = input.repo.workerPort ? restartWorkerUrl : undefined;
 
+  // DX-294 — prep-verdict MCP tool. Same workerPort gate as
+  // issue/restart: the URL routes to a worker endpoint, so a dispatch
+  // without a worker port (dashboard-mode test fixtures) leaves the
+  // tool unadvertised.
+  const prepVerdict = input.repo.workerPort ? prepVerdictUrl : undefined;
+
   // DX-242: build the danxbot MCP fallback context. The MCP server
   // uses this to finalize a dispatch when the worker is unreachable —
   // direct DB UPDATE on the dispatches row, then a filesystem queue
@@ -1160,6 +1168,13 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     slack,
     issue,
     restartWorkerUrl: restartWorker,
+    prepVerdictUrl: prepVerdict,
+    // DX-294 — issue prefix is always set on `RepoContext` for
+    // production dispatches, but the factory option is optional so
+    // test fixtures don't have to grow the field.
+    ...(input.repo.issuePrefix
+      ? { issuePrefix: input.repo.issuePrefix }
+      : {}),
     fallback,
   });
   const mcpServers: Record<string, unknown> = {

@@ -14,6 +14,7 @@ import type { SessionLogWatcher } from "./session-log-watcher.js";
 import type { DispatchTracker } from "../dashboard/dispatch-tracker.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import type { YamlPairedWrite } from "./paired-host-pid-write.js";
+import type { PrepVerdictPayload } from "../mcp/danxbot-prep-verdict.js";
 
 export interface AgentUsage {
   input_tokens: number;
@@ -186,6 +187,17 @@ export interface AgentJob {
      */
     readonly overlay: Readonly<Record<string, string>>;
   };
+  /**
+   * DX-294 — verdict the prep agent signaled via `danxbot_prep_verdict`.
+   * Stamped by `handlePrepVerdict` so the wrapping multi-agent-pick
+   * onComplete handler (Phase 5 of DX-291) can read the verdict's
+   * outcome WITHOUT re-parsing the YAML / settings side-effects the
+   * route already applied. Undefined for any dispatch that never
+   * called the tool (every non-prep dispatch — the tool itself is
+   * advertise-filtered off when the URL is absent, and even prep
+   * dispatches set this only at apply time).
+   */
+  prepVerdict?: PrepVerdictPayload;
 }
 
 export interface SpawnAgentOptions {

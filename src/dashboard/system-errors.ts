@@ -29,6 +29,7 @@ export type SystemErrorSource =
   | "poller"
   | "worktree"
   | "stop-replay"
+  | "prep-verdict-replay"
   | "orphan-reaper"
   | "legacy-cleanup"
   | "audit-drift";

@@ -91,6 +91,29 @@ export interface McpFactoryOptions {
    */
   restartWorkerUrl?: string;
   /**
+   * DX-294 — `danxbot_prep_verdict` callback URL. When present, the
+   * danxbot MCP server gets the URL via `DANXBOT_PREP_VERDICT_URL` env
+   * and the advertise-filter exposes `danxbot_prep_verdict`. Absent,
+   * the tool is filtered out of `tools/list` and a `callTool`
+   * invocation throws fail-loud.
+   *
+   * Auto-injected by `dispatch()` for every worker-mode dispatch (the
+   * URL is dispatchId-derived:
+   * `http://localhost:<workerPort>/api/prep-verdict/<dispatchId>`).
+   * Single-URL surface like `restartWorkerUrl` — the worker route is
+   * one endpoint, not a pair.
+   */
+  prepVerdictUrl?: string;
+  /**
+   * DX-294 — per-repo issue prefix (`<PREFIX>` shape, e.g. `DX`). Used
+   * by `parsePrepVerdictArgs` to validate `conflict_with` entries
+   * against `^${prefix}-\d+$` so a malformed id from the prep agent
+   * fails at the MCP boundary instead of landing a corrupt YAML.
+   * Threaded through from `RepoContext.issuePrefix` at dispatch time;
+   * appears as `DANX_ISSUE_PREFIX` env var on the MCP server.
+   */
+  issuePrefix?: string;
+  /**
    * DX-242: fallback context the danxbot MCP server uses when its POST
    * to `danxbotStopUrl` fails (worker crashed, OOM-killed, host
    * reboot). The MCP server uses these — in order — to finalize the

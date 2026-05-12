@@ -132,39 +132,60 @@ export interface FsQueueShape {
 }
 
 /**
- * Write a queued-stop file at
- * `<repoRoot>/.danxbot/dispatch-stops/<dispatchId>.json`. Atomic write
- * via tempfile + rename so the worker's boot replay never reads a
- * half-written body. Returns true on success, false on any IO error.
+ * Generic atomic-rename JSON write — the primitive that backs every
+ * MCP-side fallback queue (`dispatch-stops/` for completion, DX-294
+ * `prep-verdicts/` for prep verdicts). Body is JSON-stringified +
+ * stamped with a wall-clock ISO `timestamp` so the boot replay can age
+ * out stale entries if it ever needs to. Returns `true` on success,
+ * `false` on any IO error — callers chain fallbacks and surface a
+ * thrown error only when EVERY path fails.
  *
- * Body shape (read by the worker's boot replay path):
- *   {dispatchId, status, summary, timestamp}
- *
- * `status` is the agent-facing `CompleteStatus` (not the collapsed DB
- * status) — the worker's replay path mirrors the in-memory handleStop
- * branching for `critical_failure` correctly.
+ * Atomicity contract: the worker's boot replay reads only files that
+ * landed via `renameSync`, so it never sees a half-written body even
+ * when the writing process is killed mid-write. The tempfile name
+ * includes `process.pid` so two concurrent MCP server processes
+ * writing the same dispatchId never clobber each other's tempfile.
  */
-export function writeFsQueueEntry(
-  shape: FsQueueShape,
-  repoRoot: string,
+export function writeAtomicJsonQueueEntry(
+  dir: string,
+  filename: string,
+  body: Record<string, unknown>,
 ): boolean {
   try {
-    const dir = join(repoRoot, ".danxbot", "dispatch-stops");
     mkdirSync(dir, { recursive: true });
-    const finalPath = join(dir, `${shape.dispatchId}.json`);
+    const finalPath = join(dir, filename);
     const tempPath = `${finalPath}.tmp.${process.pid}`;
-    const body = JSON.stringify({
-      dispatchId: shape.dispatchId,
-      status: shape.status,
-      summary: shape.summary,
+    const payload = JSON.stringify({
+      ...body,
       timestamp: new Date().toISOString(),
     });
-    writeFileSync(tempPath, body, { encoding: "utf-8" });
+    writeFileSync(tempPath, payload, { encoding: "utf-8" });
     renameSync(tempPath, finalPath);
     return true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Write a queued-stop file at
+ * `<repoRoot>/.danxbot/dispatch-stops/<dispatchId>.json`. Thin wrapper
+ * over `writeAtomicJsonQueueEntry` — kept as its own surface for the
+ * existing callsite in `danxbot-server.ts` and the test pins.
+ */
+export function writeFsQueueEntry(
+  shape: FsQueueShape,
+  repoRoot: string,
+): boolean {
+  return writeAtomicJsonQueueEntry(
+    join(repoRoot, ".danxbot", "dispatch-stops"),
+    `${shape.dispatchId}.json`,
+    {
+      dispatchId: shape.dispatchId,
+      status: shape.status,
+      summary: shape.summary,
+    },
+  );
 }
 
 /**

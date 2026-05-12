@@ -43,6 +43,11 @@ vi.mock("./restage-route.js", () => ({
   handleRestage: (...args: unknown[]) => mockHandleRestage(...args),
 }));
 
+const mockHandlePrepVerdict = vi.fn();
+vi.mock("./prep-verdict-route.js", () => ({
+  handlePrepVerdict: (...args: unknown[]) => mockHandlePrepVerdict(...args),
+}));
+
 const mockSeedCooldown = vi.fn().mockResolvedValue(undefined);
 vi.mock("./restart.js", () => ({
   seedCooldownFromDb: (...args: unknown[]) => mockSeedCooldown(...args),
@@ -354,6 +359,33 @@ describe("worker server", () => {
       const { req, res } = createMockReqRes("GET", "/api/restart/dispatch-abc");
       await requestHandler(req, res);
       expect(mockHandleRestart).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/prep-verdict/:dispatchId (DX-294)", () => {
+    it("delegates to handlePrepVerdict with req, res, dispatchId, and the worker's repo", async () => {
+      mockHandlePrepVerdict.mockResolvedValue(undefined);
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/prep-verdict/dispatch-pv-1",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePrepVerdict).toHaveBeenCalledWith(
+        req,
+        res,
+        "dispatch-pv-1",
+        MOCK_REPO,
+      );
+    });
+
+    it("does not match GET /api/prep-verdict/:dispatchId", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/prep-verdict/dispatch-pv-1",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePrepVerdict).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });

@@ -55,6 +55,7 @@ import { ensurePortableRepoPath } from "./agent/portable-path.js";
 import { createWorktreeManager } from "./agent/worktree-manager.js";
 import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
+import { replayPrepVerdictQueue } from "./worker/replay-prep-verdict-queue.js";
 import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
 
 const log = createLogger("startup");
@@ -242,6 +243,27 @@ async function startWorkerMode(): Promise<void> {
     }
   } catch (err) {
     log.error(`[${repo.name}] Stop-queue replay failed`, err);
+  }
+
+  // DX-294: parallel pass for the prep-verdict fs-queue. Same shape
+  // as the stop-queue replay — reads
+  // `<repo>/.danxbot/prep-verdicts/<dispatchId>.json` entries written
+  // by the MCP server when the worker was unreachable at verdict
+  // time, applies the YAML / settings side-effects, finalizes the
+  // dispatch row terminal, deletes each file on success. Idempotent
+  // per the file header in replay-prep-verdict-queue.ts.
+  try {
+    const verdictReplay = await replayPrepVerdictQueue(repo);
+    if (
+      verdictReplay.replayed.length > 0 ||
+      verdictReplay.failed.length > 0
+    ) {
+      log.info(
+        `[${repo.name}] Replayed ${verdictReplay.replayed.length} queued prep verdicts, ${verdictReplay.failed.length} failed`,
+      );
+    }
+  } catch (err) {
+    log.error(`[${repo.name}] Prep-verdict queue replay failed`, err);
   }
 
   // DB-driven full-stack reattach (Phase 2c, DX-209). Supersedes the

@@ -638,6 +638,184 @@ describe("buildActiveTools — advertise-filter", () => {
     const names = tools.map((t) => t.name);
     expect(names).toEqual(["danxbot_complete"]);
   });
+
+  it("advertises danxbot_prep_verdict iff prepVerdict URL is set (DX-294)", () => {
+    // Same advertise-filter contract as the slack / restart tools — the
+    // tool MUST NOT appear in tools/list for a dispatch whose dispatch
+    // core didn't auto-inject the URL. A non-prep agent that sees the
+    // tool could call it and stamp YAML state on the wrong card.
+    expect(
+      buildActiveTools({ stop: STOP_URL }).map((t) => t.name),
+    ).not.toContain("danxbot_prep_verdict");
+    expect(
+      buildActiveTools({
+        stop: STOP_URL,
+        prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
+      }).map((t) => t.name),
+    ).toContain("danxbot_prep_verdict");
+    // Empty-string env failure mode — same `!!` guard.
+    expect(
+      buildActiveTools({ stop: STOP_URL, prepVerdict: "" }).map((t) => t.name),
+    ).not.toContain("danxbot_prep_verdict");
+  });
+});
+
+describe("danxbot_prep_verdict tool schema (DX-294)", () => {
+  const tool = TOOLS.find((t) => t.name === "danxbot_prep_verdict");
+
+  it("is registered in TOOLS", () => {
+    expect(tool).toBeDefined();
+  });
+
+  it("exposes ok / conflict_on / blocked / abort as the verdict enum", () => {
+    const schema = tool!.inputSchema as unknown as {
+      properties: { verdict: { enum: string[] } };
+      required: string[];
+    };
+    // Pin order — a future shrink (accidentally dropping `abort`) would
+    // surface here as the picker silently regressing to "every prep
+    // succeeds as ok" because the agent's tool schema would never
+    // accept abort.
+    expect(schema.properties.verdict.enum).toEqual([
+      "ok",
+      "conflict_on",
+      "blocked",
+      "abort",
+    ]);
+    expect(schema.required).toContain("verdict");
+    expect(schema.required).toContain("reason");
+  });
+
+  it("description names the legacy waiting_on / blocked_by names so cached skill bodies see the rename hint", () => {
+    // The 2026-05-12 rename split `verdict: waiting_on` → `conflict_on`
+    // and `blocked_by` → `conflict_with`. The tool description tells
+    // the agent both — so an agent whose skill body predates the
+    // rename sees the new names in its own tool description and
+    // self-corrects. Surface-level pin so a future description rewrite
+    // can't silently drop the migration breadcrumb.
+    expect(tool!.description).toMatch(/waiting_on/);
+    expect(tool!.description).toMatch(/blocked_by/);
+    expect(tool!.description).toMatch(/conflict_with/);
+  });
+});
+
+describe("callTool — danxbot_prep_verdict (DX-294)", () => {
+  it("rejects calls when the URL is absent — same fail-loud as the other URL-gated tools", async () => {
+    // The advertise-filter hides the tool from tools/list when the URL
+    // is unset, but `callTool` is the defense-in-depth — an agent
+    // probing for tools directly via tools/call still gets a usable
+    // error instead of a silent route to the stop URL.
+    await expect(
+      callTool(
+        "danxbot_prep_verdict",
+        { verdict: "ok", reason: "x" },
+        { stop: STOP_URL },
+      ),
+    ).rejects.toThrow(/DANXBOT_PREP_VERDICT_URL/);
+  });
+
+  it("rejects the legacy waiting_on verdict with the rename hint", async () => {
+    // Wires the rename rejects through callTool so the failure path
+    // surfaces all the way up to the agent's tool result.
+    await expect(
+      callTool(
+        "danxbot_prep_verdict",
+        { verdict: "waiting_on", reason: "x", conflict_with: ["DX-1"] },
+        {
+          stop: STOP_URL,
+          prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
+        },
+      ),
+    ).rejects.toThrow(/renamed to "conflict_on"/);
+  });
+
+  it("POSTs to the prepVerdict URL on a valid payload (happy path through callTool)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"status":"applied","verdict":"ok"}', { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const out = await callTool(
+        "danxbot_prep_verdict",
+        { verdict: "ok", reason: "no conflicts" },
+        {
+          stop: STOP_URL,
+          prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
+        },
+      );
+      expect(out).toMatch(/applied/);
+      expect(fetchMock).toHaveBeenCalledWith(
+        "http://localhost:5562/api/prep-verdict/job-xyz",
+        expect.objectContaining({ method: "POST" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("forwards urls.fallback (repoRoot + dispatchId, db stripped) into PrepVerdictUrls", async () => {
+    // The completion fallback carries a `db` field; the verdict
+    // fallback intentionally does NOT (see PrepVerdictUrls docstring).
+    // Regression that drops the fallback wiring would silently disable
+    // boot replay for prep-verdict tool. Verify by: HTTP fails →
+    // fs queue lands at the documented path under repoRoot.
+    const { mkdtempSync, rmSync, existsSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join: pathJoin } = await import("node:path");
+    const tmpRoot = mkdtempSync(pathJoin(tmpdir(), "danxbot-pv-server-fb-"));
+    try {
+      const fetchMock = vi.fn().mockRejectedValueOnce(new Error("ECONNREFUSED"));
+      vi.stubGlobal("fetch", fetchMock);
+      const out = await callTool(
+        "danxbot_prep_verdict",
+        { verdict: "ok", reason: "x" },
+        {
+          stop: STOP_URL,
+          prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
+          fallback: {
+            repoRoot: tmpRoot,
+            dispatchId: "job-xyz",
+            db: {
+              host: "localhost",
+              user: "u",
+              password: "p",
+            },
+          },
+        },
+      );
+      expect(out).toMatch(/queued for boot replay/);
+      expect(
+        existsSync(pathJoin(tmpRoot, ".danxbot", "prep-verdicts", "job-xyz.json")),
+      ).toBe(true);
+      vi.unstubAllGlobals();
+      rmSync(tmpRoot, { recursive: true, force: true });
+    } catch (e) {
+      vi.unstubAllGlobals();
+      rmSync(tmpRoot, { recursive: true, force: true });
+      throw e;
+    }
+  });
+
+  it("propagates urls.issuePrefix to the parser so bogus ids reject before POST", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(
+        callTool(
+          "danxbot_prep_verdict",
+          { verdict: "conflict_on", reason: "x", conflict_with: ["banana"] },
+          {
+            stop: STOP_URL,
+            prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
+            issuePrefix: "DX",
+          },
+        ),
+      ).rejects.toThrow(/<PREFIX>-N shape/);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("tool isolation", () => {

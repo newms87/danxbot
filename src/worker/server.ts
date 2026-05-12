@@ -31,6 +31,7 @@ import { handleClearCriticalFailure } from "./critical-failure-route.js";
 import { handleIssueCreate } from "./issue-route.js";
 import { handleRestart } from "./restart-route.js";
 import { handleRestage } from "./restage-route.js";
+import { handlePrepVerdict } from "./prep-verdict-route.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -111,6 +112,12 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
     const restageMatch = url.pathname.match(/^\/api\/restage\/(.+)$/);
     if (method === "POST" && restageMatch) {
       await handleRestage(req, res, restageMatch[1]);
+      return;
+    }
+
+    const prepVerdictMatch = url.pathname.match(/^\/api\/prep-verdict\/(.+)$/);
+    if (method === "POST" && prepVerdictMatch) {
+      await handlePrepVerdict(req, res, prepVerdictMatch[1], repo);
       return;
     }
 

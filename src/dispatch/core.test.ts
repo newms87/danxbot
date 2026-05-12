@@ -281,6 +281,14 @@ describe("dispatch() — slack-worker integration", () => {
     expect(env.DANXBOT_RESTART_WORKER_URL).toBe(
       `http://localhost:${slackRepo.workerPort}/api/restart/${result.dispatchId}`,
     );
+    // DX-294: the prep-verdict URL is auto-injected on the same
+    // worker-port gate. Regression that drops it silently disables
+    // `danxbot_prep_verdict` — the pre-dispatch prep step would then
+    // run with no verdict surface and the picker would proceed
+    // blindly with the candidate.
+    expect(env.DANXBOT_PREP_VERDICT_URL).toBe(
+      `http://localhost:${slackRepo.workerPort}/api/prep-verdict/${result.dispatchId}`,
+    );
   });
 
   it("populates mcpSettingsPath on spawnAgent options matching the per-dispatch settings.json path (DX-207)", async () => {
@@ -1295,6 +1303,12 @@ describe("dispatch() — dispatchId override", () => {
     ).toEqual([]);
     expect(env.DANXBOT_RESTART_WORKER_URL).toBe(
       `http://localhost:${testRepo.workerPort}/api/restart/${explicitId}`,
+    );
+    // DX-294: same dispatchId-derivation contract for the prep-verdict
+    // URL. Explicit-dispatchId callers (today: the poller's
+    // pre-stamp-then-spawn flow) MUST see the URL bound to the same id.
+    expect(env.DANXBOT_PREP_VERDICT_URL).toBe(
+      `http://localhost:${testRepo.workerPort}/api/prep-verdict/${explicitId}`,
     );
   });
 

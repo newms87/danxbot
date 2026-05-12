@@ -69,6 +69,22 @@ const DANXBOT_ENTRY: McpServerEntry = {
     if (opts.restartWorkerUrl) {
       env.DANXBOT_RESTART_WORKER_URL = opts.restartWorkerUrl;
     }
+    // DX-294 — prep-verdict URL injection. The danxbot MCP process
+    // gets the URL via env and `buildActiveTools` exposes
+    // `danxbot_prep_verdict` only when the env var is set. Single-URL
+    // surface like `restartWorkerUrl`.
+    if (opts.prepVerdictUrl) {
+      env.DANXBOT_PREP_VERDICT_URL = opts.prepVerdictUrl;
+    }
+    // DX-294 — per-repo issue prefix used by `parsePrepVerdictArgs` to
+    // validate `conflict_with` entries against `^${prefix}-\d+$`. Set
+    // alongside the URL (no separate gate) — the validator is a no-op
+    // when the prefix is absent, but production dispatches always
+    // carry both. The MCP server reads `DANX_ISSUE_PREFIX` at boot and
+    // threads it into `PrepVerdictUrls.issuePrefix`.
+    if (opts.issuePrefix) {
+      env.DANX_ISSUE_PREFIX = opts.issuePrefix;
+    }
     // DX-242: pass the fallback context so the MCP server can finalize
     // a dispatch when the stop URL is unreachable. The MCP server reads
     // each var independently (`readFallbackDbConfig` + raw env reads in

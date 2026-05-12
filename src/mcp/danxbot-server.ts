@@ -45,6 +45,11 @@ import {
   writeFsQueueEntry,
   type FallbackDbConfig,
 } from "./danxbot-stop-fallback.js";
+import {
+  callDanxbotPrepVerdict,
+  PREP_VERDICTS,
+  type PrepVerdictUrls,
+} from "./danxbot-prep-verdict.js";
 
 /**
  * Status values the `danxbot_complete` MCP tool's JSON schema advertises
@@ -185,6 +190,27 @@ export interface DanxbotToolUrls {
    * dispatchId-derived: `http://localhost:<workerPort>/api/restart/<dispatchId>`).
    */
   restartWorker?: string;
+  /**
+   * DX-294 — `danxbot_prep_verdict` endpoint. Exposes the tool only when
+   * present (advertise filter); the URL is the worker route
+   * `http://localhost:<workerPort>/api/prep-verdict/<dispatchId>`.
+   *
+   * Auto-injected by `dispatch()` in worker mode for every dispatch the
+   * worker can host. The pre-dispatch prep agent (Phase 4 of DX-291)
+   * calls this tool with a four-verdict payload; the worker's prep-
+   * verdict route applies the YAML / settings stamps and decides
+   * whether to keep the dispatch running (combined-mode `ok`) or stop
+   * it.
+   */
+  prepVerdict?: string;
+  /**
+   * Per-repo `<PREFIX>` (e.g. `"DX"`) used by `parsePrepVerdictArgs`
+   * to validate `conflict_with` entries against `^${prefix}-\d+$`.
+   * Threaded through from `DANX_ISSUE_PREFIX` env at MCP boot.
+   * Optional — absent dispatches degrade to non-prefix validation
+   * (still rejects blank-string ids).
+   */
+  issuePrefix?: string;
 }
 
 export const TOOLS = [
@@ -277,6 +303,69 @@ export const TOOLS = [
         },
       },
       required: ["filename"],
+    },
+  },
+  {
+    name: "danxbot_prep_verdict",
+    description:
+      "Signal the result of a pre-dispatch prep step (DX-291 / DX-294). " +
+      "Use exactly once at the END of a prep dispatch, BEFORE danxbot_complete. " +
+      "Four verdicts: \"ok\" (proceed with candidate), \"conflict_on\" " +
+      "(candidate has file-scope overlap with the cards in conflict_with — " +
+      "the worker appends {id, reason} entries to the candidate YAML's " +
+      "conflict_on[]), \"blocked\" (candidate is self-stuck — the worker " +
+      "stamps status: Blocked + blocked: {reason, timestamp} on the candidate " +
+      "YAML), \"abort\" (the prep environment itself is broken — the worker " +
+      "stamps agents.<name>.broken on settings.json so the picker skips " +
+      "this agent until cleared, and the dispatch finalizes as failed). " +
+      "ARGUMENTS: verdict (required); reason (required, non-empty); " +
+      "conflict_with (required iff verdict=conflict_on) — array of partner " +
+      "ids; broken_details (required iff verdict=abort) — " +
+      "{suggested_steps: string[]}. The legacy \"waiting_on\" verdict + " +
+      "\"blocked_by\" arg names were renamed 2026-05-12 — calls using the " +
+      "old names are rejected with a hint pointing at the new names.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        verdict: {
+          type: "string",
+          enum: [...PREP_VERDICTS],
+          description:
+            "ok = proceed with candidate; conflict_on = candidate overlaps " +
+            "with conflict_with[] partners (mutual exclusion); blocked = " +
+            "candidate is self-stuck (human action needed); abort = the " +
+            "prep agent's own environment is broken.",
+        },
+        reason: {
+          type: "string",
+          description:
+            "Non-empty one-sentence justification. Surfaces in the dashboard " +
+            "drawer, the YAML's conflict_on/blocked record, and the " +
+            "settings.json broken record.",
+        },
+        conflict_with: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Required iff verdict === 'conflict_on'. Each entry is a " +
+            "<PREFIX>-N id of a card whose work overlaps with the candidate. " +
+            "The worker appends {id, reason} to the candidate's conflict_on[].",
+        },
+        broken_details: {
+          type: "object",
+          description:
+            "Required iff verdict === 'abort'. Carries the operator-readable " +
+            "recovery steps that land on agents.<name>.broken.suggested_steps.",
+          properties: {
+            suggested_steps: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+          required: ["suggested_steps"],
+        },
+      },
+      required: ["verdict", "reason"],
     },
   },
   {
@@ -604,6 +693,38 @@ export async function callTool(
         requireObjectArgs("danxbot_restart_worker", args),
         urls,
       );
+    case "danxbot_prep_verdict": {
+      if (!urls.prepVerdict) {
+        throw new Error(
+          "danxbot_prep_verdict called without DANXBOT_PREP_VERDICT_URL configured " +
+            "(no worker endpoint available)",
+        );
+      }
+      // Strip the completion-only `db` field from `urls.fallback`
+      // when forwarding to the prep-verdict client — the verdict
+      // fallback shape does NOT carry a db field (see
+      // `PrepVerdictUrls.fallback` docstring for the rationale).
+      // Pass only `repoRoot` + `dispatchId`.
+      const fallback = urls.fallback
+        ? {
+            ...(urls.fallback.repoRoot
+              ? { repoRoot: urls.fallback.repoRoot }
+              : {}),
+            ...(urls.fallback.dispatchId
+              ? { dispatchId: urls.fallback.dispatchId }
+              : {}),
+          }
+        : undefined;
+      const prepUrls: PrepVerdictUrls = {
+        url: urls.prepVerdict,
+        ...(fallback ? { fallback } : {}),
+        ...(urls.issuePrefix ? { issuePrefix: urls.issuePrefix } : {}),
+      };
+      return callDanxbotPrepVerdict(
+        requireObjectArgs("danxbot_prep_verdict", args),
+        prepUrls,
+      );
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -640,6 +761,7 @@ export function buildActiveTools(urls: DanxbotToolUrls) {
     if (t.name === "danxbot_slack_post_update") return !!urls.slackUpdate;
     if (t.name === "danx_issue_create") return !!urls.issueCreate;
     if (t.name === "danxbot_restart_worker") return !!urls.restartWorker;
+    if (t.name === "danxbot_prep_verdict") return !!urls.prepVerdict;
     return true;
   });
 }
@@ -738,6 +860,8 @@ if (import.meta.url === entryUrl) {
     slackUpdate: process.env.DANXBOT_SLACK_UPDATE_URL,
     issueCreate: process.env.DANXBOT_ISSUE_CREATE_URL,
     restartWorker: process.env.DANXBOT_RESTART_WORKER_URL,
+    prepVerdict: process.env.DANXBOT_PREP_VERDICT_URL,
+    issuePrefix: process.env.DANX_ISSUE_PREFIX,
     ...(fallback ? { fallback } : {}),
   };
   main(urls);
