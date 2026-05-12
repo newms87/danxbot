@@ -4,7 +4,7 @@ features.md
 !.env.example
 settings.json
 .settings.lock
-issues/
+issues
 agents/
 worktrees/
 .trello-retry/
