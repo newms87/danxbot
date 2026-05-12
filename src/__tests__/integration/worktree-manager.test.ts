@@ -791,4 +791,53 @@ D("WorktreeManager (integration, real git)", () => {
     const c = makeRepoContext({ localPath: repoDir, hostPath: bogus });
     await expect(wm.bootstrap(c, "alice")).rejects.toThrow();
   });
+
+  it("DX-309: provisioned issues symlink is gitignored — `status --porcelain` stays empty", async () => {
+    // Architectural invariant: after `provisionIssuesSymlink` swaps
+    // <worktree>/.danxbot/issues to a symlink, `.danxbot/.gitignore`
+    // MUST match it so the validate() porcelain check stays empty.
+    // Drift here puts every worktree back in recovery mode (the bug
+    // this test pins). The load-bearing rule is the no-slash `issues`
+    // pattern — `issues/` alone matches dirs only, not symlinks.
+    mkdirSync(join(repoDir, ".danxbot"), { recursive: true });
+    writeFileSync(
+      join(repoDir, ".danxbot", ".gitignore"),
+      "features.md\n.env\n.env.*\n!.env.example\nsettings.json\n.settings.lock\nissues\nagents/\nworktrees/\n.trello-retry/\n",
+    );
+    mkdirSync(join(repoDir, ".danxbot", "issues", "open"), { recursive: true });
+    writeFileSync(
+      join(repoDir, ".danxbot", "issues", "open", "DX-FOO.yml"),
+      "id: DX-FOO\n",
+    );
+    git(repoDir, "add", ".danxbot/.gitignore");
+    git(repoDir, "commit", "-m", "add .danxbot/.gitignore with issues pattern");
+    git(repoDir, "push", "origin", "main");
+
+    const wm = createWorktreeManager(defaultGitRunner);
+    const c = makeRepoContext({ localPath: repoDir, hostPath: repoDir });
+    await wm.bootstrap(c, "alice");
+
+    // Sanity: the symlink exists and resolves to the canonical store.
+    const wtRoot = join(repoDir, ".danxbot", "worktrees", "alice");
+    const link = join(wtRoot, ".danxbot", "issues");
+    expect(lstatSync(link).isSymbolicLink()).toBe(true);
+    expect(realpathSync(link)).toBe(
+      realpathSync(join(repoDir, ".danxbot", "issues")),
+    );
+
+    // Invariant: the symlink is gitignored AND the worktree shows clean.
+    const ignored = execFileSync(
+      "git",
+      ["check-ignore", "-v", ".danxbot/issues"],
+      { cwd: wtRoot, encoding: "utf-8" },
+    );
+    expect(ignored).toMatch(/\.danxbot\/\.gitignore.*issues/);
+
+    const porcelain = execFileSync(
+      "git",
+      ["status", "--porcelain"],
+      { cwd: wtRoot, encoding: "utf-8" },
+    );
+    expect(porcelain.trim()).toBe("");
+  });
 });
