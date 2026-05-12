@@ -436,8 +436,22 @@ vi.mock("../poller/yaml-lifecycle.js", () => ({
 const mockHealLocalYamls = vi
   .fn()
   .mockReturnValue({ healed: [], errors: [] });
+const mockRunInvariantHeal = vi.fn().mockResolvedValue(undefined);
+const mockRunOrphanInProgressHeal = vi.fn().mockResolvedValue(undefined);
 vi.mock("../poller/heal.js", () => ({
   healLocalYamls: (...args: unknown[]) => mockHealLocalYamls(...args),
+  runInvariantHeal: (...args: unknown[]) => mockRunInvariantHeal(...args),
+  runOrphanInProgressHeal: (...args: unknown[]) =>
+    mockRunOrphanInProgressHeal(...args),
+}));
+// DX-329 — agent-locks query helpers consumed by runOrphanInProgressHeal
+// at cron import time. Stub them so cron import doesn't pull in the real
+// `pg` connection module under unit tests.
+vi.mock("../agent/agent-locks.js", () => ({
+  liveDispatchIssueIds: vi.fn().mockResolvedValue(new Set<string>()),
+  lastTerminalDispatchStatusByIssue: vi
+    .fn()
+    .mockResolvedValue(new Map<string, string>()),
 }));
 
 // DX-150: per-tick external_id format heal pass. Mocked so existing
@@ -466,6 +480,8 @@ const mockIsFeatureEnabled = vi.fn(
 );
 vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+  // DX-329 — cron now reads the agent roster for the orphan-IP heal.
+  readAgents: vi.fn().mockReturnValue([]),
 }));
 
 vi.mock("../workspace/write-if-changed.js", () => ({
@@ -2273,6 +2289,31 @@ describe("poll — runSync crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
+  it("DX-329: invokes runOrphanInProgressHeal once per tick with label='per-tick'", async () => {
+    // Wires AC #5 — the orphan IP heal pass MUST run on every cron
+    // tick (the boot half is wired in src/index.ts, exercised at boot).
+    // Pin the call shape so a future regression that drops the pass or
+    // swaps label values trips this test.
+    mockRunOrphanInProgressHeal.mockClear();
+    mockRunInvariantHeal.mockClear();
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    // Defense-in-depth: confirm the prior heal also ran. If
+    // `runInvariantHeal` was called zero times, `_sync` crashed before
+    // reaching either heal; assert both invocations as the diagnostic.
+    expect(mockRunInvariantHeal).toHaveBeenCalledTimes(1);
+    expect(mockRunOrphanInProgressHeal).toHaveBeenCalledTimes(1);
+    const [repoArg, labelArg, depsArg] =
+      mockRunOrphanInProgressHeal.mock.calls[0];
+    expect((repoArg as { name: string }).name).toBe(MOCK_REPO_CONTEXT.name);
+    expect(labelArg).toBe("per-tick");
+    expect(depsArg).toMatchObject({
+      liveDispatchIssueIds: expect.any(Function),
+      lastTerminalDispatchStatusByIssue: expect.any(Function),
+      readAgents: expect.any(Function),
+    });
+  });
 
   it("top-level catch does not trip backoff (next tick fetches cards as normal, no `In backoff` skip)", async () => {
     // Pin the invariant in the comment at index.ts:516–519: a `runSync`

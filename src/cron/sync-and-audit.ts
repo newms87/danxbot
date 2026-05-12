@@ -52,7 +52,12 @@ import { isFeatureEnabled } from "../settings-file.js";
 import { readFlag } from "../critical-failure.js";
 import { reapOrphans } from "../worker/process-scan.js";
 import { healExternalIds } from "../poller/heal-external-id.js";
-import { runInvariantHeal } from "../poller/heal.js";
+import { runInvariantHeal, runOrphanInProgressHeal } from "../poller/heal.js";
+import {
+  liveDispatchIssueIds,
+  lastTerminalDispatchStatusByIssue,
+} from "../agent/agent-locks.js";
+import { readAgents } from "../settings-file.js";
 import { syncRepoFiles } from "../inject/sync.js";
 import { runAuditPass } from "./audit-pass.js";
 import { runInboundFetch } from "./inbound-fetch.js";
@@ -316,6 +321,23 @@ async function _sync(repo: RepoContext): Promise<void> {
     // the same tick. Same scan runs once at boot (`src/index.ts`)
     // for pre-fix-bug residue.
     await runInvariantHeal(repo, "per-tick");
+
+    // DX-329 — per-tick orphan In Progress heal. Complements
+    // `runInvariantHeal` above: that pass clears stale `dispatch`
+    // blocks but never flips `status`. A card whose prior dispatch
+    // ended in any terminal `DispatchStatus`
+    // (`completed`/`failed`/`cancelled`/`recovered`/`throttled` per
+    // `src/dashboard/dispatches.ts`) ends up at `status: In Progress` +
+    // `dispatch: null` — the picker filter requires `status === "ToDo"`
+    // and skips the card forever. This pass flips it back so the picker
+    // sees the work on its next tick. Race-guarded against in-flight
+    // paired-writes via `liveDispatchIssueIds` + a 5-minute age
+    // floor. Same scan runs at boot from `src/index.ts`.
+    await runOrphanInProgressHeal(repo, "per-tick", {
+      liveDispatchIssueIds,
+      lastTerminalDispatchStatusByIssue,
+      readAgents,
+    });
 
     // Phase 5 (DX-220) — audit reconcile pass over every open YAML.
     // Calls `reconcileIssue(card, "audit")` and records drift via

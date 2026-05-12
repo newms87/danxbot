@@ -46,6 +46,7 @@ import {
   existsSync,
   readdirSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -372,6 +373,79 @@ export async function healOrphanInvariantViolations(
 }
 
 const invariantHealLog = createLogger("invariant-heal");
+const orphanIpHealLog = createLogger("orphan-ip-heal");
+
+/**
+ * Convenience wrapper that runs `healOrphanInProgress` against the
+ * named repo with live dispatches-table queries + the operator's agent
+ * roster from `<repo>/.danxbot/settings.json`. Boot + per-tick callers
+ * both invoke this with a `label` so log lines disambiguate.
+ *
+ * Pre-DX-329 the orphan-IP shape was healed only by hand — five cards
+ * (DX-275, DX-279, DX-310, DX-311, DX-313) were stranded at the time
+ * the card was filed. The two-query DB read + roster read is cheap
+ * (both hit indexed columns, <1ms even on a long-lived dispatches
+ * table) and runs on every tick alongside `runInvariantHeal`.
+ *
+ * Errors from the scan are caught + logged; they never propagate.
+ * Same failure-isolation contract as `runInvariantHeal`.
+ */
+export async function runOrphanInProgressHeal(
+  repo: RepoContext,
+  label: "boot" | "per-tick",
+  deps: {
+    liveDispatchIssueIds: (repoName: string) => Promise<Set<string>>;
+    lastTerminalDispatchStatusByIssue: (
+      repoName: string,
+    ) => Promise<Map<string, string>>;
+    readAgents: (localPath: string) => Array<{ name: string }>;
+  },
+): Promise<void> {
+  try {
+    const [liveIssueIds, priorMap, agents] = await Promise.all([
+      deps.liveDispatchIssueIds(repo.name),
+      deps.lastTerminalDispatchStatusByIssue(repo.name),
+      Promise.resolve(deps.readAgents(repo.localPath)),
+    ]);
+    const knownAgents = new Set(agents.map((a) => a.name));
+    const result = await healOrphanInProgress(repo.localPath, repo.issuePrefix, {
+      liveIssueIds,
+      knownAgents,
+      priorTerminalStatusFor: (id) => priorMap.get(id) ?? null,
+      now: Date.now(),
+      ageThresholdMs: ORPHAN_IP_AGE_THRESHOLD_MS,
+    });
+    if (result.healed.length === 0 && result.errors.length === 0) return;
+    if (result.healed.length > 0) {
+      orphanIpHealLog.info(
+        `[${repo.name}] Orphan IP heal (${label}): scanned=${result.scanned} flipped=${result.healed.length}`,
+      );
+      for (const h of result.healed) {
+        const prior = h.priorTerminalStatus ?? "never-dispatched";
+        // `agentPreserved === false` ⇒ the card carried a non-null
+        // `assigned_agent` that the roster doesn't recognize (see
+        // `healOrphanInProgress`); `staleAgent` is the cleared name.
+        // The preserved branch leaves `staleAgent: null`.
+        const agentNote = h.agentPreserved
+          ? "preserved"
+          : `cleared (was ${h.staleAgent})`;
+        orphanIpHealLog.warn(
+          `[${repo.name}] heal: flipped orphan IP → ToDo on ${h.id} (prior=${prior}, assigned_agent=${agentNote})`,
+        );
+      }
+    }
+    for (const e of result.errors) {
+      orphanIpHealLog.warn(
+        `[${repo.name}] heal: orphan IP scan error at ${e.path}: ${e.message}`,
+      );
+    }
+  } catch (err) {
+    orphanIpHealLog.error(
+      `[${repo.name}] Orphan IP heal (${label}) failed`,
+      err,
+    );
+  }
+}
 
 /**
  * Convenience wrapper that runs `healOrphanInvariantViolations` against
@@ -511,4 +585,281 @@ function inferPriorTerminalStatus(history: Issue["history"]): IssueStatus {
     if (entry.to === "Done" || entry.to === "Cancelled") return entry.to;
   }
   return "Done";
+}
+
+/**
+ * DX-329 — defaults for `healOrphanInProgress`. Five minutes is the
+ * race-guard floor: a card flipped to `In Progress` within the last 5
+ * minutes is still in the paired-write window for the legitimate
+ * dispatch path (stamp → spawn → mirror upsert → dispatches row insert).
+ * Heal must not fire there or it races a healthy dispatch. Anything
+ * older AND lacking a live dispatch row is an orphan by every signal we
+ * can see from the YAML + dispatches table.
+ */
+export const ORPHAN_IP_AGE_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * One card flipped from `In Progress` back to `ToDo` by the orphan-IP
+ * heal pass. `priorTerminalStatus` carries the most recent terminal
+ * dispatch row's status (any value from `TERMINAL_STATUSES` in
+ * `src/dashboard/dispatches.ts` — currently `completed` / `failed` /
+ * `cancelled` / `recovered` / `throttled`) so the comment + log can
+ * name what went wrong; `null` when no dispatch row ever existed (the
+ * "stamped IP at
+ * pickup but the spawn never landed a row" pathology).
+ *
+ * `agentPreserved` distinguishes the two AC #3 branches:
+ *   - `true` — the named `assigned_agent` is still in the operator's
+ *     roster (`<repo>/.danxbot/settings.json#agents`). The stamp survived
+ *     the heal so the picker re-claims fast on the next tick.
+ *   - `false` — the named agent has been deleted from the roster
+ *     (vanished persona). The stamp is cleared and the card returns to
+ *     the open pool. `staleAgent` carries the cleared name for the log.
+ */
+export interface HealedOrphanInProgress {
+  id: string;
+  /** Most recent terminal dispatch status for this card, or null. */
+  priorTerminalStatus: string | null;
+  /** `true` when `assigned_agent` survived the heal. */
+  agentPreserved: boolean;
+  /** Cleared agent name when `agentPreserved === false`, else null. */
+  staleAgent: string | null;
+}
+
+export interface HealOrphanInProgressResult {
+  /** Open YAMLs the scan looked at (parse-rejected files count too). */
+  scanned: number;
+  /** Cards flipped from IP back to ToDo. */
+  healed: HealedOrphanInProgress[];
+  /** Parse / write failures. The pass continues past each. */
+  errors: HealError[];
+}
+
+/**
+ * Dependency record for `healOrphanInProgress`. All inputs are injected
+ * so the function stays pure for the unit test layer — the wrapper
+ * (`runOrphanInProgressHeal` in `src/cron/sync-and-audit.ts`) supplies
+ * the live values from the dispatches table + the settings file.
+ */
+export interface HealOrphanInProgressDeps {
+  /**
+   * Issue IDs that have at least one non-terminal dispatches row right
+   * now. Same set `multi-agent-pick.ts` consults via
+   * `liveDispatchIssueIds(repoName)` — race guard against an in-flight
+   * dispatch caught between the YAML save and the dispatches row insert.
+   */
+  liveIssueIds: Set<string>;
+  /**
+   * Agent names that exist in `<repo>/.danxbot/settings.json#agents`.
+   * Used to decide whether to preserve or clear `assigned_agent` on the
+   * healed card (AC #3): preserve when the agent still exists, clear
+   * when the named persona was deleted.
+   */
+  knownAgents: Set<string>;
+  /**
+   * Most recent terminal dispatch status for a given issue id, or `null`
+   * when no dispatch row ever existed. Surfaces in the comment text so
+   * the operator sees `recovered` vs `failed` vs `never-dispatched` at
+   * a glance.
+   */
+  priorTerminalStatusFor: (issueId: string) => string | null;
+  /** Epoch ms — test hook for `Date.now()`. */
+  now: number;
+  /** Minimum age in IP before heal applies. See `ORPHAN_IP_AGE_THRESHOLD_MS`. */
+  ageThresholdMs: number;
+}
+
+/**
+ * DX-329 — orphan In Progress heal pass. Walks
+ * `<repo>/.danxbot/issues/open/` and flips `status: In Progress` → `ToDo`
+ * for cards stranded with `dispatch: null` and no live dispatches row.
+ *
+ * The pre-existing `healOrphanInvariantViolations` already clears stale
+ * `dispatch` blocks but never touches `status`. A card whose prior
+ * dispatch ended in any terminal `DispatchStatus`
+ * (`completed`/`failed`/`cancelled`/`recovered`/`throttled` per
+ * `src/dashboard/dispatches.ts`) ends up at `status: In Progress` +
+ * `dispatch: null` — the picker filter (`listDispatchableYamls` →
+ * `i.status !== "ToDo"`) skips the card forever. Five cards were
+ * stranded in production at the time DX-329 was filed (DX-275, DX-279,
+ * DX-310, DX-311, DX-313); each had to be re-dispatched by hand. This
+ * pass closes the loop.
+ *
+ * **Eligibility** — every predicate must hold:
+ *
+ *   - `status === "In Progress"`
+ *   - `dispatch === null` (invariant heal owns the other branch)
+ *   - `liveIssueIds.has(issue.id) === false` — no non-terminal
+ *     dispatches row right now. Catches the legitimate paired-write
+ *     race window where the YAML has been written but the dispatches
+ *     row is still pending.
+ *   - card age in IP > `deps.ageThresholdMs` — defense in depth
+ *     against the same race. Age is taken from the most recent
+ *     `status_change` history entry whose `to === "In Progress"`; when
+ *     history is silent, falls back to file mtime so legacy YAMLs
+ *     written before history was instrumented still get a sane signal.
+ *
+ * **Action** for each eligible card:
+ *
+ *   1. `status: "ToDo"`.
+ *   2. `assigned_agent` preserved when the named agent is in
+ *      `deps.knownAgents`; cleared otherwise.
+ *   3. Append one `comments[]` entry titled `## Auto-heal — flipped IP
+ *      → ToDo (orphan dispatch)` citing the prior terminal status (any
+ *      value from `TERMINAL_STATUSES`) or `never-dispatched` when no
+ *      dispatch row exists.
+ *   4. Append one `worker:heal` `status_change` history entry
+ *      (`from: "In Progress"`, `to: "ToDo"`) — the same actor + event
+ *      shape the closed→open inverse heal uses (DX-147).
+ *   5. Persist via `writeIssue`. The chokidar mirror picks up the
+ *      write and the picker observes the new ToDo card on its next
+ *      tick.
+ *
+ * Idempotent: re-running on a healed dir is a no-op (the second pass
+ * sees the card at `status: "ToDo"` and skips). Tracker-independent.
+ * Tolerates malformed YAMLs.
+ */
+export async function healOrphanInProgress(
+  repoLocalPath: string,
+  prefix: string,
+  deps: HealOrphanInProgressDeps,
+): Promise<HealOrphanInProgressResult> {
+  const result: HealOrphanInProgressResult = {
+    scanned: 0,
+    healed: [],
+    errors: [],
+  };
+  const idRegex = buildIssueIdRegex(prefix);
+  const openDir = resolve(repoLocalPath, ".danxbot", "issues", "open");
+  if (!existsSync(openDir)) return result;
+
+  for (const entry of readdirSync(openDir)) {
+    if (!entry.endsWith(".yml")) continue;
+    const stem = entry.slice(0, -".yml".length);
+    if (!idRegex.test(stem)) continue;
+    const path = resolve(openDir, entry);
+    result.scanned++;
+
+    let issue: Issue;
+    try {
+      issue = parseIssue(readFileSync(path, "utf-8"), {
+        expectedPrefix: prefix,
+      });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+      continue;
+    }
+
+    if (issue.status !== "In Progress") continue;
+    // Invariant heal owns the `dispatch != null` branch. Splitting the
+    // responsibilities keeps each pass simple and prevents double
+    // mutation on the same tick.
+    if (issue.dispatch !== null) continue;
+    if (deps.liveIssueIds.has(issue.id)) continue;
+
+    const ageMs = computeInProgressAgeMs(issue, path, deps.now);
+    if (ageMs < deps.ageThresholdMs) continue;
+
+    const priorTerminalStatus = deps.priorTerminalStatusFor(issue.id);
+    const staleAgent = issue.assigned_agent;
+    const agentPreserved =
+      staleAgent !== null && deps.knownAgents.has(staleAgent);
+
+    try {
+      const updated = applyOrphanInProgressHeal(issue, {
+        priorTerminalStatus,
+        agentPreserved,
+        now: new Date(deps.now).toISOString(),
+      });
+      await writeIssue(repoLocalPath, updated);
+      result.healed.push({
+        id: issue.id,
+        priorTerminalStatus,
+        agentPreserved,
+        staleAgent: agentPreserved ? null : staleAgent,
+      });
+    } catch (err) {
+      result.errors.push({ path, message: parseErrorMessage(err) });
+    }
+  }
+  return result;
+}
+
+/**
+ * Mutation half of `healOrphanInProgress`. Splits out from the I/O
+ * loop so the heal payload is unit-testable in isolation and so the
+ * comment + history shape lives in one place — the in-the-wild log
+ * formatter and the round-trip parser both read the same string.
+ *
+ * Reason string surfaces in the comment text. `recovered` / `failed` /
+ * `cancelled` / `timeout` / `throttled` pass through verbatim
+ * (matches the dispatches table's status column); `null` becomes
+ * `never-dispatched` for the human-facing render.
+ */
+function applyOrphanInProgressHeal(
+  issue: Issue,
+  args: {
+    priorTerminalStatus: string | null;
+    agentPreserved: boolean;
+    now: string;
+  },
+): Issue {
+  const reasonForComment =
+    args.priorTerminalStatus === null
+      ? "never-dispatched"
+      : args.priorTerminalStatus;
+  const commentText = [
+    "## Auto-heal — flipped IP → ToDo (orphan dispatch)",
+    "",
+    `Card was stuck at \`status: In Progress\` with \`dispatch: null\` and no live dispatches row. Prior dispatch terminal status: **${reasonForComment}**. The picker filter requires \`status === "ToDo"\`, so this card was invisible to the dispatch loop until the heal pass flipped it back.`,
+  ].join("\n");
+  const commentAppended = [
+    ...issue.comments,
+    { author: "danxbot", timestamp: args.now, text: commentText },
+  ];
+  const historyAppended = appendHistory(issue.history, {
+    timestamp: args.now,
+    actor: "worker:heal",
+    event: "status_change",
+    from: "In Progress",
+    to: "ToDo",
+    note: `Healer flipped orphan IP card back to ToDo (prior dispatch: ${reasonForComment})`,
+  });
+  return {
+    ...issue,
+    status: "ToDo",
+    assigned_agent: args.agentPreserved ? issue.assigned_agent : null,
+    comments: commentAppended,
+    history: historyAppended,
+  };
+}
+
+/**
+ * Compute the card's age in `In Progress`. Primary signal — most recent
+ * `status_change` history entry whose `to === "In Progress"`. Fallback
+ * — file mtime (legacy YAMLs written before history was instrumented
+ * may have empty history; the file's last-write time is the closest
+ * we have to "when did this card last transition"). The fallback
+ * protects recent untimed files from being healed on every tick.
+ */
+function computeInProgressAgeMs(
+  issue: Issue,
+  path: string,
+  now: number,
+): number {
+  for (let i = issue.history.length - 1; i >= 0; i--) {
+    const entry = issue.history[i];
+    if (entry.event !== "status_change") continue;
+    if (entry.to !== "In Progress") continue;
+    const ms = Date.parse(entry.timestamp);
+    if (Number.isFinite(ms)) return Math.max(0, now - ms);
+  }
+  try {
+    const stat = statSync(path);
+    return Math.max(0, now - stat.mtimeMs);
+  } catch {
+    // File vanished mid-scan (e.g. another writer moved it). Treat as
+    // age=0 → skip; the next tick will reconsider.
+    return 0;
+  }
 }

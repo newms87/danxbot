@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   assignedCards,
   busyAgents,
+  lastTerminalDispatchStatusByIssue,
   liveDispatchIssueIds,
   resetAgentLocksQueryFn,
   setAgentLocksQueryFn,
@@ -13,6 +14,7 @@ interface MockDispatchRow {
   status: string;
   issueId?: string | null;
   pidTerminatedAt?: number | null;
+  startedAt?: number;
 }
 
 interface MockIssueRow {
@@ -58,6 +60,14 @@ const SQL_LIVE_DISPATCH_ISSUE_IDS = normalizeSql(
        AND "status" NOT IN (${TERMINAL_PLACEHOLDERS})
        AND pid_terminated_at IS NULL`,
 );
+const SQL_LAST_TERMINAL_BY_ISSUE = normalizeSql(
+  `SELECT DISTINCT ON (issue_id) issue_id, "status"
+     FROM dispatches
+     WHERE repo_name = $1
+       AND issue_id IS NOT NULL
+       AND "status" IN (${TERMINAL_PLACEHOLDERS})
+     ORDER BY issue_id, started_at DESC`,
+);
 
 beforeEach(() => {
   dispatches.length = 0;
@@ -101,6 +111,30 @@ beforeEach(() => {
             out.push({ issue_id: r.issueId });
           }
         }
+      }
+      return out as never;
+    }
+    if (norm === SQL_LAST_TERMINAL_BY_ISSUE) {
+      const [repoName] = p as [string];
+      // Group by issue_id, pick row with greatest startedAt (DESC).
+      const byIssue = new Map<string, MockDispatchRow>();
+      for (const r of dispatches) {
+        if (
+          r.repoName !== repoName ||
+          typeof r.issueId !== "string" ||
+          r.issueId.length === 0 ||
+          !TERMINAL_DISPATCH_STATUSES.includes(r.status)
+        ) {
+          continue;
+        }
+        const prior = byIssue.get(r.issueId);
+        if (!prior || (r.startedAt ?? 0) > (prior.startedAt ?? 0)) {
+          byIssue.set(r.issueId, r);
+        }
+      }
+      const out: { issue_id: string; status: string }[] = [];
+      for (const [issueId, row] of byIssue) {
+        out.push({ issue_id: issueId, status: row.status });
       }
       return out as never;
     }
@@ -268,6 +302,58 @@ describe("liveDispatchIssueIds", () => {
 
   it("empty when no live dispatch carries an issue_id", async () => {
     const out = await liveDispatchIssueIds("danxbot");
+    expect(out.size).toBe(0);
+  });
+});
+
+describe("lastTerminalDispatchStatusByIssue (DX-329)", () => {
+  it("returns each issue's most recent terminal dispatch status", async () => {
+    dispatches.push(
+      // DX-1: two terminal rows; the later 'failed' wins over 'recovered'.
+      { repoName: "danxbot", agentName: "alice", status: "recovered", issueId: "DX-1", startedAt: 100 },
+      { repoName: "danxbot", agentName: "alice", status: "failed", issueId: "DX-1", startedAt: 200 },
+      // DX-2: single terminal row.
+      { repoName: "danxbot", agentName: "bob", status: "completed", issueId: "DX-2", startedAt: 50 },
+    );
+    const out = await lastTerminalDispatchStatusByIssue("danxbot");
+    expect(out.get("DX-1")).toBe("failed");
+    expect(out.get("DX-2")).toBe("completed");
+  });
+
+  it("excludes non-terminal dispatch rows (only terminal latest is reported)", async () => {
+    dispatches.push(
+      // DX-3 has a terminal followed by a still-running re-dispatch — the
+      // helper returns the prior terminal regardless (the live row is
+      // covered by `liveDispatchIssueIds`).
+      { repoName: "danxbot", agentName: "alice", status: "recovered", issueId: "DX-3", startedAt: 100 },
+      { repoName: "danxbot", agentName: "alice", status: "running", issueId: "DX-3", startedAt: 200 },
+    );
+    const out = await lastTerminalDispatchStatusByIssue("danxbot");
+    expect(out.get("DX-3")).toBe("recovered");
+  });
+
+  it("excludes dispatch rows with NULL issue_id (slack / api triggers)", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "completed", issueId: null, startedAt: 100 },
+      { repoName: "danxbot", agentName: "alice", status: "completed", issueId: "DX-4", startedAt: 100 },
+    );
+    const out = await lastTerminalDispatchStatusByIssue("danxbot");
+    expect(out.has("DX-4")).toBe(true);
+    expect(out.size).toBe(1);
+  });
+
+  it("scopes to the repo", async () => {
+    dispatches.push(
+      { repoName: "danxbot", agentName: "alice", status: "failed", issueId: "DX-5", startedAt: 100 },
+      { repoName: "gpt-manager", agentName: "alice", status: "failed", issueId: "GP-5", startedAt: 100 },
+    );
+    const out = await lastTerminalDispatchStatusByIssue("danxbot");
+    expect(out.size).toBe(1);
+    expect(out.has("DX-5")).toBe(true);
+  });
+
+  it("empty when no terminal dispatch carries an issue_id", async () => {
+    const out = await lastTerminalDispatchStatusByIssue("danxbot");
     expect(out.size).toBe(0);
   });
 });

@@ -148,6 +148,55 @@ export async function liveDispatchIssueIds(
 }
 
 /**
+ * DX-329 — most recent terminal dispatches row status per issue id.
+ * Used by `runOrphanInProgressHeal` to write a useful comment + log
+ * line on each healed card (`prior dispatch: recovered` vs `failed`
+ * vs `never-dispatched`). Pairs with `liveDispatchIssueIds` — that
+ * helper says "is there a live row?", this one says "what was the
+ * last finished row?".
+ *
+ * `DISTINCT ON (issue_id) ... ORDER BY issue_id, started_at DESC`
+ * collapses each issue's row history to its most recent terminal
+ * row. The pure heal function reads from the returned map; an absent
+ * key means the card has no terminal dispatches row (which the heal
+ * surfaces as `never-dispatched`).
+ *
+ * Pre-DX-329 the orphan-IP heal had nowhere to look for this signal
+ * and would have shipped a "prior status: unknown" comment on every
+ * heal. The two-query approach (live + last-terminal) is the cheapest
+ * shape that keeps both sets of information consistent across the
+ * same dispatches table — same `TERMINAL_STATUSES`-derived filter as
+ * `busyAgents` / `liveDispatchIssueIds`, drift-protected by sharing
+ * the canonical list.
+ */
+export async function lastTerminalDispatchStatusByIssue(
+  repoName: string,
+): Promise<Map<string, string>> {
+  const placeholders = TERMINAL_STATUSES.map((_, i) => `$${i + 2}`).join(", ");
+  const rows = await queryFn<{ issue_id: string; status: string }>(
+    `SELECT DISTINCT ON (issue_id) issue_id, "status"
+       FROM dispatches
+       WHERE repo_name = $1
+         AND issue_id IS NOT NULL
+         AND "status" IN (${placeholders})
+       ORDER BY issue_id, started_at DESC`,
+    [repoName, ...TERMINAL_STATUSES],
+  );
+  const out = new Map<string, string>();
+  for (const r of rows) {
+    if (
+      typeof r.issue_id === "string" &&
+      r.issue_id.length > 0 &&
+      typeof r.status === "string" &&
+      r.status.length > 0
+    ) {
+      out.set(r.issue_id, r.status);
+    }
+  }
+  return out;
+}
+
+/**
  * Map of `<PREFIX>-N` → agent name for every open issue that has
  * stamped an `assigned_agent` claim. The pick step consults this map
  * when filtering candidate cards — a card claimed by another agent is

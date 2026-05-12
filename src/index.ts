@@ -37,9 +37,15 @@ import { repoContexts } from "./repo-context.js";
 import {
   healOrphanInvariantViolations,
   runInvariantHeal,
+  runOrphanInProgressHeal,
 } from "./poller/heal.js";
 import { isPidAlive } from "./agent/host-pid.js";
 import { hostname as osHostname } from "node:os";
+import {
+  liveDispatchIssueIds,
+  lastTerminalDispatchStatusByIssue,
+} from "./agent/agent-locks.js";
+import { readAgents } from "./settings-file.js";
 import { start as startCronSync } from "./cron/sync-and-audit.js";
 import { syncRepoFiles } from "./inject/sync.js";
 import {
@@ -422,6 +428,17 @@ async function startWorkerMode(): Promise<void> {
   } catch (err) {
     log.error(`[${repo.name}] Orphan invariant heal failed`, err);
   }
+
+  // DX-329 — one-shot boot orphan IP heal. Pairs with the per-tick
+  // scan in `src/cron/sync-and-audit.ts`: the boot pass closes the
+  // gap where the worker is restarted while orphans exist on disk
+  // (otherwise the operator has to wait one full poll interval — ~60s
+  // — before the cron picks them up).
+  await runOrphanInProgressHeal(repo, "boot", {
+    liveDispatchIssueIds,
+    lastTerminalDispatchStatusByIssue,
+    readAgents,
+  });
 
   // Phase 3 of Event-Driven Worker (DX-218): register the per-repo
   // tracker with reconcile + the retry-queue scheduler so step 7 (the

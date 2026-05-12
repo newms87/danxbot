@@ -88,6 +88,8 @@ vi.mock("./settings-file.js", () => ({
   watchSettingsFile: mockWatchSettingsFile,
   settingsFilePath: vi.fn((p: string) => `${p}/.danxbot/settings.json`),
   settingsLockPath: vi.fn((p: string) => `${p}/.danxbot/.settings.lock`),
+  // DX-329 — boot path now reads the agent roster for the orphan-IP heal.
+  readAgents: vi.fn().mockReturnValue([]),
 }));
 
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
