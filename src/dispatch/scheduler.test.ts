@@ -891,6 +891,70 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
   });
 });
 
+/**
+ * Bounded-poll helper (DX-331). Replaces hardcoded `setTimeout` waits in
+ * fs-event-race tests so the assertion-side wait scales with whatever
+ * latency chokidar + the kernel actually deliver under load. Fast path:
+ * picker fires in <intervalMs → test resolves in one poll. Slow path:
+ * picker fires near `timeoutMs` → test resolves within `intervalMs` of
+ * the firing. Failure path: predicate never holds → throws past
+ * `timeoutMs`. Hardcoded ceilings hide the slow path; polling exposes it
+ * without flake.
+ */
+async function pollUntil(
+  predicate: () => boolean,
+  opts: { timeoutMs: number; intervalMs: number },
+): Promise<void> {
+  const deadline = Date.now() + opts.timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((r) => setTimeout(r, opts.intervalMs));
+  }
+  if (predicate()) return;
+  throw new Error(
+    `pollUntil: condition not met within ${opts.timeoutMs}ms`,
+  );
+}
+
+describe("pollUntil (DX-331)", () => {
+  it("resolves on the first poll when the predicate is already true", async () => {
+    const start = Date.now();
+    await pollUntil(() => true, { timeoutMs: 5000, intervalMs: 50 });
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  it("resolves once the predicate flips to true mid-wait", async () => {
+    let flipped = false;
+    setTimeout(() => {
+      flipped = true;
+    }, 80);
+    const start = Date.now();
+    await pollUntil(() => flipped, { timeoutMs: 5000, intervalMs: 20 });
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeGreaterThanOrEqual(80);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it("throws after timeoutMs when the predicate stays false", async () => {
+    const start = Date.now();
+    await expect(
+      pollUntil(() => false, { timeoutMs: 120, intervalMs: 20 }),
+    ).rejects.toThrow(/condition not met within 120ms/);
+    expect(Date.now() - start).toBeGreaterThanOrEqual(120);
+  });
+
+  it("re-checks the predicate after the loop exits at the deadline", async () => {
+    // `timeoutMs: 0` skips the while-loop body entirely (deadline =
+    // now). The post-loop `if (predicate()) return` is the ONLY path
+    // that resolves the call when the predicate was true at exactly
+    // the deadline tick — covers the late-flip race the inner loop
+    // would otherwise miss.
+    await expect(
+      pollUntil(() => true, { timeoutMs: 0, intervalMs: 10 }),
+    ).resolves.toBeUndefined();
+  });
+});
+
 describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-289)", () => {
   function waitMacrotask(): Promise<void> {
     return new Promise((r) => setImmediate(r));
@@ -963,9 +1027,15 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
       JSON.stringify({ v: 2, marker: "first" }),
     );
 
-    // Wait for chokidar's awaitWriteFinish (200ms stability) + the
-    // setImmediate that schedules the picker.
-    await new Promise((r) => setTimeout(r, 500));
+    // Bounded poll for the picker invocation. chokidar's
+    // `awaitWriteFinish` (200ms stability) + kernel inotify delivery +
+    // setImmediate scheduling typically lands the picker in 250–400ms;
+    // a 5s ceiling covers contended FS scenarios (DX-331). Hardcoded
+    // 500ms is flaky under `npx vitest run` parallel-suite load.
+    await pollUntil(() => picker.mock.calls.length >= 1, {
+      timeoutMs: 5000,
+      intervalMs: 50,
+    });
     await waitMacrotask();
 
     expect(picker).toHaveBeenCalledTimes(1);
@@ -1003,7 +1073,17 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
     // awaitWriteFinish (200ms stability) collapses the burst into a
     // single chokidar emit, and the scheduler's pendingRosterPokes
     // debounce coalesces any remaining edges to a single picker call.
-    await new Promise((r) => setTimeout(r, 500));
+    // Bounded poll (DX-331) — hardcoded 500ms flaked under contended
+    // parallel-suite load. Extra 250ms sweep after the first poke
+    // lands so a regression that fired a SECOND picker poke shortly
+    // after would manifest BEFORE the exactly-one assertion —
+    // otherwise polling-to-1 + immediate assertion could green on a
+    // coalescing regression.
+    await pollUntil(() => picker.mock.calls.length >= 1, {
+      timeoutMs: 5000,
+      intervalMs: 50,
+    });
+    await new Promise((r) => setTimeout(r, 250));
     await waitMacrotask();
 
     expect(picker).toHaveBeenCalledTimes(1);
@@ -1048,7 +1128,16 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
       JSON.stringify({ v: 99 }),
     );
 
-    await new Promise((r) => setTimeout(r, 500));
+    // Bounded poll (DX-331) — hardcoded 500ms flaked under contended
+    // parallel-suite load. Followed by an extra macrotask + a second
+    // 250ms sweep so a leaked watcher's second poke would land BEFORE
+    // we assert exactly-one — otherwise the test could green on a
+    // leak by reading the picker counter before the duplicate fires.
+    await pollUntil(() => picker.mock.calls.length >= 1, {
+      timeoutMs: 5000,
+      intervalMs: 50,
+    });
+    await new Promise((r) => setTimeout(r, 250));
     await waitMacrotask();
 
     // Single watcher, single poke — not two pokes from a leaked watcher.
