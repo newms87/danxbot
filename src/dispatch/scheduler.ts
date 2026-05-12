@@ -90,6 +90,27 @@ const pickersByRepo = new Map<string, RunPickerFn>();
 const pendingPokes = new Set<string>();
 
 /**
+ * DX-305: per-repo single-flight mutex around picker execution. Three
+ * sources can fire a picker invocation in the same macrotask burst —
+ * `onReconcileResult`'s setImmediate, `onAgentRosterChange`'s
+ * setImmediate, AND the legacy `_poll` direct call (until DX-290 retires
+ * the latter). Without this mutex two consecutive macrotasks each invoke
+ * `runPicker` against the same `busy`/`assigned` snapshot — both pick
+ * the same agent + card and `spawnAgent` runs twice. The two existing
+ * debounce sets (`pendingPokes`, `pendingRosterPokes`) coalesce within
+ * their OWN source per macrotask burst; this mutex is the cross-source
+ * + per-execution layer.
+ *
+ * Semantics: when a poke arrives during an inflight run the request
+ * coalesces into ONE `pendingTailRun` flag. After the active run
+ * resolves a single tail run fires (still under the mutex — defensive
+ * against a poke landing during the tail itself). Try/finally guards
+ * against a thrown picker permanently locking the repo.
+ */
+const pickerInflight = new Set<string>();
+const pendingTailRun = new Set<string>();
+
+/**
  * Phase 4b.2 (DX-289). settings.json file-watch handles registered per-
  * repo at `bootScheduler` time. Worker shutdown drains via `unwatch()`.
  * Map shape mirrors `pickersByRepo` + `trackersByRepo`.
@@ -131,6 +152,8 @@ export function _resetSchedulerTrackers(): void {
   pickersByRepo.clear();
   pendingPokes.clear();
   pendingRosterPokes.clear();
+  pickerInflight.clear();
+  pendingTailRun.clear();
   // Close any settings watchers registered by prior tests so a vitest
   // worker doesn't leak fs handles between describes. Awaiting per
   // entry inside the synchronous reset hook would change the public
@@ -286,6 +309,87 @@ export async function unwatchAllSettingsFiles(): Promise<void> {
 }
 
 /**
+ * DX-305: invoke the registered picker for `repoName` under the
+ * single-flight mutex. When a run is already in flight, set the tail
+ * flag and return immediately — the active run's `finally` schedules
+ * exactly one follow-up. Recursively self-schedules the tail run via
+ * `setImmediate` so the post-tail re-check (a poke landing during the
+ * tail) is observed on the next macrotask.
+ *
+ * Errors from the picker are caught and logged here so the inflight
+ * flag always clears — a thrown picker MUST NOT permanently lock out
+ * the repo. Sync throws and async rejections both land in the catch
+ * because `await fn(...)` covers both.
+ */
+async function firePickerWithMutex(repoName: string): Promise<void> {
+  if (pickerInflight.has(repoName)) {
+    pendingTailRun.add(repoName);
+    return;
+  }
+  const picker = pickersByRepo.get(repoName);
+  if (!picker) return;
+  pickerInflight.add(repoName);
+  try {
+    await picker({ now: new Date() });
+  } catch (err) {
+    log.error(
+      `[${repoName}] scheduler picker run failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  } finally {
+    pickerInflight.delete(repoName);
+    if (pendingTailRun.has(repoName)) {
+      pendingTailRun.delete(repoName);
+      setImmediate(() => {
+        void firePickerWithMutex(repoName);
+      });
+    }
+  }
+}
+
+/**
+ * DX-305: bridge for callers that want to run their OWN picker function
+ * (specifically the legacy `_poll` path which still calls
+ * `tryMultiAgentDispatch` directly and observes its `MultiAgentPickResult`
+ * to decide whether to short-circuit the legacy single-card fallthrough).
+ * Acquires the same single-flight mutex as the registered-picker path so
+ * all three concurrency sources coalesce.
+ *
+ * Returns `{ran: false}` when a run is already in flight — caller MUST
+ * treat that as "no dispatch happened this tick" (the tail run will
+ * fire via the registered picker). Returns `{ran: true, value}` when
+ * `fn` ran to completion. A thrown `fn` propagates AFTER the mutex
+ * clears, so callers can apply their own catch.
+ */
+export async function runWithPickerMutex<T>(
+  repoName: string,
+  fn: () => Promise<T>,
+): Promise<{ ran: true; value: T } | { ran: false }> {
+  if (pickerInflight.has(repoName)) {
+    pendingTailRun.add(repoName);
+    return { ran: false };
+  }
+  pickerInflight.add(repoName);
+  try {
+    const value = await fn();
+    return { ran: true, value };
+  } finally {
+    // The tail-run schedule fires REGARDLESS of whether `fn` threw.
+    // Intentional: a thrown `_poll`-side picker still represents
+    // unattended dispatch demand (cards remain dispatchable) — the
+    // registered picker should get a chance to make progress on the
+    // next macrotask. Caller's outer try/catch sees the original
+    // rejection unchanged.
+    pickerInflight.delete(repoName);
+    if (pendingTailRun.has(repoName)) {
+      pendingTailRun.delete(repoName);
+      setImmediate(() => {
+        void firePickerWithMutex(repoName);
+      });
+    }
+  }
+}
+
+/**
  * Phase 4b.2 (DX-289). Poke the scheduler that the agent roster for a
  * repo changed (typically: operator toggled an agent on/off via the
  * dashboard, or `<repo>/.danxbot/settings.json` was rewritten by
@@ -312,26 +416,11 @@ export function onAgentRosterChange(repoName: string): void {
   pendingRosterPokes.add(repoName);
   setImmediate(() => {
     pendingRosterPokes.delete(repoName);
-    const latestRunPicker = pickersByRepo.get(repoName);
-    if (!latestRunPicker) return;
-    let pickerResult: Promise<unknown>;
-    try {
-      pickerResult = Promise.resolve(latestRunPicker({ now: new Date() }));
-    } catch (err) {
-      log.error(
-        `[${repoName}] scheduler roster-change picker threw synchronously: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return;
-    }
-    pickerResult.catch((err) => {
-      log.error(
-        `[${repoName}] scheduler roster-change picker failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
+    // DX-305: route through the single-flight mutex so a concurrent
+    // `onReconcileResult` poke (or legacy `_poll` direct picker call)
+    // cannot land a duplicate `runPicker` invocation against the same
+    // `busy`/`assigned` snapshot.
+    void firePickerWithMutex(repoName);
   });
 }
 
@@ -374,33 +463,11 @@ export function onReconcileResult(args: {
   pendingPokes.add(repoName);
   setImmediate(() => {
     pendingPokes.delete(repoName);
-    // Re-read the picker map at fire time. A hot reload between
-    // schedule and fire (rare but possible during worker boot) could
-    // have rewired the callback; honor the latest registration.
-    const latestRunPicker = pickersByRepo.get(repoName);
-    if (!latestRunPicker) return;
-    // Wrap the invocation so both sync throws AND async rejections
-    // land on the same catch — `Promise.resolve(throwingFn())` does
-    // NOT capture a sync throw because the throw escapes BEFORE
-    // `Promise.resolve` runs.
-    let pickerResult: Promise<unknown>;
-    try {
-      pickerResult = Promise.resolve(latestRunPicker({ now: new Date() }));
-    } catch (err) {
-      log.error(
-        `[${repoName}] scheduler picker run threw synchronously: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-      return;
-    }
-    pickerResult.catch((err) => {
-      log.error(
-        `[${repoName}] scheduler picker run failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    });
+    // DX-305: route through the single-flight mutex so a concurrent
+    // `onAgentRosterChange` poke (or legacy `_poll` direct picker call)
+    // cannot land a duplicate `runPicker` invocation against the same
+    // `busy`/`assigned` snapshot.
+    void firePickerWithMutex(repoName);
   });
 }
 

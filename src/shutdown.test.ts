@@ -51,6 +51,7 @@ vi.mock("./db/connection.js", () => ({
   getAdminPool: vi.fn(),
   closeAdminPool: vi.fn(),
   getPlatformPool: vi.fn(),
+  query: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("./logger.js", () => ({

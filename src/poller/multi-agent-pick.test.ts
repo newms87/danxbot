@@ -90,6 +90,7 @@ vi.mock("./yaml-lifecycle.js", async () => {
 });
 
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
+import { renderLockComment } from "../issue-tracker/lock.js";
 import { runConflictCheck } from "../dispatch/conflict-check.js";
 import { dispatchWithRecovery } from "../dispatch/recovery-mode.js";
 import {
@@ -1144,5 +1145,235 @@ describe("tryMultiAgentDispatch", () => {
     const postState = await clearMock.mock.results[0].value;
     expect(postState.dispatch).toBeNull();
     expect(postState.assigned_agent).toBeNull();
+  });
+
+  /**
+   * DX-306: a transient `tryAcquireLock` throw (e.g. Trello 429) drops
+   * the agent from the picker's eligible pool for the rest of this
+   * tick. Pre-fix the same agent walks every remaining card, 429s on
+   * each, and burns Trello quota during the exact window the API is
+   * asking for backoff. The `lockResult.acquired === false` branch is
+   * a different concern (another holder owns the lock, NOT a tracker
+   * error) and MUST keep the agent eligible for other cards.
+   */
+  describe("DX-306: per-tick agent skip on lock-acquire throw", () => {
+    function trackerWithFlakyGetComments(
+      throwOnExternalIds: ReadonlySet<string>,
+    ): IssueTracker & { getCommentsCalls: string[] } {
+      const calls: string[] = [];
+      return {
+        fetchOpenCards: async () => [],
+        isValidExternalId: () => true,
+        getCard: async () => {
+          throw new Error("getCard not used");
+        },
+        createCard: async () => ({ external_id: "", ac: [] }),
+        updateCard: async () => {},
+        moveToStatus: async () => {},
+        setLabels: async () => {},
+        addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
+        editComment: async () => {},
+        getComments: async (id: string) => {
+          calls.push(id);
+          if (throwOnExternalIds.has(id)) {
+            throw new Error(`429 Too Many Requests on ${id}`);
+          }
+          return [];
+        },
+        addAcItem: async () => ({ check_item_id: "" }),
+        updateAcItem: async () => {},
+        deleteAcItem: async () => {},
+        get getCommentsCalls() {
+          return calls;
+        },
+      } as IssueTracker & { getCommentsCalls: string[] };
+    }
+
+    it("a 429 on card #1 removes the agent from this tick's pool — agent does NOT walk card #2", async () => {
+      writeSettings({ dani: agentRecord("dani") });
+      const cards = [issue("DX-1"), issue("DX-2")];
+      // First card's getComments throws (simulated 429); the second card
+      // would resolve cleanly IF the picker tried it. Pre-fix: agent
+      // walks both → 2 getComments calls. Post-fix: agent skipped after
+      // first throw → 1 getComments call.
+      const tracker = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      expect(tracker.getCommentsCalls).toEqual(["ext-DX-1"]);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    });
+
+    it("a 429 on agent A's card does NOT skip agent B — B still picks the next card", async () => {
+      writeSettings({
+        dani: agentRecord("dani"),
+        murphy: agentRecord("murphy"),
+      });
+      const cards = [issue("DX-1"), issue("DX-2")];
+      // Only DX-1 throws. dani picks DX-1 (alphabetical), throws,
+      // dani is added to skipAgents. Next iteration: pickFreeAgent
+      // returns murphy (alphabetical second). murphy picks DX-2,
+      // getComments returns [], lock acquired, dispatch proceeds.
+      const tracker = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
+      mockedDispatchWithRecovery.mockResolvedValueOnce({
+        ok: true,
+        kind: "normal",
+      } as never);
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+      const dispatchCall = mockedDispatchWithRecovery.mock.calls[0];
+      expect(dispatchCall[1].agentName).toBe("murphy");
+    });
+
+    it("when EVERY agent throws on its first card the loop terminates cleanly with 0 dispatches and one lock-attempt per agent (no infinite walk)", async () => {
+      writeSettings({
+        dani: agentRecord("dani"),
+        murphy: agentRecord("murphy"),
+      });
+      const cards = [issue("DX-1"), issue("DX-2"), issue("DX-3")];
+      // Both agents 429 on the first card they try. dani picks DX-1
+      // (alphabetical), throws → skipped. murphy picks DX-2, throws
+      // → skipped. Loop must exit (no eligible agent), not walk DX-3
+      // with either skipped agent.
+      const tracker = trackerWithFlakyGetComments(
+        new Set(["ext-DX-1", "ext-DX-2", "ext-DX-3"]),
+      );
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      // Exactly 2 getComments calls — one per agent. NOT 6 (2 agents
+      // × 3 cards) which would indicate skipAgents wasn't filtering.
+      expect(tracker.getCommentsCalls.length).toBe(2);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    });
+
+    it("skipAgents is tick-local — an agent that threw on tick 1 dispatches normally on tick 2", async () => {
+      writeSettings({ dani: agentRecord("dani") });
+      const cards = [issue("DX-1")];
+      // Tick 1: tracker throws → dani skipped → 0 dispatches.
+      // Tick 2: same dani, fresh tracker that does NOT throw → dani
+      // must be eligible again (skipAgents lifetime is per-call, not
+      // persistent).
+      const flaky = trackerWithFlakyGetComments(new Set(["ext-DX-1"]));
+      const tick1 = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker: flaky,
+        now: NOW,
+      });
+      expect(tick1.dispatched).toBe(0);
+
+      mockedDispatchWithRecovery.mockResolvedValueOnce({
+        ok: true,
+        kind: "normal",
+      } as never);
+      const fresh = trackerWithFlakyGetComments(new Set());
+      const tick2 = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker: fresh,
+        now: NOW,
+      });
+      expect(tick2.dispatched).toBe(1);
+      const dispatchCall = mockedDispatchWithRecovery.mock.calls[0];
+      expect(dispatchCall[1].agentName).toBe("dani");
+    });
+
+    it("the `lockResult.acquired === false` branch (other holder owns lock) keeps the agent eligible — agent retries card #2 unchanged", async () => {
+      writeSettings({ dani: agentRecord("dani") });
+      const cards = [issue("DX-1"), issue("DX-2")];
+      // Tracker returns a lock comment owned by ANOTHER worker for
+      // card #1 → tryAcquireLock returns {acquired: false}. Card #2
+      // has no lock comment → tryAcquireLock grants it. dani must
+      // attempt BOTH cards (this is the lock-held branch, NOT a
+      // tracker error).
+      const otherWorkerLockText = renderLockComment(
+        {
+          holder: "other-worker",
+          host: "other-host",
+          hostPid: 99999,
+          dispatchId: "other-dispatch",
+          repoPath: "/tmp/other-repo",
+          jsonlDir: "/tmp/other-jsonl",
+          workspace: "issue-worker",
+        },
+        // started a few minutes ago — well within the lock TTL so
+        // tryAcquireLock returns {acquired: false, existing: ...}.
+        new Date(NOW.getTime() - 5 * 60_000).toISOString(),
+      );
+      const calls: string[] = [];
+      const tracker: IssueTracker = {
+        fetchOpenCards: async () => [],
+        isValidExternalId: () => true,
+        getCard: async () => {
+          throw new Error("getCard not used");
+        },
+        createCard: async () => ({ external_id: "", ac: [] }),
+        updateCard: async () => {},
+        moveToStatus: async () => {},
+        setLabels: async () => {},
+        addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
+        editComment: async () => {},
+        getComments: async (id: string) => {
+          calls.push(id);
+          if (id === "ext-DX-1") {
+            return [
+              {
+                id: "existing-lock",
+                author: "other-worker",
+                text: otherWorkerLockText,
+                timestamp: new Date(NOW.getTime() - 5 * 60_000).toISOString(),
+              },
+            ];
+          }
+          return [];
+        },
+        addAcItem: async () => ({ check_item_id: "" }),
+        updateAcItem: async () => {},
+        deleteAcItem: async () => {},
+      };
+      mockedDispatchWithRecovery.mockResolvedValueOnce({
+        ok: true,
+        kind: "normal",
+      } as never);
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards,
+        inProgress: [],
+        tracker,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      // Agent walked BOTH cards — DX-1 (lock held → skip card, agent
+      // stays eligible) then DX-2 (acquired, dispatched).
+      expect(calls).toEqual(["ext-DX-1", "ext-DX-2"]);
+    });
   });
 });

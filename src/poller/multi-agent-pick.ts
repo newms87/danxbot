@@ -244,8 +244,30 @@ export async function tryMultiAgentDispatch(
   let dispatched = 0;
   let conflictBlocked = 0;
 
+  // DX-306: tick-local set of agents to skip after a tracker error
+  // (most commonly a Trello 429) on the lock-acquire path. Without this
+  // skip the same agent walks every remaining card in the tick: each
+  // 429 splices the card but never marks the agent busy, the loop's
+  // `pickFreeAgent` returns the same agent, picks the next card, 429s,
+  // repeats — burning Trello quota during the exact window the API is
+  // asking for backoff. Per-tick scope is enough; the agent retries on
+  // the next tick (cards stay dispatchable, scheduler re-arms naturally).
+  // Distinct from `busy` (DB-backed cross-tick) so a transient tracker
+  // hiccup doesn't mark the agent busy in the DB.
+  const skipAgents = new Set<string>();
+
+  // Build the picker's combined skip set per iteration so we don't
+  // mutate `busy` itself (callers may inspect it post-loop, and the
+  // semantics differ — `busy` is "real DB lock held", `skipAgents` is
+  // "skip this tick due to transient tracker error").
+  const pickerSkipSet = (): Set<string> => {
+    const combined = new Set<string>(busy);
+    for (const name of skipAgents) combined.add(name);
+    return combined;
+  };
+
   while (remainingCards.length > 0) {
-    const agent = pickFreeAgent({ roster, busy, now });
+    const agent = pickFreeAgent({ roster, busy: pickerSkipSet(), now });
     if (agent === null) break;
     const card = pickCardForAgent({
       cards: remainingCards,
@@ -384,9 +406,20 @@ export async function tryMultiAgentDispatch(
         // tick will retry. We surface this loudly because a permanent
         // tracker outage would silently churn through every card every
         // tick if every error were swallowed at debug-level.
+        //
+        // DX-306: also remove THIS AGENT from the picker's eligible
+        // pool for the rest of this tick. Without this skip the loop's
+        // next `pickFreeAgent` returns the same agent (the lock-acquire
+        // throw never set `busy`), the agent walks the next card, 429s,
+        // repeats — wasting Trello quota during the backoff window.
+        // Effect: one tracker error per agent per tick instead of one
+        // per (agent, card) pair. The `lockResult.acquired === false`
+        // branch below is "another holder owns the lock," NOT a tracker
+        // error — agent stays eligible there (different semantics).
         log.warn(
           `[${repo.name}] multi-agent lock acquire threw for ${card.id} (external_id=${card.external_id}) → ${agent.name}: ${err instanceof Error ? err.message : String(err)} — skipping this tick`,
         );
+        skipAgents.add(agent.name);
         remainingCards.splice(remainingCards.indexOf(card), 1);
         continue;
       }

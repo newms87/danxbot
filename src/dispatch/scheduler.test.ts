@@ -64,6 +64,7 @@ import {
   runPostDispatchProgressCheck,
   type RunPickerFn,
   tryAcquireLock,
+  runWithPickerMutex,
   unwatchSettingsFileForRepo,
 } from "./scheduler.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
@@ -1019,5 +1020,357 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
 
     // Single watcher, single poke — not two pokes from a leaked watcher.
     expect(picker).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * DX-305: per-repo single-flight mutex around picker execution.
+ *
+ * The pre-fix bug: two `setImmediate` callbacks (one from
+ * `onReconcileResult`, one from `onAgentRosterChange`) would fire on
+ * consecutive macrotasks and each invoke `runPicker` against the same
+ * `busy`/`assigned` snapshot — both pick the same agent + card and
+ * `spawnAgent` runs twice. The mutex coalesces concurrent pokes from
+ * ANY source (reconcile, roster, legacy `_poll`) into one in-flight
+ * run plus at most one tail run.
+ */
+describe("picker single-flight mutex (DX-305)", () => {
+  function makeReconcileRepo(name = "danxbot"): ReconcileRepoContext {
+    return { name, localPath: `/tmp/${name}`, issuePrefix: "DX" };
+  }
+
+  function makeResult(dispatchableChanged: boolean): ReconcileResult {
+    return {
+      changed: false,
+      prevHash: null,
+      nextHash: "",
+      errors: [],
+      fanout: {
+        parentId: null,
+        dependents: [],
+        dispatchableChanged,
+      },
+    };
+  }
+
+  function waitMacrotask(): Promise<void> {
+    return new Promise((r) => setImmediate(r));
+  }
+
+  it("two concurrent setImmediate-scheduled pokes (reconcile + roster) result in exactly ONE runPicker invocation", async () => {
+    const repo = makeReconcileRepo();
+    let resolvePicker: (() => void) | null = null;
+    const picker = vi.fn<RunPickerFn>().mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolvePicker = r;
+        }),
+    );
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    // Same-tick burst from BOTH sources — the bug case from the card.
+    onReconcileResult({ repo, result: makeResult(true) });
+    onAgentRosterChange(repo.name);
+    await waitMacrotask();
+
+    // Both setImmediate callbacks have fired but only ONE picker entry
+    // is in flight; the other coalesced into pendingTailRun.
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(resolvePicker).not.toBeNull();
+
+    // Resolve the in-flight run; the tail run schedules via setImmediate.
+    resolvePicker!();
+    await waitMacrotask();
+    await waitMacrotask();
+
+    // Exactly one tail run fires after the burst.
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("a poke arriving DURING an active run fires exactly ONE follow-up tail run after completion", async () => {
+    const repo = makeReconcileRepo();
+    let resolvePicker: (() => void) | null = null;
+    const picker = vi.fn<RunPickerFn>().mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolvePicker = r;
+        }),
+    );
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    // Three pokes arrive while the picker is still running. ALL must
+    // coalesce into a SINGLE tail run.
+    onReconcileResult({ repo, result: makeResult(true) });
+    onAgentRosterChange(repo.name);
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    resolvePicker!();
+    await waitMacrotask();
+    await waitMacrotask();
+
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("a thrown picker clears the inflight flag — no permanent repo lockout", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockRejectedValueOnce(new Error("picker boom"))
+      .mockResolvedValueOnce(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    // After the throw, a fresh poke MUST schedule another run — the
+    // inflight flag was cleared by the finally block.
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("runWithPickerMutex bridges the legacy _poll picker call through the same mutex", async () => {
+    const repo = makeReconcileRepo();
+    let resolvePicker: (() => void) | null = null;
+    const picker = vi.fn<RunPickerFn>().mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolvePicker = r;
+        }),
+    );
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    // Reconcile poke arrives first and acquires the mutex.
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    // _poll fires its direct call into the mutex — must be denied
+    // because a run is already in flight.
+    const directFn = vi.fn().mockResolvedValue({ dispatched: 7 });
+    const guarded = await runWithPickerMutex(repo.name, directFn);
+    expect(guarded.ran).toBe(false);
+    expect(directFn).not.toHaveBeenCalled();
+
+    // Resolve the inflight run; the tail run fires via the registered
+    // picker (NOT the direct fn — the direct caller already returned).
+    resolvePicker!();
+    await waitMacrotask();
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("runWithPickerMutex acquires the mutex when no other run is in flight and runs the direct fn to completion", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    const directFn = vi.fn().mockResolvedValue({ dispatched: 3, conflictBlocked: 0 });
+    const guarded = await runWithPickerMutex(repo.name, directFn);
+
+    expect(guarded).toEqual({ ran: true, value: { dispatched: 3, conflictBlocked: 0 } });
+    expect(directFn).toHaveBeenCalledTimes(1);
+
+    // Mutex released — a subsequent reconcile poke fires the registered picker.
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("a runWithPickerMutex call landing during an active reconcile run sets the tail flag (poll re-arms)", async () => {
+    const repo = makeReconcileRepo();
+    let resolvePicker: (() => void) | null = null;
+    const picker = vi.fn<RunPickerFn>().mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolvePicker = r;
+        }),
+    );
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    // _poll arrives mid-run; mutex denies, tail flag set.
+    const directFn = vi.fn().mockResolvedValue({ dispatched: 0 });
+    const guarded = await runWithPickerMutex(repo.name, directFn);
+    expect(guarded.ran).toBe(false);
+
+    resolvePicker!();
+    await waitMacrotask();
+    await waitMacrotask();
+
+    // Tail fires registered picker (the direct fn never ran).
+    expect(picker).toHaveBeenCalledTimes(2);
+    expect(directFn).not.toHaveBeenCalled();
+  });
+
+  it("a poke landing AFTER the tail-schedule but BEFORE the tail body runs coalesces into the same tail (no triple-fire)", async () => {
+    // Defends the comment at scheduler.ts ~line 110 ("defensive
+    // against a poke landing during the tail itself"). The pendingTailRun
+    // delete + setImmediate happen synchronously inside finally; a poke
+    // arriving on a later macrotask but before the tail body executes
+    // must STILL coalesce — either the tail runs once and the poke
+    // re-arms the tail (2 total), OR the poke acquires the just-freed
+    // mutex (also 2 total). Either way: not 3.
+    const repo = makeReconcileRepo();
+    let resolveFirst: (() => void) | null = null;
+    const picker = vi.fn<RunPickerFn>().mockImplementation(
+      () =>
+        new Promise<void>((r) => {
+          resolveFirst = r;
+        }),
+    );
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(1);
+
+    onReconcileResult({ repo, result: makeResult(true) }); // sets pendingTailRun
+    resolveFirst!();
+    await waitMacrotask(); // finally drains, schedules tail via setImmediate
+    onReconcileResult({ repo, result: makeResult(true) }); // arrives between schedule + tail body
+
+    await waitMacrotask();
+    await waitMacrotask();
+    await waitMacrotask();
+
+    // First run + at most 2 follow-up runs (tail + the late poke).
+    // Critical invariant: NEVER more than 3 (which would indicate the
+    // mutex lost an interlock).
+    expect(picker.mock.calls.length).toBeLessThanOrEqual(3);
+    // Sanity: at least the first run + ONE coalesced follow-up fired.
+    expect(picker.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("runWithPickerMutex propagates a thrown fn AND clears the mutex (subsequent acquire succeeds)", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    const boom = new Error("direct fn boom");
+    await expect(
+      runWithPickerMutex(repo.name, async () => {
+        throw boom;
+      }),
+    ).rejects.toBe(boom);
+
+    // Mutex cleared by finally → a fresh runWithPickerMutex call must
+    // ACQUIRE (ran:true), not deny (ran:false).
+    const after = await runWithPickerMutex(repo.name, async () => 42);
+    expect(after).toEqual({ ran: true, value: 42 });
+  });
+
+  it("a runWithPickerMutex throw STILL fires the registered tail picker if a poke arrived during the throwing call", async () => {
+    const repo = makeReconcileRepo();
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repo.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    let resolveStarted!: () => void;
+    const startedPromise = new Promise<void>((r) => {
+      resolveStarted = r;
+    });
+    let resolveRelease!: () => void;
+    const releasePromise = new Promise<void>((r) => {
+      resolveRelease = r;
+    });
+    const directPromise = runWithPickerMutex(repo.name, async () => {
+      resolveStarted();
+      await releasePromise;
+      throw new Error("direct fn boom");
+    });
+    await startedPromise;
+
+    // Poke arrives while direct fn is mid-flight → coalesces to tail.
+    onReconcileResult({ repo, result: makeResult(true) });
+    await waitMacrotask();
+    expect(picker).not.toHaveBeenCalled();
+
+    resolveRelease();
+    await expect(directPromise).rejects.toThrow("direct fn boom");
+
+    await waitMacrotask();
+    await waitMacrotask();
+
+    // Tail fired the registered picker even though direct fn threw.
+    expect(picker).toHaveBeenCalledTimes(1);
+  });
+
+  it("mutex is per-repo — concurrent runs on different repos do not block each other", async () => {
+    const repoA = makeReconcileRepo("repo-a");
+    const repoB = makeReconcileRepo("repo-b");
+    let resolveA: (() => void) | null = null;
+    const pickerA = vi.fn<RunPickerFn>().mockImplementation(
+      () => new Promise<void>((r) => { resolveA = r; }),
+    );
+    const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoA.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerA,
+    });
+    bootScheduler({
+      repo: makeRepo({ name: repoB.name }),
+      tracker: makeMemoryTracker(),
+      runPicker: pickerB,
+    });
+
+    onReconcileResult({ repo: repoA, result: makeResult(true) });
+    onReconcileResult({ repo: repoB, result: makeResult(true) });
+    await waitMacrotask();
+
+    // repo-A is in-flight (pending), repo-B already resolved.
+    expect(pickerA).toHaveBeenCalledTimes(1);
+    expect(pickerB).toHaveBeenCalledTimes(1);
+
+    resolveA!();
+    await waitMacrotask();
   });
 });

@@ -97,7 +97,10 @@ import type { IssueDispatch } from "../issue-tracker/interface.js";
 import { buildStartStamp } from "./dispatch-liveness-yaml.js";
 import { buildReattachPlan } from "./dispatch-reattach.js";
 import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
-import { runPostDispatchProgressCheck } from "../dispatch/scheduler.js";
+import {
+  runPostDispatchProgressCheck,
+  runWithPickerMutex,
+} from "../dispatch/scheduler.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -888,13 +891,28 @@ async function _poll(repo: RepoContext): Promise<void> {
   const dispatchablePayloads = dispatchableIssues.filter((i) =>
     dispatchableIds.has(i.id),
   );
-  const multiAgentResult = await tryMultiAgentDispatch({
-    repo,
-    cards: dispatchablePayloads,
-    inProgress: inProgressIssues,
-    tracker,
-    now: new Date(),
-  });
+  // DX-305: route the legacy `_poll` picker call through the
+  // scheduler's single-flight mutex. Without this gate, a `_poll` tick
+  // landing concurrently with an `onReconcileResult`/`onAgentRosterChange`
+  // setImmediate would invoke `tryMultiAgentDispatch` against the same
+  // `busy`/`assigned` snapshot, both pick the same agent + card, and
+  // `spawnAgent` would run twice. When the mutex denies the call
+  // (another picker run is in flight) we treat it as a 0-dispatch tick
+  // — the inflight run plus its tail handles this tick's work, and the
+  // legacy single-card fallthrough below is already a no-op spawn
+  // (suppressed by DX-242).
+  const guarded = await runWithPickerMutex(repo.name, () =>
+    tryMultiAgentDispatch({
+      repo,
+      cards: dispatchablePayloads,
+      inProgress: inProgressIssues,
+      tracker,
+      now: new Date(),
+    }),
+  );
+  const multiAgentResult = guarded.ran
+    ? guarded.value
+    : { dispatched: 0, conflictBlocked: 0 };
   if (multiAgentResult.dispatched > 0 || multiAgentResult.conflictBlocked > 0) {
     log.info(
       `[${repo.name}] Multi-agent tick: dispatched=${multiAgentResult.dispatched}, conflict-blocked=${multiAgentResult.conflictBlocked}`,
