@@ -29,11 +29,23 @@ function normalizeSql(sql: string): string {
   return sql.replace(/\s+/g, " ").trim();
 }
 
+const TERMINAL_DISPATCH_STATUSES = [
+  "completed",
+  "failed",
+  "cancelled",
+  "timeout",
+  "recovered",
+  "critical_failure",
+  "api_error_failed",
+];
 const SQL_BUSY_AGENTS = normalizeSql(
   `SELECT DISTINCT agent_name FROM dispatches
      WHERE repo_name = $1
        AND agent_name IS NOT NULL
-       AND "status" NOT IN ('completed', 'failed', 'cancelled')`,
+       AND "status" NOT IN (
+         'completed', 'failed', 'cancelled', 'timeout',
+         'recovered', 'critical_failure', 'api_error_failed'
+       )`,
 );
 const SQL_ASSIGNED_CARDS = normalizeSql(
   `SELECT id, assigned_agent FROM issues
@@ -45,7 +57,10 @@ const SQL_LIVE_DISPATCH_ISSUE_IDS = normalizeSql(
   `SELECT DISTINCT issue_id FROM dispatches
      WHERE repo_name = $1
        AND issue_id IS NOT NULL
-       AND "status" NOT IN ('completed', 'failed', 'cancelled')
+       AND "status" NOT IN (
+         'completed', 'failed', 'cancelled', 'timeout',
+         'recovered', 'critical_failure', 'api_error_failed'
+       )
        AND pid_terminated_at IS NULL`,
 );
 
@@ -64,7 +79,7 @@ beforeEach(() => {
           r.repoName === repoName &&
           r.agentName !== null &&
           r.agentName.length > 0 &&
-          !["completed", "failed", "cancelled"].includes(r.status)
+          !TERMINAL_DISPATCH_STATUSES.includes(r.status)
         ) {
           if (!seen.has(r.agentName)) {
             seen.add(r.agentName);
@@ -83,7 +98,7 @@ beforeEach(() => {
           r.repoName === repoName &&
           typeof r.issueId === "string" &&
           r.issueId.length > 0 &&
-          !["completed", "failed", "cancelled"].includes(r.status) &&
+          !TERMINAL_DISPATCH_STATUSES.includes(r.status) &&
           (r.pidTerminatedAt === undefined || r.pidTerminatedAt === null)
         ) {
           if (!seen.has(r.issueId)) {

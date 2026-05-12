@@ -76,11 +76,21 @@ export function resetAgentLocksQueryFn(): void {
  * with thousands of legacy rows.
  */
 export async function busyAgents(repoName: string): Promise<Set<string>> {
+  // Active = NOT terminal. Terminal set must include every DispatchStatus
+  // that signals "agent process is gone" — completed, failed, cancelled,
+  // timeout, recovered (DX-246 stream-idle auto-recover collapses to this),
+  // critical_failure, api_error_failed. Omitting any one (e.g. the
+  // pre-DX-246 list of only completed/failed/cancelled) leaves stale rows
+  // marking the agent busy forever → picker sees roster as fully busy →
+  // silent zero-dispatch loop with cards available.
   const rows = await queryFn<{ agent_name: string }>(
     `SELECT DISTINCT agent_name FROM dispatches
        WHERE repo_name = $1
          AND agent_name IS NOT NULL
-         AND "status" NOT IN ('completed', 'failed', 'cancelled')`,
+         AND "status" NOT IN (
+           'completed', 'failed', 'cancelled', 'timeout',
+           'recovered', 'critical_failure', 'api_error_failed'
+         )`,
     [repoName],
   );
   const out = new Set<string>();
@@ -115,7 +125,10 @@ export async function liveDispatchIssueIds(
     `SELECT DISTINCT issue_id FROM dispatches
        WHERE repo_name = $1
          AND issue_id IS NOT NULL
-         AND "status" NOT IN ('completed', 'failed', 'cancelled')
+         AND "status" NOT IN (
+           'completed', 'failed', 'cancelled', 'timeout',
+           'recovered', 'critical_failure', 'api_error_failed'
+         )
          AND pid_terminated_at IS NULL`,
     [repoName],
   );
