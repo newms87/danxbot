@@ -261,21 +261,33 @@ describe("probeMcpServer", () => {
     // hanging. After the probe returns, process.kill(pid, 0) must throw
     // ESRCH — proving the probe cleaned up its child rather than relying
     // on vitest to hang at teardown.
+    //
+    // Timeout sized to outrun cold node startup under the full vitest suite's
+    // parallel load: at 500ms the probe occasionally SIGKILLs the child before
+    // it has executed `writeFileSync(pidFile, ...)` (DX-317 — failure shape
+    // ENOENT on the pid file). 3s is empirically sufficient for node -e to
+    // load + dump a string under any load this repo's suite produces.
     const pidFile = join(tempDir, "hang.pid");
     const result = await probeMcpServer(
       "silent",
       configFor(pidMarkerHangServer(pidFile)),
-      500,
+      3_000,
     );
 
     expect(result.ok).toBe(false);
 
-    // Give the OS a moment to fully reap the killed child.
-    await new Promise((r) => setTimeout(r, 50));
-
     const fs = await import("node:fs");
+    // Poll for the pid file in case the filesystem write hasn't flushed yet —
+    // a hard sleep races against scheduler jitter on busy machines.
+    const pidFileDeadline = Date.now() + 1_000;
+    while (!fs.existsSync(pidFile) && Date.now() < pidFileDeadline) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
     const pid = parseInt(fs.readFileSync(pidFile, "utf-8"), 10);
     expect(Number.isInteger(pid)).toBe(true);
+
+    // Give the OS a moment to fully reap the killed child.
+    await new Promise((r) => setTimeout(r, 50));
 
     let stillAlive = true;
     try {
