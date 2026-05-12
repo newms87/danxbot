@@ -249,6 +249,61 @@ describe("resolveWorkspace", () => {
 
   });
 
+  describe("agentName worktree swap (DX-309)", () => {
+    function mirrorIntoWorktree(agentName: string): string {
+      const dest = resolve(
+        repoDir,
+        ".danxbot",
+        "worktrees",
+        agentName,
+        ".danxbot",
+        "workspaces",
+        "test-workspace",
+      );
+      mkdirSync(resolve(dest, ".."), { recursive: true });
+      cpSync(FIXTURE_ROOT, dest, { recursive: true });
+      return dest;
+    }
+
+    it("swaps cwd to <repo>/.danxbot/worktrees/<agentName>/.danxbot/workspaces/<name>", () => {
+      const expected = mirrorIntoWorktree("alice");
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+          agentName: "alice",
+        }),
+      );
+      expect(result.cwd).toBe(expected);
+    });
+
+    it("legacy main-checkout cwd when agentName omitted (back-compat)", () => {
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      );
+      expect(result.cwd).toBe(
+        resolve(repoDir, ".danxbot", "workspaces", "test-workspace"),
+      );
+    });
+
+    it("throws WorkspaceNotFoundError when worktree workspace dir is missing", () => {
+      // No mirrorIntoWorktree — the agent dir doesn't exist.
+      expect(() =>
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+          agentName: "ghost",
+        }),
+      ).toThrow(/worktrees\/ghost\/\.danxbot\/workspaces\/test-workspace/);
+    });
+  });
+
   describe("missing workspace", () => {
     it("throws WorkspaceNotFoundError when the workspace dir is absent", () => {
       expect(() =>

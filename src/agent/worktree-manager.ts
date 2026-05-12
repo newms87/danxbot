@@ -59,13 +59,16 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { join, sep } from "node:path";
 import {
+  cpSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
   symlinkSync,
 } from "node:fs";
 import { createLogger } from "../logger.js";
@@ -662,6 +665,67 @@ function provisionWorktreeArtifacts(
   provisionNodeModules(repoRoot, worktreePath);
   provisionEnvFile(repoRoot, worktreePath);
   provisionIssuesSymlink(repoRoot, worktreePath);
+  provisionWorktreeWorkspaces(repoRoot, worktreePath);
+}
+
+/**
+ * DX-309: copy `<repoRoot>/.danxbot/workspaces/<name>/` into
+ * `<worktreePath>/.danxbot/workspaces/<name>/` for every workspace the
+ * main checkout has. Real-dir copy (NOT symlink) — claude's spawn cwd
+ * gets physically resolved by the kernel on attach, so a symlinked
+ * workspaces dir would push the agent's git context back into the main
+ * checkout and defeat the entire isolation contract.
+ *
+ * Called from `provisionWorktreeArtifacts` so every lifecycle hook
+ * (bootstrap, validate, syncWorktree, ensureProvisioned) leaves the
+ * worktree dispatch-ready. Closes the race where `POST /api/agents`
+ * creates a worktree and a dispatch fires before the poller's per-tick
+ * `mirrorWorkspacesIntoWorktrees` step has copied the workspaces tree
+ * in.
+ *
+ * Cost: idempotent via `cpSync` — recursive copy with overwrite. The
+ * poller's per-tick `mirrorWorkspacesIntoWorktrees` is the eventual-
+ * consistency safety net and uses `writeIfChanged` (content-checked
+ * idempotence), so the two layers don't fight.
+ */
+function provisionWorktreeWorkspaces(
+  repoRoot: string,
+  worktreePath: string,
+): void {
+  const src = join(repoRoot, ".danxbot", "workspaces");
+  if (!existsSync(src)) return;
+  let entries: string[];
+  try {
+    entries = readdirSync(src);
+  } catch {
+    return;
+  }
+  const destRoot = join(worktreePath, ".danxbot", "workspaces");
+  try {
+    mkdirSync(destRoot, { recursive: true });
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    const entrySrc = join(src, name);
+    try {
+      if (!statSync(entrySrc).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const entryDest = join(destRoot, name);
+    try {
+      cpSync(entrySrc, entryDest, {
+        recursive: true,
+        // Idempotent over content — don't error on existing files.
+        force: true,
+      });
+    } catch (err) {
+      log.warn(
+        `provisionWorktreeWorkspaces: failed to mirror ${entrySrc} → ${entryDest}: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
 }
 
 /**

@@ -985,17 +985,32 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   const issueCreateUrl = `http://localhost:${input.repo.workerPort}/api/issue-create/${dispatchId}`;
   const restartWorkerUrl = `http://localhost:${input.repo.workerPort}/api/restart/${dispatchId}`;
   // DX-309: agent-bound dispatches swap every "this dispatch's repo
-  // root" reference from the main checkout to the agent's worktree. The
-  // resolver uses `agentName` to swap `cwd` (so the spawned process's
-  // git context follows the agent's branch); `DANX_REPO_ROOT` flips so
-  // the danx-issue MCP server reads issue YAMLs from the worktree (via
-  // a symlink provisioned by WorktreeManager, so files land in main);
-  // `DANX_AGENT_WORKTREE` is the boundary the PreToolUse hook uses to
-  // reject writes outside the worktree. Non-agent dispatches leave all
-  // three unset/at-main — legacy behavior preserved.
+  // root" reference from the main checkout to the agent's worktree.
+  // TWO worktree paths are kept in lockstep because the
+  // localPath/hostPath split (DX-230) bites EVERY downstream boundary:
+  //
+  //   - localPath  → container-internal path. The danx-issue MCP server
+  //                  runs inside the worker container and resolves issues
+  //                  off `DANX_REPO_ROOT`, so it must be localPath-rooted.
+  //   - hostPath   → the path the spawned claude process actually sees
+  //                  for cwd + every absolute path the agent passes to
+  //                  Edit/Write/Bash. Hostpath because claude's JSONL
+  //                  encoded-cwd + the workspace resolver's `workspaceRoot`
+  //                  use hostPath (DX-230). The PreToolUse worktree-guard
+  //                  hook reads DANX_AGENT_WORKTREE and string-prefix-
+  //                  checks it against the agent's `file_path` — those
+  //                  paths arrive hostPath-rooted, so the env value MUST
+  //                  also be hostPath-rooted or every Edit instant-denies.
+  //
+  // In host-only runtimes (danxbot self-hosting) localPath == hostPath
+  // and the distinction collapses; in docker-mode workers (gpt-manager,
+  // platform) they differ and getting it wrong breaks every dispatch.
   const agentName = input.agent?.name;
   const worktreeLocalPath = agentName
     ? resolve(input.repo.localPath, ".danxbot", "worktrees", agentName)
+    : null;
+  const worktreeHostPath = agentName
+    ? resolve(input.repo.hostPath, ".danxbot", "worktrees", agentName)
     : null;
   const overlay: Record<string, string> = {
     DANXBOT_STOP_URL: workerStopUrl,
@@ -1025,7 +1040,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // hook no-ops (legacy/non-agent dispatch). Setting this on overlay
     // (not just env) so resolver placeholder substitution can reference
     // it from workspace settings.json if needed.
-    ...(worktreeLocalPath ? { DANX_AGENT_WORKTREE: worktreeLocalPath } : {}),
+    ...(worktreeHostPath ? { DANX_AGENT_WORKTREE: worktreeHostPath } : {}),
     // Auto-inject the dispatch id so workspaces that need a per-dispatch
     // staging path (`staging-paths: - "/tmp/conflict-check/${DANXBOT_DISPATCH_ID}/"`)
     // can reference it directly without forcing every caller to plumb

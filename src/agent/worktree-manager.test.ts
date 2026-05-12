@@ -12,6 +12,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readlinkSync,
   realpathSync,
   rmSync,
@@ -1064,6 +1065,133 @@ describe("WorktreeManager", () => {
         lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink(),
       ).toBe(true);
       expect(lstatSync(join(worktreeRoot, ".env")).isSymbolicLink()).toBe(true);
+    });
+  });
+
+  describe("provisionIssuesSymlink (DX-309)", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-issues-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(join(repoRoot, ".danxbot", "issues", "open"), {
+        recursive: true,
+      });
+      mkdirSync(join(worktreeRoot, ".danxbot"), { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("symlinks <worktree>/.danxbot/issues → <main>/.danxbot/issues", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, ".danxbot", "issues");
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(realpathSync(link)).toBe(
+        realpathSync(join(repoRoot, ".danxbot", "issues")),
+      );
+    });
+
+    it("is idempotent — running twice leaves the same symlink", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const link = join(worktreeRoot, ".danxbot", "issues");
+      const inodeBefore = lstatSync(link).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(link).ino).toBe(inodeBefore);
+    });
+
+    it("preserves a real issues/ dir with orphan YAMLs under <link>.pre-symlink-<ts>", async () => {
+      const realIssues = join(worktreeRoot, ".danxbot", "issues");
+      mkdirSync(join(realIssues, "open"), { recursive: true });
+      // Orphan = a YAML absent from main.
+      writeFileSync(
+        join(realIssues, "open", "DX-WORKTREE-ONLY.yml"),
+        "id: orphan\n",
+      );
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+
+      // Link is in place.
+      expect(lstatSync(realIssues).isSymbolicLink()).toBe(true);
+
+      // Backup carries the orphan.
+      const parent = join(worktreeRoot, ".danxbot");
+      const entries = readdirSync(parent);
+      const backup = entries.find((e) => e.startsWith("issues.pre-symlink-"));
+      expect(backup).toBeDefined();
+      expect(
+        existsSync(join(parent, backup!, "open", "DX-WORKTREE-ONLY.yml")),
+      ).toBe(true);
+    });
+
+    it("materializes <worktree>/.danxbot/workspaces/<name>/ on bootstrap (no race with poller tick)", async () => {
+      // DX-309 blocker #2: dispatch after bootstrap but before the
+      // poller tick mirrored workspaces would WorkspaceNotFoundError.
+      // provisionWorktreeArtifacts runs from bootstrap/syncWorktree/
+      // ensureProvisioned, so the worktree is dispatch-ready
+      // immediately.
+      mkdirSync(join(repoRoot, ".danxbot", "workspaces", "issue-worker"), {
+        recursive: true,
+      });
+      writeFileSync(
+        join(repoRoot, ".danxbot", "workspaces", "issue-worker", "workspace.yml"),
+        "name: issue-worker\n",
+      );
+      mkdirSync(
+        join(repoRoot, ".danxbot", "workspaces", "issue-worker", ".claude"),
+        { recursive: true },
+      );
+      writeFileSync(
+        join(
+          repoRoot,
+          ".danxbot",
+          "workspaces",
+          "issue-worker",
+          ".claude",
+          "settings.json",
+        ),
+        "{}",
+      );
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+
+      const dest = join(
+        worktreeRoot,
+        ".danxbot",
+        "workspaces",
+        "issue-worker",
+      );
+      expect(existsSync(join(dest, "workspace.yml"))).toBe(true);
+      expect(existsSync(join(dest, ".claude", "settings.json"))).toBe(true);
+      // Real dir, NOT a symlink (load-bearing — symlink would make
+      // claude's cwd resolve back to main).
+      expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+    });
+
+    it("drops an empty issues/ dir without backup (nothing to preserve)", async () => {
+      const realIssues = join(worktreeRoot, ".danxbot", "issues");
+      mkdirSync(realIssues, { recursive: true });
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+
+      expect(lstatSync(realIssues).isSymbolicLink()).toBe(true);
+      const parent = join(worktreeRoot, ".danxbot");
+      const entries = readdirSync(parent);
+      expect(
+        entries.some((e) => e.startsWith("issues.pre-symlink-")),
+      ).toBe(false);
     });
   });
 

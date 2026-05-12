@@ -40,7 +40,12 @@ vi.mock("../dispatch/scheduler.js", async () => {
 });
 vi.mock("../agent/worktree-manager.js", () => ({
   createWorktreeManager: vi.fn().mockReturnValue({
-    worktreePath: vi.fn(),
+    worktreePath: vi
+      .fn()
+      .mockImplementation(
+        (_repo: { localPath: string }, agentName: string) =>
+          `${_repo.localPath}/.danxbot/worktrees/${agentName}`,
+      ),
     bootstrap: vi.fn(),
     teardown: vi.fn(),
     validate: vi.fn().mockResolvedValue({ state: "clean" }),

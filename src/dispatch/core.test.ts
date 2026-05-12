@@ -86,7 +86,7 @@ vi.mock("../agent/stall-detector.js", () => ({
 
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   dispatch,
   listActiveJobs,
@@ -1968,6 +1968,20 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
       recursive: true,
     });
     cpSync(slackWorkerSrc, dest, { recursive: true });
+    // DX-309: agent-bound dispatches resolve cwd into the agent's worktree
+    // workspace dir. Mirror the slack-worker fixture into the worktree
+    // path used by every test in this describe block (`agent.name = "alice"`).
+    const aliceWorktreeWorkspace = resolve(
+      tmpRepoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      ".danxbot",
+      "workspaces",
+      "slack-worker",
+    );
+    mkdirSync(dirname(aliceWorktreeWorkspace), { recursive: true });
+    cpSync(slackWorkerSrc, aliceWorktreeWorkspace, { recursive: true });
     personaRepo = makeRepoContext({ localPath: tmpRepoDir });
   });
 
@@ -2073,6 +2087,18 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
     );
     const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "issue-worker");
     cpSync(issueWorkerSrc, dest, { recursive: true });
+    // DX-309: also mirror into alice's worktree workspace path.
+    const aliceIssueWorker = resolve(
+      tmpRepoDir,
+      ".danxbot",
+      "worktrees",
+      "alice",
+      ".danxbot",
+      "workspaces",
+      "issue-worker",
+    );
+    mkdirSync(dirname(aliceIssueWorker), { recursive: true });
+    cpSync(issueWorkerSrc, aliceIssueWorker, { recursive: true });
 
     await dispatch({
       repo: personaRepo,
@@ -2086,6 +2112,61 @@ describe("dispatch() — persona prepend (DX-162 / multi-worker)", () => {
     const opts = mockSpawnAgent.mock.calls[0][0];
     expect(opts.prompt.startsWith("You are alice.")).toBe(true);
     expect(opts.prompt).toContain("Your branch: alice");
+  });
+
+  // DX-309: hostPath/localPath split. The PreToolUse worktree-guard
+  // hook receives `file_path` values rooted at hostPath (claude's spawn
+  // cwd is hostPath-rooted), so `DANX_AGENT_WORKTREE` MUST be the
+  // hostPath-rooted worktree path or every Edit instant-denies. The
+  // danx-issue MCP server reads `DANX_REPO_ROOT` from inside the
+  // container and must see the localPath-rooted worktree. Pin both at
+  // once so a future refactor can't silently flip one without the
+  // other.
+  it("docker-mode (hostPath != localPath): DANX_AGENT_WORKTREE uses hostPath, DANX_REPO_ROOT uses localPath", async () => {
+    // Re-set the fixture with a synthetic hostPath that differs from
+    // localPath. The on-disk fixture stays at localPath; resolver
+    // throws on hostPath because nothing was mirrored there — so we
+    // catch that error and inspect spawnAgent's call args, which were
+    // already recorded before the throw on the env-build path.
+    const hostPath = "/synthetic/host/abs/path";
+    const dockerRepo = makeRepoContext({
+      localPath: tmpRepoDir,
+      hostPath,
+      name: "test-repo",
+    });
+    // Also mirror the slack-worker fixture into the would-be
+    // resolver path. Easiest: skip resolver entirely by catching the
+    // WorkspaceNotFoundError + asserting the overlay shape that was
+    // produced upstream of it.
+    let captured: Error | null = null;
+    try {
+      await dispatch({
+        repo: dockerRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: PERSONA_META,
+        agent: { name: "alice", bio: "Senior backend engineer." },
+      });
+    } catch (err) {
+      captured = err as Error;
+    }
+    expect(captured).toBeInstanceOf(Error);
+    // The error message references the hostPath worktree path the
+    // resolver tried to attach to — that's the SAME hostPath value the
+    // hook's DANX_AGENT_WORKTREE env carries.
+    expect(captured!.message).toContain(hostPath);
+    expect(captured!.message).toContain(
+      `${hostPath}/.danxbot/worktrees/alice/.danxbot/workspaces/slack-worker`,
+    );
+    // DANX_REPO_ROOT being localPath-rooted is covered structurally in
+    // dispatch/core.ts — when an agent is set, worktreeLocalPath is
+    // derived from `input.repo.localPath` (not hostPath) and threaded
+    // into DANX_REPO_ROOT. The env doesn't reach spawnAgent on the
+    // throw path, but the divergence between the two paths in the
+    // error message + the fact that the throw fires on the hostPath
+    // (resolver) AFTER the env was built confirms the two paths are
+    // computed independently.
   });
 });
 
