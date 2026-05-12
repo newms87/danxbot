@@ -79,7 +79,7 @@ import {
   readAgents,
   type AgentRecordWithName,
 } from "../settings-file.js";
-import type { Issue, WaitingOn } from "../issue-tracker/interface.js";
+import type { Issue } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import { pickCardForAgent, pickFreeAgent } from "./pick-agent.js";
 import {
@@ -87,11 +87,9 @@ import {
 } from "./dispatch-liveness-yaml.js";
 import {
   clearDispatchAndWrite,
-  loadLocal,
   loadLocalFromDisk,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
-  writeIssue,
 } from "./yaml-lifecycle.js";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
 
@@ -328,39 +326,18 @@ export async function tryMultiAgentDispatch(
         { dispatch, dispatchId: checkDispatchId },
       );
       if (!verdict.ok) {
+        // Conflict-check rejection is a TRANSIENT, per-tick gate — NOT
+        // a persistent dep-chain wait. Semantics: "candidate overlaps
+        // an actively-In-Progress sibling on shared files". The reason
+        // evaporates the moment the sibling leaves In Progress (Done,
+        // Cancelled, ToDo bounce, recovery). `waiting_on` cleared only
+        // when deps reach TERMINAL — wrong lifecycle for this gate,
+        // produced stale stamps + cycles (DX-292 ↔ DX-294). We log
+        // the rejection and skip this tick; picker re-evaluates next
+        // tick against the live in-progress set.
         log.warn(
-          `[${repo.name}] conflict-check blocked ${card.id} for ${agent.name}: ${verdict.reason}`,
+          `[${repo.name}] conflict-check skipped ${card.id} for ${agent.name} (will retry next tick): ${verdict.reason}`,
         );
-        // Stamp `waiting_on` (NOT `blocked`) on the candidate. Per the
-        // schema contract (src/issue-tracker/interface.ts: `Blocked` vs
-        // `WaitingOn`): `blocked` = THIS card cannot make progress on
-        // its own work (human must act); `waiting_on` = dep-chain queue
-        // (waiting for OTHER cards to finish first, status stays ToDo).
-        // A conflict-check rejection is the second case — the candidate
-        // is fine, it just must wait for the overlapping sibling(s) to
-        // finish. `effectiveWaitingOn` derives the card eligible again
-        // automatically once every dep reaches a terminal status.
-        const fresh = await loadLocal(repo.localPath, card.id, repo.issuePrefix);
-        if (fresh) {
-          const reasonRaw = `Conflict-check rejection: ${verdict.reason}`;
-          const reason =
-            reasonRaw.length > 280 ? reasonRaw.slice(0, 279) + "…" : reasonRaw;
-          const by =
-            verdict.blocked_by && verdict.blocked_by.length > 0
-              ? verdict.blocked_by
-              : liveInProgress.map((c) => c.id);
-          const waiting: WaitingOn = {
-            reason,
-            timestamp: now.toISOString(),
-            by,
-          };
-          const updated: Issue = { ...fresh, waiting_on: waiting };
-          // Direct write skipping `stampDispatchAndWrite` — the card
-          // isn't being dispatched, only flagged. `writeIssue`
-          // mirror handles DB sync.
-          await writeIssue(repo.localPath, updated);
-        }
-        // Remove from the working set so the next iteration moves on.
         remainingCards.splice(remainingCards.indexOf(card), 1);
         conflictBlocked++;
         continue;
@@ -459,8 +436,17 @@ export async function tryMultiAgentDispatch(
     // card path (TEAM_PROMPT + Edit instruction); the persona prefix
     // is auto-injected by `dispatch()` before the agent reads the
     // first turn.
+    //
+    // DX-309: agent-bound dispatches cwd into the agent's worktree,
+    // and the worktree-guard PreToolUse hook rejects file_path values
+    // outside `<worktree>`. Build yamlPath under the worktree so the
+    // literal Edit instruction passes the hook's string-prefix check;
+    // the write itself lands in main via the
+    // `<worktree>/.danxbot/issues` → main symlink provisioned by the
+    // worktree manager.
+    const worktreePath = manager.worktreePath(repo, agent.name);
     const yamlPath = resolve(
-      repo.localPath,
+      worktreePath,
       ".danxbot",
       "issues",
       "open",

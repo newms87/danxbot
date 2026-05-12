@@ -350,19 +350,13 @@ describe("tryMultiAgentDispatch", () => {
     expect(result.dispatched).toBe(0);
     expect(result.conflictBlocked).toBe(1);
     expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
-    // Conflict-check rejection stamps `waiting_on` (dep-chain queue),
-    // NOT `blocked` (self-block / human-required). The candidate is
-    // fine — it just must wait for the overlapping sibling to finish.
-    // Status stays unchanged so the poller re-evaluates via
-    // `effectiveWaitingOn` next tick.
-    expect(yl.writeIssue).toHaveBeenCalled();
-    const writeCall = vi.mocked(yl.writeIssue).mock.calls[0];
-    expect(writeCall[1].status).not.toBe("Blocked");
-    expect(writeCall[1].blocked).toBeNull();
-    expect(writeCall[1].waiting_on).toMatchObject({
-      reason: expect.stringContaining("Conflict-check rejection"),
-      by: ["DX-141"],
-    });
+    // Conflict-check rejection is a TRANSIENT per-tick gate. The
+    // overlap reason evaporates the moment the sibling leaves In
+    // Progress — picker re-evaluates next tick. Persisting via
+    // `waiting_on` (which clears only on TERMINAL deps) created stale
+    // stamps + cycles (DX-292 ↔ DX-294). Picker MUST NOT write to the
+    // YAML on conflict-check rejection.
+    expect(yl.writeIssue).not.toHaveBeenCalled();
   });
 
   it("DX-262 — stale in-progress YAML with no live dispatch is filtered out → conflict-check skipped, candidate dispatched", async () => {
