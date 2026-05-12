@@ -7,6 +7,13 @@
       "env": {
         "DANX_REPO_ROOT": "${DANX_REPO_ROOT}"
       }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["tsx", "mcp-servers/playwright/src/index.ts"],
+      "env": {
+        "PLAYWRIGHT_URL": "http://playwright:3000"
+      }
     }
   }
 }
