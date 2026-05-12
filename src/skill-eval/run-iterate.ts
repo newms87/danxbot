@@ -27,14 +27,13 @@ import Anthropic from "@anthropic-ai/sdk";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, relative } from "node:path";
 import { promisify } from "node:util";
 import { config } from "../config.js";
 import { aggregateSide } from "./aggregate.js";
 import {
-  DEFAULT_POLL_INTERVAL_MS,
-  DEFAULT_TIMEOUT_MS,
-  parseNonNegativeInt as parseNonNegativeIntShared,
+  isInvokedAsScript,
+  parseCommonRunFlags,
   parsePositiveInt as parsePositiveIntShared,
   pickArg,
 } from "./cli-args.js";
@@ -55,16 +54,13 @@ import {
 } from "./plugin-git.js";
 import { runProbe } from "./probe.js";
 import { reloadAndVerify } from "./reload-propagation.js";
+import { persistEvalSetReportWithLog } from "./report-file.js";
 import { runEvalSetCore } from "./run-eval-set.js";
 
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_MAX_ITERATIONS = 5;
 const DEFAULT_COST_CAP_USD = 2.55;
-const DEFAULT_PRICING_MODEL = "claude-sonnet-4-6";
-const DEFAULT_PARALLEL = 3;
-const DEFAULT_RUNS_PER_QUERY = 3;
-const DEFAULT_SEED = 1;
 
 export class RunIterateArgsError extends Error {}
 
@@ -119,21 +115,7 @@ export function parseIterateArgs(
     );
   }
 
-  const portRaw =
-    pickArg(argv, "worker-port") ?? env.DANXBOT_WORKER_PORT ?? null;
-  if (!portRaw) {
-    throw new RunIterateArgsError(
-      "missing --worker-port (no DANXBOT_WORKER_PORT env either)",
-    );
-  }
-  const workerPort = parsePositiveInt("worker-port", portRaw);
-
-  const repoRoot = pickArg(argv, "repo-root") ?? env.DANXBOT_REPO_ROOT ?? null;
-  if (!repoRoot) {
-    throw new RunIterateArgsError(
-      "missing --repo-root (no DANXBOT_REPO_ROOT env either)",
-    );
-  }
+  const common = parseCommonRunFlags(argv, env, RunIterateArgsError);
 
   const maxIterationsRaw = pickArg(argv, "max-iterations");
   const maxIterations = maxIterationsRaw
@@ -157,38 +139,8 @@ export function parseIterateArgs(
     pickArg(argv, "cache-root") ??
     join(home, ".claude", "plugins", "marketplaces", "newms-plugins");
 
-  const workspace = pickArg(argv, "workspace") ?? "skill-eval";
-  const repoName = pickArg(argv, "repo") ?? "danxbot";
   const evalSetPath =
-    pickArg(argv, "eval-set") ?? resolveEvalSetPath(repoRoot, pluginSkill);
-  const workspaceCwd =
-    pickArg(argv, "workspace-cwd") ??
-    resolve(repoRoot, ".danxbot", "workspaces", workspace);
-
-  const timeoutMs = parsePositiveInt(
-    "timeout-ms",
-    pickArg(argv, "timeout-ms") ?? `${DEFAULT_TIMEOUT_MS}`,
-  );
-  const pollIntervalMs = parsePositiveInt(
-    "poll-interval-ms",
-    pickArg(argv, "poll-interval-ms") ?? `${DEFAULT_POLL_INTERVAL_MS}`,
-  );
-  const parallel = parsePositiveInt(
-    "parallel",
-    pickArg(argv, "parallel") ?? `${DEFAULT_PARALLEL}`,
-  );
-  const runsPerQuery = parsePositiveInt(
-    "runs-per-query",
-    pickArg(argv, "runs-per-query") ?? `${DEFAULT_RUNS_PER_QUERY}`,
-  );
-  const seed = parseNonNegativeIntShared(
-    "seed",
-    pickArg(argv, "seed") ?? `${DEFAULT_SEED}`,
-    RunIterateArgsError,
-  );
-
-  const pricingModel =
-    pickArg(argv, "pricing-model") ?? DEFAULT_PRICING_MODEL;
+    pickArg(argv, "eval-set") ?? resolveEvalSetPath(common.repoRoot, pluginSkill);
 
   const proposerModel = pickArg(argv, "proposer-model") ?? undefined;
 
@@ -198,18 +150,18 @@ export function parseIterateArgs(
     costCapUsd,
     sourceRoot,
     cacheRoot,
-    workerPort,
-    repoRoot,
-    workspace,
-    repoName,
-    workspaceCwd,
+    workerPort: common.workerPort,
+    repoRoot: common.repoRoot,
+    workspace: common.workspace,
+    repoName: common.repoName,
+    workspaceCwd: common.workspaceCwd,
     evalSetPath,
-    seed,
-    runsPerQuery,
-    parallel,
-    timeoutMs,
-    pollIntervalMs,
-    pricingModel,
+    seed: common.seed,
+    runsPerQuery: common.runsPerQuery,
+    parallel: common.parallel,
+    timeoutMs: common.timeoutMs,
+    pollIntervalMs: common.pollIntervalMs,
+    pricingModel: common.pricingModel,
     proposerModel,
   };
 }
@@ -416,15 +368,19 @@ async function main(): Promise<number> {
   const md = formatIterateReport({ pluginSkill: args.pluginSkill, result });
   process.stdout.write(md);
   process.stdout.write("\n");
+  // REPORT.md captures the iterate-shaped markdown (status + per-iteration
+  // history table + errors block) so the operator can inspect the
+  // forensics after the run without re-tailing stdout.
+  persistEvalSetReportWithLog({
+    evalSetPath: args.evalSetPath,
+    markdown: md,
+    runAt: new Date(),
+  });
 
   return result.status === "green" ? 0 : 1;
 }
 
-const invokedAsScript =
-  typeof process !== "undefined" &&
-  process.argv[1] &&
-  /run-iterate\.ts$|run-iterate\.js$/.test(process.argv[1]);
-if (invokedAsScript) {
+if (isInvokedAsScript("run-iterate")) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {

@@ -23,7 +23,6 @@
  */
 
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { calculateApiCost } from "../agent/pricing.js";
 import {
   aggregateQueryRuns,
@@ -33,10 +32,8 @@ import {
   type QueryVerdict,
 } from "./aggregate.js";
 import {
-  DEFAULT_POLL_INTERVAL_MS,
-  DEFAULT_TIMEOUT_MS,
-  parseNonNegativeInt as parseNonNegativeIntShared,
-  parsePositiveInt as parsePositiveIntShared,
+  isInvokedAsScript,
+  parseCommonRunFlags,
   pickArg,
 } from "./cli-args.js";
 import {
@@ -45,14 +42,11 @@ import {
   type EvalQuery,
 } from "./eval-set.js";
 import { ProbeError, runProbe, type ProbeArgs, type ProbeResult } from "./probe.js";
+import { persistEvalSetReportWithLog } from "./report-file.js";
 import { renderReport } from "./report.js";
 import { splitEvalSet } from "./split.js";
 
 export class RunEvalSetArgsError extends Error {}
-
-function parsePositiveInt(name: string, raw: string): number {
-  return parsePositiveIntShared(name, raw, RunEvalSetArgsError);
-}
 
 export interface RunEvalSetArgs {
   readonly pluginSkill: string;
@@ -86,11 +80,6 @@ export interface RunEvalSetResult {
 
 export type ProbeFn = (args: ProbeArgs) => Promise<ProbeResult>;
 
-const DEFAULT_PARALLEL = 3;
-const DEFAULT_RUNS_PER_QUERY = 3;
-const DEFAULT_SEED = 1;
-const DEFAULT_PRICING_MODEL = "claude-sonnet-4-6";
-
 function fail(msg: string): never {
   process.stderr.write(`FAIL ${msg}\n`);
   process.exit(2);
@@ -112,69 +101,23 @@ export function parseEvalSetArgs(
     );
   }
 
-  const workspace = pickArg(argv, "workspace") ?? "skill-eval";
-  const repoName = pickArg(argv, "repo") ?? "danxbot";
-
-  const portRaw =
-    pickArg(argv, "worker-port") ?? env.DANXBOT_WORKER_PORT ?? null;
-  if (!portRaw) {
-    throw new RunEvalSetArgsError(
-      "missing --worker-port (no DANXBOT_WORKER_PORT env either)",
-    );
-  }
-  const workerPort = parsePositiveInt("worker-port", portRaw);
-
-  const repoRoot = pickArg(argv, "repo-root") ?? env.DANXBOT_REPO_ROOT ?? null;
-  if (!repoRoot) {
-    throw new RunEvalSetArgsError(
-      "missing --repo-root (no DANXBOT_REPO_ROOT env either) — supply the danxbot install dir",
-    );
-  }
-
+  const common = parseCommonRunFlags(argv, env, RunEvalSetArgsError);
   const evalSetPath =
-    pickArg(argv, "eval-set") ?? resolveEvalSetPath(repoRoot, pluginSkill);
-  const workspaceCwd =
-    pickArg(argv, "workspace-cwd") ??
-    resolve(repoRoot, ".danxbot", "workspaces", workspace);
-
-  const timeoutMs = parsePositiveInt(
-    "timeout-ms",
-    pickArg(argv, "timeout-ms") ?? `${DEFAULT_TIMEOUT_MS}`,
-  );
-  const pollIntervalMs = parsePositiveInt(
-    "poll-interval-ms",
-    pickArg(argv, "poll-interval-ms") ?? `${DEFAULT_POLL_INTERVAL_MS}`,
-  );
-  const parallel = parsePositiveInt(
-    "parallel",
-    pickArg(argv, "parallel") ?? `${DEFAULT_PARALLEL}`,
-  );
-  const runsPerQuery = parsePositiveInt(
-    "runs-per-query",
-    pickArg(argv, "runs-per-query") ?? `${DEFAULT_RUNS_PER_QUERY}`,
-  );
-  const seed = parseNonNegativeIntShared(
-    "seed",
-    pickArg(argv, "seed") ?? `${DEFAULT_SEED}`,
-    RunEvalSetArgsError,
-  );
-
-  const pricingModel =
-    pickArg(argv, "pricing-model") ?? DEFAULT_PRICING_MODEL;
+    pickArg(argv, "eval-set") ?? resolveEvalSetPath(common.repoRoot, pluginSkill);
 
   return {
     pluginSkill,
     evalSetPath,
-    workspace,
-    workerPort,
-    repoName,
-    workspaceCwd,
-    timeoutMs,
-    pollIntervalMs,
-    parallel,
-    seed,
-    runsPerQuery,
-    pricingModel,
+    workspace: common.workspace,
+    workerPort: common.workerPort,
+    repoName: common.repoName,
+    workspaceCwd: common.workspaceCwd,
+    timeoutMs: common.timeoutMs,
+    pollIntervalMs: common.pollIntervalMs,
+    parallel: common.parallel,
+    seed: common.seed,
+    runsPerQuery: common.runsPerQuery,
+    pricingModel: common.pricingModel,
   };
 }
 
@@ -432,17 +375,21 @@ async function main(): Promise<number> {
   const result = await runEvalSetCore(args, queries, runProbe);
   process.stdout.write(result.markdown);
   process.stdout.write("\n");
+  // REPORT.md is auto-regenerated on every /skill-eval run so the prior
+  // sweep's forensics survive across sessions; the writer is atomic
+  // (temp+rename) and overwrites the previous run unconditionally.
+  persistEvalSetReportWithLog({
+    evalSetPath: args.evalSetPath,
+    markdown: result.markdown,
+    runAt: new Date(),
+  });
   process.stderr.write(
     `\nExit ${result.exitCode} (${result.overallPass ? "PASS" : "FAIL"}) — total cost ~$${result.totalCostUsd.toFixed(4)} USD (model=${args.pricingModel}, estimated)\n`,
   );
   return result.exitCode;
 }
 
-const invokedAsScript =
-  typeof process !== "undefined" &&
-  process.argv[1] &&
-  /run-eval-set\.ts$|run-eval-set\.js$/.test(process.argv[1]);
-if (invokedAsScript) {
+if (isInvokedAsScript("run-eval-set")) {
   main()
     .then((code) => process.exit(code))
     .catch((err) => {

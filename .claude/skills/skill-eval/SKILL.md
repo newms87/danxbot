@@ -3,7 +3,7 @@ name: skill-eval
 description: |
   Run skill-trigger probes against the local danxbot worker via host-mode
   interactive dispatch (never `claude -p` — bypasses Anthropic bugs #36570
-  and #556). Three modes: (1) one-shot — `/skill-eval --query "<prompt>"
+  and #556). Four modes: (1) one-shot — `/skill-eval --query "<prompt>"
   --expect-skill <plugin>:<skill>` returns a single PASS/FAIL + JSONL
   path; (2) eval-set — `/skill-eval <plugin>:<skill>` runs the JSON
   eval-set under `<repo>/tests/skill-evals/<plugin>-<skill>/eval-set.json`,
@@ -14,10 +14,15 @@ description: |
   iteration asks Claude Haiku for a tighter SKILL.md description from
   train failures only, commits + pushes the plugin source, pulls the
   marketplace cache + sanity-checks propagation, re-runs the eval-set,
-  selects best by held-out test score, rolls back to best on regression.
-  Exits 0 on green / 1 otherwise. Invoke when the operator types any of
-  those three forms OR asks for a trigger probe / full eval sweep /
-  autonomous description tightening.
+  selects best by held-out test score, rolls back to best on regression;
+  (4) sweep — `/skill-eval --all` discovers every eval-set under
+  `<repo>/tests/skill-evals/*/` and runs each sequentially, emits a
+  roll-up table to stdout + `SWEEP.md` next to the eval-sets directory.
+  Modes 2 / 3 / 4 each auto-regenerate `REPORT.md` next to their
+  eval-set so forensics survive across sessions. Exits 0 on green / 1
+  otherwise. Invoke when the operator types any of those four forms OR
+  asks for a trigger probe / full eval sweep / autonomous description
+  tightening.
 ---
 
 # Skill-Eval — trigger regression harness
@@ -152,6 +157,12 @@ Constraints enforced by `validateEvalSet` in `src/skill-eval/eval-set.ts`:
    either side), `2` for runner errors (eval-set parse / not found,
    worker unreachable on every probe, etc.).
 
+5. **REPORT.md** is auto-regenerated at
+   `<repo>/tests/skill-evals/<plugin>-<skill>/REPORT.md` on every run.
+   Contains the full stdout markdown plus a `_Last run: <ISO>_` footer.
+   Atomic write (temp+rename) so a crash mid-write cannot tear the file;
+   overwrites the prior run unconditionally.
+
 ## Mode 3 — propose-fix-retest iteration (`--iterate`)
 
 ```
@@ -241,6 +252,74 @@ marketplace pull conflict), the result carries `rollbackError` instead
      short-circuited the loop.
 
 4. **Exit codes.** `0` on green, `1` on every other terminal status.
+
+5. **REPORT.md** is auto-regenerated at
+   `<repo>/tests/skill-evals/<plugin>-<skill>/REPORT.md` on every
+   `--iterate` run. Contains the per-iteration history table (iter,
+   train, test, cost, sha, status), errors block, and a `_Last run:
+   <ISO>_` footer. Same writer as Mode 2.
+
+## Mode 4 — sweep every eval-set (`--all`)
+
+```
+/skill-eval --all   [--seed N] [--runs-per-query N] [--parallel N]
+                    [--pricing-model M] [--eval-sets-dir <dir>]
+```
+
+Discovers every `<plugin>-<skill>/eval-set.json` under
+`<repo>/tests/skill-evals/` and runs each in turn through Mode 2
+(`runEvalSetCore`). Sequential, NOT parallel — JSONL workspace
+contention + cross-eval-set cost ceiling. Internal `--runs-per-query`
+parallelism inside each eval-set is honored as normal.
+
+Side effects:
+
+- One `REPORT.md` written next to each eval-set (same writer as Modes
+  2 + 3).
+- One `SWEEP.md` written at `<repo>/tests/skill-evals/SWEEP.md`
+  containing the roll-up table with columns: skill, train %, test %,
+  runs-per-query, cost, elapsed, status (GREEN | FAIL | ERROR).
+
+### Eval-set discovery
+
+- Walks `<repo>/tests/skill-evals/*` one level deep.
+- Skips subdirectories without an `eval-set.json` file.
+- Parses directory names `<plugin>-<skill>` by splitting on the FIRST
+  hyphen so skill names with hyphens (`issue-card-workflow`,
+  `process-kill`) round-trip correctly. Plugin names with internal
+  hyphens are out of scope for V1.
+- Returns entries sorted lexicographically for deterministic ordering.
+
+### What to do when this form is invoked
+
+1. **No positional plugin:skill.** Recognize the `--all` flag.
+2. **Run the runner.** Single Bash call:
+
+   ```bash
+   npx tsx <repo-root>/src/skill-eval/run-all-sweep.ts
+   ```
+
+   Pass `--parallel`, `--seed`, `--runs-per-query`, `--pricing-model`,
+   `--eval-sets-dir` only when the operator asked for non-default
+   values.
+
+3. **Surface the markdown roll-up table verbatim.** The runner writes
+   the SWEEP.md content to stdout. The operator wants the literal
+   table — do not paraphrase.
+
+4. **Exit codes.** `0` iff every entry GREEN; `1` if any entry FAIL or
+   ERROR; `2` if no eval-sets were discovered (likely wrong
+   `--eval-sets-dir`).
+
+### Failure isolation
+
+A throw from `runEvalSetCore` (eval-set parse failure, worker
+unreachable on every probe inside one eval-set, etc.) records the
+entry as `status: ERROR` with the message in the Status column and
+DOES NOT abort the sweep — every other discoverable eval-set still
+runs. The roll-up table surfaces the error message so the operator
+can fix the underlying file and re-sweep without re-discovering
+which eval-set tripped.
 
 ## Architecture (read once)
 
