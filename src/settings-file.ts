@@ -182,6 +182,25 @@ export interface AgentSchedule {
   sun: string[];
 }
 
+/**
+ * DX-292 — per-agent broken state. Stamped onto an `AgentRecord` when a
+ * `danx-prep` dispatch ends with verdict `abort` (the agent's worktree
+ * is in a bad state that cannot recover without destroying work, see
+ * DX-291). Cleared (set to `null`) when the human marks the agent
+ * resolved from the dashboard. The poller's pick gate filters any
+ * agent with `broken !== null` out of the eligible pool — see
+ * `src/poller/pick-agent.ts#pickFreeAgent`.
+ *
+ *  - `reason` — operator-facing headline; non-empty.
+ *  - `suggested_steps` — ordered list of recovery actions (may be empty).
+ *  - `set_at` — ISO 8601 stamp recorded when the state landed.
+ */
+export interface AgentBrokenState {
+  reason: string;
+  suggested_steps: string[];
+  set_at: string;
+}
+
 export interface AgentRecord {
   type: "agent";
   bio: string;
@@ -189,12 +208,36 @@ export interface AgentRecord {
   capabilities: AgentCapability[];
   schedule: AgentSchedule;
   enabled: boolean;
+  /**
+   * DX-292 — `null` when the agent is healthy, populated when a prep
+   * dispatch flagged the worktree as unrecoverable. The poller skips
+   * any agent with `broken !== null` until the operator clears it.
+   */
+  broken: AgentBrokenState | null;
   created_at: string;
   updated_at: string;
 }
 
+/**
+ * Per-repo agent-defaults block. Optional on disk, ALWAYS materialized
+ * with defaults by `normalize()` so consumers can read without a
+ * presence check.
+ *
+ * `prepMode` (DX-292) controls how the new pre-agent prep step runs:
+ *   - `"combined"` — one dispatch on the worktree carrying BOTH the
+ *     `danx-prep` skill body AND the card-work skill body (the prep
+ *     agent transitions inline once verdict is `ok`).
+ *   - `"separate"` — prep-only dispatch; verdict via
+ *     `danxbot_prep_verdict`, then `danxbot_complete`. The poller
+ *     re-picks the card on the next tick for the work dispatch.
+ * Default: `"combined"` (cheaper, preserves prep context for the work
+ * agent). See `<repo>/.danxbot/issues/closed/DX-291.yml`.
+ */
+export type AgentPrepMode = "combined" | "separate";
+
 export interface AgentDefaults {
   conflictCheckEnabled: boolean;
+  prepMode: AgentPrepMode;
 }
 
 /**
@@ -260,6 +303,17 @@ const LOCK_STALE_MS = 30_000;
 const PARSE_ERROR_LOG_INTERVAL_MS = 60_000;
 
 /**
+ * Default block for `agentDefaults`. Used by every write-side path that
+ * needs to fall back when the existing file has no block — kept as a
+ * named helper so a future field addition lands in one spot instead of
+ * three (defaultSettings, writeSettings merge fallback, mutateAgents
+ * merge fallback).
+ */
+export function defaultAgentDefaults(): AgentDefaults {
+  return { conflictCheckEnabled: true, prepMode: "combined" };
+}
+
+/**
  * Default settings for a repo that has never been seeded. All overrides
  * null (defer to env defaults) and empty display (dashboard will render
  * "not configured" pills until setup/deploy populates it).
@@ -276,7 +330,7 @@ export function defaultSettings(): Settings {
     },
     display: {},
     agents: {},
-    agentDefaults: { conflictCheckEnabled: true },
+    agentDefaults: defaultAgentDefaults(),
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
   };
 }
@@ -400,6 +454,44 @@ function normalizeCapabilities(raw: unknown): AgentCapability[] {
   return raw.filter((c): c is AgentCapability => typeof c === "string" && known.has(c));
 }
 
+/**
+ * Normalize a `broken` field read from disk. `null` / missing → `null`.
+ * Anything else MUST match the `AgentBrokenState` shape:
+ *   - `reason` non-empty string
+ *   - `suggested_steps` array of strings (empty allowed)
+ *   - `set_at` non-empty string
+ * Malformed input degrades to `null` (with a log) — matches the fail-
+ * soft pattern of every other reader on this hot path. The write-side
+ * helper (`setAgentBroken`) is the fail-loud surface for malformed
+ * input.
+ */
+function normalizeBroken(raw: unknown): AgentBrokenState | null {
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "object") {
+    log.warn(
+      `agent.broken dropped — expected {reason, suggested_steps, set_at} | null, got ${typeof raw}`,
+    );
+    return null;
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.reason !== "string" || r.reason.length === 0) {
+    log.warn("agent.broken dropped — reason must be a non-empty string");
+    return null;
+  }
+  if (typeof r.set_at !== "string" || r.set_at.length === 0) {
+    log.warn("agent.broken dropped — set_at must be a non-empty ISO 8601 string");
+    return null;
+  }
+  if (!Array.isArray(r.suggested_steps)) {
+    log.warn("agent.broken dropped — suggested_steps must be an array");
+    return null;
+  }
+  const steps = r.suggested_steps.filter(
+    (s): s is string => typeof s === "string",
+  );
+  return { reason: r.reason, suggested_steps: steps, set_at: r.set_at };
+}
+
 function normalizeOneAgent(raw: unknown): AgentRecord | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -425,6 +517,7 @@ function normalizeOneAgent(raw: unknown): AgentRecord | null {
     capabilities,
     schedule,
     enabled: r.enabled,
+    broken: normalizeBroken(r.broken),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -463,13 +556,18 @@ function normalizeAgents(raw: unknown): Record<string, AgentRecord> {
 }
 
 function normalizeAgentDefaults(raw: unknown): AgentDefaults {
+  let conflictCheckEnabled = true;
+  let prepMode: AgentPrepMode = "combined";
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const r = raw as Record<string, unknown>;
     if (typeof r.conflictCheckEnabled === "boolean") {
-      return { conflictCheckEnabled: r.conflictCheckEnabled };
+      conflictCheckEnabled = r.conflictCheckEnabled;
+    }
+    if (r.prepMode === "combined" || r.prepMode === "separate") {
+      prepMode = r.prepMode;
     }
   }
-  return { conflictCheckEnabled: true };
+  return { conflictCheckEnabled, prepMode };
 }
 
 function normalize(partial: Partial<Settings> | null | undefined): Settings {
@@ -608,10 +706,10 @@ async function runWrite(
           : (existing.agents ?? {}),
       agentDefaults: patch.agentDefaults
         ? {
-            ...(existing.agentDefaults ?? { conflictCheckEnabled: true }),
+            ...(existing.agentDefaults ?? defaultAgentDefaults()),
             ...patch.agentDefaults,
           }
-        : (existing.agentDefaults ?? { conflictCheckEnabled: true }),
+        : (existing.agentDefaults ?? defaultAgentDefaults()),
       meta: {
         updatedAt: new Date().toISOString(),
         updatedBy: patch.writtenBy,
@@ -829,7 +927,7 @@ export async function mutateAgents(
         overrides: existing.overrides,
         display: existing.display,
         agents: normalizeAgents(next),
-        agentDefaults: existing.agentDefaults ?? { conflictCheckEnabled: true },
+        agentDefaults: existing.agentDefaults ?? defaultAgentDefaults(),
         meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
       };
       const body = JSON.stringify(merged, null, 2) + "\n";
@@ -915,6 +1013,117 @@ export function isConflictCheckEnabled(localPath: string): boolean {
 }
 
 /**
+ * DX-292 — return the per-repo `prepMode` controlling whether the new
+ * pre-agent prep step runs combined-with-work (`"combined"`) or as a
+ * separate dispatch (`"separate"`). Defaults to `"combined"` when the
+ * file is missing, the field is unset, or the JSON is corrupt. Never
+ * throws — matches the fail-soft semantics of every other hot-path
+ * reader in this module so a broken settings file can't take down the
+ * dispatch path.
+ */
+export function getPrepMode(localPath: string): AgentPrepMode {
+  try {
+    const settings = readSettings(localPath);
+    return settings.agentDefaults?.prepMode ?? "combined";
+  } catch (err) {
+    log.error(`getPrepMode threw — returning "combined" for ${localPath}`, err);
+    return "combined";
+  }
+}
+
+/**
+ * DX-292 — predicate used by the poller's pick gate
+ * (`src/poller/pick-agent.ts#pickFreeAgent`) to skip agents whose prep
+ * dispatch flagged the worktree as unrecoverable. Pure — no IO. Used
+ * over a bare `record.broken !== null` check at call sites so a future
+ * "broken with auto-clear after TTL" extension lands in one place.
+ */
+export function isAgentBroken(record: { broken: AgentBrokenState | null }): boolean {
+  return record.broken !== null;
+}
+
+/**
+ * Validate a candidate `AgentBrokenState | null`. Throws if the shape
+ * is malformed. Used by `setAgentBroken` to fail-loud at the write
+ * surface — agents calling through this helper get a usable error
+ * instead of silently dropping the broken record on the next read.
+ */
+function validateBrokenInput(
+  broken: AgentBrokenState | null,
+): asserts broken is AgentBrokenState | null {
+  if (broken === null) return;
+  if (typeof broken !== "object") {
+    throw new TypeError(
+      `setAgentBroken: broken must be null or {reason, suggested_steps, set_at} — got ${typeof broken}`,
+    );
+  }
+  if (typeof broken.reason !== "string" || broken.reason.length === 0) {
+    throw new TypeError(
+      "setAgentBroken: broken.reason must be a non-empty string",
+    );
+  }
+  if (typeof broken.set_at !== "string" || broken.set_at.length === 0) {
+    throw new TypeError(
+      "setAgentBroken: broken.set_at must be a non-empty ISO 8601 string",
+    );
+  }
+  if (!Array.isArray(broken.suggested_steps)) {
+    throw new TypeError(
+      "setAgentBroken: broken.suggested_steps must be an array",
+    );
+  }
+  for (const step of broken.suggested_steps) {
+    if (typeof step !== "string") {
+      throw new TypeError(
+        "setAgentBroken: every entry in broken.suggested_steps must be a string",
+      );
+    }
+  }
+}
+
+/**
+ * DX-292 — set or clear the `broken` field on a single agent. The
+ * direct write surface used by:
+ *   - the prep MCP verdict handler when prep returns `abort` (Phase 5).
+ *   - dashboard PATCH routes that mark an agent broken or resolve it
+ *     (Phase 7).
+ *
+ * Validates the shape fail-loud (throws `TypeError` on malformed input)
+ * BEFORE acquiring the per-file lock, so a bad request never even
+ * touches disk. Returns the refreshed `Settings` post-write.
+ *
+ * Unknown agent name → throws (no silent no-op) so a caller mis-typing
+ * the agent gets a usable error instead of believing the write
+ * succeeded.
+ */
+export async function setAgentBroken(
+  localPath: string,
+  agentName: string,
+  broken: AgentBrokenState | null,
+  writtenBy: SettingsWriter,
+): Promise<Settings> {
+  validateBrokenInput(broken);
+  return mutateAgents(
+    localPath,
+    (current) => {
+      const record = current[agentName];
+      if (!record) {
+        throw new Error(
+          `setAgentBroken: agent "${agentName}" not found in roster`,
+        );
+      }
+      current[agentName] = {
+        ...record,
+        broken,
+        updated_at: new Date().toISOString(),
+      };
+      return current;
+    },
+    writtenBy,
+  );
+}
+
+/**
  * Mask a secret for display. Format: `"abcd****wxyz"` when long enough to
  * show both ends, otherwise `"****xyz"` with the trailing fragment. Empty
  * or non-string inputs return `""`.
@@ -948,7 +1157,11 @@ export function buildDisplayFromContext(
     },
     trello: {
       apiKey: mask(ctx.trello.apiKey),
+      apiToken: mask(ctx.trello.apiToken),
       boardId: ctx.trello.boardId,
+      todoListId: ctx.trello.todoListId,
+      inProgressListId: ctx.trello.inProgressListId,
+      doneListId: ctx.trello.doneListId,
       configured: !!(ctx.trello.apiKey && ctx.trello.apiToken),
     },
     github: {

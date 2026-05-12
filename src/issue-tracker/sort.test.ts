@@ -138,7 +138,7 @@ describe("sortIssuesForStatus — priority bucket", () => {
     expect(a.priority).toBe(3.0);
   });
 
-  it("FIFO mtime tiebreak when ICE + priority equal", () => {
+  it("FIFO by numeric id ASC when ICE + priority equal — mtime ignored", () => {
     const a = mkIssue({ id: "ISS-1", iceTotal: 10, priority: 3.0 });
     const b = mkIssue({ id: "ISS-2", iceTotal: 10, priority: 3.0 });
     const c = mkIssue({ id: "ISS-3", iceTotal: 10, priority: 3.0 });
@@ -147,6 +147,7 @@ describe("sortIssuesForStatus — priority bucket", () => {
       [b.id, b],
       [c.id, c],
     ]);
+    // mtime intentionally inverted vs id order — id ASC wins.
     const out = sortInputsForStatus(
       asInputs([
         { issue: a, mtime: 300 },
@@ -156,7 +157,29 @@ describe("sortIssuesForStatus — priority bucket", () => {
       "ToDo",
       byId,
     );
-    expect(ids(out)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
+    expect(ids(out)).toEqual(["ISS-1", "ISS-2", "ISS-3"]);
+  });
+
+  it("FIFO id-numeric tiebreak handles multi-digit ids correctly (lexicographic would fail)", () => {
+    const a = mkIssue({ id: "ISS-9", iceTotal: 10 });
+    const b = mkIssue({ id: "ISS-10", iceTotal: 10 });
+    const c = mkIssue({ id: "ISS-100", iceTotal: 10 });
+    const byId = new Map<string, Issue>([
+      [a.id, a],
+      [b.id, b],
+      [c.id, c],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: c, mtime: 100 },
+        { issue: b, mtime: 100 },
+        { issue: a, mtime: 100 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    // 9 < 10 < 100 — id-numeric parser beats string localeCompare.
+    expect(ids(out)).toEqual(["ISS-9", "ISS-10", "ISS-100"]);
   });
 
   it("waiting_on / blocked tier — non-waiting cards before waiting/blocked", () => {
@@ -229,6 +252,7 @@ describe("sortIssuesForStatus — priority bucket", () => {
       [b.id, b],
       [c.id, c],
     ]);
+    // ISS-2 priority=4 wins, then ISS-1 + ISS-3 tied → id ASC: ISS-1 then ISS-3.
     const out = sortInputsForStatus(
       asInputs([
         { issue: a, mtime: 200 },
@@ -238,8 +262,8 @@ describe("sortIssuesForStatus — priority bucket", () => {
       "ToDo",
       byId,
     );
-    // b wins on priority; c beats a on FIFO at equal priority.
-    expect(ids(out)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
+    // b wins on priority; a beats c at equal priority via id ASC (1 < 3).
+    expect(ids(out)).toEqual(["ISS-2", "ISS-1", "ISS-3"]);
   });
 });
 
@@ -460,8 +484,8 @@ describe("sortIssuesForStatus — epic phase-order tier", () => {
       "ToDo",
       byId,
     );
-    // Different parents → phase-order not used → FIFO: older mtime first.
-    expect(ids(out)).toEqual(["ISS-21", "ISS-11"]);
+    // Different parents → phase-order not used → FIFO by id ASC.
+    expect(ids(out)).toEqual(["ISS-11", "ISS-21"]);
   });
 
   it("phase-order tier does NOT activate when parent is not type:Epic", () => {
@@ -482,8 +506,8 @@ describe("sortIssuesForStatus — epic phase-order tier", () => {
       "ToDo",
       byId,
     );
-    // Non-Epic parent → phase-order skipped → FIFO: older mtime first.
-    expect(ids(out)).toEqual(["ISS-12", "ISS-11"]);
+    // Non-Epic parent → phase-order skipped → FIFO by id ASC.
+    expect(ids(out)).toEqual(["ISS-11", "ISS-12"]);
   });
 
   it("phase missing from epic children[] sorts AFTER a present sibling (defensive)", () => {

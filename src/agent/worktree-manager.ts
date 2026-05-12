@@ -330,6 +330,23 @@ export function createWorktreeManager(
         return;
       }
 
+      // Orphan-dir self-heal. The idempotency check above only consults
+      // git's worktree registry; a directory can survive on disk without
+      // being registered (prior teardown that lost the registry entry but
+      // left the dir; a `.git` pointer baked with a stale absolute path
+      // from a different runtime; manual operator cleanup). `git worktree
+      // add` refuses with `fatal: '<path>' already exists`, which used to
+      // surface to the operator as a hard failure on `POST /api/agents`.
+      // Prune dangling registry entries and rm the dir so the add can
+      // proceed. Both ops are safe no-ops when there's nothing to clean.
+      if (existsSync(path)) {
+        log.warn(
+          `bootstrap(${agentName}): orphan dir at ${path} (on disk but not registered as a worktree) — pruning + removing before recreate`,
+        );
+        await runner.run(ctx.hostPath, ["worktree", "prune"]);
+        rmSync(path, { recursive: true, force: true });
+      }
+
       // No `git fetch` here. Worktree creation is a purely-local op:
       // `git worktree add -B name path origin/main` only needs the cached
       // local `refs/remotes/origin/main` to exist, which it does (host

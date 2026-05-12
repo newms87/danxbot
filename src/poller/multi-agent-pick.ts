@@ -267,7 +267,12 @@ export async function tryMultiAgentDispatch(
   };
 
   while (remainingCards.length > 0) {
-    const agent = pickFreeAgent({ roster, busy: pickerSkipSet(), now });
+    const agent = pickFreeAgent({
+      roster,
+      busy: pickerSkipSet(),
+      now,
+      repoName: repo.name,
+    });
     if (agent === null) break;
     const card = pickCardForAgent({
       cards: remainingCards,

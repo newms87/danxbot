@@ -1681,7 +1681,10 @@ describe("listIssues / readIssueDetail prefix-agnostic", () => {
     writeIssue(repo, "open", emptyIssue({ id: "ISS-1" }), 4_000);
     writeIssue(repo, "open", emptyIssue({ id: "DX-3" }), 2_000);
     const items = await listIssues(repo);
-    expect(items.map((i) => i.id)).toEqual(["DX-1", "DX-3", "DX-2", "ISS-1"]);
+    // FIFO by id-numeric ASC (mtime no longer tiebreaks). At numeric tie
+    // (DX-1 / ISS-1 both N=1) the localeCompare fallback breaks by prefix:
+    // "DX" < "ISS" → DX-1 first, ISS-1 second.
+    expect(items.map((i) => i.id)).toEqual(["DX-1", "ISS-1", "DX-2", "DX-3"]);
   });
 
   it("skips rogue ids in DB rows", async () => {

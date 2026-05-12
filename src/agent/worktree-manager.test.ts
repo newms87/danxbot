@@ -189,6 +189,56 @@ describe("WorktreeManager", () => {
       ).toBe(false);
     });
 
+    it("self-heals an orphan worktree dir (present on disk, not registered) by pruning + removing before `worktree add`", async () => {
+      // Repro for the operator-reported failure:
+      //   "Failed to bootstrap worktree for agent 'phil':
+      //    git worktree add failed: fatal: '.../worktrees/phil' already exists"
+      // The dir survived a prior teardown / runtime-path mismatch, so the
+      // worktree registry no longer lists it, but the directory + dangling
+      // `.git` pointer remain on disk. `git worktree add` refuses. Bootstrap
+      // must detect the orphan, prune dangling registry entries, rm the dir,
+      // then succeed.
+      const tmp = mkdtempSync(join(tmpdir(), "wm-orphan-"));
+      const orphanPath = join(tmp, ".danxbot", "worktrees", "alice");
+      mkdirSync(orphanPath, { recursive: true });
+      writeFileSync(
+        join(orphanPath, ".git"),
+        "gitdir: /nonexistent/.git/worktrees/alice\n",
+      );
+
+      const orphanCtx = makeRepoContext({ localPath: tmp, hostPath: tmp });
+      const runner = fakeRunner({
+        responses: [
+          { match: "worktree list --porcelain", response: { stdout: "" } },
+        ],
+      });
+      // Wrap `run` to snapshot whether the orphan dir still exists at the
+      // moment `git worktree add` would have been invoked — guards the
+      // ordering invariant (rm BEFORE add, never after).
+      const realRun = runner.run.bind(runner);
+      let orphanPresentAtAddTime: boolean | null = null;
+      runner.run = async (cwd, args) => {
+        if (args[0] === "worktree" && args[1] === "add") {
+          orphanPresentAtAddTime = existsSync(orphanPath);
+        }
+        return realRun(cwd, args);
+      };
+      const wm = createWorktreeManager(runner);
+
+      try {
+        await wm.bootstrap(orphanCtx, "alice");
+
+        expect(runner.calls.map((c) => c.args.join(" "))).toEqual([
+          "worktree list --porcelain",
+          "worktree prune",
+          `worktree add -B alice ${orphanPath} origin/main`,
+        ]);
+        expect(orphanPresentAtAddTime).toBe(false);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
     it("throws WorktreeError when `git worktree add` fails", async () => {
       const runner = fakeRunner({
         responses: [

@@ -320,6 +320,8 @@ describe("handlePostAgent", () => {
     expect(patch.agents.alice).toMatchObject({
       bio: "Engineer",
       capabilities: ["issue-worker", "slack"],
+      // DX-292 — every newly-created agent starts healthy.
+      broken: null,
     });
   });
 

@@ -433,6 +433,43 @@ export async function patchToggle(
   return res.json();
 }
 
+export interface TrelloCredentialPatch {
+  apiKey?: string;
+  apiToken?: string;
+}
+
+export interface TrelloCredentialResult {
+  updated: Array<"apiKey" | "apiToken">;
+  restartRequired: boolean;
+}
+
+/**
+ * PATCH /api/agents/:repo/trello-credentials — DX-303. Rotates the
+ * `DANX_TRELLO_API_KEY` / `DANX_TRELLO_API_TOKEN` entries in the repo's
+ * `.danxbot/.env`. Body MUST carry at least one of `apiKey` / `apiToken`;
+ * untouched fields are omitted so the request never accidentally
+ * overwrites the other credential. The server returns the list of fields
+ * actually rotated plus a `restartRequired` flag (the worker captures
+ * the RepoContext at boot, so a live swap is not yet wired). Errors
+ * surface as a `ToggleError` so the dashboard can render the server's
+ * `error` string inline.
+ */
+export async function patchTrelloCredentials(
+  repo: string,
+  patch: TrelloCredentialPatch,
+): Promise<TrelloCredentialResult> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/trello-credentials`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
 export interface IssuePrefixResult {
   prefix: string;
   migratedFiles: number;

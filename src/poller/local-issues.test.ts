@@ -523,18 +523,20 @@ describe("local-issues — DB-backed", () => {
     );
 
     it.skipIf(!handle)(
-      "falls back to FIFO mirror_updated_at within the same priority tier (untriaged)",
+      "falls back to id-numeric ASC FIFO within the same priority tier (untriaged) — mirror_updated_at no longer tiebreaks",
       async () => {
+        // Seed mtimes intentionally NOT in id order so we prove id wins.
         await seed(makeIssue({ id: "ISS-3", external_id: "c" }), 3000);
         await seed(makeIssue({ id: "ISS-1", external_id: "a" }), 1000);
         await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 2000);
         await seed(makeIssue({ id: "ISS-10", external_id: "d" }), 1000);
         const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        // Numeric id ASC: 1 < 2 < 3 < 10 (lexicographic would give 1, 10, 2, 3).
         expect(result.map((i) => i.id)).toEqual([
           "ISS-1",
-          "ISS-10",
           "ISS-2",
           "ISS-3",
+          "ISS-10",
         ]);
       },
     );
