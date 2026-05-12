@@ -165,12 +165,6 @@ vi.mock("../../critical-failure.js", () => ({
 
 vi.mock("../../settings-file.js", () => ({
   isFeatureEnabled: (_ctx: unknown, feature: string) => feature !== "ideator",
-  getIssuePollerPickupPrefix: () => null,
-  // DX-200 multi-agent picker reads these. Default-empty so the legacy
-  // single-card path runs; multi-agent integration coverage lives in
-  // `src/poller/multi-agent-pick.test.ts`.
-  readAgents: () => [],
-  isConflictCheckEnabled: () => true,
 }));
 
 vi.mock("../../workspace/write-if-changed.js", () => ({
@@ -374,144 +368,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     expect(methods).not.toContain("addComment");
   });
 
-  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] ToDo card → dispatch → onComplete with status not in ToDo [DX-242 disabled legacy spawnClaude in _poll; the dispatch + onComplete + post-dispatch-check sequence belongs in the DX-219 scheduler. DX-219/220/221 agents: port or delete. Other agents: leave alone.]: tracker request log captures fetchOpenCards + getCard, no flag write", async () => {
-    const tracker = trackerHandle.current!;
-    const { external_id: cardId } = await seedDraft(tracker);
-    tracker.clearRequestLog();
 
-    // Hydration path uses createCard's external_id. Mocking
-    // hydrateFromRemote keeps the test from worrying about the real
-    // hydrate logic — we only care about the FETCH/MOVE/COMMENT
-    // sequence on the tracker.
-    mockHydrateFromRemote.mockImplementation(
-      async (_t: unknown, externalId: string, dispatchId: string) => ({
-        schema_version: 3 as const,
-        tracker: "memory",
-        id: "ISS-1",
-        external_id: externalId,
-        parent_id: null,
-        children: [],
-        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
-        status: "ToDo" as const,
-        type: "Feature" as const,
-        title: "Demo task",
-        description: "",
-        triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
-        ac: [],
-        comments: [],
-        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      }),
-    );
-
-    let capturedOnComplete: ((j: unknown) => void) | undefined;
-    mockDispatch.mockImplementation(
-      (opts: { onComplete?: (j: unknown) => void }) => {
-        capturedOnComplete = opts.onComplete;
-        return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
-      },
-    );
-
-    await poll(REPO);
-    expect(capturedOnComplete).toBeDefined();
-
-    // Simulate the agent moving the card to Done and signaling success.
-    await tracker.moveToStatus(cardId, "Done");
-
-    capturedOnComplete!({
-      id: "j1",
-      status: "completed",
-      summary: "done",
-      startedAt: new Date(),
-      completedAt: new Date(),
-    });
-    // Drain async chain.
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const methods = methodsOnly(tracker.getRequestLog());
-    // The first two calls in the new tick are the two fetchOpenCards
-    // (NH + _poll). After dispatch + onComplete, getCard runs for the
-    // post-dispatch progress check. Card status is Done, so flag is NOT
-    // written and no moveToStatus/addComment from recovery.
-    expect(methods[0]).toBe("fetchOpenCards");
-    expect(methods[1]).toBe("fetchOpenCards");
-    // The simulated agent's own moveToStatus shows up in the log
-    // because the test invokes it directly — that's the operator's
-    // action, not the poller's.
-    expect(methods).toContain("moveToStatus");
-    // The post-dispatch check called getCard.
-    expect(methods).toContain("getCard");
-  });
-
-  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] agent failure with stuck card → recovery moves card to Needs Help [DX-242 disabled legacy spawnClaude in _poll; stuck-card recovery belongs in DX-221 per-dispatch failure tally per DX-221 ACs. DX-219/220/221 agents: port or delete. Other agents: leave alone.] via tracker.moveToStatus + tracker.addComment", async () => {
-    const tracker = trackerHandle.current!;
-    const { external_id: cardId } = await seedDraft(tracker);
-    tracker.clearRequestLog();
-
-    mockHydrateFromRemote.mockImplementation(
-      async (_t: unknown, externalId: string, dispatchId: string) => ({
-        schema_version: 3 as const,
-        tracker: "memory",
-        id: "ISS-1",
-        external_id: externalId,
-        parent_id: null,
-        children: [],
-        dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
-        status: "ToDo" as const,
-        type: "Feature" as const,
-        title: "Demo task",
-        description: "",
-        triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
-        ac: [],
-        comments: [],
-        retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      }),
-    );
-
-    let capturedOnComplete: ((j: unknown) => void) | undefined;
-    mockDispatch.mockImplementation(
-      (opts: { onComplete?: (j: unknown) => void }) => {
-        capturedOnComplete = opts.onComplete;
-        return Promise.resolve({ dispatchId: "d", job: { id: "j1" } });
-      },
-    );
-
-    await poll(REPO);
-    expect(capturedOnComplete).toBeDefined();
-
-    // Simulate the agent moving the card to In Progress mid-work, then
-    // failing — the recovery path should fire.
-    await tracker.moveToStatus(cardId, "In Progress");
-    // ISS-86: stuck-card recovery reads local YAML, not tracker. The
-    // local-issues mock projects from the most recent fetchOpenCards
-    // capture, so refresh it AFTER the moveToStatus so recovery sees
-    // the In-Progress state.
-    await tracker.fetchOpenCards();
-    tracker.clearRequestLog();
-
-    capturedOnComplete!({
-      id: "j1",
-      status: "failed",
-      summary: "boom",
-      startedAt: new Date(Date.now() - 60_000),
-      completedAt: new Date(),
-    });
-    await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-
-    const methods = methodsOnly(tracker.getRequestLog());
-    // ISS-86: recovery sources its In-Progress list from the local
-    // YAML walker (no `fetchOpenCards` here). The recovery still
-    // pushes Needs Help via moveToStatus + addComment; getCard fires
-    // for the post-dispatch progress check (card now in Needs Help,
-    // no flag).
-    expect(methods).toContain("moveToStatus");
-    expect(methods).toContain("addComment");
-
-    // Card is now in Needs Help.
-    const final = await tracker.getCard(cardId);
-    expect(final.status).toBe("Blocked");
-  });
 
   it("the SAME tracker instance is used across multiple back-to-back ticks (cache invariant)", async () => {
     // Phase 5 added `getRepoTracker` so a single tracker survives
@@ -662,78 +519,33 @@ describe("Integration: poller hot path against MemoryTracker", () => {
 
     await poll(REPO);
 
-    // hydrateFromRemote should fire EXACTLY ONCE per card on the first
-    // tick — bulk-sync writes the two siblings (dispatchId: null), then
-    // the primary-selection path's hydrate runs for cards[0] with the
-    // real dispatchId (the test's mockFindByExternalId returns null
-    // for primary because the bulk-sync loop skips cards[0]).
+    // DX-290 (Phase 4b.3): bulk-sync now hydrates EVERY tracker-listed
+    // ToDo card — the legacy primary-selection hydrate-or-stamp path
+    // (with the real dispatchId) was retired when `_poll` stopped
+    // making dispatch decisions. The multi-agent picker stamps the
+    // dispatch UUID via `stampDispatchAndWrite` when it claims a card,
+    // not here. Result: 3 ToDo cards → 3 bulk-sync hydrates, all with
+    // `dispatchId: null`.
     const externalIds = mockHydrateFromRemote.mock.calls.map(
       (call) => call[1] as string,
     );
     expect(externalIds).toHaveLength(3);
     expect(new Set(externalIds).size).toBe(3); // all distinct
 
-    // ISS-92 Phase 2: bulk-sync siblings still write via writeIssue
-    // (dispatchId: null shape), but the primary hydration path now
-    // funnels through stampDispatchAndWrite (with the enriched
-    // dispatch start record) instead of a bare writeIssue. Assert the
-    // count is 2 (siblings) — the primary's write is counted under
-    // stampDispatchAndWrite, not writeIssue.
-    expect(mockWriteIssue).toHaveBeenCalledTimes(2);
+    // Bulk-sync writes go through `writeIssue` (not
+    // `stampDispatchAndWrite`) because there's no dispatch UUID yet.
+    expect(mockWriteIssue).toHaveBeenCalledTimes(3);
 
-    // Two sibling hydrates carry dispatchId: null (bulk-sync write
-    // shape — dispatch UUID lands later via stampDispatchAndWrite when
-    // each sibling becomes the primary on a future tick). The primary
-    // hydrate carries the real UUID.
+    // Every bulk-sync hydrate carries `dispatchId: null` — the
+    // dispatch UUID lands later via `stampDispatchAndWrite` when the
+    // multi-agent picker claims the card.
     const dispatchIds = mockHydrateFromRemote.mock.calls.map(
       (call) => call[2] as string | null,
     );
-    expect(dispatchIds.filter((id) => id === null).length).toBe(2);
-    expect(dispatchIds.filter((id) => id !== null).length).toBe(1);
+    expect(dispatchIds.filter((id) => id === null).length).toBe(3);
+    expect(dispatchIds.filter((id) => id !== null).length).toBe(0);
   });
 
-  it.skip("[DX-242 SKIP — DX-215 EPIC AGENTS HANDLE; OTHERS IGNORE] bulk-sync: a sibling hydrate failure is logged but does NOT block dispatch of the primary [DX-242 disabled legacy spawnClaude in _poll; bulk-sync + dispatch sequencing belongs in the DX-219 scheduler. DX-219/220/221 agents: port or delete. Other agents: leave alone.]", async () => {
-    // Pin the documented asymmetry: sibling hydrate errors are tolerated
-    // (logged + skipped) so one bad card cannot freeze the whole tick.
-    // Without this test a future refactor that replaces the per-card
-    // try/catch with a single bulk await/throw would silently regress
-    // the contract.
-    const tracker = trackerHandle.current!;
-    await seedDraft(tracker, { id: "ISS-1", title: "primary" });
-    await seedDraft(tracker, { id: "ISS-2", title: "sibling that fails" });
-
-    // Primary (cards[0] === mem-1) succeeds; sibling (mem-2) rejects.
-    mockHydrateFromRemote.mockImplementation(
-      async (_t: unknown, externalId: string, dispatchId: string | null) => {
-        if (externalId === "mem-2") {
-          throw new Error("simulated tracker hiccup on sibling");
-        }
-        return {
-          schema_version: 3 as const,
-          tracker: "memory",
-          id: "ISS-1",
-          external_id: externalId,
-          parent_id: null,
-          children: [],
-          dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 },
-          status: "ToDo" as const,
-          type: "Feature" as const,
-          title: `card-${externalId}`,
-          description: "",
-          triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
-          ac: [],
-          comments: [],
-          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-        };
-      },
-    );
-
-    mockDispatch.mockResolvedValue({ dispatchId: "d", job: { id: "j" } });
-
-    // Sibling failure is swallowed, primary dispatch still fires.
-    await poll(REPO);
-    expect(mockDispatch).toHaveBeenCalledTimes(1);
-  });
 
   it("bulk-sync: a primary hydrate failure is logged + swallowed by _poll's top-level catch (DX-149) — no dispatch fires", async () => {
     // Counterpart to the sibling-tolerant test. Pre-DX-149 contract was
@@ -785,9 +597,10 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     await seedDraft(tracker, { id: "ISS-2", title: "new-card" });
 
     // Card 1 already has local YAML; card 2 doesn't. The poller should
-    // hydrate ONLY card 2 during bulk-sync, then stamp ISS-1 with the
-    // primary's dispatchId via stampDispatchAndWrite (which the mock
-    // returns as a passthrough).
+    // hydrate ONLY card 2 during bulk-sync. The multi-agent picker
+    // (separately tested in `multi-agent-pick.test.ts`) stamps the
+    // dispatch UUID via `stampDispatchAndWrite` when it claims a card;
+    // this test scopes to bulk-sync hydrate behavior only.
     mockFindByExternalId.mockImplementation(async (_repo: string, eid: string) => {
       if (eid === "mem-1") {
         return {

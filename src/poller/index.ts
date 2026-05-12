@@ -11,18 +11,10 @@ import {
   symlinkSync,
   rmSync,
 } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { config, targetName } from "../config.js";
+import { config } from "../config.js";
 import { repoContexts } from "../repo-context.js";
-import {
-  REVIEW_MIN_CARDS,
-  TEAM_PROMPT,
-  TEAM_PROMPT_RESUME,
-  IDEATOR_PROMPT,
-  TRIAGE_CARD_PROMPT,
-} from "./constants.js";
 import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 import {
   clearDispatchAndWrite,
@@ -30,27 +22,28 @@ import {
   ensureIssuesDirs,
   findByExternalId,
   hydrateFromRemote,
-  issuePath,
   loadLocal,
-  stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
-import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
-import { createIssueTracker, TrelloTracker } from "../issue-tracker/index.js";
+import { createIssueTracker } from "../issue-tracker/index.js";
 import type {
   Issue,
   IssueRef,
   IssueTracker,
 } from "../issue-tracker/interface.js";
-// DX-241: legacy `_poll` lock acquisition removed (orphan-lock failure
-// mode #1). The lock is now acquired by `tryMultiAgentDispatch` and
-// released by `dispatch()`'s onComplete chain via `lockRelease`.
+// DX-290 (Event-Driven Worker Phase 4b.3) retired every legacy
+// dispatch-decision path from `_poll`. The lock acquisition lives
+// inside `src/poller/multi-agent-pick.ts` (scheduled via the scheduler's
+// `runPicker` callback registered at `src/index.ts` boot). The triage
+// timer + TTL timer (DX-289) replaced the per-tick triage walk +
+// `evictDeadDispatches` walk. `tryResumeOrphan`, `tryTriageDispatch`,
+// `checkAndSpawnIdeator`, `recoverStuckCards`, and the entire legacy
+// `spawnClaude` path are gone. The `_poll` body is now sync + audit
+// only — Phase 5 (DX-220) trims further and renames the module.
 import { parseSimpleYaml } from "./parse-yaml.js";
 import { renderRepoConfigMarkdown } from "./repo-config-rule.js";
 import { writeIfChanged } from "../workspace/write-if-changed.js";
 import { createLogger } from "../logger.js";
-import { dispatch, getActiveJob } from "../dispatch/core.js";
-import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
 import { scrubLegacyTrelloWorkerSymlink } from "./legacy-trello-worker-scrub.js";
 import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 // DX-218 (Event-Driven Worker Phase 3): the per-tick orphan push was
@@ -71,153 +64,73 @@ import { injectDanxIssueMcp } from "./inject/inject-root-mcp.js";
 // `reconcileIssue` on every open YAML.
 import { healExternalIds } from "./heal-external-id.js";
 import { runInvariantHeal } from "./heal.js";
-import {
-  listDispatchableYamls,
-  listInProgressYamls,
-  listTriageDueYamls,
-} from "./local-issues.js";
 import { isLinkOrFile, isSymlink } from "./fs-probe.js";
-import type { AgentJob } from "../agent/launcher.js";
 import type { RepoContext } from "../types.js";
-import {
-  getIssuePollerPickupPrefix,
-  isFeatureEnabled,
-} from "../settings-file.js";
-import { readFlag, writeFlag } from "../critical-failure.js";
-import type {
-  DispatchTriggerMetadata,
-  TrelloTriggerMetadata,
-} from "../dashboard/dispatches.js";
-import { findNonTerminalDispatches } from "../dashboard/dispatches-db.js";
+import { isFeatureEnabled } from "../settings-file.js";
+import { readFlag } from "../critical-failure.js";
 import { isPidAlive } from "../agent/host-pid.js";
 import { reapOrphans } from "../worker/process-scan.js";
-import { hasLiveDispatchForCard as hasLiveDispatchForCardImpl } from "./live-dispatch-guard.js";
 import { hostname as osHostname } from "node:os";
-import type { IssueDispatch } from "../issue-tracker/interface.js";
-import { buildStartStamp } from "./dispatch-liveness-yaml.js";
 import { buildReattachPlan } from "./dispatch-reattach.js";
-import { tryMultiAgentDispatch } from "./multi-agent-pick.js";
-import {
-  runPostDispatchProgressCheck,
-  runWithPickerMutex,
-} from "../dispatch/scheduler.js";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 const log = createLogger("poller");
 
 /**
- * Project a local-YAML `Issue` into the `IssueRef` shape the dispatch
- * pipeline downstream consumes.
+ * Per-repo poller state.
+ *
+ * DX-290 slimmed this from the legacy seven-field shape to a re-entrancy
+ * guard plus the timer handle. The legacy fields — `teamRunning`,
+ * `consecutiveFailures`, `backoffUntil`, `priorTodoCardIds`,
+ * `trackedCardId`, `triageTracked` — all served the single-fork
+ * `spawnClaude` dispatch path that DX-290 retired. The multi-agent
+ * dispatch path (`src/poller/multi-agent-pick.ts`, scheduled via
+ * `src/dispatch/scheduler.ts`) tracks per-dispatch state inside
+ * `dispatch()` itself; the post-dispatch "card didn't move" check lives
+ * in `runPostDispatchProgressCheck`; per-card / per-dispatch backoff is
+ * an out-of-scope follow-up.
  */
-function localIssueToRef(issue: Issue): IssueRef {
-  return {
-    id: issue.id,
-    external_id: issue.external_id,
-    title: issue.title,
-    status: issue.status,
-  };
-}
-
-/** Per-repo poller state */
 interface RepoPollerState {
-  teamRunning: boolean;
   polling: boolean;
   intervalId: ReturnType<typeof setInterval> | null;
-  consecutiveFailures: number;
-  backoffUntil: number;
-  priorTodoCardIds: string[];
-  /**
-   * The Trello card the current dispatch targets. Set in `spawnClaude`
-   * when the trigger is "trello" (null for ideator/api dispatches); read
-   * by the post-dispatch "did the card move?" check in
-   * `handleAgentCompletion`. Cleared by `cleanupAfterAgent` so stale
-   * state from a prior run can't trip the check on the next dispatch.
-   * Card URL is reconstructed from cardId when the flag is written —
-   * don't duplicate it in state.
-   */
-  trackedCardId: string | null;
-  /**
-   * The triage card the current dispatch targets, paired with the
-   * dispatch's `started_at` for the "did triage advance?" check in
-   * `handleAgentCompletion`. Set in `tryTriageDispatch` BEFORE
-   * `spawnClaude` so the onComplete handler sees it; cleared by
-   * `cleanupAfterAgent`. Distinct from `trackedCardId` because triage
-   * dispatches use `trigger: "api"` and the card never moves out of its
-   * source list — the progress signal is the local YAML's
-   * `triage.expires_at` advancing past `started_at`. Without this
-   * guard, a triage agent that signals `completed` without saving the
-   * YAML produces a token-burn loop (the same broken agent gets
-   * dispatched against the same card every interval). See ISS-104.
-   */
-  triageTracked: { id: string; startedAt: string } | null;
 }
 
 const repoState = new Map<string, RepoPollerState>();
 
 /**
- * Per-repo in-memory mirror of every YAML's non-null `dispatch{}` block
- * — keyed by issue id (`ISS-N`). Populated by the boot reattach pass
- * (`runStartupReattach`) and refreshed per-tick by `evictDeadDispatches`.
+ * Boot reattach pass (ISS-92 Phase 2; DX-290 slimming).
  *
- * The single source of truth is the on-disk YAML — this map is a fast
- * lookup for "is this card occupied". Every entry's `dispatch` value
- * must mirror the YAML's `dispatch` block at the time of write; any
- * mutation to either side updates the other in the same code path.
+ * Runs once per worker startup before the polling interval registers.
+ * Walks every open YAML's `dispatch{}` block and clears the ones whose
+ * PID/host is dead so a worker that crashed mid-dispatch doesn't leave
+ * the on-disk record pointing at a process that no longer exists. Alive
+ * dispatches are logged and otherwise left alone — the per-dispatch TTL
+ * timer (`src/dispatch/ttl-timer.ts`) takes over once `dispatch()`
+ * stamps them; pre-existing alive PIDs from before this worker booted
+ * are observed via the multi-agent path's `guardLiveDispatchForCard`
+ * pre-claim check.
  *
- * ISS-92 (Phase 2 of the poller-triage rework). The companion DB-side
- * guard `hasLiveDispatchForCard` (ISS-69) keys off the dispatches table
- * and remains for the pre-claim path; this map keys off the YAML and
- * drives the reattach + per-tick scan.
+ * Cross-host verdicts on a local-only deploy are treated as cleared.
+ * Tolerates malformed YAMLs (logs + skips) so a single corrupt file
+ * cannot halt the boot phase.
+ *
+ * DX-290 retired the in-memory `activeDispatches` mirror this function
+ * used to populate — every consumer (per-tick `evictDeadDispatches`,
+ * `_poll`'s YAML-based pre-claim guard, `tryResumeOrphan`) went away
+ * with the legacy dispatch decision block.
  */
-const activeDispatches = new Map<string, Map<string, IssueDispatch>>();
-
-function getActiveDispatches(
-  repoName: string,
-): Map<string, IssueDispatch> {
-  let map = activeDispatches.get(repoName);
-  if (!map) {
-    map = new Map();
-    activeDispatches.set(repoName, map);
-  }
-  return map;
-}
-
-/**
- * Test-only accessor — returns the per-repo `activeDispatches` map so
- * tests can assert on the in-memory mirror without exporting the
- * top-level Map (which would let production code mutate it).
- */
-export function _getActiveDispatchesForTesting(
-  repoName: string,
-): ReadonlyMap<string, IssueDispatch> {
-  return getActiveDispatches(repoName);
-}
-
-/**
- * Walk every open YAML in `<repo>/.danxbot/issues/open/` and collect
- * the ones with a non-null `dispatch{}` block. Used by the boot
- * reattach pass; tolerates malformed files (logs + skips) so a single
- * corrupt YAML doesn't halt the boot phase.
- */
-async function readOpenIssuesWithDispatch(
-  repo: RepoContext,
-): Promise<Issue[]> {
+export async function runStartupReattach(repo: RepoContext): Promise<void> {
   const dir = resolve(repo.localPath, ".danxbot", "issues", "open");
-  if (!existsSync(dir)) return [];
-  const out: Issue[] = [];
+  if (!existsSync(dir)) return;
+  const issues: Issue[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".yml")) continue;
     const stem = entry.slice(0, -".yml".length);
     try {
-      // `loadLocal` is DB-backed since DX-155 — by the time this runs,
-      // the issues mirror's boot scan has already populated the DB
-      // from disk (started before the poller in `src/index.ts`).
-      // Tolerates malformed YAMLs by logging + skipping so a single
-      // corrupt file doesn't halt the boot phase.
       const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
       if (issue && issue.dispatch !== null) {
-        out.push(issue);
+        issues.push(issue);
       }
     } catch (err) {
       log.warn(
@@ -227,28 +140,6 @@ async function readOpenIssuesWithDispatch(
       );
     }
   }
-  return out;
-}
-
-/**
- * Boot reattach pass (ISS-92, Phase 2). Runs once per worker startup,
- * BEFORE the polling interval registers. Walks every open YAML, asks
- * `buildReattachPlan` to partition by liveness, then:
- *
- *   - alive → register in `activeDispatches`. Skips redispatch on the
- *     first tick (the per-tick `evictDeadDispatches` will re-verify).
- *   - cleared → write `dispatch: null` on the YAML and skip the in-
- *     memory entry entirely. The card stays where it is on disk
- *     (status unchanged) — the regular dispatch / orphan-resume paths
- *     pick it back up on the first poll.
- *
- * Cross-host verdicts on a local-only deploy are treated as cleared
- * (operator intervention via the dashboard's Agents tab); the
- * verdict.kind is logged so a future multi-host extension knows
- * exactly which entries it would need to probe.
- */
-export async function runStartupReattach(repo: RepoContext): Promise<void> {
-  const issues = await readOpenIssuesWithDispatch(repo);
   if (issues.length === 0) return;
 
   const plan = buildReattachPlan(issues, {
@@ -257,12 +148,9 @@ export async function runStartupReattach(repo: RepoContext): Promise<void> {
     isPidAlive,
   });
 
-  const map = getActiveDispatches(repo.name);
-
   for (const action of plan.alive) {
-    map.set(action.issue.id, action.issue.dispatch!);
     log.info(
-      `[${repo.name}] reattach: ${action.issue.id} alive (pid=${action.issue.dispatch!.pid}, dispatch=${action.issue.dispatch!.id}) — registered`,
+      `[${repo.name}] reattach: ${action.issue.id} alive (pid=${action.issue.dispatch!.pid}, dispatch=${action.issue.dispatch!.id}) — left in place`,
     );
   }
 
@@ -271,112 +159,17 @@ export async function runStartupReattach(repo: RepoContext): Promise<void> {
       `[${repo.name}] reattach: clearing ${action.issue.id} (verdict=${action.verdict.kind}, dispatch=${action.issue.dispatch!.id})`,
     );
     try {
-      // Sync phase (writeFileSync) throws here; the trailing mirror-
-      // ack Promise is fire-and-forget — the mirror's CRITICAL_FAILURE
-      // path covers DB-side failures, no per-call retry needed.
-      void clearDispatchAndWrite(repo.localPath, action.issue).catch(
-        (err) =>
-          log.warn(
-            `[${repo.name}] reattach: clearDispatch mirror ack failed for ${action.issue.id}`,
-            err,
-          ),
+      void clearDispatchAndWrite(repo.localPath, action.issue).catch((err) =>
+        log.warn(
+          `[${repo.name}] reattach: clearDispatch mirror ack failed for ${action.issue.id}`,
+          err,
+        ),
       );
     } catch (err) {
       log.error(
         `[${repo.name}] reattach: clearDispatch failed for ${action.issue.id}`,
         err,
       );
-    }
-    map.delete(action.issue.id);
-  }
-}
-
-/**
- * Per-tick liveness scan (ISS-92, Phase 2). Re-runs the same liveness
- * verdict against every in-memory `activeDispatches` entry and evicts
- * any whose verdict !== alive. Eviction clears `dispatch: null` on the
- * YAML in addition to dropping the in-memory entry.
- *
- * Reads the YAML at eviction time (not the in-memory copy) so that
- * any field the agent updated mid-session (status flips, AC ticks)
- * survives the clear. Concurrent dispatches that wrote a fresh
- * `dispatch{}` block on the same YAML between reattach and now would
- * normally be safe — `clearDispatchAndWrite` reads-then-writes, so a
- * stamp written after this read but before this write would be
- * overwritten. In practice the poller never has two dispatches on the
- * same card simultaneously (single-dispatch-per-tick invariant), so
- * the read-modify-write race window is empty.
- */
-export async function evictDeadDispatches(repo: RepoContext): Promise<void> {
-  const map = getActiveDispatches(repo.name);
-  if (map.size === 0) return;
-
-  const currentHost = osHostname();
-  const now = Date.now();
-
-  for (const [issueId, dispatchBlock] of map) {
-    const plan = buildReattachPlan(
-      [
-        // Synthetic single-issue input — buildReattachPlan only reads
-        // `issue.dispatch`. Keeps the verdict logic in one place
-        // without forcing the per-tick scan to re-load every YAML.
-        {
-          schema_version: 7,
-          tracker: "memory",
-          id: issueId,
-          external_id: "",
-          parent_id: null,
-          children: [],
-          dispatch: dispatchBlock,
-          status: "In Progress",
-          type: "Feature",
-          title: issueId,
-          description: "",
-          priority: 3.0,
-          position: null,
-          triage: {
-            expires_at: "",
-            reassess_hint: "",
-            last_status: "",
-            last_explain: "",
-            ice: { total: 0, i: 0, c: 0, e: 0 },
-            history: [],
-          },
-          ac: [],
-          comments: [],
-          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-          assigned_agent: null,
-          waiting_on: null,
-          blocked: null,
-          requires_human: null,
-          conflict_on: [],
-          history: [],
-        } as Issue,
-      ],
-      { currentHost, now, isPidAlive },
-    );
-
-    for (const action of plan.cleared) {
-      log.warn(
-        `[${repo.name}] liveness: evicting ${issueId} (verdict=${action.verdict.kind}, dispatch=${dispatchBlock.id})`,
-      );
-      const issue = await loadLocal(repo.localPath, issueId, repo.issuePrefix);
-      if (issue) {
-        try {
-          void clearDispatchAndWrite(repo.localPath, issue).catch((err) =>
-            log.warn(
-              `[${repo.name}] liveness: clearDispatch mirror ack failed for ${issueId}`,
-              err,
-            ),
-          );
-        } catch (err) {
-          log.error(
-            `[${repo.name}] liveness: clearDispatch failed for ${issueId}`,
-            err,
-          );
-        }
-      }
-      map.delete(issueId);
     }
   }
 }
@@ -385,14 +178,8 @@ function getState(repoName: string): RepoPollerState {
   let state = repoState.get(repoName);
   if (!state) {
     state = {
-      teamRunning: false,
       polling: false,
       intervalId: null,
-      consecutiveFailures: 0,
-      backoffUntil: 0,
-      priorTodoCardIds: [],
-      trackedCardId: null,
-      triageTracked: null,
     };
     repoState.set(repoName, state);
   }
@@ -482,7 +269,7 @@ async function checkNeedsHelp(
 
 export async function poll(repo: RepoContext): Promise<void> {
   const state = getState(repo.name);
-  if (state.teamRunning || state.polling) {
+  if (state.polling) {
     return;
   }
 
@@ -508,23 +295,6 @@ export async function poll(repo: RepoContext): Promise<void> {
   if (flag) {
     log.warn(
       `[${repo.name}] poller halted — critical-failure flag present (source=${flag.source}, dispatch=${flag.dispatchId}): ${flag.reason}`,
-    );
-    // Halt is a stronger signal than backoff. If we're halted because
-    // of a run that also tripped backoff, clear that state so when the
-    // operator clears the flag the poller resumes on the very next
-    // tick — no leftover "In backoff" log from a dispatch whose real
-    // failure mode is now being tracked by the flag file.
-    state.consecutiveFailures = 0;
-    state.backoffUntil = 0;
-    return;
-  }
-
-  if (Date.now() < state.backoffUntil) {
-    const remainingSeconds = Math.round(
-      (state.backoffUntil - Date.now()) / 1000,
-    );
-    log.info(
-      `[${repo.name}] In backoff — ${remainingSeconds}s remaining (${state.consecutiveFailures} consecutive failures)`,
     );
     return;
   }
@@ -620,16 +390,11 @@ async function _poll(repo: RepoContext): Promise<void> {
   // exhaustion is registered per-repo via
   // `setRetryQueueSystemErrorHookForRepo` in `src/index.ts`.
 
-  // YAML-driven liveness scan (ISS-92, Phase 2). Walks the in-memory
-  // `activeDispatches` mirror, re-checks every entry, and evicts any
-  // whose verdict turned dead/expired/cross-host. The YAML's
-  // `dispatch{}` is also cleared on disk so the next tick (or a
-  // restart) doesn't have to re-discover the same dead entry. Cheap:
-  // the map is per-repo and tracks only currently-dispatched cards
-  // (typically 0–1 entries). Runs BEFORE the tracker fetch so the
-  // ToDo dispatch path can immediately re-claim a card whose previous
-  // dispatch just died.
-  await evictDeadDispatches(repo);
+  // DX-290 (Event-Driven Worker Phase 4b.3): the per-tick
+  // `evictDeadDispatches` walk is gone. Per-dispatch TTL timers in
+  // `src/dispatch/ttl-timer.ts` (DX-289) handle dead-dispatch eviction
+  // event-driven — when the TTL expires the timer probes liveness and
+  // (on dead PID) clears the YAML's `dispatch{}` block via reconcile.
 
   // Phase 3 (DX-142) — process-table orphan scan. The DB-driven
   // reattach pass at boot + the YAML-driven `evictDeadDispatches`
@@ -708,9 +473,10 @@ async function _poll(repo: RepoContext): Promise<void> {
   // below exist solely to drive the inbound mirror
   // (`bulkSyncMissingYamls`). DX-218 retired the per-tick orphan-push
   // pass; outbound (YAML → tracker) pushes are now reconcile step 7's
-  // job. The dispatch + stuck-card scan switch to listDispatchableYamls
-  // / listInProgressYamls / listTriageDueYamls AFTER the inbound mirror
-  // runs.
+  // job. DX-290 retired the dispatch + stuck-card scan from this body
+  // entirely; the scheduler's `runPicker` callback (registered in
+  // `src/index.ts`) reads `listDispatchableYamls` /
+  // `listInProgressYamls` itself on each event-driven pick.
   //
   // Cards on the Trello Action Items list surface with
   // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are
@@ -725,27 +491,28 @@ async function _poll(repo: RepoContext): Promise<void> {
     (c) => c.status === "Blocked",
   );
 
-  // Bulk-sync every triage-eligible card that lacks a local YAML so
-  // the per-card triage agent has a YAML to load via
-  // `mcp__danx-issue__danx_issue_get`. Coverage:
-  //   - Every dispatchable ToDo sibling (`slice(1)` — the primary has
-  //     its own dedicated hydrate-or-stamp path that THROWS on hydrate
-  //     failure).
+  // Bulk-sync every tracker-listed card that lacks a local YAML so the
+  // multi-agent dispatch path (`src/poller/multi-agent-pick.ts`,
+  // scheduled via the scheduler's `runPicker` callback) and the per-
+  // card triage agent each have a YAML to read. Coverage:
+  //   - Every ToDo card (DX-290: previously the primary was sliced off
+  //     because the legacy single-card path had its own dedicated
+  //     hydrate-or-stamp pipeline that took the primary directly; that
+  //     pipeline is gone, so we hydrate the whole bucket here).
   //   - Every In Progress card (closes the gap where a worker died
-  //     before writing the YAML; the orphan-resume scan below depends
-  //     on a local YAML existing).
+  //     before writing the YAML).
   //   - Every Review card (so the per-card triage agent can read it
   //     locally) — Phase 4 of ISS-90 added this branch when the
   //     Action Items list collapsed into `status: "Review"`.
   //   - Every Needs Help card (same reason as Review — the triage
   //     agent's Hard Gate audit needs the local YAML).
   // Bulk-sync writes carry `dispatch: null`; the dispatch primary's
-  // record is stamped via `stampDispatchAndWrite` later, and an
-  // In Progress orphan keeps its existing `dispatch` because
+  // record is stamped by `stampDispatchAndWrite` inside the multi-agent
+  // picker. An In Progress orphan keeps its existing `dispatch` because
   // `findByExternalId` short-circuits hydration when the YAML already
   // exists.
   await bulkSyncMissingYamls(repo, tracker, [
-    ...trackerToDoRefs.slice(1),
+    ...trackerToDoRefs,
     ...trackerInProgressRefs,
     ...trackerReviewRefs,
     ...trackerNeedsHelpRefs,
@@ -772,313 +539,27 @@ async function _poll(repo: RepoContext): Promise<void> {
   // `(dispatch !== null) === (assigned_agent !== null)` when the
   // underlying dispatch (if any) is verifiably dead. Catches both XOR
   // directions in one pass; the liveness gate inside the scan protects
-  // in-flight paired-writes. Runs BEFORE `listDispatchableYamls` so
-  // orphans cleared this tick re-enter the dispatchable pool on the
-  // SAME tick rather than waiting another poll interval. Same scan
-  // runs once at boot (`src/index.ts`) for pre-fix-bug residue.
+  // in-flight paired-writes. Cleared orphans surface back to the
+  // scheduler's `runPicker` callback in `src/index.ts` via the chokidar
+  // → reconcile → `onReconcileResult` event chain on the same tick.
+  // Same scan runs once at boot (`src/index.ts`) for pre-fix-bug residue.
   await runInvariantHeal(repo, "per-tick");
 
-  // ISS-86: dispatch source is local YAML, not the tracker fetch above.
-  // Phase 4 of ISS-90 dropped the `excludeExternalIds` filter — Action
-  // Items list cards now hydrate as `status: "Review"` (see
-  // `trello.ts#listIdToStatus`), so the existing `status === "ToDo"`
-  // filter inside `listDispatchableYamls` naturally excludes them.
-  // Capture the full Issue payloads BEFORE projecting to IssueRef so
-  // the multi-agent picker (DX-200) can read `assigned_agent` /
-  // description / ac without re-loading from the DB. The legacy
-  // single-card path below uses the IssueRef projection.
-  const dispatchableIssues = await listDispatchableYamls(
-    repo.localPath,
-    repo.issuePrefix,
-  );
-  const inProgressIssues = await listInProgressYamls(
-    repo.localPath,
-    repo.issuePrefix,
-  );
-  let cards: IssueRef[] = dispatchableIssues.map(localIssueToRef);
-  const inProgressCards: IssueRef[] = inProgressIssues.map(localIssueToRef);
-
-  // Orphan-resume check. Runs BEFORE the ToDo dispatch path so a
-  // worker that died mid-dispatch can resume its prior session
-  // instead of leaving the card parked in In Progress forever. If a
-  // resume fires, the tick exits early — single-dispatch invariant.
-  // If an orphan's session file is gone, the scan resets the card to
-  // ToDo on both the YAML and the tracker; the returned
-  // `resetToToDo` refs are folded back into `cards` so this tick
-  // dispatches them rather than waiting a full poll interval.
-  const orphanScan = await tryResumeOrphan(repo, tracker, inProgressCards);
-  if (orphanScan.resumed) {
-    return;
-  }
-  if (orphanScan.resetToToDo.length > 0) {
-    cards = [...cards, ...orphanScan.resetToToDo];
-  }
-
-  // Optional pickup-name-prefix filter from per-repo settings. When set,
-  // ONLY cards whose name starts with the prefix are eligible for
-  // dispatch — pre-existing real ToDo cards are left untouched on this
-  // tick. Used by the system-test harness for race-free isolation
-  // (Trello `IleofrBj`); operators can also use it to temporarily limit
-  // the poller to one card class without disabling it entirely.
-  // Important: filter BEFORE the empty-cards branch so a board with
-  // only non-matching cards falls through to the ideator check rather
-  // than dispatching, AND before `priorTodoCardIds` is captured so
-  // stuck-card recovery only considers cards in this dispatch's scope.
-  // Match against `IssueRef.title` — TrelloTracker strips the `#ISS-N: `
-  // id prefix from card names, so `[System Test] foo` still matches the
-  // operator-configured prefix `[System Test]` regardless of whether the
-  // card has been reconciled with a local YAML.
-  const pickupPrefix = getIssuePollerPickupPrefix(repo.localPath);
-  if (pickupPrefix) {
-    const before = cards.length;
-    cards = cards.filter((c) => c.title.startsWith(pickupPrefix));
-    log.info(
-      `[${repo.name}] pickupNamePrefix="${pickupPrefix}" filter: ${cards.length}/${before} cards match`,
-    );
-  }
-
-  // DX-217 (Event-Driven Worker Phase 2): the per-tick waiting-on
-  // auto-clear pass (DX-147 / `resolveWaitingOnCards`) was absorbed
-  // into `reconcileIssue` step 3b. When a dependency's YAML reaches
-  // a terminal status, its watcher event triggers reconcile → step 10
-  // recurses on every dependent → those dependents' reconciles clear
-  // `waiting_on` and write the YAML on the same trigger. Cleared cards
-  // appear in `listDispatchableYamls` on subsequent ticks (or already
-  // do on this tick if the watcher event landed during an earlier
-  // step's await). Phase 5's audit pass catches any drift.
-
-  if (cards.length === 0) {
-    // Phase 4 of ISS-90 — single-dispatch-per-tick decision tree.
-    // Order: work-ready (covered above and short-circuits the tick) →
-    // triage-due → idle/ideator. The triage-due path dispatches the
-    // `danx-triage-card` skill against ONE card per tick when an
-    // operator has opted in via `overrides.autoTriage`. Falls through
-    // to the ideator only when no triage is due.
-    if (await tryTriageDispatch(repo)) {
-      return;
-    }
-    log.info(`[${repo.name}] No cards in ToDo — checking if ideator needed`);
-    await checkAndSpawnIdeator(repo, tracker);
-    return;
-  }
-
-  log.info(
-    `[${repo.name}] Found ${cards.length} card${cards.length > 1 ? "s" : ""} — starting team`,
-  );
-  cards.forEach((card, i) => log.info(`  ${i + 1}. ${card.title}`));
-
-  // Save tracker-native ids for stuck-card recovery on failure
-  const state = getState(repo.name);
-  state.priorTodoCardIds = cards.map((c) => c.external_id);
-
-  // Multi-worker pick (DX-200 / DX-158 epic Phase 5). When the repo
-  // has at least one configured agent in `<repo>/.danxbot/settings.json`,
-  // route through the multi-agent picker instead of the legacy
-  // single-card dispatch. The picker:
-  //   - Claims up to N free agents per tick (concurrent dispatches)
-  //   - Stamps `assigned_agent` on each claimed YAML
-  //   - Runs a triage-precursor conflict-check when other agents are
-  //     in-flight, and stamps `blocked` on candidates that overlap
-  //   - Dispatches via `dispatchWithRecovery` (worktree validation +
-  //     persona injection from Phases 3-4)
-  // When the agents map is empty (every repo pre-Phase-5), the helper
-  // returns `{dispatched: 0}` and we fall through to the legacy
-  // single-card path below — zero behavior change for those repos.
-  // Filter the dispatchable Issue list to the same set the legacy path
-  // would dispatch — `cards` (IssueRef[]) reflects the post-filter
-  // state after the pickup-prefix filter and the waiting-on resolver
-  // ran. Build an Issue subset that intersects with `cards` by id.
-  const dispatchableIds = new Set(cards.map((c) => c.id));
-  const dispatchablePayloads = dispatchableIssues.filter((i) =>
-    dispatchableIds.has(i.id),
-  );
-  // DX-305: route the legacy `_poll` picker call through the
-  // scheduler's single-flight mutex. Without this gate, a `_poll` tick
-  // landing concurrently with an `onReconcileResult`/`onAgentRosterChange`
-  // setImmediate would invoke `tryMultiAgentDispatch` against the same
-  // `busy`/`assigned` snapshot, both pick the same agent + card, and
-  // `spawnAgent` would run twice. When the mutex denies the call
-  // (another picker run is in flight) we treat it as a 0-dispatch tick
-  // — the inflight run plus its tail handles this tick's work, and the
-  // legacy single-card fallthrough below is already a no-op spawn
-  // (suppressed by DX-242).
-  const guarded = await runWithPickerMutex(repo.name, () =>
-    tryMultiAgentDispatch({
-      repo,
-      cards: dispatchablePayloads,
-      inProgress: inProgressIssues,
-      tracker,
-      now: new Date(),
-    }),
-  );
-  const multiAgentResult = guarded.ran
-    ? guarded.value
-    : { dispatched: 0, conflictBlocked: 0 };
-  if (multiAgentResult.dispatched > 0 || multiAgentResult.conflictBlocked > 0) {
-    log.info(
-      `[${repo.name}] Multi-agent tick: dispatched=${multiAgentResult.dispatched}, conflict-blocked=${multiAgentResult.conflictBlocked}`,
-    );
-    // The multi-agent path owns the dispatch; do NOT fall through to
-    // the legacy single-card path on the same tick.
-    return;
-  }
-
-  // Record the first card as the dispatch trigger. One agent session processes
-  // the whole ToDo queue; tagging it with the primary card lets the dashboard
-  // show what kicked off the run. The UI can expand to show all processed cards
-  // by scanning the JSONL for tracker MCP calls.
-  const primary = cards[0];
-  const trelloMeta: TrelloTriggerMetadata = {
-    cardId: primary.external_id,
-    cardName: primary.title,
-    cardUrl: `https://trello.com/c/${primary.external_id}`,
-    listId: repo.trello.todoListId,
-    listName: "ToDo",
-  };
-
-  // Hydrate-or-load by tracker-native external_id, then dispatch using
-  // the resolved INTERNAL id. The agent never sees external_id — the
-  // dispatch prompt and YAML filename both use `id`.
-  //   1. Pre-generate the dispatch UUID so the same value lands in BOTH
-  //      the dispatch row AND the YAML's `dispatch.id` field.
-  //   2. `findByExternalId` scans existing YAMLs — if one carries this
-  //      external_id, it's authoritative; only `dispatch` overwrites.
-  //   3. No match → `hydrateFromRemote` pulls metadata, allocates an
-  //      ISS-N (or parses one from the title prefix), patches the
-  //      tracker title, and writes a fresh local YAML. Reuses the same
-  //      cached tracker instance so MemoryTracker state survives.
-  //   4. Dispatch task references the local id — agent edits
-  //      `<repo>/.danxbot/issues/open/<id>.yml` directly with `Edit` /
-  //      `Write` and never knows external trackers exist.
-  const dispatchId = randomUUID();
-
-  // ISS-92 Phase 2: YAML-based liveness guard (defense in depth with
-  // the DB-backed check below). A primary in `listDispatchableYamls`
-  // already has `status: ToDo` + `blocked: null`, so an active
-  // `dispatch{}` block on it is exceptional — but the boot reattach
-  // pass populates `activeDispatches` for every alive PID it finds,
-  // and we honor that mirror here in case the stale state ever leaks
-  // through. We resolve the local id via `findByExternalId` because
-  // the in-memory map is keyed by issue id, not external_id.
-  const existingForGuard = await findByExternalId(
-    repo.localPath,
-    primary.external_id,
-  );
-  if (
-    existingForGuard &&
-    getActiveDispatches(repo.name).has(existingForGuard.id)
-  ) {
-    log.info(
-      `[${repo.name}] ${primary.title} already has live YAML dispatch (${existingForGuard.id}) — skipping`,
-    );
-    return;
-  }
-
-  // Pre-claim DB guard (ISS-69). Host-mode dispatches outlive the worker
-  // — a worker restart leaves the prior dispatch's claude process running
-  // under PID 1 with the dispatch row still `running`. Before acquiring
-  // the tracker lock (which is wall-clock based and will eventually
-  // reclaim a stale-looking-but-actually-live dispatch) check whether
-  // any non-terminal row references this card and whose `host_pid` is
-  // alive — if so, skip this tick. The pre-existing claude is still
-  // working and will finalize via ISS-68's stop-handler DB fallback.
-  if (await hasLiveDispatchForCard(repo.name, primary.external_id)) {
-    log.info(
-      `[${repo.name}] ${primary.title} already has live dispatch (host_pid alive) — skipping`,
-    );
-    return;
-  }
-
-  // DX-241: legacy lock acquisition removed from this code path.
-  // The multi-environment dispatch lock now lives inside
-  // `tryMultiAgentDispatch` — that's the sole active dispatcher
-  // (legacy unscoped spawn was disabled by DX-242). Acquiring the
-  // lock here when the spawn never fires meant every poll tick wrote
-  // an orphan lock comment that lingered until TTL (DX-241 failure
-  // mode #1: "Worker stop = orphan lock for 2h"). The release path
-  // is wired into `dispatch()`'s onComplete chain via the new
-  // `lockRelease` field on `DispatchInput`.
-
-  // Pre-stamp the YAML with the dispatch shell BEFORE spawn so a
-  // crash between `dispatch()` resolving and the post-spawn pid stamp
-  // still leaves a partial record on disk that the next reattach pass
-  // can recover from. The `buildStartStamp` helper enforces the
-  // pid:0 + host + ISO + per-kind-TTL invariant in one place. Phase 2
-  // of poller-triage rework (ISS-92), refactored to a helper in
-  // Phase 4 (ISS-94).
-  const startStamp = buildStartStamp(dispatchId, "work", osHostname());
-
-  // Reuse the lookup the YAML-based guard above already performed when
-  // present — `findByExternalId` is O(N) over the open dir, so paying
-  // it twice would burn CPU on every dispatch tick.
-  const existing =
-    existingForGuard ??
-    (await findByExternalId(repo.localPath, primary.external_id));
-  let resolvedIssue: Issue;
-  if (existing) {
-    resolvedIssue = await stampDispatchAndWrite(
-      repo.localPath,
-      existing,
-      startStamp,
-    );
-  } else {
-    resolvedIssue = await hydrateFromRemote(
-      tracker,
-      primary.external_id,
-      dispatchId,
-      repo.localPath,
-      repo.issuePrefix,
-    );
-    // hydrateFromRemote stamps the placeholder dispatch shape (pid:0,
-    // host:"", started_at:"", ttl_seconds:0). Overwrite with the
-    // enriched start record so the YAML carries the real
-    // host/started_at/ttl_seconds even before the spawn returns.
-    resolvedIssue = await stampDispatchAndWrite(
-      repo.localPath,
-      resolvedIssue,
-      startStamp,
-    );
-  }
-
-  // Pass the card id as the slash-command argument; the `danx-next` skill
-  // owns the "edit YAML, chokidar mirrors, call danxbot_complete" contract.
-  const task = `${TEAM_PROMPT} ${resolvedIssue.id}`;
-
-  // DX-242: legacy single-card unscoped dispatch DISABLED. The
-  // multi-agent picker (DX-200) is the SOLE dispatcher. When the
-  // picker returns 0 (every agent busy / out-of-schedule / roster
-  // empty), end the tick instead of falling through to an unscoped
-  // spawnClaude that runs from repo-root cwd with no agent persona +
-  // no worktree isolation. All prep code above (lock acquisition, DB
-  // guard, hydrate, stamp) intentionally STILL RUNS — it remains
-  // testable + still useful for the resume path. Event-Driven Worker
-  // epic (DX-215) Phases 4-6 retire the entire block once the
-  // scheduler reaches feature parity (see DX-219 + DX-221 ACs).
-  log.warn(
-    `[${repo.name}] Legacy unscoped dispatch suppressed for ${resolvedIssue.id} — configure an agent or wait for the multi-agent picker to free up`,
-  );
-  // DX-219 follow-up: the pre-stamp block above wrote `dispatch:
-  // {pid:0, …}` onto `resolvedIssue` BEFORE we knew the spawn would be
-  // suppressed. Without this rollback the YAML carries an orphan
-  // dispatch record forever, and the subsequent tick's
-  // `i.dispatch != null` gate excludes the card from
-  // `listDispatchableYamls` permanently. Clearing here is the inverse
-  // of the stamp call inside the `if (existing) …` branch above.
-  try {
-    await clearDispatchAndWrite(repo.localPath, resolvedIssue);
-  } catch (clearErr) {
-    log.warn(
-      `[${repo.name}] post-suppress clearDispatch failed for ${resolvedIssue.id}: ${clearErr instanceof Error ? clearErr.message : String(clearErr)}`,
-    );
-  }
-  // await spawnClaude(
-  //   repo,
-  //   task,
-  //   { trigger: "trello", metadata: trelloMeta },
-  //   dispatchId,
-  //   undefined,
-  //   { issueId: resolvedIssue.id, startStamp },
-  // );
+  // DX-290 (Event-Driven Worker Phase 4b.3): every dispatch decision is
+  // gone from `_poll`. The scheduler's `runPicker` callback (registered
+  // by `bootScheduler` in `src/index.ts`, fired via reconcile's
+  // `onReconcileResult` and settings-watch's `onAgentRosterChange`)
+  // owns multi-agent picks; per-card `setTimeout`s in
+  // `src/dispatch/triage-timer.ts` + `src/dispatch/ttl-timer.ts`
+  // (DX-289) own triage + dead-dispatch eviction. The legacy
+  // `tryResumeOrphan`, `tryTriageDispatch`, `checkAndSpawnIdeator`,
+  // `recoverStuckCards`, `evictDeadDispatches`, the dispatchable /
+  // in-progress partitioning, the pickup-name-prefix filter, and the
+  // DX-242 legacy single-card dispatch block all moved out in DX-290.
+  // The auto-clear pass (DX-147 / `resolveWaitingOnCards`) is read-time
+  // via `effectiveWaitingOn` (`src/issue/effective-waiting-on.ts`). The
+  // remaining `_poll` body is sync + audit only — Phase 5 (DX-220)
+  // trims further and renames the module.
   } catch (error) {
     // DX-149: any throw from inside `_poll` (tracker calls, lock
     // acquisition, hydrate-or-load, dispatch shell prep) lands here
@@ -1109,30 +590,6 @@ async function _poll(repo: RepoContext): Promise<void> {
  * resume target (In Progress with a stamped id from a prior dispatch)
  * stamps the real UUID via `stampDispatchAndWrite`.
  */
-/**
- * Pre-claim DB guard (ISS-69). Thin wrapper that wires the impl in
- * `live-dispatch-guard.ts` to the production `findNonTerminalDispatches`
- * + `isPidAlive` + `log`. Lives inline so the call site in `_poll`
- * stays a single readable line; the underlying logic is unit-tested in
- * `live-dispatch-guard.test.ts`.
- */
-async function hasLiveDispatchForCard(
-  repoName: string,
-  cardId: string,
-  internalIssueId?: string,
-): Promise<boolean> {
-  return hasLiveDispatchForCardImpl(
-    repoName,
-    cardId,
-    {
-      findNonTerminalDispatches,
-      isPidAlive,
-      log,
-    },
-    internalIssueId,
-  );
-}
-
 async function bulkSyncMissingYamls(
   repo: RepoContext,
   tracker: IssueTracker,
@@ -1160,224 +617,20 @@ async function bulkSyncMissingYamls(
   }
 }
 
-// `resolveWaitingOnCards` was extracted to `./waiting-on-resolver.ts` (DX-147)
-// so the auto-clear path stays testable without paying the env-validation
-// tax of pulling `index.ts` into a unit test. See that file for the
-// full contract.
+// DX-217 (Phase 2): the per-tick `waiting_on` auto-clear pass
+// (DX-147 / `resolveWaitingOnCards`) was retired in favor of read-time
+// derivation via `effectiveWaitingOn` (`src/issue/effective-waiting-on.ts`).
+// `waiting_on` is now a durable record; the dispatch gate at read time
+// checks whether every id in `by[]` resolves to a terminal status.
+//
+// DX-290 (Phase 4b.3): the `tryResumeOrphan` helper that called
+// `spawnClaude` to resume orphan In Progress dispatches was retired
+// along with `spawnClaude` itself. The TTL timer
+// (`src/dispatch/ttl-timer.ts`) clears dead dispatch records via
+// audit-reconcile; the multi-agent path's `guardLiveDispatchForCard`
+// (`src/dispatch/scheduler.ts`) protects against double-dispatch when
+// a host-mode claude is reparented to PID 1 across worker restart.
 
-/**
- * Look at every In Progress card. For the first one whose local YAML
- * carries a `dispatch.id` that:
- *   - is NOT currently in `activeJobs` (still alive on this worker), AND
- *   - DOES correspond to a Claude session JSONL on disk
- *
- * spawn a fresh dispatch with `--resume <sessionId>` so the agent
- * picks up where it left off. Returns `{ resumed: true }` when a resume
- * fires (the caller must skip the ToDo dispatch path on this tick to
- * preserve the single-dispatch invariant).
- *
- * Side-effect for the "session file gone" case: card resets to ToDo
- * locally (YAML status + dispatch cleared) AND on the tracker. The
- * reset card's `IssueRef` (with `status: "ToDo"`) is returned in
- * `resetToToDo` so the caller can include it in this tick's dispatch
- * pool — the snapshot of `cards` taken before this scan ran is stale
- * by the time we mutate the card's status, and waiting a full poll
- * interval before picking it up wastes the tick.
- *
- * Skipped silently when the In Progress card has no local YAML (the
- * bulk-sync step that runs immediately before this should have
- * written one — if it didn't, hydration failed and a warning is
- * already in the log) or no `dispatch` record (the agent never
- * reached the YAML stamp before dying — same fresh-ToDo recovery
- * applies on the next tick once it bubbles up there).
- */
-type OrphanScanResult =
-  | { resumed: true }
-  | { resumed: false; resetToToDo: IssueRef[] };
-
-async function tryResumeOrphan(
-  repo: RepoContext,
-  tracker: IssueTracker,
-  inProgressRefs: IssueRef[],
-): Promise<OrphanScanResult> {
-  const resetToToDo: IssueRef[] = [];
-  for (const ref of inProgressRefs) {
-    const issue = await findByExternalId(repo.localPath, ref.external_id);
-    // No local YAML — bulk-sync runs immediately before this so a
-    // missing YAML means hydration failed; warning already logged
-    // upstream. Skip and let the next sync attempt fix it.
-    if (!issue) continue;
-
-    // No `dispatch` record on a card sitting in In Progress. The prior
-    // agent died before the YAML stamp (or the card was force-moved by
-    // an operator). Nothing to resume against, and the card will sit
-    // in In Progress forever unless we reset it. Reset to ToDo so the
-    // poller's regular dispatch path picks it up on the next bubble.
-    // Skip the reset only when the dispatches DB shows a live host_pid
-    // for this card (host-mode `script -q -f` reparented claude to
-    // PID 1 and is still running — see ISS-69).
-    if (!issue.dispatch) {
-      if (await hasLiveDispatchForCard(repo.name, ref.external_id, issue.id)) {
-        log.info(
-          `[${repo.name}] Skipping orphan-reset for "${issue.title}" (${issue.id}) — no YAML dispatch stamp, but dispatches DB has live host_pid`,
-        );
-        continue;
-      }
-      log.warn(
-        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has no dispatch stamp — resetting to ToDo for fresh dispatch`,
-      );
-      await writeIssue(repo.localPath, {
-        ...issue,
-        status: "ToDo",
-      });
-      try {
-        await tracker.moveToStatus(ref.external_id, "ToDo");
-      } catch (err) {
-        log.error(
-          `[${repo.name}] Failed to reset ${ref.external_id} to ToDo on tracker: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      resetToToDo.push({ ...ref, status: "ToDo" });
-      continue;
-    }
-    const dispatchId = issue.dispatch.id;
-
-    // Live job on this worker — the orphan check would race with the
-    // running dispatch. Skip; the live dispatch will reach completion
-    // (or stall) through its own monitoring path.
-    if (getActiveJob(dispatchId)) continue;
-
-    // ISS-92 Phase 2: YAML-based liveness guard. The boot reattach
-    // pass populated `activeDispatches` with every alive PID it found
-    // on disk. An entry here means "this card's dispatch{} block
-    // points at a same-host PID that responded to signal 0 within the
-    // TTL window" — the prior dispatch is still alive across the
-    // worker restart. Skip orphan-resume; the YAML's evictDeadDispatches
-    // path will clear it on the tick after the PID dies.
-    if (getActiveDispatches(repo.name).has(issue.id)) {
-      log.info(
-        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — YAML reattach has it registered as alive (dispatch ${dispatchId})`,
-      );
-      continue;
-    }
-
-    // ISS-69 mirror: in-memory `activeJobs` is wiped on every worker
-    // restart, but host-mode dispatches outlive the worker — `script
-    // -q -f` reparents claude to PID 1, so the prior agent is still
-    // running. Without this DB-backed liveness probe the orphan-resume
-    // path stamps a NEW dispatch.id and spawns a duplicate claude
-    // (observed in the ISS-66 dispatch that produced this fix). The
-    // ToDo dispatch path already guards via `hasLiveDispatchForCard`
-    // (see line ~429); orphan-resume runs BEFORE that path and must
-    // apply the same check or the duplicate happens before the ToDo
-    // guard ever gets a chance to fire.
-    //
-    // Kept alongside the YAML-based check as defense-in-depth: the DB
-    // guard catches dispatches whose YAML block was lost (file deleted
-    // by an operator, schema corruption) but whose dispatches table
-    // row still records the live host_pid.
-    if (await hasLiveDispatchForCard(repo.name, ref.external_id, issue.id)) {
-      log.info(
-        `[${repo.name}] Skipping orphan-resume for "${issue.title}" (${issue.id}) — dispatches DB has live host_pid for card ${ref.external_id} (or issueId ${issue.id})`,
-      );
-      continue;
-    }
-
-    const resolved = await resolveParentSessionId(repo.name, dispatchId);
-    if (resolved.kind === "no-session-dir") {
-      // No claude projects dir for this repo — infrastructure issue
-      // that affects every dispatch, not just this one. Stop the
-      // resume scan so we don't keep paying the lookup cost on every
-      // remaining In Progress card.
-      log.error(
-        `[${repo.name}] No claude session dir for repo — skipping orphan-resume scan`,
-      );
-      return { resumed: false, resetToToDo };
-    }
-    if (resolved.kind === "not-found") {
-      log.warn(
-        `[${repo.name}] In Progress card "${issue.title}" (${issue.id}) has dispatch.id ${dispatchId} but no matching JSONL on disk — resetting to ToDo`,
-      );
-      await writeIssue(repo.localPath, {
-        ...issue,
-        status: "ToDo",
-        dispatch: null,
-      });
-      try {
-        await tracker.moveToStatus(ref.external_id, "ToDo");
-      } catch (err) {
-        log.error(
-          `[${repo.name}] Failed to reset ${ref.external_id} to ToDo on tracker: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      // Surface the reset to the caller so this tick can dispatch the
-      // card immediately as a ToDo. `cards` was snapshotted before the
-      // orphan scan ran, so the caller appends `resetToToDo` to it
-      // before falling through to the dispatch path.
-      resetToToDo.push({ ...ref, status: "ToDo" });
-      continue;
-    }
-
-    log.info(
-      `[${repo.name}] Resuming orphan In Progress card "${issue.title}" (${issue.id}) — parent dispatch ${dispatchId} session ${resolved.sessionId}`,
-    );
-    const newDispatchId = randomUUID();
-    const startStamp = buildStartStamp(newDispatchId, "work", osHostname());
-    const stamped = await stampDispatchAndWrite(
-      repo.localPath,
-      issue,
-      startStamp,
-    );
-    const yamlPath = issuePath(repo.localPath, stamped.id, "open");
-    // ISS-135 — explicit RESUMED-dispatch contract. The May-7 incident
-    // showed an orphan-resumed agent re-running /danx-next from
-    // scratch against a card whose prior session had already shipped
-    // the work + commits, then re-dispatching `danxbot_complete` as
-    // if it were starting fresh. The contract below tells the agent
-    // to read the YAML FIRST, recognise terminal state (Done /
-    // Cancelled + every AC checked + retro filled), and call
-    // danxbot_complete WITHOUT redoing any work. Anything short of
-    // terminal — find the smallest gap and resume from there.
-    //
-    // Keep in sync with the "Resume self-check" sections in
-    // src/poller/inject/workspaces/issue-worker/.claude/skills/
-    //   danx-next/SKILL.md (Step 1.1) and danx-start/SKILL.md.
-    // Two-layer defense: this prompt is what the agent sees on its
-    // first turn; the skill section is what it sees if it ever
-    // consults the workflow. Both must agree on the "terminal + ACs
-    // checked + retro filled = call danxbot_complete and stop" rule.
-    const task =
-      `${TEAM_PROMPT_RESUME}\n\n` +
-      `RESUMED dispatch on ${stamped.id} (parent ${dispatchId}).\n\n` +
-      `CONTRACT — read FIRST, act AFTER:\n` +
-      `1. Read ${yamlPath} now. Note current status, AC checked-state, retro state, commits in retro.commits[].\n` +
-      `2. If status ∈ {Done, Cancelled} AND every AC item checked AND retro filled — work is COMPLETE. ` +
-      `Call danxbot_complete({status: "completed", summary: "..."}) immediately. ` +
-      `Do NOT re-run /danx-next. Do NOT redo any work. Do NOT save the YAML again.\n` +
-      `3. Else, identify the smallest gap (uncompleted AC, missing retro field, unverified AC item) and resume from that point. ` +
-      `Save the YAML when each gap closes. Call danxbot_complete only when every gap is closed.\n\n` +
-      `This is a RESUME, not a fresh dispatch. The prior session already did most or all of the work. Verify, don't repeat.`;
-    await spawnClaude(
-      repo,
-      task,
-      {
-        trigger: "trello",
-        metadata: {
-          cardId: ref.external_id,
-          cardName: ref.title,
-          cardUrl: `https://trello.com/c/${ref.external_id}`,
-          listId: repo.trello.inProgressListId,
-          listName: "In Progress",
-        },
-      },
-      newDispatchId,
-      { resumeSessionId: resolved.sessionId, parentJobId: dispatchId },
-      { issueId: stamped.id, startStamp },
-    );
-    return { resumed: true };
-  }
-  return { resumed: false, resetToToDo };
-}
 
 /** Directory containing files to inject into target repos. */
 const injectDir = resolve(dirname(fileURLToPath(import.meta.url)), "inject");
@@ -2382,701 +1635,6 @@ function scrubRepoRootDanxArtifacts(repoLocalPath: string): void {
   });
 }
 
-async function spawnClaude(
-  repo: RepoContext,
-  prompt: string,
-  apiDispatchMeta: DispatchTriggerMetadata,
-  dispatchId?: string,
-  resumeOpts?: { resumeSessionId: string; parentJobId: string },
-  /**
-   * When set, the dispatch is bound to a per-card YAML. The poller
-   * builds a `YamlPairedWrite` callback pair from this and threads it
-   * through `dispatch()` to the launcher; the launcher invokes
-   * `pairedWriteHostPid` AFTER the runtime fork resolves the agent
-   * PID, stamping the DB row's `host_pid` and the YAML's
-   * `dispatch.pid` atomically. The `write` callback also registers
-   * the card in `activeDispatches`; the completion callback later
-   * clears `dispatch: null` and drops the in-memory entry. Ideator /
-   * auto-triage paths omit this — there is no card-bound dispatch
-   * slot for those (auto-triage runs across many cards as one
-   * session).
-   *
-   * Originally ISS-92, Phase 2 of the poller-triage rework. DX-140
-   * moved the post-spawn stamping inside the launcher under the
-   * paired-write contract.
-   */
-  dispatchStamp?: { issueId: string; startStamp: IssueDispatch },
-): Promise<void> {
-  const state = getState(repo.name);
-
-  state.teamRunning = true;
-
-  // Track the Trello card this dispatch targets. The post-dispatch
-  // "card didn't move out of ToDo" check in `handleAgentCompletion`
-  // reads this field to detect env-level blockers. Ideator/api
-  // dispatches are not card-specific — null tracks "no card to check".
-  state.trackedCardId =
-    apiDispatchMeta.trigger === "trello"
-      ? apiDispatchMeta.metadata.cardId
-      : null;
-
-  // The poller's tracker calls (fetchOpenCards, moveToStatus, retro
-  // comments) need a usable IssueTracker. Resolve the cached tracker
-  // up front so the validation key is the RESOLVED tracker class, not
-  // an env var the createIssueTracker factory reads internally — that
-  // keeps "which tracker is active" with one source of truth and
-  // eliminates the only `process.env` read that used to live on the
-  // poller hot path.
-  //
-  // Only TrelloTracker requires populated credentials on RepoContext;
-  // MemoryTracker (DANXBOT_TRACKER=memory) constructs without them.
-  // Fail loud here so a missing value surfaces as a clear configuration
-  // error before we spawn an agent that the poller can't follow up on.
-  // The dispatch overlay itself no longer needs these (Phase 5 of
-  // tracker-agnostic-agents retired the trello MCP server entry from
-  // the issue-worker workspace).
-  const tracker = getRepoTracker(repo);
-  const trello = repo.trello;
-  if (
-    tracker instanceof TrelloTracker &&
-    (!trello?.apiKey || !trello?.apiToken || !trello?.boardId)
-  ) {
-    throw new Error(
-      `[${repo.name}] poller dispatchCard called without complete trello credentials on RepoContext`,
-    );
-  }
-
-  // Workspace-shaped dispatch (Phase 3 of the workspace-dispatch epic,
-  // Trello `q5aFuINM`). The poller's allowed-tools, MCP server set, and
-  // skill surface live in `src/poller/inject/workspaces/issue-worker/`
-  // and are mirrored to `<repo>/.danxbot/workspaces/issue-worker/` by
-  // the inject pipeline on every poll tick. `dispatch` resolves that
-  // fixture, merges the danxbot infrastructure server, and runs the
-  // shared spawn loop — stall recovery, activeJobs registration,
-  // completion signalling. The poller still supplies its own
-  // `timeoutMs` (60x poll interval) and chains `handleAgentCompletion`
-  // through `onComplete`. See `.claude/rules/agent-dispatch.md`.
-  //
-  // Awaited (not fire-and-forget): the post-spawn YAML PID stamp
-  // (DX-140 paired write) runs INSIDE `spawnAgent` after the runtime
-  // fork resolves the agent's PID. Awaiting `dispatch()` blocks the
-  // poll tick for the spawn duration (~1–3s in practice). The runtime
-  // agent execution is still async via `onComplete` — we only sequence
-  // the spawn itself.
-  //
-  // Phase 1 of DB-as-dispatch-registry (DX-140) — when the dispatch is
-  // bound to a per-card YAML, build a `YamlPairedWrite` pair and pass
-  // it through `pairedWriteYaml`. The launcher invokes
-  // `pairedWriteHostPid` AFTER the runtime fork resolves the agent
-  // PID; both the DB row's `host_pid` and the YAML's `dispatch.pid`
-  // are stamped in one logical operation with mutual rollback.
-  // Replaces the old "stamp YAML pid post-dispatch in the poller"
-  // path which left a window where DB + YAML carried divergent values.
-  const pairedWriteYaml = dispatchStamp
-    ? {
-        write: async (pid: number) => {
-          const enrichedStamp: IssueDispatch = {
-            ...dispatchStamp.startStamp,
-            pid,
-          };
-          const issue = await loadLocal(
-            repo.localPath,
-            dispatchStamp.issueId,
-            repo.issuePrefix,
-          );
-          // Fail loud — if the YAML disappeared between dispatch start
-          // and PID resolution (concurrent close/move, operator
-          // intervention, broken inject pipeline) silently skipping the
-          // YAML stamp would leave the DB row carrying `host_pid` while
-          // the YAML carries nothing. That recreates the divergent
-          // half-stamped state the paired write exists to prevent.
-          // Throwing routes the helper into its YAML-fail rollback
-          // branch (DB stamp UPDATE never runs because YAML write is
-          // first; if it had run, the DB rollback fires).
-          if (!issue) {
-            throw new Error(
-              `paired-write: YAML for ${dispatchStamp.issueId} disappeared during dispatch — cannot stamp pid ${pid}`,
-            );
-          }
-          await stampDispatchAndWrite(repo.localPath, issue, enrichedStamp);
-          // Mirror into the in-memory active map for the per-tick liveness
-          // probe — keeps the poller's existing reattach logic functional.
-          getActiveDispatches(repo.name).set(
-            dispatchStamp.issueId,
-            enrichedStamp,
-          );
-        },
-        clear: async () => {
-          // Rollback path — DB UPDATE failed after we wrote the YAML.
-          // Clear the YAML's `dispatch{}` and drop the in-memory entry
-          // so the next tick sees a clean slate.
-          const issue = await loadLocal(
-            repo.localPath,
-            dispatchStamp.issueId,
-            repo.issuePrefix,
-          );
-          if (issue && issue.dispatch !== null) {
-            await clearDispatchAndWrite(repo.localPath, issue);
-          }
-          getActiveDispatches(repo.name).delete(dispatchStamp.issueId);
-        },
-      }
-    : undefined;
-
-  try {
-    await dispatch({
-      repo,
-      task: prompt,
-      workspace: "issue-worker",
-      // `DANXBOT_WORKER_PORT` and the dispatchId-derived URLs are
-      // auto-injected by `dispatch()` from `repo.workerPort`. Phase 5 of
-      // tracker-agnostic-agents retired the trello MCP server entry from
-      // the issue-worker workspace, so TRELLO_API_KEY / TRELLO_TOKEN /
-      // TRELLO_BOARD_ID no longer need an overlay either — agents now
-      // talk to the tracker through the danxbot MCP server's
-      // `danx_issue_*` tools, which the worker proxies.
-      overlay: {},
-      timeoutMs: config.pollerIntervalMs * 60,
-      apiDispatchMeta,
-      // Phase 2 of tracker-agnostic-agents (Trello ZDb7FOGO): when the trello
-      // trigger pre-stamped a UUID into the YAML, thread it through so the
-      // dispatch row's id matches the YAML's `dispatch.id`. Ideator and other
-      // non-trello dispatches omit this and inherit the auto-generated UUID
-      // inside `dispatch()`.
-      dispatchId,
-      resumeSessionId: resumeOpts?.resumeSessionId,
-      parentJobId: resumeOpts?.parentJobId,
-      // DX-84 — when the poller binds the dispatch to a per-card YAML,
-      // forward the local issue id so the dispatch row stamps `issue_id`
-      // and the per-card Agent Chat tab can list this run.
-      issueId: dispatchStamp?.issueId,
-      pairedWriteYaml,
-      onComplete: (job) => {
-        // ISS-92 Phase 2: dispatch end clears the YAML's `dispatch{}`
-        // and drops the in-memory entry. Runs BEFORE the failure-
-        // handling backoff so a rapid re-tick doesn't see stale state.
-        // Skipped silently when no dispatchStamp was passed (ideator /
-        // auto-triage paths). Fire-and-forget — `clearActiveDispatch`
-        // is async since DX-155 (loadLocal queries Postgres) but the
-        // dispatch onComplete contract is sync; we drop into the
-        // standard "log on rejection" pattern the rest of this branch
-        // uses.
-        if (dispatchStamp) {
-          void clearActiveDispatch(repo, dispatchStamp.issueId).catch((err) =>
-            log.error(
-              `[${repo.name}] clearActiveDispatch failed for ${dispatchStamp.issueId}`,
-              err,
-            ),
-          );
-        }
-        handleAgentCompletion(repo, state, job).catch((err) =>
-          log.error(`[${repo.name}] Error in post-completion handler`, err),
-        );
-      },
-    });
-  } catch (err) {
-    // Pre-spawn failures (workspace resolution error, OS spawn error, MCP probe
-    // failure) deliberately skip the exponential-backoff escalator:
-    // these are configuration / infrastructure errors, not intermittent
-    // agent failures. We reset `teamRunning` so the next tick retries
-    // immediately and the problem shows up every minute until the
-    // operator fixes it. Runtime agent failures take the separate
-    // `handleAgentCompletion` path above, which DOES apply backoff.
-    log.error(`[${repo.name}] dispatch() failed before agent spawned`, err);
-    if (dispatchStamp) {
-      // Pre-spawn failure leaves the pre-stamped dispatch{} block on
-      // the YAML pointing at a dispatch that never started. Clear so
-      // the next tick sees a clean slate; the regular ToDo dispatch
-      // path will re-pick the card up with a fresh dispatchId.
-      const issue = await loadLocal(
-        repo.localPath,
-        dispatchStamp.issueId,
-        repo.issuePrefix,
-      );
-      if (issue) {
-        try {
-          void clearDispatchAndWrite(repo.localPath, issue).catch(
-            (mirrorErr) =>
-              log.warn(
-                `[${repo.name}] pre-spawn cleanup: clearDispatch mirror ack failed for ${dispatchStamp.issueId}`,
-                mirrorErr,
-              ),
-          );
-        } catch (clearErr) {
-          log.error(
-            `[${repo.name}] pre-spawn cleanup: clearDispatch failed for ${dispatchStamp.issueId}`,
-            clearErr,
-          );
-        }
-      }
-      getActiveDispatches(repo.name).delete(dispatchStamp.issueId);
-    }
-    cleanupAfterAgent(state);
-  }
-}
-
-/**
- * Drop a card from the per-repo `activeDispatches` map AND clear its
- * YAML's `dispatch{}` block. Idempotent — missing in-memory entry +
- * already-null YAML are both no-ops.
- *
- * Called from the dispatch onComplete chain. Distinct from
- * `evictDeadDispatches` (per-tick liveness cleanup) — this fires on
- * agent termination, regardless of whether the agent saved a terminal
- * status or simply exited (timeout, stall, kill).
- */
-async function clearActiveDispatch(
-  repo: RepoContext,
-  issueId: string,
-): Promise<void> {
-  const map = getActiveDispatches(repo.name);
-  map.delete(issueId);
-  const issue = await loadLocal(repo.localPath, issueId, repo.issuePrefix);
-  if (issue && issue.dispatch !== null) {
-    try {
-      void clearDispatchAndWrite(repo.localPath, issue).catch((mirrorErr) =>
-        log.warn(
-          `[${repo.name}] clearActiveDispatch: mirror ack failed for ${issueId}`,
-          mirrorErr,
-        ),
-      );
-    } catch (err) {
-      log.error(
-        `[${repo.name}] clearActiveDispatch: write failed for ${issueId}`,
-        err,
-      );
-    }
-  }
-}
-
-/**
- * Handle agent completion: track failures, apply backoff, recover stuck cards.
- * On success, resets the failure counter. On failure, increments the counter,
- * recovers stuck cards, and applies exponential backoff.
- */
-async function handleAgentCompletion(
-  repo: RepoContext,
-  state: RepoPollerState,
-  job: AgentJob,
-): Promise<void> {
-  // DX-260 (Phase 2 of DX-246): `recovered` is a launcher-internal
-  // terminal state that means "this dispatch ended so a fresh resume
-  // could continue the chain." The recover-child dispatch (auto-spawned
-  // via /api/resume from the recover handler) will report its OWN
-  // terminal status when it finishes. Treating `recovered` as a
-  // failure here would inflate `consecutiveFailures` per recover and
-  // trip the poller-level halt after `pollerBackoffScheduleMs.length`
-  // API-error events — undoing the entire feature's "recovered !=
-  // failed" semantic. The per-chain cap (MAX_RECOVERS) is enforced
-  // in-launcher and writes CRITICAL_FAILURE on exhaust, so the
-  // poller-level escalator never needs to see these.
-  const isFailure = job.status !== "completed" && job.status !== "recovered";
-
-  if (isFailure) {
-    state.consecutiveFailures++;
-    log.warn(
-      `[${repo.name}] Agent ${job.status} (${state.consecutiveFailures} consecutive failure${state.consecutiveFailures > 1 ? "s" : ""})`,
-    );
-
-    // Recover stuck cards before backoff
-    await recoverStuckCards(repo, state, job);
-
-    const schedule = config.pollerBackoffScheduleMs;
-    if (state.consecutiveFailures > schedule.length) {
-      log.error(
-        `[${repo.name}] Max consecutive failures (${state.consecutiveFailures}) exceeded schedule — halting poller`,
-      );
-      cleanupAfterAgent(state);
-      return; // Don't resume polling
-    }
-
-    const backoffMs = schedule[state.consecutiveFailures - 1];
-    state.backoffUntil = Date.now() + backoffMs;
-    log.warn(
-      `[${repo.name}] Backing off ${backoffMs / 1000}s before next attempt`,
-    );
-  } else {
-    if (state.consecutiveFailures > 0) {
-      log.info(`[${repo.name}] Agent succeeded — resetting failure counter`);
-    }
-    state.consecutiveFailures = 0;
-    state.backoffUntil = 0;
-  }
-
-  // DX-260: skip card-progress + triage checks on `recovered`. The
-  // parent dispatch hit an API stream-idle error and handed off to a
-  // recover-child via POST /api/resume; the recover-child is still
-  // running against the same card. Treating "card still in ToDo when
-  // parent ended" as a halt signal here would CRITICAL_FAILURE the
-  // entire poller on every transient Anthropic stutter. The
-  // recover-child runs its own card-progress check when IT terminates.
-  const isRecovered = job.status === "recovered";
-
-  // Post-dispatch card-progress check. Runs on both success and
-  // failure — a "completed" agent that never moved the card is as much
-  // of an env-level signal as a "failed" one. If the card still sits
-  // in ToDo, this writes the critical-failure flag; the next tick's
-  // halt gate will see it and refuse to dispatch.
-  if (state.trackedCardId && !isRecovered) {
-    await checkCardProgressedOrHalt(repo, state, job);
-  }
-
-  // ISS-104: parallel guard for triage dispatches. A triage agent that
-  // signals `completed` without advancing `triage.expires_at` would be
-  // re-dispatched against the same card on every tick — a token-burn
-  // loop the existing trello-trigger guard does not catch (triage
-  // dispatches use `trigger: "api"` and never move the card across
-  // lists). Same fail-loud halt mechanism via the critical-failure flag.
-  if (state.triageTracked && !isRecovered) {
-    await checkTriageProgressedOrHalt(repo, state, job);
-  }
-
-  cleanupAfterAgent(state);
-  log.info(`[${repo.name}] Headless agent finished — resuming polling`);
-  poll(repo).catch((err) =>
-    log.error(`[${repo.name}] Re-poll after headless agent failed`, err),
-  );
-}
-
-function cleanupAfterAgent(state: RepoPollerState): void {
-  state.teamRunning = false;
-  state.priorTodoCardIds = [];
-  state.trackedCardId = null;
-  state.triageTracked = null;
-}
-
-/**
- * Legacy single-card dispatch post-completion adapter. The actual
- * fetch + halt-flag logic lives in `runPostDispatchProgressCheck`
- * (`src/dispatch/scheduler.ts`) — DX-219 deduped the body so the
- * legacy `_poll` path and the multi-agent `onComplete` chain share
- * one implementation of the "card stayed in ToDo → CRITICAL_FAILURE"
- * decision. This wrapper exists to thread the legacy path's
- * `state.trackedCardId` and `AgentJob` shape into the scheduler's
- * parameterized inputs.
- *
- * Resilience to a future bootScheduler regression: the scheduler
- * silently warns + returns when no tracker is registered for the
- * repo, so this wrapper still composes cleanly even if `startPoller`
- * happens before `bootScheduler` (which the worker boot order
- * forbids — but defense-in-depth lives here).
- */
-async function checkCardProgressedOrHalt(
-  repo: RepoContext,
-  state: RepoPollerState,
-  job: AgentJob,
-): Promise<void> {
-  const cardId = state.trackedCardId;
-  if (!cardId) return;
-
-  await runPostDispatchProgressCheck({
-    repo,
-    cardId,
-    jobId: job.id,
-    jobStatus: job.status,
-    jobSummary: job.summary,
-  });
-}
-
-/**
- * After a `kind: "triage"` dispatch exits, re-read the target YAML
- * locally and verify `triage.expires_at` advanced past the dispatch's
- * `started_at`. If not, the dispatch did zero application-level work —
- * either the agent forgot to update the triage block at all, or the
- * `Edit` call did not advance the `expires_at` timestamp. Either way
- * the next tick's `listTriageDueYamls` returns the same card and the
- * same broken agent gets dispatched again. Write the critical-failure
- * flag so the halt gate stops the loop.
- *
- * Parallels `checkCardProgressedOrHalt` (work-dispatch guard). The
- * progress signal differs:
- *   - work dispatch: tracker reports the card moved out of ToDo.
- *   - triage dispatch: local YAML's `triage.expires_at` parses to a
- *     timestamp strictly after the dispatch's `started_at`.
- *
- * Read failures (loadLocal throws, YAML missing) do NOT trip the flag —
- * false-negative is safer than false-positive, mirroring the work-
- * dispatch guard's tolerance for `tracker.getCard` / `findByExternalId`
- * failures. The next tick reattempts; if the underlying env problem
- * also breaks the next dispatch, that next dispatch will surface the
- * signal through its own guard.
- *
- * Async since DX-155 — `loadLocal` queries Postgres now, so the
- * helper carries the Promise<void> through to the completion handler.
- *
- * Phase 1 of ISS-104.
- */
-async function checkTriageProgressedOrHalt(
-  repo: RepoContext,
-  state: RepoPollerState,
-  job: AgentJob,
-): Promise<void> {
-  const tracked = state.triageTracked;
-  if (!tracked) return;
-
-  let issue: Issue | null;
-  try {
-    issue = await loadLocal(repo.localPath, tracked.id, repo.issuePrefix);
-  } catch (err) {
-    log.error(
-      `[${repo.name}] Failed to read local YAML for triage target ${tracked.id} after dispatch — skipping triage-progress check`,
-      err,
-    );
-    return;
-  }
-
-  if (!issue) {
-    // YAML disappeared (deleted, renamed to closed/, or never existed).
-    // The poller cannot re-dispatch a missing id, so the loop self-
-    // terminates without a flag.
-    return;
-  }
-
-  const startedAtMs = Date.parse(tracked.startedAt);
-  const expiresAt = issue.triage?.expires_at ?? "";
-  const expiresAtMs = expiresAt ? Date.parse(expiresAt) : NaN;
-  const advanced =
-    !!expiresAt && Number.isFinite(expiresAtMs) && expiresAtMs > startedAtMs;
-  if (advanced) {
-    return;
-  }
-
-  log.error(
-    `[${repo.name}] Triage dispatch ${job.id} for ${tracked.id} did not advance triage.expires_at (started_at=${tracked.startedAt}, post=${expiresAt || "(empty)"}) — writing critical-failure flag`,
-  );
-  writeFlag(repo.localPath, {
-    source: "post-dispatch-check",
-    dispatchId: job.id,
-    cardId: tracked.id,
-    reason: `Triage dispatch for ${tracked.id} did not advance triage.expires_at`,
-    detail:
-      `Triage dispatch ${job.id} for ${tracked.id} ` +
-      `(status=${job.status}, summary=${job.summary || "none"}) finished but the local YAML's ` +
-      `triage.expires_at is still "${expiresAt || ""}" (started_at=${tracked.startedAt}). ` +
-      `The next tick would re-dispatch the same broken triage agent — token-burn loop. ` +
-      `Poller halts until the flag is cleared and the underlying issue (agent forgot ` +
-      `to save, MCP danx-issue not loaded, etc.) is fixed.`,
-  });
-}
-
-/**
- * After agent failure, check if any cards moved from ToDo to In Progress
- * during the agent's run. If so, move them to Needs Help with a comment.
- */
-async function recoverStuckCards(
-  repo: RepoContext,
-  state: RepoPollerState,
-  job: AgentJob,
-): Promise<void> {
-  if (state.priorTodoCardIds.length === 0) return;
-
-  const tracker = getRepoTracker(repo);
-  try {
-    // ISS-86: source of truth for "is this card stuck in progress?" is
-    // the local YAML, not tracker.fetchOpenCards. Match by external_id
-    // so the priorTodoCardIds set (recorded before dispatch from the
-    // tracker view) keys correctly into the local-derived list.
-    const stuckCards = (
-      await listInProgressYamls(repo.localPath, repo.issuePrefix)
-    )
-      .map(localIssueToRef)
-      .filter((card) => state.priorTodoCardIds.includes(card.external_id));
-
-    for (const card of stuckCards) {
-      log.warn(
-        `[${repo.name}] Recovering stuck card "${card.title}" → Needs Help`,
-      );
-      await tracker.moveToStatus(card.external_id, "Blocked");
-
-      const elapsed = formatElapsed(job);
-      const comment = `## Agent Failure — Card Recovery
-
-The agent working on this card ${job.status} after ${elapsed}.
-
-**Error:** ${job.summary || "No details available"}
-
-This card was automatically moved to Needs Help. Review the error and move back to ToDo to retry.
-
-${DANXBOT_COMMENT_MARKER}`;
-
-      await tracker.addComment(card.external_id, comment);
-    }
-  } catch (err) {
-    log.error(`[${repo.name}] Failed to recover stuck cards`, err);
-  }
-}
-
-function formatElapsed(job: AgentJob): string {
-  const ms =
-    (job.completedAt?.getTime() ?? Date.now()) - job.startedAt.getTime();
-  const seconds = Math.round(ms / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.round(seconds / 60)}min`;
-}
-
-/**
- * Per-card triage dispatch gate (Phase 4 of ISS-90). Replaces the
- * legacy bulk `checkAndSpawnTriage` (one session over every Action
- * Items + Review card) with a single-card dispatch — one tick fires
- * one `danx-triage-card` agent against one specific YAML.
- *
- * Invoked from the empty-ToDo branch of `_poll` BEFORE
- * `checkAndSpawnIdeator`. Returns `true` when it spawned a triage
- * agent — the caller honors the per-tick single-dispatch invariant by
- * returning immediately. Returns `false` when:
- *   - `autoTriage` is disabled (env default or operator override), OR
- *   - no triage-due card exists.
- *
- * Triage-due eligibility (delegated to `listTriageDueYamls`):
- *   - `dispatch === null` (no in-flight dispatch on the card)
- *   - `triage.expires_at === ""` OR `Date.parse(expires_at) <= now`
- *   - `blocked != null` OR `status` ∈ {Review, Needs Help}
- * Sort: never-triaged first, then `expires_at` ASC.
- *
- * The dispatched agent runs with `kind: "triage"` and TTL 600s
- * (`TTL_SECONDS_BY_KIND.triage`). Same `dispatchStamp` lifecycle as a
- * work dispatch — pre-stamp on the YAML, register in
- * `activeDispatches`, post-spawn pid update, onComplete cleanup.
- */
-async function tryTriageDispatch(repo: RepoContext): Promise<boolean> {
-  // Per-repo runtime toggle. Env default is `false` — operators opt in
-  // via the dashboard Agents tab. See `.claude/rules/settings-file.md`.
-  if (!isFeatureEnabled(repo, "autoTriage")) {
-    log.info(
-      `[${repo.name}] Auto-triage disabled (settings.json override or env default) — skipping`,
-    );
-    return false;
-  }
-
-  const due = await listTriageDueYamls(
-    repo.localPath,
-    Date.now(),
-    repo.issuePrefix,
-  );
-  if (due.length === 0) {
-    return false;
-  }
-
-  const target = due[0];
-  log.info(
-    `[${repo.name}] Triage-due: dispatching ${target.id} (status=${target.status}, waiting_on=${target.waiting_on ? "yes" : "no"}, expires_at=${target.triage.expires_at || "(never)"})`,
-  );
-
-  const dispatchId = randomUUID();
-  // Stamp the dispatch record on disk BEFORE spawn so a crash between
-  // dispatch() resolving and the post-spawn pid stamp leaves a partial
-  // record the next reattach pass can recover from. Same invariant as
-  // the work-ready dispatch path; the helper centralizes the
-  // pid:0/host/TTL contract across all three spawn sites.
-  const startStamp = buildStartStamp(dispatchId, "triage", osHostname());
-  const stamped = await stampDispatchAndWrite(
-    repo.localPath,
-    target,
-    startStamp,
-  );
-  const prompt = TRIAGE_CARD_PROMPT(stamped.id);
-
-  // ISS-104: record the triage target + dispatch start timestamp so the
-  // post-dispatch guard in `handleAgentCompletion` can verify the
-  // dispatch actually moved `triage.expires_at` forward. Set BEFORE
-  // `await spawnClaude` so the field is in place by the time
-  // `onComplete` fires. Pre-spawn failures route through spawnClaude's
-  // catch branch which calls `cleanupAfterAgent` directly (without
-  // `handleAgentCompletion`), so the field is cleared without tripping
-  // the guard — correct because no agent ran on the pre-spawn-failure
-  // path.
-  const state = getState(repo.name);
-  state.triageTracked = {
-    id: stamped.id,
-    startedAt: startStamp.started_at,
-  };
-
-  await spawnClaude(
-    repo,
-    prompt,
-    {
-      trigger: "api",
-      metadata: {
-        endpoint: "poller/triage-card",
-        callerIp: null,
-        statusUrl: null,
-        initialPrompt: prompt.slice(0, 500),
-      },
-    },
-    dispatchId,
-    undefined,
-    { issueId: stamped.id, startStamp },
-  );
-  return true;
-}
-
-/**
- * Shared spawn shape for poller-driven, non-card API dispatches
- * (ideator + any future periodic that does NOT bind to a specific
- * card YAML). Wraps the `spawnClaude` call with the metadata block
- * every poller-side `api` trigger needs: `endpoint` slug,
- * `initialPrompt` preview slice, and the null `callerIp` /
- * `statusUrl` fields the Trello-trigger path doesn't apply.
- */
-function spawnPollerApiAgent(
-  repo: RepoContext,
-  prompt: string,
-  endpoint: string,
-): void {
-  // Fire-and-forget: ideator has no per-card YAML stamp to write
-  // post-spawn (no `dispatchStamp` arg), so the only reason to await
-  // `spawnClaude` here would be sequencing — and the caller
-  // (`_poll` empty-ToDo branch) is already at end-of-tick. Errors
-  // surface via the dispatch.catch path inside `spawnClaude`.
-  void spawnClaude(repo, prompt, {
-    trigger: "api",
-    metadata: {
-      endpoint,
-      callerIp: null,
-      statusUrl: null,
-      initialPrompt: prompt.slice(0, 500),
-    },
-  });
-}
-
-async function checkAndSpawnIdeator(
-  repo: RepoContext,
-  tracker: IssueTracker,
-): Promise<void> {
-  // Per-repo runtime toggle. Env default is `false` — operators opt in
-  // via the dashboard Agents tab. Checked BEFORE the Review-list fetch
-  // so a disabled repo doesn't pay the tracker round-trip on every
-  // empty-ToDo tick. See `.claude/rules/settings-file.md`.
-  if (!isFeatureEnabled(repo, "ideator")) {
-    log.info(
-      `[${repo.name}] Ideator disabled (settings.json override or env default) — skipping`,
-    );
-    return;
-  }
-
-  let reviewCards: IssueRef[];
-  try {
-    const all = await tracker.fetchOpenCards();
-    reviewCards = all.filter((c) => c.status === "Review");
-  } catch (error) {
-    log.error(`[${repo.name}] Error fetching Review cards`, error);
-    return;
-  }
-
-  if (reviewCards.length >= REVIEW_MIN_CARDS) {
-    log.info(
-      `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — no ideation needed`,
-    );
-    return;
-  }
-
-  log.info(
-    `[${repo.name}] Review has ${reviewCards.length} cards (min ${REVIEW_MIN_CARDS}) — spawning ideator`,
-  );
-  // Ideator runs don't originate from a specific card — tag them as API
-  // dispatches so the poller run is still visible in dispatch history.
-  spawnPollerApiAgent(repo, IDEATOR_PROMPT, "poller/ideator");
-}
 
 export function shutdown(): void {
   log.info("Shutting down...");
@@ -3120,11 +1678,12 @@ export async function start(): Promise<void> {
     const intervalSeconds = config.pollerIntervalMs / 1000;
     log.info(`[${repo.name}] Started — polling every ${intervalSeconds}s`);
 
-    // Boot reattach (ISS-92, Phase 2). Walks every open YAML, registers
-    // alive dispatches in `activeDispatches`, clears YAMLs whose
-    // dispatch is dead/expired/cross-host. MUST run before the first
-    // `poll(repo)` call so the dispatch path doesn't double-spawn a
-    // card whose previous claude is still alive across worker restart.
+    // Boot reattach (ISS-92 Phase 2; DX-290 slimmed). Walks every open
+    // YAML and clears the ones whose recorded dispatch PID/host is
+    // dead/expired/cross-host; alive PIDs are left in place for the
+    // per-dispatch TTL timer (`src/dispatch/ttl-timer.ts`) to track.
+    // MUST run before the first `poll(repo)` call so the next reconcile
+    // → scheduler poke sees the cleaned baseline.
     await runStartupReattach(repo);
 
     poll(repo);
@@ -3135,7 +1694,6 @@ export async function start(): Promise<void> {
 /** Reset module state for testing. Do not use in production. */
 export function _resetForTesting(): void {
   for (const state of repoState.values()) {
-    state.teamRunning = false;
     state.polling = false;
     if (state.intervalId) {
       clearInterval(state.intervalId);
@@ -3144,7 +1702,6 @@ export function _resetForTesting(): void {
   }
   repoState.clear();
   trackerByRepo.clear();
-  activeDispatches.clear();
 }
 
 // Auto-start when run as the direct entrypoint.

@@ -927,6 +927,55 @@ describe("tryMultiAgentDispatch", () => {
     expect(passed.jobSummary).toBe("ok");
   });
 
+  /**
+   * DX-290 (Event-Driven Worker Phase 4b.3) — the same hook MUST also
+   * fire when the dispatch ends with a failure status. AC #4 explicitly
+   * pins this: `recoverStuckCards is wired via … onComplete; test
+   * asserts the hook fires on a failed dispatch`. Without the assertion
+   * a future refactor that branches "skip check on failure" would slip
+   * past the happy-path coverage above. The previous in-poller
+   * `recoverStuckCards` ran specifically on failure to surface stuck
+   * cards to operators; the multi-agent equivalent is
+   * `runPostDispatchProgressCheck` writing CRITICAL_FAILURE when the
+   * card never moved out of ToDo — regardless of jobStatus.
+   */
+  it("AC #4 (DX-290): runPostDispatchProgressCheck fires from dispatch.onComplete on a FAILED dispatch", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [issue("DX-1")],
+      inProgress: [],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.onComplete).toBeDefined();
+
+    // Simulate the launcher invoking onComplete with a failed status —
+    // mirrors the lifecycle stop signal the worker emits when the agent
+    // exits non-zero or is killed by the stall detector.
+    await dispatchInput.onComplete!({
+      id: "did-1",
+      status: "failed",
+      summary: "agent crashed mid-dispatch",
+    } as never);
+
+    expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
+    const passed = vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0];
+    expect(passed.cardId).toBe("ext-DX-1");
+    expect(passed.jobId).toBe("did-1");
+    expect(passed.jobStatus).toBe("failed");
+    expect(passed.jobSummary).toBe("agent crashed mid-dispatch");
+  });
+
   it("AC #4: dispatch.onComplete runs BOTH the YAML dispatch{} cleanup AND the post-dispatch progress check in one invocation", async () => {
     // Composite-behaviour test for the multi-agent onComplete chain.
     // The handler must (a) clear the YAML's `dispatch{}` block via

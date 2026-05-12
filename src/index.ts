@@ -38,7 +38,10 @@ import {
 import { isPidAlive } from "./agent/host-pid.js";
 import { hostname as osHostname } from "node:os";
 import { start as startPoller, syncRepoFiles } from "./poller/index.js";
-import { syncSettingsFileOnBoot } from "./settings-file.js";
+import {
+  getIssuePollerPickupPrefix,
+  syncSettingsFileOnBoot,
+} from "./settings-file.js";
 import { watchRepoEnvFile } from "./dashboard/repo-env-writer.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
 import { reapOrphans } from "./worker/process-scan.js";
@@ -440,14 +443,16 @@ async function startWorkerMode(): Promise<void> {
   // dispatchableChanged poke fires the multi-agent picker without
   // waiting for the next `_poll` tick. The closure re-reads card
   // state on each fire so we observe the latest YAML truth (DB-backed
-  // via `listDispatchableYamls`). Until Phase 4b.3 deletes the legacy
-  // `_poll` picker invocation, both paths run — both are idempotent
-  // (`busyAgents` DB lock + tracker-comment lock prevent double-claim).
+  // via `listDispatchableYamls`). Phase 4b.3 (DX-290) deleted the
+  // legacy `_poll` picker invocation; this `runPicker` is now the SOLE
+  // dispatcher — fired by reconcile's `onReconcileResult` and
+  // settings-watch's `onAgentRosterChange` through the scheduler's
+  // single-flight mutex.
   bootScheduler({
     repo,
     tracker: repoTracker,
     runPicker: async ({ now }) => {
-      const cards = await listDispatchableYamls(
+      const allCards = await listDispatchableYamls(
         repo.localPath,
         repo.issuePrefix,
       );
@@ -455,6 +460,20 @@ async function startWorkerMode(): Promise<void> {
         repo.localPath,
         repo.issuePrefix,
       );
+      // DX-290: operator-facing pickup-name-prefix filter. Migrated
+      // from `_poll`'s deleted dispatch-decision block so the toggle in
+      // `<repo>/.danxbot/settings.json` continues to work — when set,
+      // ONLY YAMLs whose `title` starts with the prefix are eligible
+      // for dispatch. Used by the system-test harness for race-free
+      // isolation; operators can also use it to limit the worker to
+      // one card class without disabling the poller entirely. Filter
+      // here (closure for runPicker) rather than in
+      // `listDispatchableYamls` so the in-process settings hot-path
+      // observes operator toggles without a worker restart.
+      const pickupPrefix = getIssuePollerPickupPrefix(repo.localPath);
+      const cards = pickupPrefix
+        ? allCards.filter((c) => c.title.startsWith(pickupPrefix))
+        : allCards;
       await tryMultiAgentDispatch({
         repo,
         cards,
