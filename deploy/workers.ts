@@ -55,6 +55,14 @@ export function buildLaunchCommand(
   // inside the container without a worker restart.
   const claudeConfigFile = `${env.claudeAuthDir}/.claude.json`;
   const claudeCredsDir = `${env.claudeAuthDir}/.claude`;
+  // DX-230 portable-path contract. The per-repo compose.yml substitutes
+  // ${DANXBOT_REPO_ROOT} into the primary volume bind AND ${DANXBOT_REPO_HOST_PATH}
+  // (with `:?` fail-fast) into the mirror-bind so worktree realpath() resolves
+  // identically across runtimes. Locally `scripts/worker-env.sh` exports both
+  // before `docker compose up`. The deploy CLI invokes compose directly over
+  // SSH and never sources worker-env.sh — both vars MUST be in the prefix or
+  // compose interpolation aborts before the worker container is created.
+  const repoHostPath = `${CONTAINER_REPOS_BASE}/${repo.name}`;
   // Per-repo claude-projects/ uses a STATIC `../../claude-projects` mount
   // in every worker compose. Do NOT re-introduce `CLAUDE_PROJECTS_DIR`
   // here — any compose that still has `${CLAUDE_PROJECTS_DIR:-...}` would
@@ -66,7 +74,7 @@ export function buildLaunchCommand(
   // Adding it here would require the worker compose to interpolate it back
   // out, which silently overrides the image-baked value with empty when the
   // host shell isn't exporting it. Trello auX4nTRk for the rationale.
-  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}'`;
+  const prefix = `DANXBOT_WORKER_IMAGE='${env.workerImage}' CLAUDE_AUTH_DIR='${env.claudeAuthDir}' CLAUDE_CONFIG_FILE='${claudeConfigFile}' CLAUDE_CREDS_DIR='${claudeCredsDir}' DANXBOT_WORKER_PORT='${repo.workerPort}' DANXBOT_REPOS_BASE='${CONTAINER_REPOS_BASE}' DANXBOT_REPO_ROOT='${repoHostPath}' DANXBOT_REPO_HOST_PATH='${repoHostPath}'`;
   return `${prefix} docker compose --env-file /danxbot/.env -f ${CONTAINER_REPOS_BASE}/${repo.name}/.danxbot/config/compose.yml -p worker-${repo.name} up -d --remove-orphans`;
 }
 

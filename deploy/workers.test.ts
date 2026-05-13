@@ -72,6 +72,39 @@ describe("worker commands", () => {
     expect(cmd).toContain("DANXBOT_REPOS_BASE='/danxbot/repos'");
   });
 
+  // DX-230 portable-path contract. Every per-repo compose.yml substitutes
+  // ${DANXBOT_REPO_ROOT} into the primary volume bind AND fail-fast
+  // ${DANXBOT_REPO_HOST_PATH:?...} into the mirror-bind. Locally,
+  // scripts/worker-env.sh exports both before compose up; the deploy CLI
+  // invokes compose directly over SSH and never sources that script, so
+  // both vars MUST land in the inline prefix or compose interpolation
+  // aborts with `required variable DANXBOT_REPO_HOST_PATH is missing`
+  // before the worker container is even created (witnessed live on
+  // `make deploy TARGET=gpt`).
+  it("injects DANXBOT_REPO_ROOT + DANXBOT_REPO_HOST_PATH = <container repo path> so compose interpolation succeeds remotely", () => {
+    const cmd = buildLaunchCommand(
+      { name: "app", url: "x", workerPort: 5561 },
+      ENV,
+    );
+    expect(cmd).toContain("DANXBOT_REPO_ROOT='/danxbot/repos/app'");
+    expect(cmd).toContain("DANXBOT_REPO_HOST_PATH='/danxbot/repos/app'");
+  });
+
+  it("DANXBOT_REPO_ROOT + DANXBOT_REPO_HOST_PATH carry the repo name verbatim (no shared default across repos)", () => {
+    const danxbot = buildLaunchCommand(
+      { name: "danxbot", url: "x", workerPort: 5561 },
+      ENV,
+    );
+    const gpt = buildLaunchCommand(
+      { name: "gpt-manager", url: "x", workerPort: 5562 },
+      ENV,
+    );
+    expect(danxbot).toContain("DANXBOT_REPO_ROOT='/danxbot/repos/danxbot'");
+    expect(danxbot).toContain("DANXBOT_REPO_HOST_PATH='/danxbot/repos/danxbot'");
+    expect(gpt).toContain("DANXBOT_REPO_ROOT='/danxbot/repos/gpt-manager'");
+    expect(gpt).toContain("DANXBOT_REPO_HOST_PATH='/danxbot/repos/gpt-manager'");
+  });
+
   // Regression guard for the auX4nTRk fix: the prefix MUST NOT inject
   // DANXBOT_COMMIT. The SHA reaches the runtime via the image-baked ENV
   // (Dockerfile ARG, populated by deploy/build.ts --build-arg). Adding it
