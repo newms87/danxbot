@@ -27,7 +27,7 @@ TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/l
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-yaml-memory test-system-cleanup \
-       test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep \
+       test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep test-system-orphan-reap \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user ensure-root-user reset-data \
        publish-danx-issue-mcp publish-playwright-mcp \
@@ -297,6 +297,9 @@ test-system-yaml-memory: ## Phase 4 AC #6 — verify dispatched session JSONL ha
 
 test-system-cleanup: ## Verify no orphaned temp dirs or zombie jobs
 	@$(SYSTEM_TEST_SCRIPT) --test cleanup
+
+test-system-orphan-reap: ## DX-323 / DX-328 — scope-stop reaps backgrounded grandchildren (host worker only, ~$0.05)
+	@$(SYSTEM_TEST_SCRIPT) --test orphan-reap
 
 test-system-agent-creation: ## DX-262 — agent CRUD + worktree validity E2E (free, no Claude API)
 	@./src/__tests__/system/test-agent-creation.sh

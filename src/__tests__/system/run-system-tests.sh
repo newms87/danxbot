@@ -10,7 +10,7 @@
 #
 # Options:
 #   --worker-port PORT   Worker port (default: 5561)
-#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, yaml-memory, multi-worker, cleanup)
+#   --test NAME          Run a single test (health, dispatch, heartbeat, cancel, error, poller, yaml-memory, multi-worker, orphan-reap, cleanup)
 #   --host-mode          Include host-mode-only tests (stall detection)
 #   --api-token TOKEN    API token for dispatch requests (default: "system-test-token")
 
@@ -1286,7 +1286,7 @@ _multi_worker_seed_agents() {
     // Pre-DX-281 this helper wholesale-replaced `cur.agents = {}` to
     // avoid the AGENTS_MAX=5 cap when combined with operator agents.
     // The raw fs.writeFileSync below bypasses the writer-merge lock,
-    // so the wipe raced the worker's `syncSettingsFileOnBoot` between
+    // so the wipe raced the worker `syncSettingsFileOnBoot` call between
     // the wipe and the EXIT restore — the worker became the last
     // writer post-wipe (confirmed via `meta.updatedBy: "worker"`
     // stamp) and re-cemented the empty agents map under its own
@@ -1377,6 +1377,183 @@ assigned_agent: null
 EOF
 }
 
+test_orphan_reap() {
+  log_header "test-system-orphan-reap"
+  local start_time=$SECONDS
+
+  # DX-323 / DX-328 — proves the scope-confinement invariant end-to-end:
+  # backgrounded grandchildren spawned through the agent's Bash tool
+  # inherit `danxbot-dispatch-<id>.scope` so `systemctl --user stop` on
+  # the scope reaps the whole tree atomically. The DX-262 orphan class
+  # is closed by this path. Host-only — docker runtime is its own
+  # cgroup and skips the scope wrapper.
+
+  # Skip if user systemd is unavailable — without it `systemd-run --user`
+  # has nowhere to anchor the scope. The scope-absence branch below
+  # additionally catches the case of a host worker running pre-DX-325
+  # code (no systemd-run wrap at spawn), so a separate "is the worker
+  # in docker?" gate is redundant + brittle (would mis-identify a
+  # docker worker on host networking).
+  if [[ -e /.dockerenv ]] \
+     || ! systemd-run --user --version >/dev/null 2>&1 \
+     || ! systemctl --user is-system-running >/dev/null 2>&1; then
+    skip "Orphan reap requires user systemd (systemd-run + is-system-running)"
+    return
+  fi
+
+  # Spawn 30 `yes` processes inside the dispatched session's Bash
+  # subshell. 30 (not 300 as the card mentions) — same correctness
+  # proof at 1/10 the load; the cgroup walk reaps N PIDs in O(1) so
+  # the count is not load-sensitive. Sleep 240s pins the agent so the
+  # `yes` PIDs are guaranteed to be alive when we sample the scope.
+  local launch_response
+  launch_response=$(http_post "${WORKER_URL}/api/launch" "{
+    \"workspace\": \"system-test\",
+    \"task\": \"Use the Bash tool to run exactly this command and nothing else: for i in \$(seq 1 30); do yes > /dev/null & done; sleep 240\",
+    \"api_token\": \"${API_TOKEN}\"
+  }")
+
+  local job_id
+  job_id=$(json_field "$launch_response" "job_id")
+  if [[ -z "$job_id" ]]; then
+    fail "Launch failed: $launch_response"
+    return
+  fi
+  pass "Job launched (id: $job_id)"
+
+  local scope_unit="danxbot-dispatch-${job_id}.scope"
+
+  # First wait up to 30s for the scope unit to APPEAR (proves the worker
+  # is running DX-325+ code; an older worker would spawn claude without
+  # the systemd-run wrap and we'd wait forever on a unit that never
+  # materializes). If the scope never shows up, the worker is stale —
+  # skip with a clear pointer instead of failing.
+  log_info "Waiting up to 30s for scope unit ${scope_unit} to materialize..."
+  local cgroup_path=""
+  local scope_wait=0
+  while [[ $scope_wait -lt 30 ]]; do
+    cgroup_path=$(systemctl --user show "$scope_unit" -p ControlGroup --value 2>/dev/null)
+    if [[ -n "$cgroup_path" && "$cgroup_path" != "(null)" ]]; then break; fi
+    sleep 2
+    scope_wait=$((scope_wait + 2))
+  done
+  if [[ -z "$cgroup_path" || "$cgroup_path" == "(null)" ]]; then
+    log_info "Scope unit never appeared — worker is running pre-DX-325 code (no systemd-run wrap)"
+    skip "Worker has no scope unit; restart against current main to verify end-to-end"
+    http_post "${WORKER_URL}/api/cancel/${job_id}" "{\"api_token\": \"${API_TOKEN}\"}" >/dev/null 2>&1 || true
+    return
+  fi
+  pass "Scope unit created (cgroup: ${cgroup_path})"
+
+  log_info "Waiting up to 90s for 30 'yes' PIDs in scope cgroup..."
+  local elapsed=0
+  local yes_count=0
+  local procs_file="/sys/fs/cgroup${cgroup_path}/cgroup.procs"
+  while [[ $elapsed -lt 90 ]]; do
+    if [[ -f "$procs_file" ]]; then
+      yes_count=0
+      while IFS= read -r pid; do
+        [[ -z "$pid" ]] && continue
+        local comm
+        comm=$(cat "/proc/${pid}/comm" 2>/dev/null || true)
+        if [[ "$comm" == "yes" ]]; then
+          yes_count=$((yes_count + 1))
+        fi
+      done < "$procs_file"
+      if [[ "$yes_count" -ge 30 ]]; then break; fi
+    fi
+    sleep 3
+    elapsed=$((elapsed + 3))
+  done
+
+  if [[ "$yes_count" -ge 30 ]]; then
+    pass "Scope cgroup contains ${yes_count} 'yes' PIDs (≥ 30)"
+  else
+    fail "Scope cgroup contains only ${yes_count} 'yes' PIDs after 90s (cgroup: ${cgroup_path:-<missing>})"
+    http_post "${WORKER_URL}/api/cancel/${job_id}" "{\"api_token\": \"${API_TOKEN}\"}" >/dev/null 2>&1 || true
+    return
+  fi
+
+  # Snapshot every yes PID inside the scope as `pid:starttime` pairs.
+  # `starttime` (field 22 of /proc/<pid>/stat — kernel boot ticks at
+  # process spawn) defeats the post-stop PID-reuse hazard: a recycled
+  # PID matching `comm == "yes"` would have a DIFFERENT starttime,
+  # so the survival check can distinguish "original PID alive" from
+  # "kernel reused the slot for an unrelated yes."
+  local target_pairs
+  target_pairs=$(
+    while IFS= read -r pid; do
+      [[ -z "$pid" ]] && continue
+      local comm
+      comm=$(cat "/proc/${pid}/comm" 2>/dev/null || true)
+      [[ "$comm" != "yes" ]] && continue
+      local stat
+      stat=$(cat "/proc/${pid}/stat" 2>/dev/null || true)
+      [[ -z "$stat" ]] && continue
+      # field 22 is starttime. Args 2..N could contain spaces enclosed
+      # in parens (comm field); awk's `RT=/\) /` split captures the
+      # tail after the parenthesised comm so positional indexing works.
+      local starttime
+      # /proc/<pid>/stat: "pid (comm) state ppid ...". The comm field
+      # is parenthesised and may contain spaces, so split on `) ` to
+      # isolate the post-comm tail; starttime is field 20 of that tail.
+      starttime=$(echo "$stat" | awk -F') ' '{n=split($2,a," "); print a[20]}')
+      [[ -z "$starttime" ]] && continue
+      echo "${pid}:${starttime}"
+    done < "$procs_file"
+  )
+  local target_count
+  if [[ -z "$target_pairs" ]]; then
+    target_count=0
+  else
+    target_count=$(echo "$target_pairs" | wc -l)
+  fi
+
+  log_info "Stopping scope ${scope_unit} (equivalent to job-stop.ts host path)..."
+  systemctl --user stop "$scope_unit" >/dev/null 2>&1 || true
+
+  # systemd default TimeoutStopSec is 90s; SIGTERM on `yes` exits
+  # instantly. 5s is generous.
+  sleep 5
+
+  local scope_after
+  scope_after=$(systemctl --user show "$scope_unit" -p ControlGroup --value 2>/dev/null)
+  if [[ -z "$scope_after" || "$scope_after" == "(null)" ]]; then
+    pass "Scope unit collected (--collect swept on stop)"
+  else
+    fail "Scope unit still present after stop: $scope_after"
+  fi
+
+  local surviving=0
+  while IFS=: read -r pid starttime; do
+    [[ -z "$pid" || -z "$starttime" ]] && continue
+    [[ ! -d "/proc/${pid}" ]] && continue
+    local now_stat
+    now_stat=$(cat "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ -z "$now_stat" ]] && continue
+    local now_starttime
+    now_starttime=$(echo "$now_stat" | awk -F') ' '{n=split($2,a," "); print a[20]}')
+    # PID-reuse guard: a new process at the same PID slot has a later
+    # starttime. Original PID alive iff slot+starttime match the snapshot.
+    if [[ "$now_starttime" == "$starttime" ]]; then
+      surviving=$((surviving + 1))
+    fi
+  done <<< "$target_pairs"
+
+  if [[ "$surviving" == "0" ]]; then
+    pass "Zero 'yes' PIDs survive scope stop — DX-262 orphan class closed (${target_count} verified via pid+starttime)"
+  else
+    fail "${surviving} of ${target_count} 'yes' PIDs survived scope stop"
+  fi
+
+  # Best-effort housekeeping. The worker's SessionLogWatcher will
+  # eventually notice the missing process and mark the dispatch row
+  # failed; calling cancel is faster + idempotent on a dead job.
+  http_post "${WORKER_URL}/api/cancel/${job_id}" "{\"api_token\": \"${API_TOKEN}\"}" >/dev/null 2>&1 || true
+
+  log_info "Completed in $((SECONDS - start_time))s"
+}
+
 test_cleanup() {
   log_header "test-system-cleanup"
 
@@ -1452,6 +1629,7 @@ main() {
       poller)      test_cron_sweep ;;
       yaml-memory) test_yaml_memory ;;
       multi-worker) test_multi_worker ;;
+      orphan-reap) test_orphan_reap ;;
       cleanup)     test_cleanup ;;
       *) log "${RED}Unknown test: $SINGLE_TEST${NC}"; exit 1 ;;
     esac
@@ -1465,6 +1643,7 @@ main() {
     test_cron_sweep
     test_yaml_memory
     test_multi_worker
+    test_orphan_reap
     test_cleanup
   fi
 

@@ -38,13 +38,15 @@ Worker hostname: `workerHost(name) = danxbot-worker-<name>` (compose `container_
 
 **Router is strict allowlist.** Unknown path or method → `{"error":"Not found"}` 404. No SPA fallback except `GET /` serving `index.html`. Prevents the regression where `POST /api/launch` returned SPA HTML 200.
 
-## The Single Fork Principle — scope-confined on host (DX-323 / DX-325)
+## The Single Fork Principle — scope-confined on host (DX-323)
 
-Every dispatch spawns EXACTLY ONE `claude` process. Runtime auto-detected from `/.dockerenv` (container → docker; host → host); never set via env var. Mode only changes the spawn shape — everything downstream is identical.
+Every dispatch is a single `systemd-run --user --scope` unit on host, a single `claude` PID in docker. Whole process tree is ONE kill target — backgrounded grandchildren (`yes > /dev/null &`, double-forks, daemons the Bash tool spawned) inherit the cgroup so `systemctl --user stop <scope>.scope` reaps the entire tree atomically. The DX-262 orphan class is closed by this invariant.
+
+Runtime is auto-detected from `/.dockerenv` (container → docker; host → host); never set via env var. Mode only changes the spawn shape — monitoring, completion, cancellation are identical.
 
 **Production routing** is two states, not three. `dispatch()` (`src/dispatch/core.ts`) defaults `openTerminal: config.isHost`, so the launcher's `if (options.openTerminal)` branch is `true` on host and `false` in docker. Result: host production ALWAYS reaches `terminal.ts#buildDispatchScript` (interactive TUI inside `script -q -f`); docker production ALWAYS reaches `spawn-docker-mode.ts` (headless `claude -p`). The third row in the table below — "Host headless" — exists only because the `spawn-docker-mode.ts` host wrap is defense-in-depth for direct `spawnAgent()` callers (tests, future non-TUI host paths); no production code reaches it today. The "Host mode MUST be interactive" rule (see below) bans `claude -p` in production host runtime; the headless wrap is test-only and does not violate that contract because production never routes there.
 
-**Host runtime confines every dispatch in a per-dispatch transient systemd user-scope unit.** The cgroup is `danxbot-dispatch-<dispatchId>.scope`; backgrounded grandchildren (`yes > /dev/null &`, double-forks, daemons the dispatched agent's Bash tool spawns) inherit the scope so the whole tree is one kill target. Boot preflight (`src/agent/systemd-preflight.ts`) refuses to start the worker on host if `systemctl --user is-system-running` is offline or `systemd-run --user --version` does not run — there is no naked-spawn fallback. Docker runtime SKIPS the scope wrapper because the container boundary is already the cgroup that confines the tree.
+**Boot preflight is the load-bearing gate.** `src/agent/systemd-preflight.ts` refuses to start the worker on host if `systemctl --user is-system-running` is offline OR `systemd-run --user --version` does not run — `process.exit(1)`, no fallback. Docker runtime SKIPS the scope wrapper because the container boundary is already the cgroup that confines the tree.
 
 | Concern | Docker (production) | Host TUI (production) | Host headless (test-only) |
 |---|---|---|---|
@@ -54,10 +56,11 @@ Every dispatch spawns EXACTLY ONE `claude` process. Runtime auto-detected from `
 | Prompt | `-p` argv | Positional arg after `--` | `-p` argv (test path only — production never reaches this) |
 | `DANXBOT_DISPATCH_SCOPE` env | NOT set (no real scope unit in the container) | `danxbot-dispatch-<id>` | `danxbot-dispatch-<id>` |
 | Monitoring / StallDetector / LaravelForwarder / Heartbeat / Usage / `danxbot_complete` | Identical (SessionLogWatcher → JSONL) | Identical | Identical |
-| Cancel (Phase 2, current) | SIGTERM `job.handle.pid` | SIGTERM tracked PID — `script` cascades through pty | SIGTERM `job.handle.pid` — systemd-run forwards to its scope's children |
-| Cancel (Phase 3, future) | unchanged | `systemctl --user stop danxbot-dispatch-<id>.scope` | `systemctl --user stop danxbot-dispatch-<id>.scope` |
+| Stop (`job.stop`, `cancelJob`, MCP `danxbot_complete`) | `terminateWithGrace`: SIGTERM tracked PID → 5s grace → SIGKILL (container PID namespace IS the cgroup) | `systemctl --user stop danxbot-dispatch-<id>.scope` — systemd walks the cgroup, SIGTERMs every PID atomically, TimeoutStopSec owns SIGKILL escalation. Exit code 5 (`unit not found`) = `--collect` already swept it = success | `systemctl --user stop danxbot-dispatch-<id>.scope` |
 
-ONE fork, ONE process tree (cgroup-confined on host), ONE JSONL, ONE watcher. Adding a second spawn / observer / monitoring path = STOP, you're unwinding this contract. The pure helper that builds the systemd-run argv lives at `src/agent/scope.ts#buildSystemdRunArgs`; its unit test pins the canonical arg order including `--collect` (auto-cleanup of completed scope units).
+ONE fork, ONE process tree (cgroup-confined on host), ONE JSONL, ONE watcher, ONE stop primitive (`src/agent/job-stop.ts#stopAgentTree` — branches on `job.scopeName`). Adding a second spawn / observer / monitoring path / stop path = STOP, you're unwinding this contract. The pure helper that builds the systemd-run argv lives at `src/agent/scope.ts#buildSystemdRunArgs`; its unit test pins the canonical arg order including `--collect` (auto-cleanup of completed scope units).
+
+**Cron reap safety net.** A host crash that kills the worker before `job.stop` runs leaves the scope unit + its cgroup alive. `src/cron/jobs/reap-orphan-dispatches.ts` fires every 60s via the `make install-cron` per-minute tick, enumerates `danxbot-dispatch-*.scope` units, joins against the `dispatches` table, and `systemctl --user stop`s every scope whose row is terminal-or-missing AND whose scope age clears the 60s race-window guard. Read-only on the DB, kill-only on scopes — no env-variable scan / proc-tree walk, no "kill anything older than X regardless of DB."
 
 ## SessionLogWatcher — the only monitoring mechanism
 
@@ -79,13 +82,15 @@ Only legitimate second observer: `TerminalOutputWatcher` (`src/agent/terminal-ou
 
 Agents call `danxbot_complete({status, summary})` (MCP tool, `src/mcp/danxbot-server.ts`). MCP server POSTs `DANXBOT_STOP_URL` (`http://localhost:<worker_port>/api/stop/<dispatchId>`). Worker `job.stop`:
 
-1. Set `job.status` + `job.summary` BEFORE killing (prevents exit handler race).
-2. Register close listener BEFORE signal (catch fast exit).
-3. SIGTERM tracked PID; 5s grace → SIGKILL.
+1. Set `job.status` + `job.summary` BEFORE the stop call (prevents exit handler race).
+2. Register close listener BEFORE the stop call (catch fast exit).
+3. `stopAgentTree({job, scopeName})` (`src/agent/job-stop.ts`) — single primitive, branches on `job.scopeName`:
+   - **Host** (`scopeName` set): `systemctl --user stop <scope>.scope`. systemd walks the cgroup, SIGTERMs every PID atomically, TimeoutStopSec owns SIGKILL escalation. Exit code 5 (unit not found) = `--collect` already swept the scope = success. No `kill(pid)` fallback — re-introducing one defeats the scope wrap (only the script wrapper dies, backgrounded grandchildren re-orphan).
+   - **Docker** (`scopeName` unset): `terminateWithGrace` — SIGTERM tracked PID → 5s grace → SIGKILL. Container PID namespace IS the cgroup; no scope wrap exists (DX-325 anti-goal).
 4. Run `job._cleanup` (watcher.stop, forwarder.flush, heartbeat stop, inactivity timer clear, MCP settings-dir rm).
 5. PUT final status to `statusUrl` if configured.
 
-Host mode: killing claude → bash script exits → Windows Terminal tab closes.
+Host mode: stopping the scope cascades to the `script -q -f` PTY → bash script exits → Windows Terminal tab closes.
 
 **Fallback chain (DX-242):** if HTTP fails (worker dead), MCP server falls through to direct DB UPDATE then atomic filesystem queue at `<repoRoot>/.danxbot/dispatch-stops/<dispatchId>.json` for boot replay. Full contract + boot replay invariants → dispatch-deep skill.
 
@@ -181,6 +186,8 @@ Mechanical pre-edit check for `src/terminal.ts` / any WT-launching bash:
 | Calling `runPicker` / `tryMultiAgentDispatch` outside the per-repo single-flight mutex (`firePickerWithMutex` / `runWithPickerMutex` in `src/dispatch/scheduler.ts`) | DX-305. Three concurrency sources fire pickers for one repo; without the mutex, two macrotasks pick the same agent + card → double-spawn. Use `firePickerWithMutex(repoName)` for fire-and-forget pokes; `runWithPickerMutex(repoName, fn)` when caller needs the `MultiAgentPickResult`. |
 | Reintroducing `runConflictCheck`, `dispatchInRecoveryMode`, `buildRecoveryPrompt`, or any other separate pre-dispatch conflict-check / recovery-prompt dispatch | DX-297 retired these. The `danxbot:danx-prep` skill runs file-overlap + branch-state reasoning DIRECTLY on the agent's worktree as the first step of every dispatch. The prep-verdict worker route (DX-294) is the single writer of `conflict_on[]` stamping + `agents.<name>.broken` stamping. A separate precursor session would double-stamp + reintroduce the timeout false-positive class (DX-273, DX-274). |
 | `git reset --hard`, `git checkout <ref>`, `git restore`, `git clean -f` in any dispatch / worktree / recovery code path | Destroys uncommitted agent work irrecoverably. Commit-first is the only recovery primitive — see `~/web/claude-plugins/dev/skills/git-discipline/SKILL.md` "Never Destroy Work. Ever." The prep skill's WIP recovery commits the residue to the agent's branch; sync uses `fetch + pull --ff-only + rebase` exclusively. |
+| Booting the worker on host without `systemd-run --user --version` AND `systemctl --user is-system-running` both succeeding | DX-325 boot preflight (`src/agent/systemd-preflight.ts`) `process.exit(1)`s if either check fails — there is no naked-spawn fallback. Reintroducing one re-creates the orphan-grandchildren class: backgrounded `yes > /dev/null &` reparents to PID 1 and survives the tracked PID's death. The runtime invariant is "every dispatch is scope-confined OR the worker doesn't run." |
+| `kill(pid, "SIGTERM" \| "SIGKILL")` in the HOST dispatch stop path | DX-326 routes every host stop (`job.stop`, `cancelJob`, MCP `danxbot_complete`) through `stopAgentTree` → `systemctl --user stop <scope>.scope`. A `kill(pid)` fallback only reaps the script wrapper (the scope's main PID), leaving backgrounded children orphaned. Docker path keeps `terminateWithGrace` (the container IS the cgroup); host path MUST stay on systemctl. |
 
 ## Critical failure flag — poller halt
 

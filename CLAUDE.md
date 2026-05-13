@@ -76,6 +76,8 @@ Every dispatched agent (Slack deep-agent, Trello poller, `/api/launch`) takes th
 
 Runtime mode is auto-detected from `/.dockerenv` at startup — inside a container → docker (headless), on host → host (interactive Windows Terminal). Runtime affects ONLY the spawn shape; monitoring, heartbeat, event forwarding, and stall detection are identical. See `.claude/rules/agent-dispatch.md` for the full contract.
 
+**Host-mode process confinement + orphan-reap safety net (DX-323).** On host, every dispatch is wrapped in a per-dispatch transient systemd user-scope unit (`danxbot-dispatch-<id>.scope`) so backgrounded grandchildren the agent's Bash tool spawns (`yes &`, double-forks, daemons) inherit the cgroup. `systemctl --user stop <scope>.scope` reaps the entire tree atomically — there is no `kill(pid)` fallback on host, and the worker refuses to boot without `systemd-run --user --version` + `systemctl --user is-system-running`. A per-minute system cron line installed via `make install-cron` fires `src/cron/tick.ts`, which iterates the registry at `src/cron/jobs/index.ts`; the `reap-orphan-dispatches` job (DX-327) catches scopes the worker leaked through an unclean death (OOM, kill -9, host reboot) by joining live scope units with the `dispatches` table and stopping every unit whose row is terminal-or-missing. Docker runtime SKIPS the scope wrapper because the container boundary already confines the tree.
+
 ## Tech Stack
 
 - **Runtime:** Node.js 20 + `tsx` (TypeScript executed directly, no build step)

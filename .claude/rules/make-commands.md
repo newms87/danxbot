@@ -26,6 +26,8 @@ Source of truth = `Makefile` (`make help`). Always `cd /home/newms/web/danxbot` 
 | `make launch-infra` | Start shared MySQL + dashboard |
 | `make stop-infra` | Stop shared infra |
 | `make logs [REPO=<name>]` | Tail infra or worker logs |
+| `make install-cron` | Install/replace the per-minute system cron line (DX-324) — fires `src/cron/tick.ts` which runs every registered job (`src/cron/jobs/index.ts`, e.g. DX-327 `reap-orphan-dispatches`). User-scoped (no sudo); pins `$(CURDIR)` so invoke from the main clone, not a worktree. Idempotent — filters any prior `# danxbot-cron`-marked line before appending. Stderr → `/tmp/danxbot-cron.log`. |
+| `make uninstall-cron` | Remove the danxbot cron line. No-op when absent. User-scoped. |
 
 ## Worker / Deploy Launch (STRICTLY PROHIBITED w/o user auth)
 
@@ -47,7 +49,7 @@ Source of truth = `Makefile` (`make help`). Always `cd /home/newms/web/danxbot` 
 |---------|-------|------|---------|
 | `make test` / `make test-unit` / `make test-integration` | 1 | free | Mocked + fake-claude |
 | `make test-validate` | 2 | ~$1 | Real Claude API, 150k token cap. Excluded from `make test`. |
-| `make test-system[-dispatch,-health,-heartbeat,-cancel,-error,-stall,-poller,-cleanup,-slack,-prep]` | 3 | ~$1 max | Full stack; needs infra+worker+`ANTHROPIC_API_KEY`. `test-system-slack` + `test-system-prep` are free (deterministic — no Claude spend). `test-system-prep` covers the four prep-verdict paths (DX-291 / DX-297) via the prep-flow integration test. |
+| `make test-system[-dispatch,-health,-heartbeat,-cancel,-error,-stall,-poller,-cleanup,-slack,-prep,-orphan-reap]` | 3 | ~$1 max | Full stack; needs infra+worker+`ANTHROPIC_API_KEY`. `test-system-slack` + `test-system-prep` are free (deterministic — no Claude spend). `test-system-prep` covers the four prep-verdict paths (DX-291 / DX-297) via the prep-flow integration test. `test-system-orphan-reap` (DX-323 / DX-328) skips on docker workers — scope confinement is host-only. |
 
 ## Conventions
 
