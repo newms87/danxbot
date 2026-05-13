@@ -215,6 +215,25 @@ function unlinkIfExists(path: string): void {
 const armedTimers = new Map<string, NodeJS.Timeout>();
 
 /**
+ * Per-repo "already-logged trello-sync-disabled" registry. When the
+ * operator turns trelloSync off, enqueueRetry / fireRetry / drainRetries
+ * each get called once per issue — without this dedupe set, every
+ * retry-eligible card produces its own log line. We log ONCE per repo
+ * per process for the disabled state and suppress subsequent hits.
+ * Cleared in `_resetForTesting`.
+ */
+const loggedTrelloSyncDisabled = new Set<string>();
+
+function logTrelloSyncDisabledOnce(repoName: string | undefined): void {
+  const key = repoName ?? "unknown";
+  if (loggedTrelloSyncDisabled.has(key)) return;
+  loggedTrelloSyncDisabled.add(key);
+  log.info(
+    `Retry queue: trello sync disabled for repo (${key}) — deferring queue activity (entries stay on disk)`,
+  );
+}
+
+/**
  * Track one tracker registration per repo so the timer callback (which
  * runs without a request-level deps object) can resolve which tracker
  * to use. The retry-queue's enqueue path stores the `repoName` in the
@@ -296,9 +315,7 @@ export function enqueueRetry(opts: EnqueueRetryOptions): void {
   // best-effort retry write. Reads `overrides.trelloSync.enabled` only;
   // null + true + read errors all fall through to normal enqueue.
   if (isTrelloSyncOverrideDisabled(opts.repoLocalPath)) {
-    log.info(
-      `Retry queue: trello sync disabled for repo (${opts.repoName ?? "unknown"}) — dropping enqueue for ${opts.issueId}`,
-    );
+    logTrelloSyncDisabledOnce(opts.repoName);
     return;
   }
   const queuedAt = opts.now?.() ?? Date.now();
@@ -420,9 +437,7 @@ async function fireRetry(
     return;
   }
 
-  const tracker = entryRepoName
-    ? trackersByRepo.get(entryRepoName)
-    : undefined;
+  const tracker = entryRepoName ? trackersByRepo.get(entryRepoName) : undefined;
   if (!tracker) {
     // No tracker registered for this repo (e.g. boot scan ran before
     // the index.ts wiring registered it, or a hand-written test
@@ -452,9 +467,7 @@ async function fireRetry(
   // setTimeout-armed entry doesn't sit orphaned until the next worker
   // boot if the operator never flips it back.
   if (isTrelloSyncOverrideDisabled(repoLocalPath)) {
-    log.info(
-      `Retry queue: trello sync disabled for repo (${entryRepoName}) — deferring ${entry.issueId} (entry stays on disk)`,
-    );
+    logTrelloSyncDisabledOnce(entryRepoName);
     const nowMs = now?.() ?? Date.now();
     const deferredEntry: RetryQueueEntry = {
       ...entry,
@@ -670,7 +683,9 @@ export function bootRescheduleRetryQueue(args: BootRescheduleArgs): {
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.warn(`Retry queue: boot rescan dropping malformed ${filename}: ${msg}`);
+      log.warn(
+        `Retry queue: boot rescan dropping malformed ${filename}: ${msg}`,
+      );
       unlinkIfExists(path);
       malformed++;
       continue;
@@ -764,6 +779,7 @@ export function _resetForTesting(): void {
   armedTimers.clear();
   trackersByRepo.clear();
   systemErrorHookByRepo.clear();
+  loggedTrelloSyncDisabled.clear();
   rng = Math.random;
 }
 
@@ -824,9 +840,7 @@ export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
   // fires from EITHER drain path. Entries stay on disk so the next
   // enqueue or boot reschedules them when the toggle is re-enabled.
   if (isTrelloSyncOverrideDisabled(deps.repoLocalPath)) {
-    log.info(
-      `Retry queue: trello sync disabled for repo (${deps.repoName ?? "test-repo"}) — drainRetries returning empty (entries stay on disk)`,
-    );
+    logTrelloSyncDisabledOnce(deps.repoName);
     return { ...EMPTY_DRAIN_RESULT };
   }
 
@@ -862,18 +876,13 @@ export async function drainRetries(deps: DrainDeps): Promise<DrainResult> {
       if (typeof parsed.repoName !== "string" || parsed.repoName === "") {
         parsed.repoName = repoName;
       }
-      if (
-        typeof parsed.issuePrefix !== "string" ||
-        parsed.issuePrefix === ""
-      ) {
+      if (typeof parsed.issuePrefix !== "string" || parsed.issuePrefix === "") {
         parsed.issuePrefix = deps.prefix;
       }
       entries.push({ path, entry: parsed });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.warn(
-        `Retry queue: dropping malformed entry ${filename}: ${msg}`,
-      );
+      logger.warn(`Retry queue: dropping malformed entry ${filename}: ${msg}`);
       unlinkIfExists(path);
       result.malformed++;
     }
