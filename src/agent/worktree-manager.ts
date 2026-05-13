@@ -55,7 +55,6 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { join, sep } from "node:path";
 import {
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -67,6 +66,7 @@ import {
   statSync,
   symlinkSync,
 } from "node:fs";
+import { mirrorWorkspaceTree } from "../inject/workspaces.js";
 import { createLogger } from "../logger.js";
 import { AGENT_NAME_SHAPE } from "../settings-file.js";
 import type { RepoConfig } from "../types.js";
@@ -676,10 +676,11 @@ function provisionDashboardNodeModules(
  * `mirrorWorkspacesIntoWorktrees` step has copied the workspaces tree
  * in.
  *
- * Cost: idempotent via `cpSync` — recursive copy with overwrite. The
- * poller's per-tick `mirrorWorkspacesIntoWorktrees` is the eventual-
- * consistency safety net and uses `writeIfChanged` (content-checked
- * idempotence), so the two layers don't fight.
+ * Cost: idempotent via `mirrorWorkspaceTree` — symlink-aware via
+ * lstat + `writeIfChanged` (content-checked idempotence); shares the
+ * single implementation with the poller's per-tick
+ * `mirrorWorkspacesIntoWorktrees` safety net, so the two layers don't
+ * fight.
  */
 function provisionWorktreeWorkspaces(
   repoRoot: string,
@@ -708,11 +709,13 @@ function provisionWorktreeWorkspaces(
     }
     const entryDest = join(destRoot, name);
     try {
-      cpSync(entrySrc, entryDest, {
-        recursive: true,
-        // Idempotent over content — don't error on existing files.
-        force: true,
-      });
+      // `mirrorWorkspaceTree` is symlink-aware (mirrors symlinks as
+      // symlinks via lstat) and idempotent via `writeIfChanged` — safe
+      // to re-run on every `ensureProvisioned`. cpSync was previously
+      // used here but trips `ERR_FS_CP_EINVAL` on the `mcp-servers`
+      // symlink target's realpath-resolved circularity check OR EEXIST
+      // on idempotent re-runs.
+      mirrorWorkspaceTree(entrySrc, entryDest, []);
     } catch (err) {
       log.warn(
         `provisionWorktreeWorkspaces: failed to mirror ${entrySrc} → ${entryDest}: ${(err as Error).message ?? err}`,

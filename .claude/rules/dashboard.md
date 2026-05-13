@@ -80,7 +80,7 @@ Human-driven write surface for issue YAMLs. Auth-gated by per-user bearer (NOT t
 
 | Field | Type | Notes |
 |---|---|---|
-| `status` | `IssueStatus` | Terminal (`Done`/`Cancelled`) moves the file `open/` → `closed/`. Patching to `Blocked` auto-stamps `blocked: {reason: "Manually moved to Blocked via dashboard", timestamp}`; patching off `Blocked` auto-clears `blocked`. Patching to any non-`ToDo` status auto-clears `waiting_on` (operator wins). DX-237 — keeps the drag-to-Blocked UX from 400ing on the YAML invariant. |
+| `status` | `IssueStatus` | Terminal (`Done`/`Cancelled`) moves the file `open/` → `closed/`. Patching to `Blocked` auto-stamps `blocked: {reason: "Manually moved to Blocked via dashboard", timestamp}`; patching off `Blocked` auto-clears `blocked`. `waiting_on` is independent of `status` (pure dispatch gate, durable record) — it is NEVER auto-cleared by a status change. |
 | `title` | non-empty `string` | |
 | `description` | `string` | |
 | `ac` | `IssueAcItem[]` | Full array replace. The SPA round-trips existing `check_item_id`s so the worker's tracker push edits in place. |

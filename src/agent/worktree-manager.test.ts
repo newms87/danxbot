@@ -1209,6 +1209,66 @@ describe("WorktreeManager", () => {
     });
   });
 
+  describe("provisionWorktreeWorkspaces — symlinks inside workspaces", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-ws-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(worktreeRoot, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("copies a mcp-servers symlink verbatim, does not trip cpSync circularity guard", async () => {
+      // Regression: without `verbatimSymlinks: true`, Node's cpSync
+      // realpath-resolves a symlink-to-dir target and trips its own
+      // circularity guard (`ERR_FS_CP_EINVAL` — "Cannot copy <target>
+      // to a subdirectory of self <target>") when src + dest tree share
+      // an ancestor with the symlink target. Repro geometry: workspace
+      // dir contains a `mcp-servers` symlink to an external dir under
+      // the same `workArea`.
+      const mcpServersHost = join(workArea, "mcp-servers");
+      mkdirSync(mcpServersHost, { recursive: true });
+      writeFileSync(join(mcpServersHost, "server.js"), "// real\n");
+      const wsSrc = join(repoRoot, ".danxbot", "workspaces", "board-chat");
+      mkdirSync(wsSrc, { recursive: true });
+      writeFileSync(join(wsSrc, "workspace.yml"), "name: board-chat\n");
+      symlinkSync(mcpServersHost, join(wsSrc, "mcp-servers"), "dir");
+
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      // First call — fresh provisioning.
+      await wm.ensureProvisioned(ctx, "alice");
+      // Second call — idempotent re-run. Production hits this every
+      // dispatch (every `ensureProvisioned`); the old cpSync path
+      // ERR_FS_CP_EINVAL'd here because dest mcp-servers symlink
+      // already existed and its realpath collided with src.
+      await wm.ensureProvisioned(ctx, "alice");
+
+      const link = join(
+        worktreeRoot,
+        ".danxbot",
+        "workspaces",
+        "board-chat",
+        "mcp-servers",
+      );
+      expect(lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(link)).toBe(mcpServersHost);
+      // Non-symlink content mirrors normally.
+      expect(
+        existsSync(
+          join(worktreeRoot, ".danxbot", "workspaces", "board-chat", "workspace.yml"),
+        ),
+      ).toBe(true);
+    });
+  });
+
   describe("provisionIssuesSymlink (DX-309)", () => {
     let workArea: string;
     let repoRoot: string;

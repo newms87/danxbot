@@ -15,6 +15,7 @@
 
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -274,7 +275,30 @@ export function mirrorWorkspaceTree(
     const srcPath = resolve(srcDir, entry);
     const destPath = resolve(destDir, entry);
     const childSegments = [...relSegments, entry];
-    if (statSync(srcPath).isDirectory()) {
+    // Use lstat — statSync follows symlinks. The `mcp-servers` entry in
+    // each workspace is a symlink to `<danxbot>/mcp-servers`; recursing
+    // through it deep-copies the entire mcp-servers tree into every
+    // worktree's workspace each tick AND, if the dest symlink already
+    // exists, writes resolve THROUGH it into the real mcp-servers source.
+    // Mirror symlinks as symlinks instead.
+    const srcLstat = lstatSync(srcPath);
+    if (srcLstat.isSymbolicLink()) {
+      const target = readlinkSync(srcPath);
+      try {
+        if (isLinkOrFile(destPath)) rmSync(destPath, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+      let linkType: "dir" | "file" = "file";
+      try {
+        linkType = statSync(srcPath).isDirectory() ? "dir" : "file";
+      } catch {
+        // dangling symlink — keep "file" default; Linux ignores the type anyway
+      }
+      symlinkSync(target, destPath, linkType);
+      continue;
+    }
+    if (srcLstat.isDirectory()) {
       mirrorWorkspaceTree(srcPath, destPath, childSegments);
     } else {
       writeIfChanged(destPath, readFileSync(srcPath, "utf-8"));

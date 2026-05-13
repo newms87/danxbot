@@ -938,18 +938,11 @@ export function validateIssue(
   // enforce this on write; the parser enforces it on read so a hand-edited
   // file with a half-set state fails loud rather than landing in memory.
   //
-  // DX-212: paired invariant — `waiting_on != null ⟹ status === "ToDo"`.
-  // The worker's `forceWaitingOnToToDo` helper is the legacy enforcement
-  // point, but it only ran inside `syncTrackedIssueOnComplete` AFTER the
-  // `auto-sync.ts` `trigger === "trello"` gate. Non-Trello dispatches
-  // (`/api/launch issue-worker`, future workspaces) silently skipped that
-  // normalization, leaving `status: In Progress + waiting_on: {…}` on
-  // disk. Pushing the invariant into the parser makes every reader refuse
-  // the bad shape uniformly — the chokidar mirror still upserts the raw
-  // YAML to Postgres (it uses `parseYamlText`, not `parseIssue`), but the
-  // poller's heal pass / `syncTrackedIssueOnComplete` / dashboard reader
-  // / retry queue all hit `parseIssue` and fail loud via
-  // `recordSystemError` so the operator banner surfaces the bad file.
+  // `waiting_on` is independent of `status`. Any status (ToDo, In Progress,
+  // Review, Blocked, Done, Cancelled) is legal with any waiting_on shape.
+  // waiting_on is a pure dispatch gate — the picker checks effective
+  // resolution of every id in `by[]`; the field itself is a durable record
+  // never mutated by the system as a side effect of a status change.
   if (
     typeof v.status === "string" &&
     ISSUE_STATUSES.includes(v.status as IssueStatus)
@@ -964,11 +957,6 @@ export function validateIssue(
     if (!statusBlocked && fieldBlocked) {
       errors.push(
         `blocked field is non-null but status is '${v.status}' — must set status to 'Blocked'`,
-      );
-    }
-    if (waitingOnResult !== null && v.status !== "ToDo") {
-      errors.push(
-        `waiting_on is non-null but status is '${v.status}' — must set status to 'ToDo' (waiting_on overrides any other status; the poller skips dispatch while any blocker is non-terminal)`,
       );
     }
   }

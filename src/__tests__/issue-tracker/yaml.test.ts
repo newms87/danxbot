@@ -256,7 +256,7 @@ describe("serializeIssue / parseIssue", () => {
       expect(serializeIssue(parsed)).toBe(yaml1);
     });
 
-    it("accepts requires_human alongside status: ToDo + waiting_on record (orthogonal to DX-212 invariant)", () => {
+    it("accepts requires_human alongside status: ToDo + waiting_on record", () => {
       const issue = fullIssue({
         status: "ToDo",
         waiting_on: {
@@ -314,7 +314,7 @@ describe("serializeIssue / parseIssue", () => {
     });
   });
 
-  it("round-trips status: ToDo + waiting_on byte-stable (DX-212)", () => {
+  it("round-trips status: ToDo + waiting_on byte-stable", () => {
     // The canonical compliant shape under the new parser invariant. A
     // serialize → parse → re-serialize chain MUST be byte-identical so
     // `waiting_on != null + status: ToDo` round-trips without normalization
@@ -864,17 +864,15 @@ describe("validateIssue", () => {
   });
 });
 
-// DX-212: parser invariant — `waiting_on != null` REQUIRES `status: ToDo`.
-// Mirrors the existing `Blocked ⟺ blocked != null` invariant. Pushed into
-// the parser so every reader (auto-sync, poller heal, dashboard, retry
-// queue) refuses bad shape uniformly — the worker's `forceWaitingOnToToDo`
-// is no longer the only enforcement, and the trigger=trello gate in
-// `auto-sync.ts` can no longer let a non-Trello dispatch silently land
-// `status: In Progress + waiting_on: {…}` on disk.
-describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
+// `waiting_on` is independent of `status` — pure dispatch gate, durable
+// record. Any status (ToDo, In Progress, Review, Blocked, Done, Cancelled)
+// is legal with any waiting_on shape; the picker checks effective dep
+// resolution and the field itself is never auto-mutated by a status change.
+describe("validateIssue waiting_on is independent of status", () => {
   function withWaitingOnAndStatus(
     waitingOn: unknown,
     status: string,
+    blocked: unknown = null,
   ): Record<string, unknown> {
     return {
       schema_version: 4,
@@ -899,7 +897,7 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
       ac: [],
       comments: [],
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-      blocked: null,
+      blocked,
       waiting_on: waitingOn,
     };
   }
@@ -910,12 +908,14 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
     by: ["ISS-99"],
   };
 
-  it("accepts waiting_on != null with status: ToDo (the canonical shape)", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "ToDo"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(true);
+  it("accepts waiting_on != null with every non-Blocked status", () => {
+    for (const status of ["ToDo", "In Progress", "Review", "Done", "Cancelled"]) {
+      const result = validateIssue(
+        withWaitingOnAndStatus(populatedWaitingOn, status),
+        { expectedPrefix: "ISS" },
+      );
+      expect(result.ok).toBe(true);
+    }
   });
 
   it("accepts waiting_on: null with any non-Blocked status", () => {
@@ -928,101 +928,18 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
     }
   });
 
-  it("rejects waiting_on != null with status: In Progress", () => {
+  it("accepts waiting_on != null paired with status: Blocked + blocked record (self-block AND dep-chain note both legal)", () => {
     const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "In Progress"),
+      withWaitingOnAndStatus(populatedWaitingOn, "Blocked", {
+        reason: "stuck on auth",
+        timestamp: "2026-05-09T00:00:00.000Z",
+      }),
       { expectedPrefix: "ISS" },
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(
-        result.errors.some((e) =>
-          /waiting_on is non-null but status is 'In Progress'/.test(e),
-        ),
-      ).toBe(true);
-    }
+    expect(result.ok).toBe(true);
   });
 
-  it("rejects waiting_on != null with status: Review", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "Review"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(
-        result.errors.some((e) =>
-          /waiting_on is non-null but status is 'Review'/.test(e),
-        ),
-      ).toBe(true);
-    }
-  });
-
-  it("rejects waiting_on != null with status: Done", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "Done"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(
-        result.errors.some((e) =>
-          /waiting_on is non-null but status is 'Done'/.test(e),
-        ),
-      ).toBe(true);
-    }
-  });
-
-  it("rejects waiting_on != null with status: Cancelled", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "Cancelled"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-  });
-
-  it("error message names the offending status verbatim and points at the rule", () => {
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "In Progress"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      const offending = result.errors.find((e) =>
-        /waiting_on is non-null but status/.test(e),
-      );
-      expect(offending).toBeDefined();
-      // The message points the operator/agent at the corrective action so
-      // the failure is loud AND actionable.
-      expect(offending).toContain("'In Progress'");
-      expect(offending).toContain("'ToDo'");
-    }
-  });
-
-  it("does not double-report the invariant when the status enum is itself invalid", () => {
-    // A bogus status value already fails validation via the enum check.
-    // We don't want a SECOND `waiting_on / status` error on top — that
-    // would be confusing noise. The invariant only fires when status is
-    // a recognized non-ToDo enum.
-    const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "totally-bogus"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(
-        result.errors.some((e) =>
-          /waiting_on is non-null but status is 'totally-bogus'/.test(e),
-        ),
-      ).toBe(false);
-    }
-  });
-
-  it("parseIssue throws IssueParseError on a serialized YAML carrying the bad shape", () => {
-    // Hand-build the YAML text rather than going through serializeIssue
-    // so the test pins the on-disk surface, not the in-memory object.
-    // This is the surface a human-edited file or pre-DX-212 agent would
-    // hit on the next reader's parseIssue call.
+  it("parseIssue round-trips a serialized YAML carrying waiting_on + In Progress", () => {
     const yaml = [
       "schema_version: 4",
       "tracker: trello",
@@ -1059,12 +976,7 @@ describe("validateIssue waiting_on ⟹ status: ToDo invariant (DX-212)", () => {
       "blocked: null",
       "",
     ].join("\n");
-    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      IssueParseError,
-    );
-    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      /waiting_on is non-null but status/,
-    );
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).not.toThrow();
   });
 });
 

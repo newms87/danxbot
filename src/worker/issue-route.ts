@@ -29,8 +29,8 @@
  *
  * `syncTrackedIssueOnComplete` runs synchronously from inside the worker
  * (no HTTP round-trip) when an agent signals `danxbot_complete`. It
- * applies the same `forceWaitingOnToToDo` normalization + history-diff
- * append the legacy save handler did, then calls `runSync` to push to
+ * applies the history-diff append the legacy save handler did, then
+ * calls `runSync` to push to
  * the tracker. This is the immediate-tracker-push safety net; without it
  * a completed agent's terminal-state YAML would only reach the tracker
  * on the poller's next tick (~30-60s lag).
@@ -125,8 +125,7 @@ const issueLocks = new Map<string, Promise<void>>();
  * no diff (intentional; we have no prior reference state). Worker
  * restart loses the cache, so the first sync after restart also has no
  * diff — same fallback. The cache is updated AFTER `appendDiffEntries`
- * runs so the next call sees the post-normalization state
- * (`forceWaitingOnToToDo` already applied).
+ * runs so the next call sees the post-history-diff state.
  *
  * **Concurrent-call safety on the same id.** `applyHistoryDiff` reads
  * `prior` and writes the new state in straight-line synchronous code
@@ -224,13 +223,9 @@ function resolveDispatchActor(
  * before `blocked` / `unblocked` so a same-save status flip reads first
  * in the timeline.
  *
- * Both inputs are taken AFTER `forceWaitingOnToToDo` normalization so an
- * agent's `(status: "Blocked", waiting_on: {…})` save — given prior
- * cached state `In Progress` — emits a proper
- * `status_change(In Progress, ToDo)` plus `blocked` event, not a
- * spurious `(In Progress, Needs Help)` jump that never actually
- * persisted (the worker normalizes status → ToDo whenever waiting_on is
- * non-null).
+ * Both inputs are the raw saved Issue values; `waiting_on` does not
+ * influence `status` here (the two fields are independent — `waiting_on`
+ * is the dispatch gate, `status` is the workflow position).
  *
  *  - `oldIssue == null` → first save in this worker process for this id.
  *    Returns `newIssue.history` unchanged (by reference, so the upstream
@@ -297,10 +292,6 @@ export function appendDiffEntries(
  * `persistAfterSync` so the on-disk YAML carries the new entries. The
  * cache update happens unconditionally so the next call sees this
  * call's post-normalization state.
- *
- * The `forceWaitingOnToToDo` normalization happens upstream (in
- * `syncTrackedIssueOnComplete`), so `issue` here is already the
- * post-normalized shape per the diff contract.
  *
  * **Allocation:** when no transitions were detected, `appendDiffEntries`
  * returns `issue.history` by reference; the identity check below short-
@@ -839,41 +830,6 @@ export async function handleIssueCreate(
 }
 
 /**
- * Defense-in-depth normalizer. Forces `status: "ToDo"` whenever the input
- * Issue carries a non-null `waiting_on` record. Returns the original issue
- * unchanged when `waiting_on === null` or `status` is already ToDo, so the
- * no-op path doesn't allocate.
- *
- * **Load-bearing enforcement of this invariant lives in the parser.**
- * `validateIssue` in `src/issue-tracker/yaml.ts` rejects any YAML with
- * `waiting_on != null && status !== "ToDo"` (DX-212). Every `parseIssue`
- * caller — `syncTrackedIssueOnComplete`, the poller's heal pass, the
- * dashboard reader, the retry queue — therefore refuses the bad shape on
- * read. This helper only matters for in-memory `Issue` values constructed
- * WITHOUT going through `parseIssue` (test fixtures, future programmatic
- * builders). On the auto-sync path here, `parseIssue` at line ~898 throws
- * before this helper would ever see a non-compliant shape, so the helper
- * is a no-op in production. Kept for two reasons: (a) defense-in-depth
- * against a future caller that constructs an Issue programmatically and
- * forgets the pairing, (b) the existing test surface invokes it directly.
- *
- * Historical note (pre-DX-212): this WAS the load-bearing enforcement.
- * The `auto-sync.ts` `trigger === "trello"` gate meant non-Trello
- * dispatches skipped this normalization entirely, leaving
- * `status: In Progress + waiting_on: {…}` on disk indefinitely. Promoting
- * the invariant into the parser closed that gap structurally.
- */
-export function forceWaitingOnToToDo(issue: Issue): Issue {
-  if (issue.waiting_on === null) return issue;
-  if (issue.status === "ToDo" && issue.blocked === null) return issue;
-  // waiting_on overrides any self-block + Blocked status — the card is
-  // queued behind deps, not self-blocked. Clear `blocked` along with the
-  // status flip so the v4 invariant `status === "Blocked" ⟺ blocked !== null`
-  // holds post-normalization.
-  return { ...issue, status: "ToDo", blocked: null };
-}
-
-/**
  * Look in `open/` first, then `closed/`. Returns null when neither exists.
  * Lookup key is the issue's internal `id` (the on-disk filename basename),
  * not the external_id.
@@ -933,14 +889,6 @@ export async function syncTrackedIssueOnComplete(
     );
     return { ok: false, errors: [msg] };
   }
-
-  // Worker contract: `waiting_on != null` ALWAYS forces `status:
-  // "ToDo"`. Agents set the waiting_on record only — they don't
-  // separately move status, and a stray `Blocked` / `Done` paired with
-  // a non-null waiting_on is a category error we silently normalize.
-  // The poller's dispatch gate then skips the card while every blocker
-  // in `by[]` is non-terminal. See `forceWaitingOnToToDo`.
-  issue = forceWaitingOnToToDo(issue);
 
   // DX-146 / Phase 2: diff append. The auto-sync triggered by
   // `danxbot_complete` is a save event from history's perspective —

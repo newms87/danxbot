@@ -572,7 +572,7 @@ describe("handlePrepVerdict — blocked verdict", () => {
     );
   });
 
-  it("clears any pre-existing waiting_on so the v7 parser invariant holds (Blocked + waiting_on != null is rejected)", async () => {
+  it("preserves any pre-existing waiting_on when stamping Blocked (independent fields)", async () => {
     mkdirSync(join(root, ".danxbot", "issues", "open"), { recursive: true });
     const issueWithWaiting = createEmptyIssue({
       id: "DX-100",
@@ -603,7 +603,8 @@ describe("handlePrepVerdict — blocked verdict", () => {
     expect(res._getStatusCode()).toBe(200);
     const yaml = readIssue(root, "DX-100");
     expect(yaml.status).toBe("Blocked");
-    expect(yaml.waiting_on).toBeNull();
+    expect(yaml.waiting_on).not.toBeNull();
+    expect(yaml.waiting_on?.by).toEqual(["DX-99"]);
   });
 });
 

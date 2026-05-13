@@ -678,7 +678,7 @@ describe("reconcileIssue — Phase 2 parent-derive (DX-217)", () => {
   );
 
   it.skipIf(!dbHandle)(
-    "skips parent with waiting_on != null (worker forces ToDo there)",
+    "skips parent-status derivation when parent has waiting_on != null",
     async () => {
       const parent: Issue = {
         ...makeIssue("DX-530", "ToDo"),

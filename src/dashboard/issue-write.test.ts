@@ -585,7 +585,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     expect(issue.blocked).toBeNull();
   });
 
-  it("status away from ToDo auto-clears `waiting_on` (operator wins over dispatch gates)", async () => {
+  it("status away from ToDo preserves `waiting_on` (independent durable dep-chain record)", async () => {
     writeFixture(
       makeIssue({
         status: "ToDo",
@@ -605,7 +605,8 @@ describe("applyIssuePatch — round-trip mutation", () => {
       "alice",
     );
     expect(issue.status).toBe("In Progress");
-    expect(issue.waiting_on).toBeNull();
+    expect(issue.waiting_on).not.toBeNull();
+    expect(issue.waiting_on?.by).toEqual(["DX-99"]);
   });
 
   it("status patch that does not touch Blocked leaves `blocked` alone", async () => {

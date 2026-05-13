@@ -213,7 +213,7 @@ Full table + implications: `.claude/rules/agent-dispatch.md` Forbidden Patterns 
 
 ### Trello Board
 
-IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interface (`src/issue-tracker/`). Lists: Review → ToDo → In Progress → Blocked / Done / Cancelled + Action Items. `status: "Blocked"` populates `Issue.blocked = {reason, timestamp}`; cards waiting on OTHER cards use `Issue.waiting_on` + STAY in ToDo (different concept).
+IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interface (`src/issue-tracker/`). Lists: Review → ToDo → In Progress → Blocked / Done / Cancelled + Action Items. `status: "Blocked"` populates `Issue.blocked = {reason, timestamp}`; cards waiting on OTHER cards use `Issue.waiting_on` (independent dispatch gate — picker skips dispatch while any dep is non-terminal; the field itself is a durable record decoupled from status).
 
 ### Card Workflow (Orchestrator)
 

@@ -699,9 +699,8 @@ export interface PostDispatchCheckInput {
  *     a tracker transient — the next tick reattempts).
  *   - Card moved out of ToDo (any other status = some progress).
  *   - Local YAML has `waiting_on != null` (the agent intentionally
- *     parked the card behind other in-flight work — the worker
- *     forces `status: ToDo` on save, so the tracker will report
- *     ToDo as expected).
+ *     parked the card behind other in-flight work — picker skips
+ *     re-dispatch while deps non-terminal).
  *   - No tracker registered for this repo (`bootScheduler` not called)
  *     — fail-open with a warning rather than a flag write.
  *

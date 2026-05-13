@@ -570,9 +570,9 @@ function applyValidatedPatch(
     } else if (next.status !== "Blocked" && next.blocked !== null) {
       next.blocked = null;
     }
-    if (next.status !== "ToDo" && next.waiting_on !== null) {
-      next.waiting_on = null;
-    }
+    // waiting_on is independent of status (pure dispatch gate, durable
+    // record). Operator moving status off ToDo does NOT strip the
+    // dep-chain note.
   }
 
   // Compute target state from the post-patch status. Done / Cancelled
@@ -585,8 +585,8 @@ function applyValidatedPatch(
 
   // Validate the merged Issue by serializing + re-parsing through the
   // strict schema. Any patch that produces an invalid document (e.g.
-  // status: Blocked without populating `blocked`, or violates the
-  // waiting_on/status invariant) fails here BEFORE any disk write.
+  // status: Blocked without populating `blocked`) fails here BEFORE any
+  // disk write.
   const serialized = serializeIssue(next);
   try {
     parseIssue(serialized, { expectedPrefix });

@@ -198,10 +198,12 @@ export interface IssueDispatch {
  *    (worker route) and by inbound tracker hydrate (`bulkSyncMissingYamls`).
  *  - `status_change` — `status` changed between the loaded YAML and the saved
  *    YAML. `from` + `to` both required.
- *  - `blocked` — `blocked` transitioned `null → record`. `to` carries the
- *    forced `ToDo` status the worker imposes; `from` may be omitted.
- *  - `unblocked` — `blocked` transitioned `record → null`. Worker auto-clears
- *    on all blockers terminal.
+ *  - `blocked` — `waiting_on` transitioned `null → record` (the event
+ *    name predates the rename; it tracks the dep-chain note, not the
+ *    self-block field). `to` carries the card's status at the moment of
+ *    the transition.
+ *  - `unblocked` — `waiting_on` transitioned `record → null` (agent or
+ *    operator cleared the dep-chain note).
  *
  * `actor` is the audit identity that performed the mutation. Format
  * `<source>:<id>` — canonical sources today: `dispatch:<uuid>`,
@@ -510,11 +512,15 @@ export interface Issue {
    */
   assigned_agent: string | null;
   /**
-   * Non-null = the card is waiting on the issues listed in `waiting_on.by[]`.
-   * Worker forces `status: "ToDo"` whenever this is non-null; poller skips
-   * dispatching the card until every dependency in `by[]` reaches a terminal
-   * status (Done or Cancelled), at which point the poller clears
-   * `waiting_on` and resumes dispatch. See `WaitingOn` for the invariants.
+   * Non-null = a durable dep-chain record naming the issues in
+   * `waiting_on.by[]` that gate dispatch of this card. **Pure dispatch
+   * gate, independent of `status`** — the picker checks effective
+   * resolution (every id in `by[]` reaches `Done` or `Cancelled`); the
+   * field itself is NEVER auto-mutated by the system as a side effect of
+   * a status change. Any status (ToDo, In Progress, Review, Blocked,
+   * Done, Cancelled) is legal with any `waiting_on` value. Only the
+   * agent or operator may clear the record (if they decide the link was
+   * mistaken). See `WaitingOn` for the shape.
    */
   waiting_on: WaitingOn | null;
   /**

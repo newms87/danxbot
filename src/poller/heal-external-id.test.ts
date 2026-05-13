@@ -393,9 +393,6 @@ describe("healExternalIds (DX-150 — per-tick external_id format heal)", () => 
       id: "DX-50",
       external_id: "mem-2",
       type: "Bug",
-      // DX-212: `waiting_on != null` requires `status: ToDo` per the
-      // parser invariant. The original "In Progress" was incidental — the
-      // test exercises external_id healing, not status semantics.
       status: "ToDo",
       title: "Custom title",
       description: "Custom description",

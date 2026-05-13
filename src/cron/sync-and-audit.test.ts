@@ -528,8 +528,18 @@ const mockCopyFileSync = vi.fn();
 const mockUnlinkSync = vi.fn();
 const mockRmSync = vi.fn();
 const mockStatSync = vi.fn();
-const mockLstatSync = vi.fn().mockImplementation(() => ({
+const mockLstatSync = vi.fn().mockImplementation((path: unknown) => ({
   isSymbolicLink: () => false,
+  // Default: defer to statSync's dir decision so tests that only set up
+  // mockStatSync get the right dir-ness through lstat too.
+  isDirectory: () => {
+    try {
+      const s = mockStatSync(path) as { isDirectory?: () => boolean };
+      return typeof s?.isDirectory === "function" ? s.isDirectory() : false;
+    } catch {
+      return false;
+    }
+  },
 }));
 const mockReadlinkSync = vi.fn().mockReturnValue("");
 const mockChmodSync = vi.fn();
@@ -1336,6 +1346,7 @@ language: node
 
     mockLstatSync.mockImplementation((path: unknown) => ({
       isSymbolicLink: () => path === legacyPath,
+      isDirectory: () => false,
     }));
     mockReadlinkSync.mockImplementation((path: unknown) =>
       path === legacyPath ? currentPath : "",
@@ -1402,6 +1413,7 @@ language: node
 
     mockLstatSync.mockImplementation(() => ({
       isSymbolicLink: () => false,
+      isDirectory: () => false,
     }));
 
     await poll(MOCK_REPO_CONTEXT);

@@ -12,8 +12,8 @@
  *         candidate's `conflict_on[]`, one per `conflict_with` id,
  *         deduped by id (first reason wins on subsequent re-POSTs).
  *       - `blocked` → stamp `status: "Blocked"` + `blocked:
- *         {reason, timestamp: now}` and clear any pre-existing
- *         `waiting_on` so the v7 parser invariant holds.
+ *         {reason, timestamp: now}`. Any existing `waiting_on` is
+ *         preserved (independent field).
  *   - settings.json side-effect:
  *       - `abort` → `setAgentBroken(localPath, agentName, {reason,
  *         suggested_steps, set_at: now}, "worker")` so the picker
@@ -161,11 +161,8 @@ function applyConflictOnVerdict(
  * Apply the `blocked` verdict. Reads + parses the candidate YAML,
  * stamps `status: "Blocked"` + `blocked: {reason, timestamp: nowIso}`,
  * writes back. Idempotent — re-POSTs bump the timestamp but leave the
- * card in Blocked.
- *
- * Forces a v7-invariant-compatible shape: `waiting_on` is cleared
- * (Blocked + waiting_on is a parser-rejected pair); `blocked` is non-
- * null iff status is "Blocked".
+ * card in Blocked. Any pre-existing `waiting_on` record is preserved
+ * (independent durable dep-chain note; not coupled to status).
  */
 function applyBlockedVerdict(
   repo: RepoContext,
@@ -186,10 +183,6 @@ function applyBlockedVerdict(
     ...issue,
     status: "Blocked",
     blocked: { reason: payload.reason, timestamp: nowIso },
-    // v7 parser rejects `status: "Blocked" + waiting_on != null`. The
-    // prep-verdict path treats Blocked as the dominant gate — clear
-    // any waiting_on so the parser invariant holds post-write.
-    waiting_on: null,
   };
   writeFileSync(filePath, serializeIssue(next));
 }
