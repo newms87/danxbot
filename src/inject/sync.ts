@@ -34,6 +34,7 @@ import { renderRepoConfigMarkdown } from "../poller/repo-config-rule.js";
 import { ensureGitignoreEntry, ensureIssuesDirs } from "../poller/yaml-lifecycle.js";
 import type { RepoContext } from "../types.js";
 import { log, projectRoot } from "./_shared/inject-utils.js";
+import { ensureWorkspaceGitignoreEntries } from "./gitignore-workspaces.js";
 import { injectDanxIssueMcp } from "./inject-root-mcp.js";
 import {
   copyComposeOverride,
@@ -111,6 +112,13 @@ export function syncRepoFiles(repo: RepoContext): void {
   // `<repo>/.danxbot/.trello-retry/` is local-only and must never be
   // committed (entries contain raw upstream tracker error strings).
   ensureGitignoreEntry(repo.localPath, ".trello-retry/");
+  // DX-340: gitignore danxbot-owned workspace files so the per-tick
+  // inject re-render never dirties a tracked working tree (which would
+  // abort `syncWorktree`'s strict ff-only pull and quarantine the
+  // agent). Universal patterns + per-templated-workspace patterns;
+  // auto-grows when a new templated workspace is added under
+  // `src/inject/workspaces/`.
+  ensureWorkspaceGitignoreEntries(repo.localPath);
 
   // DX-201: ensure the connected repo's root `.mcp.json` advertises the
   // `danx-issue` MCP server so a host-session `claude` at the repo root
