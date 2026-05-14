@@ -4,8 +4,8 @@
  *
  * AC #4 of `69f76d57359b5fe89f80ab22` asks for "a Layer 3 scenario in
  * `make test-system-poller` (or equivalent) that drives a full
- * ToDo→Done lifecycle through the poller against MemoryTracker; the
- * JSONL contains zero `mcp__trello__*` calls and the MemoryTracker
+ * ToDo→Done lifecycle through the poller against FakeTracker; the
+ * JSONL contains zero `mcp__trello__*` calls and the FakeTracker
  * request log shows the expected `fetchOpenCards`/`moveToStatus`/
  * `addComment` sequence."
  *
@@ -13,10 +13,10 @@
  * (`make test-system-yaml-memory`) — Phase 4 already removed the
  * Trello MCP server entry from the issue-worker workspace. This test
  * covers the OTHER half of AC #4: confirming that when the poller
- * runs against a real `MemoryTracker`, the request log captures the
+ * runs against a real `FakeTracker`, the request log captures the
  * expected method sequence (`fetchOpenCards`, then `getCard` for the
  * post-dispatch progress check, plus `moveToStatus`/`addComment` on
- * recovery). A single MemoryTracker survives across calls because
+ * recovery). A single FakeTracker survives across calls because
  * `getRepoTracker` caches the factory result — break the cache and
  * this test fails loud.
  *
@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import type {
   CreateCardInput,
   Issue,
@@ -227,8 +227,8 @@ vi.mock("../../poller/local-issues.js", () => ({
   ): Promise<Issue[]> => [],
 }));
 
-// The factory mock returns the real MemoryTracker the test sets up.
-const trackerHandle: { current: MemoryTracker | null } = { current: null };
+// The factory mock returns the real FakeTracker the test sets up.
+const trackerHandle: { current: FakeTracker | null } = { current: null };
 vi.mock("../../issue-tracker/index.js", async () => {
   const actual = await vi.importActual<
     typeof import("../../issue-tracker/index.js")
@@ -299,7 +299,7 @@ const REPO: RepoContext = {
 };
 
 function seedDraft(
-  tracker: MemoryTracker,
+  tracker: FakeTracker,
   overrides: Partial<CreateCardInput> = {},
 ): Promise<{
   external_id: string;
@@ -332,7 +332,7 @@ function methodsOnly(
 
 // --- Tests ---
 
-describe("Integration: poller hot path against MemoryTracker", () => {
+describe("Integration: poller hot path against FakeTracker", () => {
   beforeEach(() => {
     _resetForTesting();
     mockDispatch.mockReset();
@@ -340,7 +340,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     mockFindByExternalId.mockResolvedValue(null);
     mockHydrateFromRemote.mockReset();
     mockWriteIssue.mockReset();
-    trackerHandle.current = new MemoryTracker();
+    trackerHandle.current = new FakeTracker();
     lastOpenCards.value = [];
   });
 
@@ -374,16 +374,16 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     // Phase 5 added `getRepoTracker` so a single tracker survives
     // every call site in the poller hot path. A regression that
     // recreates the tracker per tick would silently break Layer 3
-    // memory-tracker scenarios.
+    // FakeTracker scenarios.
     //
     // Pin: with NO `_resetForTesting()` between ticks, the factory
     // (createIssueTracker) must be invoked exactly once. The cached
-    // MemoryTracker survives, so a card seeded BEFORE the first tick
+    // FakeTracker survives, so a card seeded BEFORE the first tick
     // is still visible to the SECOND tick's `fetchOpenCards`.
     const tracker = trackerHandle.current!;
     // Replace the factory with a vi.fn so we can count invocations.
     // Reusing the same tracker handle: every call returns the SAME
-    // MemoryTracker instance — the spy proves how many times the
+    // FakeTracker instance — the spy proves how many times the
     // poller asked for it.
     const factorySpy = vi.fn(() => tracker);
     // Hook the factory into the imported module by re-mocking — the
@@ -456,7 +456,7 @@ describe("Integration: poller hot path against MemoryTracker", () => {
     await new Promise((r) => setImmediate(r));
 
     // Zero factory calls on the second tick — the cached tracker was
-    // reused. The MemoryTracker still has the seeded card because we
+    // reused. The FakeTracker still has the seeded card because we
     // never tore it down.
     expect(factorySpy).not.toHaveBeenCalled();
     const freshFetch = await tracker.fetchOpenCards();

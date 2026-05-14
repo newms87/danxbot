@@ -6,7 +6,7 @@
  * worth pinning. DX-241.
  */
 import { describe, expect, it } from "vitest";
-import { MemoryTracker } from "../src/issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../src/__tests__/helpers/FakeTracker.js";
 import {
   LOCK_TTL_MS,
   parseLockComment,
@@ -55,7 +55,7 @@ function defaultCreate(): CreateCardInput {
 
 describe("processCardForClear", () => {
   it("releases an active lock and returns 'released' with a descriptive detail", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tryAcquireLock(
       tracker,
@@ -86,7 +86,7 @@ describe("processCardForClear", () => {
   });
 
   it("dryRun=true logs a 'released' outcome but does NOT call editComment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tryAcquireLock(
       tracker,
@@ -123,7 +123,7 @@ describe("processCardForClear", () => {
   });
 
   it("returns 'skipped-no-lock' when the card has no lock comment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     const outcome = await processCardForClear({
@@ -139,7 +139,7 @@ describe("processCardForClear", () => {
   });
 
   it("returns 'skipped-already-released' when the comment is already in released form", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tryAcquireLock(
       tracker,
@@ -167,7 +167,7 @@ describe("processCardForClear", () => {
   });
 
   it("respects minAgeMs — a young lock is skipped, an old lock is released", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER, startedAt);
@@ -198,7 +198,7 @@ describe("processCardForClear", () => {
   });
 
   it("returns 'error' on an unparseable lock body (caller leaves it for the next acquire's overwrite path)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tracker.addComment(
       external_id,
@@ -223,7 +223,7 @@ describe("processCardForClear", () => {
     // 33h old) from prior dev sessions, predating the host_pid field.
     // The script must release them so the next acquire reclaims
     // without a 2h wait.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const legacyHolder: LockHolderInfo = {
       ...HOLDER,

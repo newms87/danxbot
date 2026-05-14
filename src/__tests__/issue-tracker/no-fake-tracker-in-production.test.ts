@@ -3,40 +3,43 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 
 /**
- * DX-343 AC #3 — repo-level guard for "no `MemoryTracker` in
- * production code." The class is preserved as a TEST-ONLY stub at
- * `src/issue-tracker/__test__-memory.ts`; production code MUST NOT
- * import from it. Phase 4 (DX-345) deletes the stub entirely once
- * the test suite migrates to a dedicated FakeTracker.
+ * DX-345 AC #6 — repo-level guard for "no `FakeTracker` in
+ * production code." The class lives at
+ * `src/__tests__/helpers/FakeTracker.ts`; production code MUST NOT
+ * import from it. The `__tests__/` ancestor segment is the contract;
+ * this assertion makes it load-bearing.
  *
  * Two checks per file under `src/`:
  *
- *   1. The bare identifier `\bMemoryTracker\b` must not appear in
+ *   1. The bare identifier `\bFakeTracker\b` must not appear in
  *      any non-test file (docstrings, code, comments — all forbidden
  *      so the comment scrub doesn't rot back).
- *   2. The module specifier `issue-tracker/__test__-memory` must not
- *      appear in any non-test import — the `__test__-` filename
- *      prefix is the contract; this assertion makes the contract
- *      load-bearing.
+ *   2. The module specifier `__tests__/helpers/FakeTracker` must not
+ *      appear in any non-test import — the `__tests__/` ancestor is
+ *      the contract; this assertion makes the contract load-bearing.
  *
  * Mirrors the `dashboard/src/__tests__/no-poll-imports.test.ts`
- * pattern: the previous AC was enforced only by reviewer discipline
- * + a manual `grep`. Converting it to a vitest-time invariant means
- * the next regression fails the build instead of slipping past.
+ * pattern: replaces reviewer discipline + manual `grep` with a
+ * vitest-time invariant.
+ *
+ * Replaces the retired `no-memory-tracker-in-production.test.ts` from
+ * DX-343 — the prior in-memory tracker class was deleted entirely in
+ * Phase 4 / DX-345.
  */
 
 const SRC_ROOT = resolve(__dirname, "..", "..");
 
-// Files allowed to mention `MemoryTracker`. The set is exhaustive:
-//   - The stub itself (the symbol it declares).
+// Files allowed to mention `FakeTracker`. The set is exhaustive:
 //   - This file (carries the literal string in its own assertions).
+// Everything else under `src/__tests__/helpers/FakeTracker.ts` is
+// already excluded by `isProductionFile` (the `__tests__/` ancestor
+// segment marks it test-only).
 const SYMBOL_EXEMPT_FILES = new Set<string>([
-  join("issue-tracker", "__test__-memory.ts"),
-  join("__tests__", "issue-tracker", "no-memory-tracker-in-production.test.ts"),
+  join("__tests__", "issue-tracker", "no-fake-tracker-in-production.test.ts"),
 ]);
 
-const SYMBOL_RE = /\bMemoryTracker\b/;
-const STUB_IMPORT_RE = /issue-tracker\/__test__-memory(?:\.js)?["']/;
+const SYMBOL_RE = /\bFakeTracker\b/;
+const HELPER_IMPORT_RE = /__tests__\/helpers\/FakeTracker(?:\.js)?["']/;
 
 function* walkSrc(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
@@ -62,8 +65,8 @@ function isProductionFile(absPath: string): boolean {
   return true;
 }
 
-describe("no-MemoryTracker-in-production sweep", () => {
-  it("no production .ts file mentions the bare `MemoryTracker` identifier", () => {
+describe("no-FakeTracker-in-production sweep", () => {
+  it("no production .ts file mentions the bare `FakeTracker` identifier", () => {
     const violations: string[] = [];
     for (const absPath of walkSrc(SRC_ROOT)) {
       const relPath = absPath.slice(SRC_ROOT.length + 1);
@@ -77,13 +80,13 @@ describe("no-MemoryTracker-in-production sweep", () => {
     expect(violations).toEqual([]);
   });
 
-  it("no production .ts file imports from `issue-tracker/__test__-memory`", () => {
+  it("no production .ts file imports from `__tests__/helpers/FakeTracker`", () => {
     const violations: string[] = [];
     for (const absPath of walkSrc(SRC_ROOT)) {
       const relPath = absPath.slice(SRC_ROOT.length + 1);
       if (!isProductionFile(absPath)) continue;
       const content = readFileSync(absPath, "utf-8");
-      if (STUB_IMPORT_RE.test(content)) {
+      if (HELPER_IMPORT_RE.test(content)) {
         violations.push(relPath);
       }
     }

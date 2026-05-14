@@ -70,7 +70,7 @@ import {
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
-import { MemoryTracker } from "../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../__tests__/helpers/FakeTracker.js";
 
 function makeTrelloConfig(): import("../types.js").TrelloConfig {
   return {
@@ -153,12 +153,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
   } as Issue;
 }
 
-function makeMemoryTracker(): IssueTracker {
-  const tracker = new MemoryTracker();
-  return tracker;
-}
-
-function makeFakeTracker(getCardImpl: () => Promise<Issue> | Issue): IssueTracker {
+function makeMockTracker(getCardImpl: () => Promise<Issue> | Issue): IssueTracker {
   return {
     fetchOpenCards: async () => [],
     getCard: async (id: string) => {
@@ -188,9 +183,9 @@ afterEach(() => {
 });
 
 describe("bootScheduler (AC #3)", () => {
-  it("registers a MemoryTracker without credential checks", () => {
+  it("registers a FakeTracker without credential checks", () => {
     const repo = makeRepo({ trello: undefined as unknown as RepoContext["trello"] });
-    const tracker = makeMemoryTracker();
+    const tracker = new FakeTracker();
 
     expect(() => bootScheduler({ repo, tracker })).not.toThrow();
     expect(getSchedulerTracker(repo.name)).toBe(tracker);
@@ -258,8 +253,8 @@ describe("bootScheduler (AC #3)", () => {
 
   it("is idempotent — re-registering the same repo updates the tracker reference", () => {
     const repo = makeRepo();
-    const trackerA = makeMemoryTracker();
-    const trackerB = makeMemoryTracker();
+    const trackerA = new FakeTracker();
+    const trackerB = new FakeTracker();
 
     bootScheduler({ repo, tracker: trackerA });
     expect(getSchedulerTracker(repo.name)).toBe(trackerA);
@@ -395,7 +390,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("writes the CRITICAL_FAILURE flag when the tracked card stayed in ToDo (local YAML agrees)", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() =>
+    const tracker = makeMockTracker(() =>
       makeIssue({ status: "ToDo", title: "Stuck card" }),
     );
     bootScheduler({ repo, tracker });
@@ -416,7 +411,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("does NOT write the flag when the card moved to In Progress", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() =>
+    const tracker = makeMockTracker(() =>
       makeIssue({ status: "In Progress" }),
     );
     bootScheduler({ repo, tracker });
@@ -428,7 +423,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("does NOT write the flag when the card moved to Done", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => makeIssue({ status: "Done" }));
+    const tracker = makeMockTracker(() => makeIssue({ status: "Done" }));
     bootScheduler({ repo, tracker });
 
     await runPostDispatchProgressCheck({ repo, ...baseInput });
@@ -438,7 +433,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("skips flag when local YAML moved out of ToDo even though tracker still reports ToDo (stale tracker, e.g. trello sync disabled)", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() =>
+    const tracker = makeMockTracker(() =>
       makeIssue({ status: "ToDo", title: "Stale tracker card" }),
     );
     bootScheduler({ repo, tracker });
@@ -451,7 +446,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("skips flag when local YAML is missing (file moved to closed/) even though tracker still reports ToDo", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() =>
+    const tracker = makeMockTracker(() =>
       makeIssue({ status: "ToDo", title: "Closed card" }),
     );
     bootScheduler({ repo, tracker });
@@ -464,7 +459,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("does NOT write the flag when the local YAML has waiting_on (intentional park)", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
+    const tracker = makeMockTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
     (findByExternalId as Mock).mockResolvedValue(
       makeIssue({
@@ -484,7 +479,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("does NOT write the flag when tracker.getCard throws — false-negative is safer than false-positive", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => {
+    const tracker = makeMockTracker(() => {
       throw new Error("transient tracker outage");
     });
     bootScheduler({ repo, tracker });
@@ -497,7 +492,7 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
 
   it("does NOT write the flag when findByExternalId throws — same false-negative discipline", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
+    const tracker = makeMockTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
     (findByExternalId as Mock).mockRejectedValue(new Error("fs ENOENT"));
 
@@ -518,10 +513,10 @@ describe("runPostDispatchProgressCheck (AC #4)", () => {
     const repoA = makeRepo({ name: "repo-a", localPath: "/tmp/repo-a" });
     const repoB = makeRepo({ name: "repo-b", localPath: "/tmp/repo-b" });
 
-    const trackerA = makeFakeTracker(() =>
+    const trackerA = makeMockTracker(() =>
       makeIssue({ status: "ToDo", title: "A's card" }),
     );
-    const trackerB = makeFakeTracker(() =>
+    const trackerB = makeMockTracker(() =>
       makeIssue({ status: "Done", title: "B's card" }),
     );
 
@@ -591,7 +586,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -607,7 +602,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -622,7 +617,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     // bootScheduler without runPicker
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
     });
 
     // Must not throw. Subsequent bootScheduler with a picker AND a
@@ -637,7 +632,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const followupPicker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: followupPicker,
     });
     onReconcileResult({ repo, result: makeResult(true) });
@@ -650,7 +645,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -667,7 +662,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -688,12 +683,12 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoA.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerA,
     });
     bootScheduler({
       repo: makeRepo({ name: repoB.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerB,
     });
 
@@ -713,7 +708,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
       .mockResolvedValueOnce(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -732,13 +727,13 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
     // Re-boot without runPicker — picker should be cleared.
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
     });
 
     onReconcileResult({ repo, result: makeResult(true) });
@@ -751,7 +746,7 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
 describe("runPostDispatchProgressCheck — flag-detail formatting", () => {
   it("substitutes 'none' for an empty job summary and propagates the job status verbatim", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
+    const tracker = makeMockTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
     (findByExternalId as Mock).mockResolvedValue(makeIssue({ status: "ToDo" }));
 
@@ -771,7 +766,7 @@ describe("runPostDispatchProgressCheck — flag-detail formatting", () => {
 
   it("forwards the original summary text when present (no truncation)", async () => {
     const repo = makeRepo();
-    const tracker = makeFakeTracker(() => makeIssue({ status: "ToDo" }));
+    const tracker = makeMockTracker(() => makeIssue({ status: "ToDo" }));
     bootScheduler({ repo, tracker });
     (findByExternalId as Mock).mockResolvedValue(makeIssue({ status: "ToDo" }));
 
@@ -804,7 +799,7 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo(),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -818,7 +813,7 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
   it("no-op when no picker is registered (empty roster scenario)", async () => {
     bootScheduler({
       repo: makeRepo(),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
     });
 
     expect(() => onAgentRosterChange("danxbot")).not.toThrow();
@@ -831,7 +826,7 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo(),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -848,12 +843,12 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
     const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: "repo-a" }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerA,
     });
     bootScheduler({
       repo: makeRepo({ name: "repo-b" }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerB,
     });
 
@@ -869,7 +864,7 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo(),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -890,7 +885,7 @@ describe("onAgentRosterChange — Phase 4b.2 (DX-289)", () => {
       .mockResolvedValueOnce(undefined);
     bootScheduler({
       repo: makeRepo(),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1025,7 +1020,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
     });
     bootScheduler({
       repo: repoCtx,
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
       reconcile: reconcileSpy,
     });
@@ -1069,7 +1064,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
     });
     bootScheduler({
       repo: repoCtx,
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
       reconcile: reconcileSpy,
     });
@@ -1118,7 +1113,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
 
     bootScheduler({
       repo: repoCtx,
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
       reconcile: reconcileSpy,
     });
@@ -1128,7 +1123,7 @@ describe("bootScheduler — settings-watch + onAgentRosterChange end-to-end (DX-
     // is armed; otherwise a single write fires two picker pokes.
     bootScheduler({
       repo: repoCtx,
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
       reconcile: reconcileSpy,
     });
@@ -1203,7 +1198,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     );
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1237,7 +1232,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     );
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1268,7 +1263,7 @@ describe("picker single-flight mutex (DX-305)", () => {
       .mockResolvedValueOnce(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1296,7 +1291,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     );
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1325,7 +1320,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1352,7 +1347,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     );
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1392,7 +1387,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     );
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1422,7 +1417,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1444,7 +1439,7 @@ describe("picker single-flight mutex (DX-305)", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repo.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -1488,12 +1483,12 @@ describe("picker single-flight mutex (DX-305)", () => {
     const pickerB = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoA.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerA,
     });
     bootScheduler({
       repo: makeRepo({ name: repoB.name }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: pickerB,
     });
 

@@ -7,7 +7,7 @@
  * level — the queue's contract is "call syncIssue, persist if differs,
  * unlink on success / rewrite on failure", so mocking the tracker layer
  * keeps these tests fast and deterministic without paying the
- * `MemoryTracker`'s per-test setup cost.
+ * `FakeTracker`'s per-test setup cost.
  *
  * Test inventory matches the DX-132 test plan 1:1:
  *

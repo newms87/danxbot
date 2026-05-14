@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import {
   isRetroNonEmpty,
   renderRetroComment,
@@ -38,7 +38,7 @@ function defaultCreate(): CreateCardInput {
 
 describe("syncIssue", () => {
   it("round-trip identity: getCard → sync → only getComments+getCard, zero writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     tracker.clearRequestLog();
@@ -51,7 +51,7 @@ describe("syncIssue", () => {
   });
 
   it("idempotency: calling sync twice in a row issues zero writes the second time", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = await tracker.getCard(external_id);
     // Mutate locally so the first sync writes.
@@ -65,7 +65,7 @@ describe("syncIssue", () => {
   });
 
   it("merges new remote comments into local", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // Remote-only comment posted directly via tracker API.
     await tracker.addComment(external_id, "from a human");
@@ -84,7 +84,7 @@ describe("syncIssue", () => {
   // ---- ISS-87 (inbound channel discipline) ----
 
   it("inbound merge SKIPS bot-marked comments even when the local YAML has no matching id (no echo loop)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // Tracker has a danxbot-marked comment but local hasn't been
     // stamped with its id (simulates a different deployment, a worker
@@ -102,7 +102,7 @@ describe("syncIssue", () => {
   });
 
   it("inbound merge ANCHORS the marker check — a human comment that QUOTES the marker mid-body is still pulled", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // A human reply that quotes the bot's prior comment (marker
     // appears mid-body, not at position 0). `includes` would suppress
@@ -119,7 +119,7 @@ describe("syncIssue", () => {
   });
 
   it("inbound merge appends a human comment but skips a bot comment in the SAME pull", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tracker.addComment(external_id, "human one");
     await tracker.addComment(
@@ -137,7 +137,7 @@ describe("syncIssue", () => {
   });
 
   it("inbound merge dedupes by id when local already carries the human comment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tracker.addComment(external_id, "from a human");
     const local = await tracker.getCard(external_id);
@@ -148,7 +148,7 @@ describe("syncIssue", () => {
   });
 
   it("tracker-side title edit does NOT propagate to YAML — next sync re-asserts local title onto the tracker", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     expect(local.title).toBe("T");
@@ -166,7 +166,7 @@ describe("syncIssue", () => {
   });
 
   it("tracker-side description / status / AC edits do NOT propagate to YAML", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     const originalDesc = local.description;
@@ -216,7 +216,7 @@ describe("syncIssue", () => {
     }
 
     it("calls tracker.createCard exactly once and never calls getCard/getComments with empty id", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const result = await syncIssue(tracker, orphan());
       const log = tracker.getRequestLog();
       const methods = log.map((l) => l.method);
@@ -231,20 +231,20 @@ describe("syncIssue", () => {
     });
 
     it("stamps external_id and check_item_ids onto updatedLocal", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const result = await syncIssue(tracker, orphan());
       expect(result.updatedLocal.external_id).toMatch(/^mem-/);
       expect(result.updatedLocal.ac[0].check_item_id).toMatch(/^chk-/);
     });
 
     it("propagates createCard failure as a thrown error", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       tracker.failNextWrite(new Error("boom"));
       await expect(syncIssue(tracker, orphan())).rejects.toThrow("boom");
     });
 
     it("idempotent: re-syncing the stamped result issues zero writes", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const first = await syncIssue(tracker, orphan());
       tracker.clearRequestLog();
       const second = await syncIssue(tracker, first.updatedLocal);
@@ -253,7 +253,7 @@ describe("syncIssue", () => {
   });
 
   it("title change → updateCard", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -268,7 +268,7 @@ describe("syncIssue", () => {
   });
 
   it("status change → moveToStatus", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -282,7 +282,7 @@ describe("syncIssue", () => {
   });
 
   it("type change → setLabels", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -296,7 +296,7 @@ describe("syncIssue", () => {
   });
 
   it("AC item add → addAcItem; new check_item_id stamped back into local", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     local.ac.push({ check_item_id: "", title: "AC2", checked: false });
@@ -306,7 +306,7 @@ describe("syncIssue", () => {
   });
 
   it("AC item update propagates title and checked", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     local.ac[0].checked = true;
@@ -319,7 +319,7 @@ describe("syncIssue", () => {
   });
 
   it("AC item missing locally → deleteAcItem", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     local.ac = [];
@@ -330,7 +330,7 @@ describe("syncIssue", () => {
 
 
   it("local comment without id → addComment, marker prepended, id stamped", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     local.comments.push({ author: "", timestamp: "", text: "hello" });
@@ -346,7 +346,7 @@ describe("syncIssue", () => {
   });
 
   it("local comment whose text already contains the marker is NOT double-stamped", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     const original = `${DANXBOT_COMMENT_MARKER}\n\nalready stamped`;
@@ -359,7 +359,7 @@ describe("syncIssue", () => {
   });
 
   it("propagates errors from tracker writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
     local.comments.push({ author: "", timestamp: "", text: "x" });
@@ -370,7 +370,7 @@ describe("syncIssue", () => {
   // ---- Test gap C: setLabels derived-args shape ----
 
   it("derives blocked:true from status='Blocked' (gap C)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -393,7 +393,7 @@ describe("syncIssue", () => {
   });
 
   it("derives blocked:false for non-Blocked statuses (gap C)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     // Seed in Blocked so the diff fires when we move out of it.
     const { external_id } = await tracker.createCard(defaultCreate());
     // Move remote to Blocked so its labels reflect that.
@@ -429,7 +429,7 @@ describe("syncIssue", () => {
     // label. The Phase 1 churn-prevention rationale (the projection
     // always read `false`) no longer holds — projection now reads from
     // the actual label state.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -457,7 +457,7 @@ describe("syncIssue", () => {
     // requires_human record, the remote (which previously had the
     // label) must have it stripped. Sync's diff predicate sees the
     // local `false` vs remote `true` mismatch and fires one mutation.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // Seed: stamp a requires_human label on the remote first.
     await tracker.setLabels(external_id, {
@@ -488,7 +488,7 @@ describe("syncIssue", () => {
     // `requires_human: true` derived from the orthogonal field — so a
     // tracker that has provisioned the matching label applies it in
     // the same single mutation.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -517,7 +517,7 @@ describe("syncIssue", () => {
   });
 
   it("derives blocked:true from local.blocked != null and pushes the Blocked label", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -539,7 +539,7 @@ describe("syncIssue", () => {
   });
 
   it("blocked:null on both sides → no setLabels (idempotent on the unblocked path)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -555,7 +555,7 @@ describe("syncIssue", () => {
   });
 
   it("derives triaged:true when triage.history[] has at least one entry (gap C)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -615,7 +615,7 @@ describe("syncIssue", () => {
       conflict_on: [],
       history: [],
     };
-    const tracker = new MemoryTracker({ seed: [seed] });
+    const tracker = new FakeTracker({ seed: [seed] });
     const local: Issue = {
       ...(await tracker.getCard("card-triaged")),
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
@@ -636,7 +636,7 @@ describe("syncIssue", () => {
 
   it("propagates type Bug/Feature/Epic into setLabels args (gap C)", async () => {
     for (const type of ["Bug", "Epic"] as const) {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(defaultCreate());
       const local: Issue = { ...(await tracker.getCard(external_id)), type };
       tracker.clearRequestLog();
@@ -653,7 +653,7 @@ describe("syncIssue", () => {
   });
 
   it("local-as-truth wins on every non-comment field", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -673,7 +673,7 @@ describe("syncIssue", () => {
   // ---- Phase 5: worker-rendered retro comment ----
 
   it("renders ONE retro comment on terminal-status save with both danxbot markers", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = {
@@ -700,7 +700,7 @@ describe("syncIssue", () => {
 
   it("retro renderer is a no-op on non-terminal status (In Progress / Blocked)", async () => {
     for (const status of ["In Progress", "Blocked"] as const) {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(defaultCreate());
       const local: Issue = {
         ...(await tracker.getCard(external_id)),
@@ -723,7 +723,7 @@ describe("syncIssue", () => {
   });
 
   it("retro renderer is a no-op when retro is fully empty even on Done", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -746,7 +746,7 @@ describe("syncIssue", () => {
   });
 
   it("idempotent: re-sync with same retro produces zero retro writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -780,7 +780,7 @@ describe("syncIssue", () => {
   });
 
   it("editing retro.good triggers editComment on the existing retro comment, NOT a new addComment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
@@ -810,7 +810,7 @@ describe("syncIssue", () => {
   });
 
   it("a user-authored comment that QUOTES `## Retro` (no danxbot marker) does NOT trip the legacy detector — fresh retro is still posted", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // User pastes back a Phase-4 retro body in a discussion comment; no
     // `<!-- danxbot -->` marker, no `<!-- danxbot-retro -->` marker.
@@ -867,7 +867,7 @@ describe("syncIssue", () => {
   // `remoteComments` view as a fallback so the worker recognizes its own
   // prior POST regardless of local YAML state.
   it("DX-503: retro renderer detects worker-rendered retro on the remote even when local.comments[] does not carry the retro id (no duplicate)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     // Tick 1: agent saves Done with retro → syncIssue posts retro.
@@ -914,7 +914,7 @@ describe("syncIssue", () => {
   // Same mechanism, edit path: stale local + retro body change must
   // resolve to editComment on the remote retro, not addComment.
   it("DX-503: stale local.comments[] + retro body change resolves to editComment on the remote retro, never a fresh addComment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     // Tick 1.
@@ -952,7 +952,7 @@ describe("syncIssue", () => {
   // legacy retro on remote must still resolve to the no-op `legacy` branch,
   // not a fresh addComment.
   it("DX-503: legacy retro on remote is NOT duplicated when local.comments[] is stale", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     const legacyText = `${DANXBOT_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** old\n`;
@@ -985,7 +985,7 @@ describe("syncIssue", () => {
   // future contributor could "helpfully" wire legacy editing through
   // `hasLegacyRetroComment` and accidentally migrate Phase-4 retros.
   it("DX-503: stale local + legacy retro on remote + retro body change resolves to no-op (legacy is NEVER edited)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     const legacyText = `${DANXBOT_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** legacy v1\n`;
@@ -1024,7 +1024,7 @@ describe("syncIssue", () => {
   // → `findCommentByMarker(knownCommentsForRetro, ...)` hits it. Pins
   // that the OR-fallback's first arm still does work in that path.
   it("DX-503: retro carrying RETRO_COMMENT_MARKER but missing leading DANXBOT_COMMENT_MARKER is visible via the normal inbound merge", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     // Hand-craft a retro that lost the leading marker but kept the
@@ -1064,7 +1064,7 @@ describe("syncIssue", () => {
   });
 
   it("legacy `## Retro` comment without our marker is NOT duplicated by the renderer", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // Simulate Phase 4 behavior: agent manually appended a retro comment with
     // the standard `<!-- danxbot -->` marker but NO `<!-- danxbot-retro -->`.
@@ -1206,7 +1206,7 @@ describe("syncIssue", () => {
   // tracker traffic in production.
 
   it("children[] is local-only — mutating local.children issues zero tracker writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = {
@@ -1223,7 +1223,7 @@ describe("syncIssue", () => {
   });
 
   it("parent_id is local-only — mutating local.parent_id issues zero tracker writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = { ...fresh, parent_id: "ISS-99" };
@@ -1235,7 +1235,7 @@ describe("syncIssue", () => {
   });
 
   it("dispatch_id is local-only — mutating local.dispatch?.id issues zero tracker writes", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = {
@@ -1254,7 +1254,7 @@ describe("syncIssue", () => {
     // then re-syncs and asserts zero writes — covers title / description /
     // status / labels (type + needsHelp + requires_human + triaged + blocked)
     // / AC items / bot comments / retro in one round-trip.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
     const local: Issue = {
@@ -1310,7 +1310,7 @@ describe("syncIssue", () => {
   });
 
   it("blocked label idempotency: waiting_on.reason / by[] mutations alone produce zero writes (only the blocked status is mirrored)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
 

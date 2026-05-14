@@ -25,7 +25,7 @@ import {
 } from "vitest";
 import { cleanupLegacyNeedsApproval } from "../../worker/legacy-cleanup.js";
 import { TrelloTracker } from "../../issue-tracker/trello.js";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import { _resetForTesting as resetCircuit } from "../../issue-tracker/circuit-breaker.js";
 import {
   _clearSystemErrors,
@@ -136,7 +136,7 @@ describe("cleanupLegacyNeedsApproval", () => {
   }
 
   it("non-Trello tracker → skipped=true with no API calls", async () => {
-    const tracker: IssueTracker = new MemoryTracker();
+    const tracker: IssueTracker = new FakeTracker();
     const repo = makeRepoContext(scratch);
 
     const result = await cleanupLegacyNeedsApproval({ repo, tracker });

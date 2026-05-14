@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import {
   LOCK_TTL_MS,
   parseLockComment,
@@ -129,7 +129,7 @@ ${LOCK_COMMENT_MARKER}
 
 describe("tryAcquireLock", () => {
   it("acquires on a card with no existing lock comment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     const result = await tryAcquireLock(
@@ -154,7 +154,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("refuses to acquire when held by another holder within TTL", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -174,7 +174,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("reclaims a stale lock (>= TTL) and edits the existing comment in-place", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     const first = await tryAcquireLock(
@@ -211,7 +211,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("refreshes the lock when the same holder re-acquires within TTL", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     const first = await tryAcquireLock(
@@ -250,7 +250,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("treats age == LOCK_TTL_MS as stale (>= boundary)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -269,7 +269,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("treats age == LOCK_TTL_MS - 1 as fresh (rejects other holder)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -288,7 +288,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("treats same holder name on different host as another instance and refuses within TTL", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -312,7 +312,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("invariant: one comment per card lifetime across acquire→reclaim→refresh", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const t0 = new Date("2026-05-04T07:00:00.000Z");
 
@@ -348,7 +348,7 @@ describe("tryAcquireLock", () => {
   });
 
   it("overwrites an unparseable lock comment (legacy/corrupted)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     // Seed a malformed lock comment.
     await tracker.addComment(
@@ -381,7 +381,7 @@ describe("tryAcquireLock — host_pid + isPidAlive", () => {
     // Failure mode #1 from the card description: worker stops mid-dispatch,
     // leaves a fresh-looking lock with a now-dead PID. Without the liveness
     // check the next dispatch on the same host has to wait ~2h for TTL.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -409,7 +409,7 @@ describe("tryAcquireLock — host_pid + isPidAlive", () => {
   });
 
   it("does NOT reclaim a same-host lock whose host_pid is alive within TTL", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -436,7 +436,7 @@ describe("tryAcquireLock — host_pid + isPidAlive", () => {
     // Different physical host can't safely peek into another host's PID
     // table. Cross-host stale detection MUST stay TTL-based; the
     // releaseLock path is what handles cross-host stop.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -461,7 +461,7 @@ describe("tryAcquireLock — host_pid + isPidAlive", () => {
   });
 
   it("self-refresh path is unaffected by isPidAlive (own pid is always considered alive enough)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const startedAt = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, startedAt);
@@ -486,7 +486,7 @@ describe("tryAcquireLock — host_pid + isPidAlive", () => {
     // liveness check must treat 0 as "unknown, fall back to TTL"
     // rather than "dead, reclaim". Otherwise legacy locks would all
     // appear stale on the rollout tick.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const legacyBody = `${DANXBOT_COMMENT_MARKER}
 ${LOCK_COMMENT_MARKER}
@@ -544,7 +544,7 @@ describe("renderReleasedLockComment + parseLockComment", () => {
 
 describe("releaseLock", () => {
   it("returns {released: false, reason: 'no-lock'} when the card has no lock comment", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     const result = await releaseLock(
@@ -558,7 +558,7 @@ describe("releaseLock", () => {
   });
 
   it("returns {released: false, reason: 'unparseable'} when the lock body is corrupt", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tracker.addComment(
       external_id,
@@ -576,7 +576,7 @@ describe("releaseLock", () => {
   });
 
   it("returns {released: false, reason: 'not-mine'} when the dispatchId does not match", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tryAcquireLock(
       tracker,
@@ -596,7 +596,7 @@ describe("releaseLock", () => {
   });
 
   it("releases the lock so a fresh acquire by another holder reclaims immediately within TTL", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const t0 = new Date("2026-05-04T07:00:00.000Z");
     await tryAcquireLock(tracker, external_id, HOLDER_A, t0);
@@ -633,7 +633,7 @@ describe("releaseLock", () => {
   });
 
   it("solves failure mode #2 — host rename: prior holder releases, new runtime reclaims without TTL wait", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
 
     // Operator runs the docker worker first.
@@ -690,7 +690,7 @@ describe("releaseLock", () => {
     // We treat the post-release state as "not-mine" so the second call
     // is a no-op. Simplest: a release is recognized by `releasedAt !==
     // ""`, and we refuse to re-release such a comment.
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     await tryAcquireLock(
       tracker,

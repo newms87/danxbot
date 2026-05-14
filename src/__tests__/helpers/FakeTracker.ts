@@ -1,18 +1,11 @@
 /**
- * DX-343 — TEST-ONLY stub. Phase 4 (DX-345) replaces this with a
- * dedicated `FakeTracker` under a test-support directory and deletes
- * this file entirely. Production code MUST NOT import from this
- * module — the `__test__-` filename prefix is the contract enforced
- * by the AC #3 grep (`MemoryTracker\b` must have zero hits in
- * production code).
+ * FakeTracker — in-memory `IssueTracker` implementation for tests.
+ * Stores cards in a `Map<external_id, StoredCard>`, records every
+ * method call into a `RequestLogEntry[]`, and supports
+ * `failNextWrite()` for error-path tests.
  *
- * The class is preserved verbatim from the retired `memory.ts` so the
- * existing test fixtures (yaml-lifecycle, scheduler, lock, sync,
- * retry-queue, worker/issue-route, integration suites) keep working
- * between Phase 2 (this card) and Phase 4 without an inline
- * mass-rewrite. The `createIssueTracker` production branch that read
- * `DANXBOT_TRACKER === "memory"` is gone — this stub is reachable
- * only via direct test imports.
+ * Production code MUST NOT import from this file — guarded by
+ * `src/__tests__/issue-tracker/no-fake-tracker-in-production.test.ts`.
  */
 import {
   isTriaged,
@@ -28,7 +21,7 @@ import {
   type IssueType,
   type ManagedLabels,
   type RequiresHuman,
-} from "./interface.js";
+} from "../../issue-tracker/interface.js";
 
 function cloneTriage(t: IssueTriage): IssueTriage {
   return {
@@ -67,7 +60,7 @@ interface StoredCard {
   tracker: string;
   /**
    * Internal issue id (`ISS-N`). Stored alongside the tracker-native id
-   * so memory tracker round-trips preserve it. Empty string is permitted
+   * so the fake tracker round-trips preserve it. Empty string is permitted
    * for seeded fixtures that pre-date the id contract; tests touching
    * the schema are responsible for supplying a valid id.
    */
@@ -76,7 +69,7 @@ interface StoredCard {
   parent_id: string | null;
   /**
    * Child issue ids (`ISS-N[]`). Mirrors `Issue.children`. Stored on the
-   * card so seeded fixtures round-trip cleanly through the memory tracker.
+   * card so seeded fixtures round-trip cleanly.
    */
   children: string[];
   dispatch: IssueDispatch | null;
@@ -108,7 +101,7 @@ interface StoredCard {
  * for forcing rejection on the next mutating call, and lets tests seed initial
  * cards via the constructor.
  */
-export class MemoryTracker implements IssueTracker {
+export class FakeTracker implements IssueTracker {
   private cards = new Map<string, StoredCard>();
   private nextExternalId = 1;
   private nextCheckItemId = 1;
@@ -140,7 +133,7 @@ export class MemoryTracker implements IssueTracker {
    * Read methods are unaffected.
    */
   failNextWrite(
-    error: Error = new Error("MemoryTracker forced write failure"),
+    error: Error = new Error("FakeTracker forced write failure"),
   ): void {
     this.pendingWriteRejection = error;
   }
@@ -438,7 +431,7 @@ export class MemoryTracker implements IssueTracker {
             },
       conflict_on: card.conflict_on.map((c: { id: string; reason: string }) => ({ ...c })),
       // `history` is local-only audit; the tracker abstraction never sees it.
-      // MemoryTracker mirrors Trello's contract: always emit [] on read so
+      // FakeTracker mirrors Trello's contract: always emit [] on read so
       // the local YAML stays authoritative for the audit log.
       history: [],
       labels: { ...card.labels },

@@ -1,6 +1,6 @@
 /**
  * Phase 4 verification — agents work the YAML editing flow end-to-end
- * against MemoryTracker, with zero `mcp__trello__*` calls in the
+ * against FakeTracker, with zero `mcp__trello__*` calls in the
  * dispatched session JSONL.
  *
  * AC #6 of the Phase 4 card (Trello LDBhbd61) demands that the full card
@@ -132,31 +132,31 @@ vi.mock("../../repo-context.js", () => ({
   getRepoContext: vi.fn(),
 }));
 
-// MemoryTracker drives the YAML save path. The test seeds it manually
+// FakeTracker drives the YAML save path. The test seeds it manually
 // per-scenario via `setIssueTracker(seedIssue)` so the per-issue
 // external_id matches what the YAML on disk says.
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import type { Issue } from "../../issue-tracker/interface.js";
 const issueTrackerMock = vi.hoisted(() => ({
-  tracker: null as MemoryTracker | null,
+  tracker: null as FakeTracker | null,
 }));
 function setIssueTracker(seed: Issue): {
   addCommentCalls: Array<{ externalId: string; text: string }>;
   spawnedActionItems: string[];
 } {
-  const tracker = new MemoryTracker();
+  const tracker = new FakeTracker();
   const addCommentCalls: Array<{ externalId: string; text: string }> = [];
   const spawnedActionItems: string[] = [];
   let nextCommentSeq = 0;
-  // Bypass MemoryTracker's auto-id-mint: install stubs that return the
+  // Bypass FakeTracker's auto-id-mint: install stubs that return the
   // pre-shaped issue regardless of the lookup key. The worker calls
   // `getCard`, `getComments`, and the various mutation helpers as part of
   // sync.ts's local-as-truth diff. Stubbing read methods to echo the seed
-  // is enough — the writes will be issued against MemoryTracker's real
+  // is enough — the writes will be issued against FakeTracker's real
   // store, but `runSync` only mutates remote when local diverges. Echoing
   // the agent's final on-disk YAML keeps the diff small and the test
   // focused on the reachability of the YAML round-trip, not on
-  // MemoryTracker-internal write semantics (those have their own unit
+  // FakeTracker-internal write semantics (those have their own unit
   // suite).
   // Populate `labels` on the returned Issue so sync's outbound label diff
   // is a no-op against the seed (matches the stubbed reads above).
@@ -496,7 +496,7 @@ afterAll(async () => {
 // (`syncTrackedIssueOnComplete` block) and `src/__tests__/worker/auto-sync.test.ts`.
 // Skipping the suite here so a follow-up card can rebuild it as a true
 // end-to-end integration test against the new auto-sync pipeline.
-describe.skip("Integration: YAML lifecycle vs MemoryTracker (Phase 4 AC #6) — DX-157 rewrite pending", () => {
+describe.skip("Integration: YAML lifecycle vs FakeTracker (Phase 4 AC #6) — DX-157 rewrite pending", () => {
   it("ToDo → In Progress → Done flips the YAML, moves it open/ → closed/, and emits zero mcp__trello__ calls", async () => {
     const externalId = "mem-yaml-1";
     const seed = buildSeedIssue(externalId, "ToDo");

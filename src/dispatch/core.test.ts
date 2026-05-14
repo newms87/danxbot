@@ -973,7 +973,7 @@ describe("listActiveJobs()", () => {
 
 /**
  * Pin the test-only drain helper added for Trello 69f77e9b77472aefac1317b2:
- * the `yaml-lifecycle-memory-tracker.test.ts` teardown leak. The helper
+ * the `yaml-lifecycle-fake-tracker.test.ts` teardown leak. The helper
  * iterates `activeJobs` and awaits each `_cleanup()` + `_forwarderFlush`
  * so test teardown can `rmSync(<config.logsDir>)` without racing the
  * fire-and-forget forwarder flush the launcher kicks off in `runCleanup`.
@@ -1752,13 +1752,13 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("calls releaseLock on the supplied tracker when the dispatch onComplete fires", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
+    const { FakeTracker } = await import("../__tests__/helpers/FakeTracker.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
     const { LOCK_COMMENT_MARKER } = await import("../issue-tracker/markers.js");
 
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
       schema_version: 7,
       tracker: "memory",
@@ -1832,13 +1832,13 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("releases the tracker lock on the spawn-failure path (no terminal job ever ran)", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
+    const { FakeTracker } = await import("../__tests__/helpers/FakeTracker.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
     const { LOCK_COMMENT_MARKER } = await import("../issue-tracker/markers.js");
 
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
       schema_version: 7,
       tracker: "memory",
@@ -1905,13 +1905,13 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
     // EC2) polling the same card could grab it during the recovery
     // window. The respawnInProgress gate fixes that — release fires
     // ONLY on the FINAL terminal state, not on each per-respawn close.
-    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
+    const { FakeTracker } = await import("../__tests__/helpers/FakeTracker.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
     const { LOCK_COMMENT_MARKER } = await import("../issue-tracker/markers.js");
 
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
       schema_version: 7,
       tracker: "memory",
@@ -2004,10 +2004,10 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
     // The release path is fire-and-forget. Even when tracker.editComment
     // rejects (network outage, auth failure), the dispatch completes
     // and the next caller's onComplete still runs.
-    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
+    const { FakeTracker } = await import("../__tests__/helpers/FakeTracker.js");
     const { tryAcquireLock } = await import("../issue-tracker/lock.js");
 
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
       schema_version: 7,
       tracker: "memory",
@@ -2079,8 +2079,8 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("dispatch with no lockRelease leaves tracker comments unchanged at terminal state", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
-    const tracker = new MemoryTracker();
+    const { FakeTracker } = await import("../__tests__/helpers/FakeTracker.js");
+    const tracker = new FakeTracker();
 
     let capturedOnComplete:
       | ((job: ReturnType<typeof makeRunningJob>) => void)

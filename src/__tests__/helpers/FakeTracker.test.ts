@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "./FakeTracker.js";
 import type { CreateCardInput } from "../../issue-tracker/interface.js";
 
 function defaultInput(
@@ -26,9 +26,9 @@ function defaultInput(
   };
 }
 
-describe("MemoryTracker", () => {
+describe("FakeTracker", () => {
   it("creates a card and assigns external_id + check_item_ids", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const created = await tracker.createCard(defaultInput());
     expect(created.external_id).toMatch(/^mem-/);
     expect(created.ac).toHaveLength(1);
@@ -36,7 +36,7 @@ describe("MemoryTracker", () => {
   });
 
   it("getCard returns the full Issue with assigned ids", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     const card = await tracker.getCard(external_id);
     expect(card.external_id).toBe(external_id);
@@ -45,7 +45,7 @@ describe("MemoryTracker", () => {
   });
 
   it("fetchOpenCards returns only open statuses", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const a = await tracker.createCard(
       defaultInput({ status: "ToDo", title: "open" }),
     );
@@ -59,7 +59,7 @@ describe("MemoryTracker", () => {
   });
 
   it("updateCard patches title and description independently", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.updateCard(external_id, { title: "New title" });
     let card = await tracker.getCard(external_id);
@@ -72,14 +72,14 @@ describe("MemoryTracker", () => {
   });
 
   it("moveToStatus changes the status", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.moveToStatus(external_id, "In Progress");
     expect((await tracker.getCard(external_id)).status).toBe("In Progress");
   });
 
   it("setLabels overwrites the label state", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.setLabels(external_id, {
       type: "Bug",
@@ -92,7 +92,7 @@ describe("MemoryTracker", () => {
   });
 
   it("getCard surfaces the current managed-label projection on Issue.labels (ISS-88)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
 
     // Right after createCard the card's labels mirror the createCard
@@ -123,7 +123,7 @@ describe("MemoryTracker", () => {
 
   it("addComment returns id and timestamp; getComments returns oldest-first", async () => {
     let now = 1700000000000;
-    const tracker = new MemoryTracker({
+    const tracker = new FakeTracker({
       clock: () => new Date(now).toISOString(),
     });
     const { external_id } = await tracker.createCard(defaultInput());
@@ -137,7 +137,7 @@ describe("MemoryTracker", () => {
 
   it("editComment replaces text in-place; preserves id, author, timestamp", async () => {
     let now = 1700000000000;
-    const tracker = new MemoryTracker({
+    const tracker = new FakeTracker({
       clock: () => new Date(now).toISOString(),
     });
     const { external_id } = await tracker.createCard(defaultInput());
@@ -153,7 +153,7 @@ describe("MemoryTracker", () => {
   });
 
   it("editComment throws when the comment id is unknown on the given card", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     await expect(
       tracker.editComment(external_id, "cmt-nope", "ignored"),
@@ -161,7 +161,7 @@ describe("MemoryTracker", () => {
   });
 
   it("editComment is a write — failNextWrite rejects it by identity", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     const { id } = await tracker.addComment(external_id, "v1");
     const err = new Error("boom");
@@ -173,7 +173,7 @@ describe("MemoryTracker", () => {
   });
 
   it("AC item lifecycle: add, update, delete", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput({ ac: [] }));
     const { check_item_id } = await tracker.addAcItem(external_id, {
       title: "x",
@@ -189,7 +189,7 @@ describe("MemoryTracker", () => {
 
 
   it("logs every interface call", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.getCard(external_id);
     await tracker.updateCard(external_id, { title: "T2" });
@@ -204,7 +204,7 @@ describe("MemoryTracker", () => {
   });
 
   it("request log has one entry per interface method, with the right method+externalId+details (Test gap B)", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     tracker.clearRequestLog();
 
@@ -287,7 +287,7 @@ describe("MemoryTracker", () => {
   });
 
   it("failNextWrite rejects the next mutating call with the EXACT queued Error instance", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     const err = new Error("boom");
     tracker.failNextWrite(err);
@@ -303,7 +303,7 @@ describe("MemoryTracker", () => {
   });
 
   it("failNextWrite does NOT reject reads, then rejects the next write with the EXACT queued Error instance", async () => {
-    const tracker = new MemoryTracker();
+    const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
     const err = new Error("should-not-fire");
     tracker.failNextWrite(err);
@@ -316,7 +316,7 @@ describe("MemoryTracker", () => {
   });
 
   it("seeds initial cards", async () => {
-    const tracker = new MemoryTracker({
+    const tracker = new FakeTracker({
       seed: [
         {
           schema_version: 7,
@@ -351,10 +351,10 @@ describe("MemoryTracker", () => {
 
   it("preserves the seed Issue's `tracker` field on read (round-trip)", async () => {
     // A seeded Issue carrying tracker: "trello" should round-trip with
-    // tracker: "trello" on getCard — the MemoryTracker is a faithful
+    // tracker: "trello" on getCard — the FakeTracker is a faithful
     // in-memory store, not a tracker-name rewriter. Useful for tests that
-    // want to feed Trello-shaped fixtures through the Memory backend.
-    const tracker = new MemoryTracker({
+    // want to feed Trello-shaped fixtures through the in-memory backend.
+    const tracker = new FakeTracker({
       seed: [
         {
           schema_version: 7,

@@ -145,7 +145,7 @@ export interface AgentJob {
    * subsequent `rmSync(<config.logsDir>)` cannot race a pending
    * `appendFile` against `<config.logsDir>/event-queue/<jobId>.jsonl`
    * (Trello 69f77e9b77472aefac1317b2 — teardown leak in
-   * `yaml-lifecycle-memory-tracker.test.ts`).
+   * `yaml-lifecycle-fake-tracker.test.ts`).
    *
    * Always set when the dispatch was created with `eventForwarding`;
    * `undefined` otherwise (poller-style dispatches that omit

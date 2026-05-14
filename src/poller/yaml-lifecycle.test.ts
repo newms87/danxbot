@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { MemoryTracker } from "../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../__tests__/helpers/FakeTracker.js";
 import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import {
   clearDispatchAndWrite,
@@ -148,7 +148,7 @@ describe("yaml-lifecycle", () => {
 
   describe("hydrateFromRemote", () => {
     it("calls tracker.getCard + tracker.getComments and writes valid YAML with stamped dispatch_id", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       // Seed a memory card carrying an internal id (the memory tracker
       // round-trips it; getCard returns it as `Issue.id` so hydrate
       // doesn't have to allocate a new ISS-N).
@@ -178,7 +178,7 @@ describe("yaml-lifecycle", () => {
     });
 
     it("allocates a new ISS-N when the remote card has no id (legacy / human-created)", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       // Memory tracker preserves whatever id we seed — empty here means
       // the equivalent of "remote card created without a `#ISS-N: ` prefix".
       const { external_id } = await tracker.createCard(
@@ -201,7 +201,7 @@ describe("yaml-lifecycle", () => {
       // does. Hydrate's signature was widened from `string` to
       // `string | null` to support that. Pin the contract so a future
       // refactor that re-tightens the type can't break bulk-sync.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-99" }),
       );
@@ -228,7 +228,7 @@ describe("yaml-lifecycle", () => {
       // future hydrateFromRemote refactor that drops a required field
       // (e.g. `children`, `blocked`) and only fails downstream when the
       // poller eventually re-reads the file.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-200" }),
       );
@@ -277,7 +277,7 @@ describe("yaml-lifecycle", () => {
     });
 
     it("includes remote comments in the hydrated Issue", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-3" }),
       );
@@ -299,7 +299,7 @@ describe("yaml-lifecycle", () => {
     // ----- DX-147 — tracker:<name> 'created' entry on first hydrate -----
 
     it("DX-147: appends exactly one tracker:<name> 'created' entry referencing external_id when history is empty", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-300" }),
       );
@@ -313,7 +313,7 @@ describe("yaml-lifecycle", () => {
 
       expect(issue.history).toHaveLength(1);
       const entry = issue.history[0];
-      // Actor uses the dynamic tracker name — MemoryTracker's
+      // Actor uses the dynamic tracker name — FakeTracker's
       // `tracker` field is `"memory"`, so the actor is
       // `tracker:memory`. In production with TrelloTracker the actor
       // would be `tracker:trello` (per the canonical actor table on
@@ -342,7 +342,7 @@ describe("yaml-lifecycle", () => {
       // re-enters hydrate. Verifying exactly-once means showing the
       // entry survives the round-trip path (write → parse) used by
       // every later worker / poller code path that consumes the YAML.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-400" }),
       );
@@ -366,7 +366,7 @@ describe("yaml-lifecycle", () => {
       // that the post-allocation path still emits the `created` entry
       // — a regression that early-returns inside the allocate branch
       // would otherwise ship without a created entry.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "" }),
       );
@@ -389,7 +389,7 @@ describe("yaml-lifecycle", () => {
 
   describe("writeIssue", () => {
     it("serializes and writes to open/<id>.yml; round-trips through parseIssue", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-12" }),
       );
@@ -413,7 +413,7 @@ describe("yaml-lifecycle", () => {
 
   describe("stampDispatchAndWrite", () => {
     it("overwrites dispatch_id and writes back, returning the updated Issue", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-13" }),
       );
@@ -433,7 +433,7 @@ describe("yaml-lifecycle", () => {
     });
 
     it("string form stamps the placeholder dispatch shape", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-14" }),
       );
@@ -457,7 +457,7 @@ describe("yaml-lifecycle", () => {
     });
 
     it("IssueDispatch form stamps the full record verbatim", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-15" }),
       );
@@ -496,7 +496,7 @@ describe("yaml-lifecycle", () => {
 
   describe("clearDispatchAndWrite", () => {
     it("clears dispatch and PRESERVES assigned_agent (durable audit)", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-16" }),
       );
@@ -532,7 +532,7 @@ describe("yaml-lifecycle", () => {
       // assigned_agent state is irrelevant — the function gates on
       // `dispatch === null` only, since assigned_agent is durable audit
       // and never touched here.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-18" }),
       );
@@ -560,7 +560,7 @@ describe("yaml-lifecycle", () => {
     });
 
     it("is a no-op when dispatch is null (no assigned_agent either)", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-17" }),
       );
@@ -729,7 +729,7 @@ describe("yaml-lifecycle", () => {
 
   describe("loadLocalFromDisk (DX-284 — DB-mirror-bypass cleanup reader)", () => {
     it("returns the parsed Issue when the open YAML exists", async () => {
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-400" }),
       );
@@ -764,7 +764,7 @@ describe("yaml-lifecycle", () => {
       // The yaml-lifecycle test suite runs without `startIssuesMirror`,
       // so `loadLocal` (DB-backed) would return null here. This test
       // documents the contract that the cleanup path now depends on.
-      const tracker = new MemoryTracker();
+      const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "ISS-402" }),
       );

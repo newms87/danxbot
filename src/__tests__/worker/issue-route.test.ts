@@ -4,7 +4,7 @@
  *
  * Spins up a real `node:http` server bound to a random port for each
  * test, registers `/api/issue-create/:id`, then issues real `fetch`
- * calls against the loopback address. The MemoryTracker stands in for a
+ * calls against the loopback address. The FakeTracker stands in for a
  * real IssueTracker — it implements the full interface deterministically
  * and supports `failNextWrite` for the tracker-error-isolation tests
  * that AC #2 requires.
@@ -49,7 +49,7 @@ import {
   syncTrackedIssueOnComplete,
   type IssueRouteDeps,
 } from "../../worker/issue-route.js";
-import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
+import { FakeTracker } from "../helpers/FakeTracker.js";
 import {
   ensureIssuesDirs,
   issuePath,
@@ -63,7 +63,7 @@ import type { RepoContext } from "../../types.js";
 
 interface TestHarness {
   url: string;
-  tracker: MemoryTracker;
+  tracker: FakeTracker;
   repo: RepoContext;
   recordedErrors: Array<{ dispatchId: string; message: string }>;
   recordedSystemErrors: string[];
@@ -71,7 +71,7 @@ interface TestHarness {
 }
 
 async function startTestServer(): Promise<TestHarness> {
-  const tracker = new MemoryTracker();
+  const tracker = new FakeTracker();
   const repoLocalPath = mkdtempSync(join(tmpdir(), "danxbot-issue-route-"));
   ensureIssuesDirs(repoLocalPath);
   const recordedErrors: Array<{ dispatchId: string; message: string }> = [];

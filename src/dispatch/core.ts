@@ -218,7 +218,7 @@ export function _resetForTesting(): void {
  * `appendFile` calls into `<config.logsDir>/event-queue/<jobId>.jsonl`.
  *
  * Trello 69f77e9b77472aefac1317b2 — teardown leak in
- * `yaml-lifecycle-memory-tracker.test.ts`. The previous unhandled-
+ * `yaml-lifecycle-fake-tracker.test.ts`. The previous unhandled-
  * rejection fix (commit fa15457) wrapped `drainAndSend` so ENOENT
  * never escapes; this helper closes the underlying race so the test
  * suite stops keeping vitest's event loop warm with pending writes
