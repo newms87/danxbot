@@ -718,6 +718,57 @@ describe("handlePrepVerdict — prepVerdict stash on AgentJob", () => {
     expect(order).toEqual(["stop:prepVerdict=conflict_on"]);
   });
 
+  it("flushes the HTTP response before awaiting job.stop — prevents MCP-server kill race", async () => {
+    // Repro for the DX-504 prep-verdict close-on-call class. The
+    // prep agent's MCP server (a child of the dispatch's cgroup) makes
+    // the verdict POST; the route awaits `job.stop()` which tears down
+    // that cgroup via `systemctl --user stop`. If the route awaits stop
+    // BEFORE writing the response, the MCP server dies mid-fetch and
+    // the agent sees the MCP stdio close instead of the verdict ack.
+    //
+    // Contract under test: by the time `job.stop()` has been invoked
+    // but is still pending (its kill HAS NOT completed), the worker
+    // MUST have already written the HTTP response onto the wire. The
+    // MCP server's `fetch` then returns before the kill lands.
+    writeIssue(root, "DX-100");
+    const { job, stop } = makeJobStub();
+    let resolveStop!: () => void;
+    const stopGate = new Promise<void>((r) => {
+      resolveStop = r;
+    });
+    stop.mockImplementation(async () => {
+      await stopGate;
+    });
+
+    const req = createMockReqWithBody("POST", {
+      verdict: "conflict_on",
+      reason: "race repro",
+      conflict_with: ["DX-200"],
+    });
+    const res = createMockRes();
+    const handlerPromise = handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+      getJob: vi.fn().mockReturnValue(job),
+    });
+
+    // Drain microtasks + nextTicks so parseBody, applyVerdictSideEffect,
+    // and the response write complete. The handler must NOT have
+    // returned yet because the stop gate is still unresolved.
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setImmediate(r));
+    }
+
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect((res.end as ReturnType<typeof vi.fn>)).toHaveBeenCalled();
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.verdict).toBe("conflict_on");
+    expect(body.dispatchTerminal).toBe("completed");
+
+    resolveStop();
+    await handlerPromise;
+  });
+
   it("tolerates a missing job (race: dispatch ended between activeJobs and the verdict POST)", async () => {
     writeIssue(root, "DX-100");
     const req = createMockReqWithBody("POST", {

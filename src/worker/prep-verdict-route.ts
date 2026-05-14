@@ -298,11 +298,23 @@ async function applyVerdictSideEffect(
 }
 
 /**
- * Decide the dispatch lifecycle for the verdict. Calls `job.stop` for
- * every terminating verdict (and `ok` on prep-only dispatches);
- * returns the terminal status the ack body surfaces. `undefined`
- * return value = keep running (only `ok` on `dispatchKind: "work"`
- * dispatches).
+ * Plan the dispatch lifecycle effect for a verdict WITHOUT executing
+ * the `job.stop` side-effect yet. Returns the terminal status the ack
+ * body surfaces plus a `runStop` closure the caller invokes AFTER the
+ * HTTP response has been written.
+ *
+ * The two-phase shape is load-bearing for the prep agent's MCP wire
+ * (DX-504 close-on-call class): `job.stop` reaps the prep dispatch's
+ * cgroup via `systemctl --user stop`, which kills the in-flight MCP
+ * server child making this verdict POST. Awaiting stop BEFORE writing
+ * the response means the MCP server dies before receiving the ack —
+ * Claude sees the MCP stdio close instead of the verdict result, and
+ * the prep skill treats the call as failed. Compute the plan, write
+ * the response, THEN await stop so the ack is on the wire before the
+ * kill lands.
+ *
+ * `runStop === undefined` = keep dispatch running (only `ok` on
+ * `dispatchKind: "work"` dispatches).
  *
  * DX-296 — branching is per-dispatch via `job.dispatchKind`, NOT the
  * repo-wide `prepMode` setting. The picker stamps `dispatchKind` on
@@ -323,42 +335,42 @@ async function applyVerdictSideEffect(
  * prep-verdict tool advertised in the first place; the fallback is
  * defense in depth.
  */
-async function decideDispatchLifecycle(
+function planDispatchLifecycle(
   payload: PrepVerdictPayload,
   job: AgentJob | undefined,
   dispatchId: string,
-): Promise<"completed" | "failed" | undefined> {
+): {
+  terminal?: "completed" | "failed";
+  runStop?: () => Promise<void>;
+} {
   if (payload.verdict === "ok") {
     if (job?.dispatchKind === "prep") {
-      await job.stop?.(
-        "completed",
-        `prep ok (prep-only dispatch): ${payload.reason}`,
-      );
-      return "completed";
+      const summary = `prep ok (prep-only dispatch): ${payload.reason}`;
+      return {
+        terminal: "completed",
+        runStop: async () => {
+          await job.stop?.("completed", summary);
+        },
+      };
     }
     if (job !== undefined && job.dispatchKind === undefined) {
-      // Misconfiguration tripwire — a verdict POST landed against a
-      // dispatch the multi-agent picker did NOT spawn (Slack /
-      // ideator / external `/api/launch` path). The defensive
-      // "keep running" choice prevents silently killing a non-prep
-      // dispatch, but the call is unexpected — log loudly so the
-      // operator can chase the misconfig.
       log.warn(
         `[Dispatch ${dispatchId}] prep verdict=ok arrived against a dispatch with dispatchKind=undefined — keeping the dispatch running, but this dispatch should not have been able to call danxbot_prep_verdict. Investigate the caller's workspace MCP setup.`,
       );
     }
-    return undefined;
+    return {};
   }
-  // Every non-ok verdict terminates the dispatch. Mapping lives in
-  // `mapTerminalVerdictToDispatchStatus` so the DB collapse rule is
-  // shared with future fallback paths.
   const terminal = mapTerminalVerdictToDispatchStatus(payload.verdict);
   const summary =
     payload.verdict === "abort"
       ? `agent env aborted prep — see broken record: ${payload.reason}`
       : `prep ${payload.verdict}: ${payload.reason}`;
-  await job?.stop?.(terminal, summary);
-  return terminal;
+  return {
+    terminal,
+    runStop: async () => {
+      await job?.stop?.(terminal, summary);
+    },
+  };
 }
 
 /**
@@ -457,10 +469,24 @@ export async function handlePrepVerdict(
     job.prepVerdict = payload;
   }
 
-  const terminal = await decideDispatchLifecycle(payload, job, dispatchId);
-  if (terminal) {
-    ack.dispatchTerminal = terminal;
+  // Plan the lifecycle (pure), write the response, THEN execute the
+  // stop. Order matters — see `planDispatchLifecycle` docstring for
+  // the DX-504 close-on-call rationale. Awaiting stop before writing
+  // would kill the prep dispatch's MCP-server child mid-fetch.
+  const lifecycle = planDispatchLifecycle(payload, job, dispatchId);
+  if (lifecycle.terminal) {
+    ack.dispatchTerminal = lifecycle.terminal;
   }
-
   json(res, 200, ack);
+
+  if (lifecycle.runStop) {
+    try {
+      await lifecycle.runStop();
+    } catch (err) {
+      log.error(
+        `Prep verdict ${payload.verdict} stop failed for ${dispatchId}`,
+        err,
+      );
+    }
+  }
 }
