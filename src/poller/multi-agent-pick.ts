@@ -370,19 +370,18 @@ export async function tryMultiAgentDispatch(
       );
     } else if (owned.kind === "duplicates") {
       reconcileOwnedCards = owned.cards;
-      // DX-501: prefer the card MOST LIKELY to be retained as the
-      // dispatch row + lock target — minimizes wasted stamp churn when
-      // the agent releases the others. Rank: In Progress > Review >
-      // Blocked > ToDo > any other status. Falls back to the first
-      // duplicate when ranks tie.
-      const rank = (s: Issue["status"]): number => {
-        if (s === "In Progress") return 0;
-        if (s === "Review") return 1;
-        if (s === "Blocked") return 2;
-        if (s === "ToDo") return 3;
-        return 4;
-      };
-      card = [...owned.cards].sort((a, b) => rank(a.status) - rank(b.status))[0];
+      // DX-501: dispatch target is the first duplicate in input order.
+      // The picker only ever dispatches cards in ToDo (fresh) or In
+      // Progress (resume — DX-360); a `Blocked` / `Review` / non-null
+      // `waiting_on` / non-null `requires_human` card with an
+      // `assigned_agent` stamp is an INVALID state — the agent should
+      // have nulled the stamp when it escalated, but didn't. The
+      // reconcile body enumerates ALL duplicates regardless of target,
+      // so the agent walks every card and recovers the invalid ones
+      // in-session. No status-rank heuristic on the dispatch target
+      // (the target is just the YAML the dispatch row + tracker lock
+      // hang on; agent may release it).
+      card = owned.cards[0];
       log.warn(
         `[${repo.name}] multi-agent pick (reconcile): ${agent.name} owns ${owned.cards.length} open cards (${owned.cards.map((c) => c.id).join(", ")}) — dispatching reconcile task on ${card.id} (status=${card.status})`,
       );

@@ -977,34 +977,37 @@ describe("tryMultiAgentDispatch", () => {
     expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
   });
 
-  it("reconcile picks the In Progress duplicate as the dispatch target over a ToDo sibling (DX-501)", async () => {
+  it("reconcile picks the first duplicate in input order as the dispatch target (DX-501)", async () => {
+    // The dispatch target is just the YAML the dispatch row + lock hang
+    // on; the agent reads ALL duplicates from the prompt and recovers
+    // each one. No status-rank heuristic — Blocked / Review on an agent
+    // stamp is an invalid state and the agent handles it regardless of
+    // which YAML the dispatch row sits on.
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
       job: {} as never,
     });
 
-    const todoFirst = issue("DX-1", {
+    const first = issue("DX-1", {
       assigned_agent: "dani",
       status: "ToDo",
     });
-    const inProgressSecond = issue("DX-2", {
+    const second = issue("DX-2", {
       assigned_agent: "dani",
       status: "In Progress",
     });
     await tryMultiAgentDispatch({
       repo: fakeRepo(),
-      cards: [todoFirst],
-      openIssues: [todoFirst, inProgressSecond],
+      cards: [first],
+      openIssues: [first, second],
       tracker: fakeTracker(),
       now: NOW,
     });
 
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    // DX-2 is picked despite being second in openIssues — In Progress
-    // outranks ToDo in the reconcile target selector.
-    expect(dispatchInput.issueId).toBe("DX-2");
-    // Enumeration still shows BOTH cards.
+    expect(dispatchInput.issueId).toBe("DX-1");
+    // Enumeration covers BOTH cards regardless of target.
     expect(dispatchInput.task).toContain("DX-1");
     expect(dispatchInput.task).toContain("DX-2");
   });
