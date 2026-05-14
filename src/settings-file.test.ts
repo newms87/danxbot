@@ -3196,3 +3196,44 @@ describe("settings-file", () => {
     });
   });
 });
+
+/**
+ * DX-511 cross-module lockstep — `EFFORT_LEVEL_NAMES` exists in BOTH
+ * `src/settings-file.ts` AND `src/issue-tracker/interface.ts` because the
+ * YAML validator needs the list without pulling the settings module's
+ * `node:fs/promises` + logger surface into every `parseIssue` caller.
+ *
+ * The two declarations MUST stay byte-identical or the drift class fires:
+ * an `effort_level` literal that the YAML validator accepts would be
+ * rejected by `getAgentEffortLevel`'s membership check (silent dispatch
+ * routing failure) or vice versa.
+ *
+ * Lockstep partner: `dashboard/src/__tests__/effort-levels-lockstep.test.ts`
+ * pins the SPA's redeclaration to this one.
+ */
+describe("DX-511 — cross-module EFFORT_LEVEL_NAMES lockstep", () => {
+  it("interface.ts EFFORT_LEVEL_NAMES matches settings-file.ts byte-identically", async () => {
+    const fromInterface = (await import("./issue-tracker/interface.js"))
+      .EFFORT_LEVEL_NAMES;
+    const fromSettings = (await import("./settings-file.js"))
+      .EFFORT_LEVEL_NAMES;
+    expect([...fromSettings]).toEqual([...fromInterface]);
+  });
+
+  it("EFFORT_LEVEL_NAMES has the same length in both modules (catch silent appends)", async () => {
+    const fromInterface = (await import("./issue-tracker/interface.js"))
+      .EFFORT_LEVEL_NAMES;
+    const fromSettings = (await import("./settings-file.js"))
+      .EFFORT_LEVEL_NAMES;
+    expect(fromInterface.length).toBe(fromSettings.length);
+    expect(fromInterface.length).toBe(7);
+  });
+
+  it("DEFAULT_AGENT_EFFORT_LEVEL is one of the canonical names (no orphaned default)", async () => {
+    const fromInterface = (await import("./issue-tracker/interface.js"))
+      .EFFORT_LEVEL_NAMES;
+    const defaultName = (await import("./settings-file.js"))
+      .DEFAULT_AGENT_EFFORT_LEVEL;
+    expect(fromInterface).toContain(defaultName);
+  });
+});

@@ -129,7 +129,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 7,
+      schema_version: 8,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -180,6 +180,7 @@ export class TrelloTracker implements IssueTracker {
       blocked: null,
       requires_human: null,
       conflict_on: [],
+      effort_level: null,
       // `history` is local-only audit; Trello has no native field for it.
       // Phase 1 of DX-138 (DX-145) lands the schema; the tracker abstraction
       // never sees history, so `getCard` always emits [] here.

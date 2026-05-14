@@ -91,6 +91,7 @@ interface StoredCard {
   blocked: { reason: string; timestamp: string } | null;
   requires_human: RequiresHuman | null;
   conflict_on: { id: string; reason: string }[];
+  effort_level: import("../../issue-tracker/interface.js").EffortLevelName | null;
   labels: ManagedLabels;
 }
 
@@ -207,6 +208,7 @@ export class FakeTracker implements IssueTracker {
       blocked: null,
       requires_human: null,
       conflict_on: [],
+      effort_level: null,
       labels: {
         type: input.type,
         blocked: input.status === "Blocked",
@@ -380,7 +382,7 @@ export class FakeTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 7,
+      schema_version: 8,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -430,6 +432,7 @@ export class FakeTracker implements IssueTracker {
               set_at: card.requires_human.set_at,
             },
       conflict_on: card.conflict_on.map((c: { id: string; reason: string }) => ({ ...c })),
+      effort_level: card.effort_level,
       // `history` is local-only audit; the tracker abstraction never sees it.
       // FakeTracker mirrors Trello's contract: always emit [] on read so
       // the local YAML stays authoritative for the audit log.
@@ -483,6 +486,7 @@ export class FakeTracker implements IssueTracker {
               set_at: issue.requires_human.set_at,
             },
       conflict_on: issue.conflict_on.map((c: { id: string; reason: string }) => ({ ...c })),
+      effort_level: issue.effort_level,
       labels: {
         type: issue.type,
         blocked: issue.status === "Blocked",

@@ -38,7 +38,7 @@ function buildIssueYaml(overrides: IssueOverrides = {}): string {
   // watcher invokes — keeps the fixture byte-identical to production
   // writes.
   return serializeIssue({
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id,
     external_id: "",
@@ -67,6 +67,7 @@ function buildIssueYaml(overrides: IssueOverrides = {}): string {
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     assigned_agent: null,
   });
 }

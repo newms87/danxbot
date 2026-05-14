@@ -109,7 +109,7 @@ function makeIssueWithDispatch(opts: {
   ttlSeconds: number;
 }): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: opts.id,
     external_id: `ext-${opts.id}`,
@@ -145,6 +145,7 @@ function makeIssueWithDispatch(opts: {
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
   } as unknown as Issue;
 }

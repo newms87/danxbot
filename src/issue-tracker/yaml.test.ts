@@ -388,7 +388,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
    */
   function legacyIssueWithoutRequiresHuman(): Issue {
     return {
-      schema_version: 7,
+      schema_version: 8,
       tracker: "memory",
       id: "DX-1",
       external_id: "",
@@ -416,6 +416,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       requires_human: undefined as any,
       conflict_on: [],
+      effort_level: null,
       assigned_agent: null,
       waiting_on: null,
       history: [],
@@ -642,5 +643,205 @@ describe("DX-280 — schema_version forward-compat bound", () => {
     );
     const reparsed = parseIssue(yaml, { expectedPrefix: "DX" });
     expect(reparsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
+  });
+});
+
+/**
+ * DX-511 — `effort_level` field (schema v7 → v8 bump).
+ *
+ * The DX-508 epic's per-card effort hint. One of seven canonical
+ * `EffortLevelName` literals or `null` (inherit-default semantics).
+ * The validator rejects unknown values fail-loud — a typo would
+ * silently route the dispatch through the wrong model/effort tier.
+ *
+ * Migration shape from v7: the field is optional. v7 YAMLs without
+ * the key parse as `effort_level: null` (same shape as a fresh card).
+ * On round-trip the writer emits explicit `null` so a second reader
+ * sees the healed value without re-running the migration.
+ */
+function yamlV7WithoutEffortLevel(): string {
+  return `schema_version: 7
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+history: []
+`;
+}
+
+function yamlV8WithEffortLevel(value: string): string {
+  return `schema_version: 8
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+effort_level: ${value}
+history: []
+`;
+}
+
+describe("DX-511 — effort_level field (v8)", () => {
+  it("v7 fixture without effort_level parses with effort_level: null (forward migration)", () => {
+    const issue = parseIssue(yamlV7WithoutEffortLevel(), {
+      expectedPrefix: "DX",
+    });
+    expect(issue.effort_level).toBeNull();
+  });
+
+  it("v8 fixture with explicit effort_level: null parses as null", () => {
+    const issue = parseIssue(yamlV8WithEffortLevel("null"), {
+      expectedPrefix: "DX",
+    });
+    expect(issue.effort_level).toBeNull();
+  });
+
+  it.each([
+    "min",
+    "very_low",
+    "low",
+    "medium",
+    "high",
+    "very_high",
+    "max",
+  ] as const)("v8 fixture with effort_level: %s round-trips losslessly + byte-stable re-serialize", (name) => {
+    const issue = parseIssue(yamlV8WithEffortLevel(name), {
+      expectedPrefix: "DX",
+    });
+    expect(issue.effort_level).toBe(name);
+    const reSerialized = serializeIssue(issue);
+    expect(reSerialized).toContain(`effort_level: ${name}`);
+    const reparsed = parseIssue(reSerialized, { expectedPrefix: "DX" });
+    expect(reparsed.effort_level).toBe(name);
+    // Non-null byte-stability — parse → serialize → parse → serialize
+    // must produce identical bytes (canonical key order + explicit YAML
+    // emission for the field). Without this, an integer-coerce or
+    // quoting-inconsistency regression would diverge between save round-trips.
+    expect(serializeIssue(reparsed)).toBe(reSerialized);
+  });
+
+  it("rejects an invalid effort_level value fail-loud (typo guard)", () => {
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("bogus"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level must be null or one of/);
+  });
+
+  it("rejects a non-string effort_level (number, boolean, list, mapping) fail-loud", () => {
+    // Every plausible hand-edit / external-tool failure mode that yaml.js
+    // can produce. The canonical names are lowercase + snake_case; anything
+    // else must surface as a parse error rather than silently coerce
+    // through the validator. Without this defense-in-depth coverage a
+    // future relaxation could leak `effort_level: Medium` through with
+    // an unintended downcast.
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("42"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level/);
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("true"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level/);
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("[low]"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level/);
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("{name: low}"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level/);
+  });
+
+  it("rejects mixed-case + empty-string effort_level (canonical names are lowercase + snake_case)", () => {
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel("Medium"), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level must be null or one of/);
+    expect(() =>
+      parseIssue(yamlV8WithEffortLevel('""'), { expectedPrefix: "DX" }),
+    ).toThrow(/effort_level must be null or one of/);
+  });
+
+  it("serializeIssue emits effort_level: null as explicit YAML null, not absent key (round-trip stable)", () => {
+    const issue = parseIssue(yamlV7WithoutEffortLevel(), {
+      expectedPrefix: "DX",
+    });
+    const yaml = serializeIssue(issue);
+    // Explicit `effort_level: null` so a second reader sees the healed
+    // value without re-running the v7-without-field migration.
+    expect(yaml).toMatch(/effort_level:\s*null/);
+  });
+
+  it("createEmptyIssue stamps effort_level: null by default", () => {
+    const fresh = createEmptyIssue();
+    expect(fresh.effort_level).toBeNull();
+    expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
+  });
+
+  it("createEmptyIssue accepts an explicit effort_level seed", () => {
+    const fresh = createEmptyIssue({ effort_level: "high" });
+    expect(fresh.effort_level).toBe("high");
+  });
+
+  it("issueToCreateInput mirrors effort_level (null and non-null)", () => {
+    const fresh = createEmptyIssue({ id: "DX-1", title: "t", description: "d" });
+    expect(issueToCreateInput(fresh).effort_level).toBeNull();
+    const withLevel = createEmptyIssue({
+      id: "DX-2",
+      title: "t",
+      description: "d",
+      effort_level: "very_high",
+    });
+    expect(issueToCreateInput(withLevel).effort_level).toBe("very_high");
+  });
+
+  it("KNOWN_SCHEMA_MAX bumped to 8 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
+    expect(KNOWN_SCHEMA_MAX).toBe(8);
+    const fresh = createEmptyIssue();
+    expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
+    expect(issueToCreateInput(fresh).schema_version).toBe(KNOWN_SCHEMA_MAX);
   });
 });

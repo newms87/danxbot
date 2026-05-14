@@ -22,7 +22,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string; status: IssueStatus },
 ): Issue {
   const merged: Issue = {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     external_id: "",
     parent_id: null,
@@ -49,6 +49,7 @@ function buildIssue(
     assigned_agent: null,
     waiting_on: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
     ...overrides,
   };

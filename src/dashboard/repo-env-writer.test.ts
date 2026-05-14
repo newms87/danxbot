@@ -5,7 +5,7 @@
  * per-file in-process queue.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   existsSync,
   mkdirSync,
@@ -372,10 +372,14 @@ describe("watchRepoEnvFile", () => {
       writtenBy: "test",
     });
 
-    // Wait past awaitWriteFinish (200ms) + a buffer.
-    await new Promise((r) => setTimeout(r, 500));
-
-    expect(fires).toBeGreaterThanOrEqual(1);
+    // DX-262 pattern — `vi.waitFor` polls the watcher state instead of
+    // a fixed `setTimeout` so the test holds under CPU contention from
+    // parallel suite runs (the chokidar fire can land well past the
+    // 200ms awaitWriteFinish + 500ms buffer under heavy load).
+    await vi.waitFor(() => expect(fires).toBeGreaterThanOrEqual(1), {
+      timeout: 5_000,
+      interval: 50,
+    });
     expect(lastLocalPath).toBe(repoLocalPath);
   });
 

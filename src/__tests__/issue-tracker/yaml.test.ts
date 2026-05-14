@@ -26,7 +26,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -56,6 +56,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     waiting_on: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
     ...overrides,
   };
@@ -285,14 +286,14 @@ describe("serializeIssue / parseIssue", () => {
       // next save). Pin the legacy acceptance so a future tightening
       // doesn't drop it.
       const yaml1 = serializeIssue(fullIssue()).replace(
-        "schema_version: 7",
+        "schema_version: 8",
         "schema_version: 5",
       );
       const parsed = parseIssue(yaml1, { expectedPrefix: "ISS" });
-      // In-memory schema_version is normalized to 6 (the canonical
-      // version the type system enforces); the on-disk shape is
-      // re-emitted as 6 on round-trip.
-      expect(parsed.schema_version).toBe(7);
+      // In-memory schema_version is normalized to KNOWN_SCHEMA_MAX (the
+      // canonical version the type system enforces); the on-disk shape
+      // is re-emitted as KNOWN_SCHEMA_MAX on round-trip.
+      expect(parsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
     });
 
     it('parseIssue throws fail-loud on status: "Needs Approval" with a clear migration message (DX-231)', () => {
@@ -724,12 +725,17 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 7 is the current canonical version (DX-231 added requires_human)", () => {
+  it("schema_version: 8 is the current canonical version (DX-511 added effort_level)", () => {
+    const result = validateIssue(valid({ schema_version: 8 }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("schema_version: 7 is still accepted (v7 → v8 forward migration, effort_level defaults to null)", () => {
     const result = validateIssue(valid({ schema_version: 7 }));
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 7 is forward-compat accepted with a console.warn (DX-280)", () => {
+  it("schema_version above KNOWN_SCHEMA_MAX is forward-compat accepted with a console.warn (DX-280)", () => {
     // Pre-DX-280 behavior: validator hard-rejected with "schema_version
     // must be 3, 4, 5, or 6 (got 7)" — that broke every host save when
     // the writer's stamped version bumped without a same-commit
@@ -1122,7 +1128,7 @@ describe("createEmptyIssue", () => {
 
   it("uses sensible defaults when no seed fields are provided", () => {
     const issue = createEmptyIssue();
-    expect(issue.schema_version).toBe(7);
+    expect(issue.schema_version).toBe(KNOWN_SCHEMA_MAX);
     expect(issue.tracker).toBe("memory");
     expect(issue.children).toEqual([]);
     expect(issue.status).toBe("ToDo");
@@ -1139,7 +1145,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 7,
+      schema_version: 8,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1176,11 +1182,12 @@ describe("serializeIssue byte-stable snapshot", () => {
       waiting_on: null,
       requires_human: null,
       conflict_on: [],
+      effort_level: null,
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 7
+      "schema_version: 8
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1234,6 +1241,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       blocked: null
       requires_human: null
       conflict_on: []
+      effort_level: null
       "
     `);
   });
@@ -1246,7 +1254,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     // — broken for diffing + git history. The companion test for the
     // `null` shape pins the same field's absence-from-payload contract.
     const fixture: Issue = {
-      schema_version: 7,
+      schema_version: 8,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1284,11 +1292,12 @@ describe("serializeIssue byte-stable snapshot", () => {
         set_at: "2026-05-10T12:00:00.000Z",
       },
       conflict_on: [],
+      effort_level: null,
       history: [],
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 7
+      "schema_version: 8
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1332,6 +1341,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         set_by: agent
         set_at: 2026-05-10T12:00:00.000Z
       conflict_on: []
+      effort_level: null
       "
     `);
     // Round-trip — the snapshot is the canonical on-disk form; parsing

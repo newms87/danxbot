@@ -64,7 +64,7 @@ function makeIssue(
   waiting_on: WaitingOn | null = null,
 ): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -93,6 +93,7 @@ function makeIssue(
     assigned_agent: null,
     waiting_on,
     conflict_on: [],
+    effort_level: null,
     history: [],
   };
 }
@@ -304,7 +305,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // crash listDispatchableYamls (`w.by` undefined → `.map` throws).
       const broken = {
         ...({
-          schema_version: 7,
+          schema_version: 8,
           tracker: "memory",
           id: "DX-W",
           external_id: "",

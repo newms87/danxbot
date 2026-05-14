@@ -119,7 +119,7 @@ describe("EventBus — typed issue:updated topic (DX-226)", () => {
         // Minimal valid Issue stub — the bus does not validate the
         // payload, just routes it. Subscribers project to IssueListItem.
         issue: {
-          schema_version: 7,
+          schema_version: 8,
           tracker: "memory",
           id: "DX-1",
           external_id: "",
@@ -148,6 +148,7 @@ describe("EventBus — typed issue:updated topic (DX-226)", () => {
           blocked: null,
           requires_human: null,
           conflict_on: [],
+          effort_level: null,
           assigned_agent: null,
         },
       },

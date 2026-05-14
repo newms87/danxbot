@@ -18,7 +18,7 @@ const MarkdownEditorStub = {
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -47,6 +47,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     assigned_agent: null,
     updated_at: 0,
     created_at: 0,

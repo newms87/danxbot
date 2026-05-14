@@ -312,7 +312,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  */
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "trello",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -334,6 +334,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     assigned_agent: null,
     waiting_on: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
   };
 }

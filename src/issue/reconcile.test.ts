@@ -42,7 +42,7 @@ import { ReconcileValidationError, type ReconcileResult } from "./reconcile-type
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id,
     external_id: "",
@@ -71,6 +71,7 @@ function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
   };
 }

@@ -15,7 +15,7 @@ vi.mock("../../api", () => ({
 
 function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
   const base: IssueDetail = {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -45,6 +45,7 @@ function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
     waiting_on: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     updated_at: 0,
     created_at: 0,
     raw_yaml: "",

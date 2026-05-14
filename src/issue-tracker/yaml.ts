@@ -4,9 +4,11 @@ import {
   YAMLParseError,
 } from "yaml";
 import {
+  EFFORT_LEVEL_NAMES,
   ISSUE_STATUSES,
   ISSUE_TYPES,
   type CreateCardInput,
+  type EffortLevelName,
   type Issue,
   type IssueAcItem,
   type Blocked,
@@ -24,6 +26,8 @@ import {
   type RequiresHuman,
   type ConflictOnEntry,
 } from "./interface.js";
+
+const EFFORT_LEVEL_SET: ReadonlySet<EffortLevelName> = new Set(EFFORT_LEVEL_NAMES);
 
 const TRIAGE_HISTORY_CAP = 10;
 
@@ -58,14 +62,23 @@ const TRIAGE_HISTORY_CAP = 10;
  * over real schema breaks.
  *
  * Maintenance contract: every time the writer's stamped version bumps
- * (the literal `6` in `createEmptyIssue` + `serializeIssue` +
+ * (the literal in `createEmptyIssue` + `serializeIssue` +
  * `issueToCreateInput` + the `issue.schema_version` assignment in
- * `validateIssue`), bump `KNOWN_SCHEMA_MAX` here. The
- * `forward-compat-bounds.test` regression test asserts the writer and
- * the validator's known-max stay in sync.
+ * `validateIssue`), bump `KNOWN_SCHEMA_MAX` here. The DX-280 lockstep
+ * test in `yaml.test.ts` pins the writer == `KNOWN_SCHEMA_MAX` invariant
+ * — a one-sided bump fails the unit suite before it reaches a host
+ * session.
+ *
+ * Schema versions:
+ *  - v3: `children[]` field for two-way epic ↔ phase linkage.
+ *  - v4: split `blocked` → `waiting_on` (dep-chain) + `blocked` (self-block).
+ *  - v5: `priority` field.
+ *  - v6: `requires_human` orthogonal indicator (DX-231).
+ *  - v7: `conflict_on[]` two-way dispatch mutex.
+ *  - v8: `effort_level` field (DX-508 / DX-511).
  */
 export const KNOWN_SCHEMA_MIN = 3;
-export const KNOWN_SCHEMA_MAX = 7;
+export const KNOWN_SCHEMA_MAX = 8;
 
 /**
  * Set of `schema_version` values this process has already warned about.
@@ -178,7 +191,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 7
+ *  - schema_version: 8
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -190,6 +203,7 @@ function emptyTriage(): IssueTriage {
  *  - triage: empty (every field "" / 0; history: []) — re-triages on next poll
  *  - ac, comments: []
  *  - retro: { good: "", bad: "", action_item_ids: [], commits: [] }
+ *  - effort_level: null (DX-508 — inherits agent default at dispatch)
  */
 export function createEmptyIssue(
   seed: {
@@ -199,10 +213,11 @@ export function createEmptyIssue(
     type?: IssueType;
     title?: string;
     description?: string;
+    effort_level?: EffortLevelName | null;
   } = {},
 ): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -224,6 +239,7 @@ export function createEmptyIssue(
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: seed.effort_level ?? null,
     history: [],
   };
 }
@@ -458,6 +474,15 @@ export function serializeIssue(issue: Issue): string {
       id: c.id,
       reason: c.reason,
     })),
+    // `effort_level` (v8) — one of the seven canonical EffortLevelName
+    // literals or null. Position after `conflict_on` keeps the dispatch
+    // gates contiguous; effort_level is a dispatch hint (not a gate) but
+    // logically sits with the other dispatch-resolution fields. `null`
+    // serializes as explicit YAML `null` (not absent key) so fresh
+    // round-trips are stable. The type contract is `EffortLevelName |
+    // null` (not optional), so we pass through verbatim — sibling fields
+    // (`blocked`, `waiting_on`, `requires_human`) all use this discipline.
+    effort_level: issue.effort_level,
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -554,7 +579,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -573,6 +598,7 @@ export function issueToCreateInput(issue: Issue): CreateCardInput {
       action_item_ids: [...issue.retro.action_item_ids],
       commits: [...issue.retro.commits],
     },
+    effort_level: issue.effort_level,
   };
 }
 
@@ -986,6 +1012,23 @@ export function validateIssue(
     else conflictOnResult = r;
   }
 
+  // effort_level — optional field (v8). Missing / null → null. Present
+  // must be one of the seven canonical EffortLevelName literals
+  // (EFFORT_LEVEL_NAMES). Anything else fails-loud — a typo in a
+  // hand-edited card would silently route the dispatch through the
+  // wrong model/effort tier. v3-v7 YAMLs omit the field; the
+  // validator defaults to `null` so they round-trip cleanly.
+  let effortLevelResult: EffortLevelName | null = null;
+  if ("effort_level" in v && v.effort_level !== null && v.effort_level !== undefined) {
+    if (typeof v.effort_level !== "string" || !EFFORT_LEVEL_SET.has(v.effort_level as EffortLevelName)) {
+      errors.push(
+        `effort_level must be null or one of [${EFFORT_LEVEL_NAMES.join(", ")}] (got ${JSON.stringify(v.effort_level)})`,
+      );
+    } else {
+      effortLevelResult = v.effort_level as EffortLevelName;
+    }
+  }
+
   // history — optional field. Missing → []. Legacy YAMLs ship without the
   // field (DX-138 Phase 1 lands the schema). Present must be a list (or YAML
   // null which normalizes to []); each entry strictly validated so a
@@ -1061,11 +1104,11 @@ export function validateIssue(
     // Hardcoded to the canonical writer version (KNOWN_SCHEMA_MAX). A
     // forward-compat-accepted parse (v.schema_version > KNOWN_SCHEMA_MAX)
     // silent-downgrades here — the returned `Issue.schema_version` is
-    // type-literal `6`, never the future value seen on disk. Lockstep
-    // contract: when the writer bumps, bump this literal AND
-    // KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
+    // type-literal `KNOWN_SCHEMA_MAX`, never the future value seen on
+    // disk. Lockstep contract: when the writer bumps, bump this literal
+    // AND KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 7,
+    schema_version: 8,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -1087,6 +1130,7 @@ export function validateIssue(
     blocked: blockedResult,
     requires_human: requiresHumanResult,
     conflict_on: conflictOnResult,
+    effort_level: effortLevelResult,
     history: historyResult,
   };
   return { ok: true, issue };

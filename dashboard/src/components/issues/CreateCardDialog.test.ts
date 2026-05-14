@@ -56,7 +56,7 @@ const DanxDialogStub = {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -85,6 +85,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     blocked: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     assigned_agent: null,
     ...overrides,
   };

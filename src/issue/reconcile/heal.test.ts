@@ -7,7 +7,7 @@ function makeIssue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 7,
+    schema_version: 8,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -39,6 +39,7 @@ function makeIssue(
     waiting_on: null,
     requires_human: null,
     conflict_on: [],
+    effort_level: null,
     history: [],
     ...overrides,
   };

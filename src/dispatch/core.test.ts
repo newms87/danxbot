@@ -1760,7 +1760,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 7,
+      schema_version: 8,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -1840,7 +1840,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 7,
+      schema_version: 8,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -1913,7 +1913,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 7,
+      schema_version: 8,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -2009,7 +2009,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 7,
+      schema_version: 8,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
