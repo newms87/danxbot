@@ -6,6 +6,7 @@ import TypeBadge from "./TypeBadge.vue";
 import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
 import AgentBadge from "../AgentBadge.vue";
+import AgentAvatarStack from "../agents/AgentAvatarStack.vue";
 import IceBadge from "./IceBadge.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
@@ -100,6 +101,18 @@ const showRequiresHumanChildrenChip = computed(
   () => isEpic.value && requiresHumanChildCount.value > 0,
 );
 
+// DX-524 — rollup of `assigned_agent` across the recursive child
+// subtree. Parents (Epic + any card with non-empty children[]) render
+// the avatar STACK instead of their own `assigned_agent` chip because
+// parents never dispatch — the live work lives on their children. Non-
+// parent cards fall through to the existing single-agent badge.
+const childAssignments = computed(
+  () => props.issue.child_assignments ?? [],
+);
+const hasChildAssignments = computed(
+  () => childAssignments.value.length > 0,
+);
+
 // DX-516 — triage ICE chip + relative timestamp.
 // Gated entirely on the triage block's history length. Untriaged cards
 // (history empty or block absent on legacy fixtures) render nothing
@@ -190,8 +203,15 @@ function onParentClick(e: MouseEvent): void {
         CONFLICT {{ conflictActiveCount > 0 ? conflictActiveCount : conflictEntries.length }}
       </span>
       </span>
+      <AgentAvatarStack
+        v-if="hasChildAssignments"
+        :class="{ 'ml-auto': !hasAnyGate }"
+        class="row-agent"
+        :repo="props.repo"
+        :assignments="childAssignments"
+      />
       <AgentBadge
-        v-if="issue.assigned_agent"
+        v-else-if="issue.assigned_agent"
         :class="{ 'ml-auto': !hasAnyGate }"
         class="row-agent"
         :repo="props.repo"

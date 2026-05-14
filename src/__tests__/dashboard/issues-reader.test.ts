@@ -361,6 +361,7 @@ describe("listIssues", () => {
         ice: { total: 0, i: 0, c: 0, e: 0 },
         history: [],
       },
+      child_assignments: [],
     });
   });
 
@@ -2045,5 +2046,396 @@ describe("listIssues — status grouping smoke", () => {
     writeIssue(repo, "open", emptyIssue({ id: "ISS-1", status }), 1_000);
     const items = await listIssues(repo, { includeClosed: "all" });
     expect(items.find((i) => i.id === "ISS-1")?.status).toBe(status);
+  });
+});
+
+// DX-524 — `child_assignments` rollup on every list item. One entry per
+// (agent, child) pair across the recursive child subtree, filtered to
+// children whose `status` is non-terminal AND `assigned_agent !== null`.
+// Empty on non-parent rows and on parents whose subtree has zero
+// qualifying assignments. Walk uses the in-memory `byId` map; missing
+// children (orphaned id references) are skipped.
+describe("child_assignments rollup (DX-524)", () => {
+  it("emits [] on cards with no children", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({ id: "ISS-1", type: "Feature", children: [] }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].child_assignments).toEqual([]);
+  });
+
+  it("emits [] when every child is terminal or has no assigned_agent", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-10",
+        type: "Epic",
+        children: ["ISS-11", "ISS-12", "ISS-13"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-11",
+        parent_id: "ISS-10",
+        status: "Done",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-12",
+        parent_id: "ISS-10",
+        status: "Cancelled",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-13",
+        parent_id: "ISS-10",
+        status: "ToDo",
+        assigned_agent: null,
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo, { includeClosed: "all" });
+    const epic = items.find((i) => i.id === "ISS-10")!;
+    expect(epic.child_assignments).toEqual([]);
+  });
+
+  it("excludes Review-status children even with an assigned_agent (residue from triage, not active work)", async () => {
+    // Locks the ASSIGNABLE_STATUSES whitelist contract. A regression
+    // that widens the whitelist to include Review (e.g. someone reads
+    // the spec as "any non-terminal status") would silently surface
+    // stale triage-assigned agents on the parent rollup.
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-90",
+        type: "Epic",
+        children: ["ISS-91"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-91",
+        parent_id: "ISS-90",
+        title: "Review-stuck child",
+        status: "Review",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-90")!;
+    expect(epic.child_assignments).toEqual([]);
+  });
+
+  it("emits one entry per non-terminal child with an assigned_agent, excluding Done/Cancelled/null", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-20",
+        type: "Epic",
+        title: "Parent epic",
+        children: ["ISS-21", "ISS-22", "ISS-23", "ISS-24", "ISS-25", "ISS-26"],
+      }),
+      1_700_000_000_000,
+    );
+    // ToDo + assigned → INCLUDED
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-21",
+        parent_id: "ISS-20",
+        title: "Phase 1",
+        status: "ToDo",
+        assigned_agent: "buildy",
+      }),
+      1_700_000_000_000,
+    );
+    // In Progress + assigned → INCLUDED
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-22",
+        parent_id: "ISS-20",
+        title: "Phase 2",
+        status: "In Progress",
+        assigned_agent: "sage",
+      }),
+      1_700_000_000_000,
+    );
+    // Blocked + assigned → INCLUDED (Blocked is non-terminal)
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-23",
+        parent_id: "ISS-20",
+        title: "Phase 3",
+        status: "Blocked",
+        assigned_agent: "phil",
+        blocked: { reason: "needs key", timestamp: "2026-01-01T00:00:00Z" },
+      }),
+      1_700_000_000_000,
+    );
+    // Done + assigned → EXCLUDED (stale agent on terminal card)
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-24",
+        parent_id: "ISS-20",
+        title: "Phase 4 done",
+        status: "Done",
+        assigned_agent: "alice",
+      }),
+      1_700_000_000_000,
+    );
+    // Cancelled + assigned → EXCLUDED
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-25",
+        parent_id: "ISS-20",
+        title: "Phase 5 cancelled",
+        status: "Cancelled",
+        assigned_agent: "bob",
+      }),
+      1_700_000_000_000,
+    );
+    // In Progress + null assigned_agent → EXCLUDED
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-26",
+        parent_id: "ISS-20",
+        title: "Phase 6 unassigned",
+        status: "In Progress",
+        assigned_agent: null,
+      }),
+      1_700_000_000_000,
+    );
+
+    const items = await listIssues(repo, { includeClosed: "all" });
+    const epic = items.find((i) => i.id === "ISS-20")!;
+    expect(epic.child_assignments).toEqual([
+      { agent: "buildy", issue_id: "ISS-21", issue_title: "Phase 1" },
+      { agent: "sage", issue_id: "ISS-22", issue_title: "Phase 2" },
+      { agent: "phil", issue_id: "ISS-23", issue_title: "Phase 3" },
+    ]);
+  });
+
+  it("skips missing children (orphaned id references) without inflating the rollup", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-30",
+        type: "Epic",
+        children: ["ISS-31", "ISS-32"],
+      }),
+      1_700_000_000_000,
+    );
+    // ISS-31 is intentionally NOT seeded (orphaned reference)
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-32",
+        parent_id: "ISS-30",
+        title: "Real child",
+        status: "In Progress",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-30")!;
+    expect(epic.child_assignments).toEqual([
+      { agent: "phil", issue_id: "ISS-32", issue_title: "Real child" },
+    ]);
+  });
+
+  it("walks recursive grandchildren (epic → sub-epic → phase)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-40",
+        type: "Epic",
+        title: "Top-level epic",
+        children: ["ISS-41"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-41",
+        type: "Epic",
+        parent_id: "ISS-40",
+        title: "Sub-epic",
+        status: "In Progress",
+        // Sub-epic itself never carries assigned_agent (parents don't
+        // dispatch); the grandchild does.
+        assigned_agent: null,
+        children: ["ISS-42"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-42",
+        parent_id: "ISS-41",
+        title: "Leaf phase",
+        status: "In Progress",
+        assigned_agent: "murphy",
+      }),
+      1_700_000_000_000,
+    );
+
+    const items = await listIssues(repo);
+    const top = items.find((i) => i.id === "ISS-40")!;
+    expect(top.child_assignments).toEqual([
+      { agent: "murphy", issue_id: "ISS-42", issue_title: "Leaf phase" },
+    ]);
+    const subEpic = items.find((i) => i.id === "ISS-41")!;
+    // Sub-epic also sees its own leaf.
+    expect(subEpic.child_assignments).toEqual([
+      { agent: "murphy", issue_id: "ISS-42", issue_title: "Leaf phase" },
+    ]);
+  });
+
+  it("emits [] on non-parent rows (no children)", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-50",
+        type: "Feature",
+        children: [],
+        status: "In Progress",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    expect(items[0].child_assignments).toEqual([]);
+  });
+
+  it("keeps duplicate (agent, child) pairs verbatim when the same agent owns multiple children", async () => {
+    // The spec calls for "one entry per (agent, child) pair" so the
+    // tooltip can list every per-card assignment. Distinct-by-agent is
+    // a SPA-side concern (avatar count cap); the backend ships every pair.
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-60",
+        type: "Epic",
+        children: ["ISS-61", "ISS-62"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-61",
+        parent_id: "ISS-60",
+        title: "Phase A",
+        status: "In Progress",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-62",
+        parent_id: "ISS-60",
+        title: "Phase B",
+        status: "ToDo",
+        assigned_agent: "phil",
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-60")!;
+    expect(epic.child_assignments).toEqual([
+      { agent: "phil", issue_id: "ISS-61", issue_title: "Phase A" },
+      { agent: "phil", issue_id: "ISS-62", issue_title: "Phase B" },
+    ]);
+  });
+
+  it("cycle-safe: a graph that loops back into a visited node does not re-enter it", async () => {
+    // Malformed graph: ISS-71 lists ISS-70 as a child (cycle). The walk
+    // tracks visited ids and skips the re-entry. Without the guard, the
+    // recursion would stack-overflow.
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-70",
+        type: "Epic",
+        children: ["ISS-71"],
+      }),
+      1_700_000_000_000,
+    );
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-71",
+        parent_id: "ISS-70",
+        title: "Cycling child",
+        status: "In Progress",
+        assigned_agent: "phil",
+        children: ["ISS-70"], // cycle back to the root
+      }),
+      1_700_000_000_000,
+    );
+    const items = await listIssues(repo);
+    const epic = items.find((i) => i.id === "ISS-70")!;
+    expect(epic.child_assignments).toEqual([
+      { agent: "phil", issue_id: "ISS-71", issue_title: "Cycling child" },
+    ]);
   });
 });

@@ -59,6 +59,20 @@ export interface IssueListChild {
 }
 
 /**
+ * DX-524 — per-assignment entry for the parent rollup of `assigned_agent`
+ * across the recursive child subtree. One entry per (agent, child) pair
+ * — agents working on multiple children of the same parent show up once
+ * per child so the tooltip can list every per-card assignment without a
+ * secondary fetch. The SPA dedupes by `agent` for the avatar count cap
+ * and renders ALL pairs in the tooltip body.
+ */
+export interface IssueListChildAssignment {
+  agent: string;
+  issue_id: string;
+  issue_title: string;
+}
+
+/**
  * List-card projection of an Issue. Sized for the Issues-tab board view —
  * AC / child / comment counts are pre-rolled so the SPA can render the
  * card without a per-row detail fetch. `children_detail[]` is included on
@@ -183,6 +197,25 @@ export interface IssueListItem {
    * type-check; the server ALWAYS emits.
    */
   triage?: IssueTriage;
+  /**
+   * DX-524 — rollup of `assigned_agent` across THIS card's recursive
+   * child subtree. One entry per (agent, child) pair filtered to children
+   * whose `status` is non-terminal (`ToDo` / `In Progress` / `Blocked`)
+   * AND `assigned_agent !== null`. Empty `[]` on cards with no children
+   * OR no qualifying child assignments. Missing children (orphaned id
+   * references) are skipped. Computed walk uses the same in-memory
+   * `byId` map the rest of the projection consumes — no extra DB hit.
+   *
+   * SPA usage: `IssueCard.vue` renders an `AgentAvatarStack` (capped at
+   * 3 distinct avatars + `+N` chip) when this is non-empty, fallback to
+   * the single `AgentBadge` on `assigned_agent` otherwise. Distinct
+   * counts use `agent`; the tooltip enumerates every entry for
+   * per-card attribution.
+   *
+   * Optional on the type so pre-DX-524 test fixtures (which omit the
+   * field) still type-check; the server ALWAYS emits.
+   */
+  child_assignments?: IssueListChildAssignment[];
 }
 
 /**
@@ -278,6 +311,62 @@ function toRawIssue(row: DbIssueRow): RawIssue {
   return { issue: row.issue, mtimeMs: row.mirrorUpdatedAtMs };
 }
 
+/**
+ * DX-524 — non-terminal child statuses that contribute to the parent
+ * `child_assignments` rollup. `Done` / `Cancelled` children are excluded
+ * so stale agent names from completed work do not surface on the parent
+ * row; `Review` is excluded by spec because cards in Review have not yet
+ * been picked up by the dispatcher (a stamped `assigned_agent` there is
+ * almost certainly leftover triage residue, not active work).
+ */
+const ASSIGNABLE_STATUSES = new Set<IssueStatus>([
+  "ToDo",
+  "In Progress",
+  "Blocked",
+]);
+
+/**
+ * DX-524 — walk THIS card's recursive child subtree and collect one
+ * `IssueListChildAssignment` per (child) whose `status` is in
+ * `ASSIGNABLE_STATUSES` AND `assigned_agent !== null`. Skips children
+ * absent from `byId` (orphaned references — `children_detail` already
+ * surfaces those as `missing: true`; the assignment rollup mirrors the
+ * "missing ⟹ excluded" semantics so the count never inflates from a
+ * dropped row). Cycle-safe via `visited: Set<string>` — a malformed
+ * graph that loops back never re-enters a node.
+ */
+function collectChildAssignments(
+  root: Issue,
+  byId: Map<string, Issue>,
+): IssueListChildAssignment[] {
+  const out: IssueListChildAssignment[] = [];
+  const visited = new Set<string>([root.id]);
+  function walk(parent: Issue): void {
+    for (const cid of parent.children) {
+      if (visited.has(cid)) continue;
+      visited.add(cid);
+      const child = byId.get(cid);
+      if (!child) continue;
+      if (
+        ASSIGNABLE_STATUSES.has(child.status) &&
+        child.assigned_agent !== null
+      ) {
+        out.push({
+          agent: child.assigned_agent,
+          issue_id: child.id,
+          issue_title: child.title,
+        });
+      }
+      // Recurse into grandchildren so a multi-level epic (epic →
+      // sub-epic → phase) surfaces agents on the top-level row. Same
+      // status + assigned_agent gate applies at every depth.
+      walk(child);
+    }
+  }
+  walk(root);
+  return out;
+}
+
 function toListItem(
   raw: RawIssue,
   byId: Map<string, Issue>,
@@ -361,6 +450,7 @@ function toListItem(
       return r.forward.length + r.reverse.length;
     })(),
     triage: cloneTriage(issue.triage),
+    child_assignments: collectChildAssignments(issue, byId),
   };
 }
 

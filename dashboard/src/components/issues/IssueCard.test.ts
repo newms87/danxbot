@@ -10,9 +10,11 @@ import type {
 } from "../../types";
 
 // AgentBadge does an authed avatar fetch on mount; stub it out so the
-// IssueCard's contract is the only thing under test here.
+// IssueCard's contract is the only thing under test here. AgentAvatarStack
+// (DX-524) is stubbed for the same reason — its children fetch avatar URLs.
 const stubs = {
   AgentBadge: true,
+  AgentAvatarStack: true,
   IssueAgeBadge: true,
   TypeBadge: true,
   ACBar: true,
@@ -414,5 +416,95 @@ describe("IssueCard — priority icon (DX-522)", () => {
     const w = mountCard(makeListItem({ priority: 3 }));
     const icon = w.get("[data-test='priority-icon']");
     expect(icon.classes()).toContain("priority-size-sm");
+  });
+});
+
+// DX-524 — child_assignments rollup rendered as an avatar stack on parent
+// rows (cards with non-empty children that have non-terminal assigned
+// children). Non-parent rows keep the existing single-AgentBadge path.
+describe("IssueCard — child_assignments avatar stack (DX-524)", () => {
+  it("renders AgentAvatarStack INSTEAD of AgentBadge when child_assignments is non-empty", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        assigned_agent: null,
+        child_assignments: [
+          { agent: "phil", issue_id: "DX-2", issue_title: "Phase A" },
+          { agent: "sage", issue_id: "DX-3", issue_title: "Phase B" },
+        ],
+      }),
+    );
+    expect(w.findComponent({ name: "AgentAvatarStack" }).exists()).toBe(true);
+    expect(w.findComponent({ name: "AgentBadge" }).exists()).toBe(false);
+  });
+
+  it("falls through to AgentBadge when child_assignments is empty AND assigned_agent is set", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Feature",
+        assigned_agent: "phil",
+        child_assignments: [],
+      }),
+    );
+    expect(w.findComponent({ name: "AgentBadge" }).exists()).toBe(true);
+    expect(w.findComponent({ name: "AgentAvatarStack" }).exists()).toBe(false);
+  });
+
+  it("falls through to AgentBadge when child_assignments is undefined AND assigned_agent is set (back-compat)", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Feature",
+        assigned_agent: "phil",
+        // child_assignments deliberately omitted — pre-DX-524 fixture shape
+      }),
+    );
+    expect(w.findComponent({ name: "AgentBadge" }).exists()).toBe(true);
+    expect(w.findComponent({ name: "AgentAvatarStack" }).exists()).toBe(false);
+  });
+
+  it("renders neither chip when child_assignments is empty AND assigned_agent is null", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        assigned_agent: null,
+        child_assignments: [],
+      }),
+    );
+    expect(w.findComponent({ name: "AgentAvatarStack" }).exists()).toBe(false);
+    expect(w.findComponent({ name: "AgentBadge" }).exists()).toBe(false);
+  });
+
+  it("renders AgentAvatarStack on a non-Epic parent (any card with non-empty child_assignments)", () => {
+    // Spec says parents = Epic OR any card with non-empty children[]. The
+    // gate is on child_assignments shape, not type — defense-in-depth in
+    // case the backend ever rolls up assignments on a non-epic sub-card
+    // with phase-shaped children of its own.
+    const w = mountCard(
+      makeListItem({
+        type: "Feature",
+        assigned_agent: null,
+        child_assignments: [
+          { agent: "phil", issue_id: "DX-2", issue_title: "Sub" },
+        ],
+      }),
+    );
+    expect(w.findComponent({ name: "AgentAvatarStack" }).exists()).toBe(true);
+    expect(w.findComponent({ name: "AgentBadge" }).exists()).toBe(false);
+  });
+
+  it("passes repo + assignments through to AgentAvatarStack", () => {
+    const assignments = [
+      { agent: "phil", issue_id: "DX-2", issue_title: "Phase A" },
+      { agent: "sage", issue_id: "DX-3", issue_title: "Phase B" },
+    ];
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        child_assignments: assignments,
+      }),
+    );
+    const stack = w.findComponent({ name: "AgentAvatarStack" });
+    expect(stack.props("repo")).toBe("danxbot");
+    expect(stack.props("assignments")).toEqual(assignments);
   });
 });

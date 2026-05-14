@@ -94,6 +94,7 @@ export type { RepoDispatchCounts, DispatchCountsByTrigger } from "@backend/dashb
 export type {
   IssueListItem,
   IssueListChild,
+  IssueListChildAssignment,
   IssueDetail,
 } from "@backend/dashboard/issues-reader.js";
 export type {
