@@ -9,14 +9,15 @@ import CommentsTab from "./CommentsTab.vue";
 import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
 import HistoryTab from "./HistoryTab.vue";
+import TriageTab from "./TriageTab.vue";
 import RequiresHumanPanel from "./RequiresHumanPanel.vue";
 import IssueChatTab from "./IssueChatTab.vue";
 import { acCounts } from "./acCounts";
 
-type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "retro" | "raw";
+type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "triage" | "retro" | "raw";
 
 const VALID_TABS: ReadonlyArray<TabId> = [
-  "overview", "ac", "children", "chat", "comments", "history", "retro", "raw",
+  "overview", "ac", "children", "chat", "comments", "history", "triage", "retro", "raw",
 ];
 
 // Two persisted defaults: epic vs non-epic. Different card kinds have
@@ -95,41 +96,39 @@ const childrenLabel = computed(() => {
 
 const hasActiveDispatch = computed(() => props.issue?.dispatch != null);
 
+// Triage tab hides entirely until the card has at least one decision —
+// matches the IssueCard ICE chip gate (DX-516) so an untriaged card has
+// no triage UI anywhere in the dashboard.
+const hasTriageHistory = computed(
+  () => (props.issue?.triage?.history.length ?? 0) > 0,
+);
+
+function countLabel(base: string, n: number): string {
+  return n > 0 ? `${base} · ${n}` : base;
+}
+
 const tabs = computed(() => {
-  // Epics use children (phase cards) as their acceptance criteria —
-  // AC tab is suppressed entirely so the operator never sees an empty
-  // tab on an epic and the children panel remains the canonical
-  // completion view.
+  // Epics use children (phase cards) as their acceptance criteria, so
+  // the AC tab is suppressed on epics and the children panel is the
+  // canonical completion view.
   const out: { id: TabId; label: string; disabled: boolean }[] = [
     { id: "overview", label: "Overview", disabled: false },
   ];
   if (!isEpic.value) {
     out.push({
       id: "ac",
-      label: "AC" + (ac.value.total > 0 ? ` · ${ac.value.done}/${ac.value.total}` : ""),
+      label: ac.value.total > 0 ? `AC · ${ac.value.done}/${ac.value.total}` : "AC",
       disabled: ac.value.total === 0,
     });
   }
   out.push(
     { id: "children", label: childrenLabel.value, disabled: childCount.value === 0 },
     { id: "chat", label: "Chat", disabled: false },
-    {
-      id: "comments",
-      label:
-        "Comments" +
-        (props.issue && props.issue.comments.length > 0
-          ? ` · ${props.issue.comments.length}`
-          : ""),
-      disabled: false,
-    },
-    {
-      id: "history",
-      label: (() => {
-        const n = props.issue?.history?.length ?? 0;
-        return n > 0 ? `History · ${n}` : "History";
-      })(),
-      disabled: false,
-    },
+    { id: "comments", label: countLabel("Comments", props.issue?.comments.length ?? 0), disabled: false },
+    { id: "history", label: countLabel("History", props.issue?.history?.length ?? 0), disabled: false },
+    ...(hasTriageHistory.value
+      ? [{ id: "triage" as TabId, label: countLabel("Triage", props.issue?.triage?.history.length ?? 0), disabled: false }]
+      : []),
     { id: "retro", label: "Retro", disabled: !hasRetro.value },
     { id: "raw", label: "Raw YAML", disabled: false },
   );
@@ -227,6 +226,7 @@ function onUpdateIssue(issue: Issue): void {
           @update:issue="onUpdateIssue"
         />
         <HistoryTab v-else-if="tab === 'history'" :issue="issue" />
+        <TriageTab v-else-if="tab === 'triage'" :issue="issue" />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />
       </div>

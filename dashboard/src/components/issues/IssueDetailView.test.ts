@@ -35,6 +35,7 @@ const stubs = {
   RetroTab: Stub("RetroTab"),
   RawTab: Stub("RawTab"),
   HistoryTab: Stub("HistoryTab"),
+  TriageTab: Stub("TriageTab"),
   AgentChat: Stub("AgentChat"),
 };
 
@@ -117,6 +118,39 @@ describe("IssueDetailView active-dispatch banner", () => {
   it("hides the banner during the initial loading state", () => {
     const w = mountView(null, true);
     expect(w.find('[data-test="active-dispatch-banner"]').exists()).toBe(false);
+  });
+});
+
+describe("IssueDetailView Triage tab visibility (DX-517 AC #1)", () => {
+  it("hides the Triage tab when triage.history is empty", () => {
+    const w = mountView(makeDetail());
+    const labels = w.findAll(".tab").map((t) => t.text());
+    expect(labels.some((l) => l.startsWith("Triage"))).toBe(false);
+  });
+
+  it("renders the Triage tab labeled 'Triage · N' when history is non-empty", () => {
+    const w = mountView(
+      makeDetail({
+        triage: {
+          expires_at: "2026-05-15T00:00:00Z",
+          reassess_hint: "",
+          last_status: "Keep",
+          last_explain: "rationale",
+          ice: { total: 60, i: 5, c: 4, e: 3 },
+          history: [
+            {
+              timestamp: "2026-05-14T00:00:00Z",
+              status: "Keep",
+              explain: "rationale",
+              expires_at: "2026-05-15T00:00:00Z",
+              ice: { total: 60, i: 5, c: 4, e: 3 },
+            },
+          ],
+        },
+      }),
+    );
+    const labels = w.findAll(".tab").map((t) => t.text());
+    expect(labels.some((l) => l === "Triage · 1")).toBe(true);
   });
 });
 
