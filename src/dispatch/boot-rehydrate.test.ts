@@ -288,6 +288,35 @@ describe("bootRehydrate", () => {
     expect(result.cleared).toBe(0);
   });
 
+  it("_malformed row from DB (YAML parse failed at last mirror) is skipped without crashing on dispatch.host", async () => {
+    writeFileSync(resolve(openDir, "DX-1.yml"), "");
+    writeFileSync(resolve(openDir, "DX-2.yml"), "");
+    const good = makeIssueWithDispatch({
+      id: "DX-1",
+      pid: 100,
+      host: (await import("node:os")).hostname(),
+      startedAt: new Date().toISOString(),
+      ttlSeconds: 7200,
+    });
+    const malformed = { id: "DX-2", _malformed: true, raw: "bad: `unquoted" } as unknown as Issue;
+    loadLocalMock.mockImplementation(async (_root: string, stem: string) => {
+      if (stem === "DX-1") return good;
+      if (stem === "DX-2") return malformed;
+      return null;
+    });
+    isPidAliveMock.mockReturnValue(true);
+
+    const result = await bootRehydrate({
+      repo: makeRepo(tmpRoot),
+      reconcile: dummyReconcile as never,
+      ttlMs: 7_200_000,
+      ttlTimerDeps: dummyTtlDeps as never,
+    });
+
+    expect(result.alive).toBe(1);
+    expect(result.cleared).toBe(0);
+  });
+
   it("clearDispatchAndWrite rejection on one cleared issue is swallowed — bootRehydrate still resolves with correct counts", async () => {
     writeFileSync(resolve(openDir, "DX-1.yml"), "");
     writeFileSync(resolve(openDir, "DX-2.yml"), "");

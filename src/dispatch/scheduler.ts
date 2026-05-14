@@ -301,7 +301,14 @@ async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
     const stem = entry.slice(0, -".yml".length);
     try {
       const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
-      if (issue && issue.dispatch !== null) issues.push(issue);
+      if (!issue) continue;
+      if ((issue as unknown as { _malformed?: boolean })._malformed === true) {
+        log.warn(
+          `[${repo.name}] bootRehydrate: skipping malformed ${entry} — DB row carries _malformed marker (YAML parse failed at last mirror); fix the YAML so it round-trips`,
+        );
+        continue;
+      }
+      if (issue.dispatch != null) issues.push(issue);
     } catch (err) {
       log.warn(
         `[${repo.name}] bootRehydrate: skipping ${entry}: ${
