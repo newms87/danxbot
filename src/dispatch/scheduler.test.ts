@@ -754,7 +754,7 @@ describe("firePickerWithMutex — DX-368 cron-tick safety net", () => {
     const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoName }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -785,7 +785,7 @@ describe("firePickerWithMutex — DX-368 cron-tick safety net", () => {
       .mockResolvedValue(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoName }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -812,7 +812,7 @@ describe("firePickerWithMutex — DX-368 cron-tick safety net", () => {
       .mockResolvedValueOnce(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoName }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
@@ -841,7 +841,7 @@ describe("firePickerWithMutex — DX-368 cron-tick safety net", () => {
       .mockResolvedValueOnce(undefined);
     bootScheduler({
       repo: makeRepo({ name: repoName }),
-      tracker: makeMemoryTracker(),
+      tracker: new FakeTracker(),
       runPicker: picker,
     });
 
