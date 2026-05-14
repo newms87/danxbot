@@ -27,6 +27,7 @@ import { eventBus } from "./event-bus.js";
 import {
   handleLaunchProxy,
   handleResumeProxy,
+  handleFleshOutProxy,
   handleJobProxy,
   loadDispatchToken,
   makeResolveWorkerHost,
@@ -184,6 +185,11 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/resume") {
     await handleResumeProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/flesh-out") {
+    await handleFleshOutProxy(req, res, dispatchDeps);
     return true;
   }
 

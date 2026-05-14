@@ -15,6 +15,7 @@ const mockHandleCancel = vi.fn();
 const mockHandleStatus = vi.fn();
 const mockHandleStop = vi.fn();
 const mockHandleResume = vi.fn();
+const mockHandleFleshOut = vi.fn();
 const mockHandleSlackReply = vi.fn();
 const mockHandleSlackUpdate = vi.fn();
 vi.mock("./dispatch.js", () => ({
@@ -23,6 +24,7 @@ vi.mock("./dispatch.js", () => ({
   handleStatus: (...args: unknown[]) => mockHandleStatus(...args),
   handleStop: (...args: unknown[]) => mockHandleStop(...args),
   handleResume: (...args: unknown[]) => mockHandleResume(...args),
+  handleFleshOut: (...args: unknown[]) => mockHandleFleshOut(...args),
   handleSlackReply: (...args: unknown[]) => mockHandleSlackReply(...args),
   handleSlackUpdate: (...args: unknown[]) => mockHandleSlackUpdate(...args),
 }));
@@ -208,6 +210,25 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleLaunch).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("POST /api/flesh-out (DX-348 Phase 1)", () => {
+    it("delegates to handleFleshOut with req, res, and repo", async () => {
+      mockHandleFleshOut.mockResolvedValue(undefined);
+
+      const { req, res } = createMockReqRes("POST", "/api/flesh-out");
+      await requestHandler(req, res);
+
+      expect(mockHandleFleshOut).toHaveBeenCalledWith(req, res, MOCK_REPO);
+    });
+
+    it("does not match GET /api/flesh-out", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/flesh-out");
+      await requestHandler(req, res);
+
+      expect(mockHandleFleshOut).not.toHaveBeenCalled();
       expect(res._getStatusCode()).toBe(404);
     });
   });

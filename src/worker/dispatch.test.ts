@@ -239,6 +239,7 @@ vi.mock("./auto-sync.js", () => ({
 import {
   handleLaunch,
   handleResume,
+  handleFleshOut,
   handleCancel,
   handleListJobs,
   handleStatus,
@@ -1841,5 +1842,345 @@ describe("handleLaunch — callerIp extraction", () => {
     await handleLaunch(req, res, MOCK_REPO);
 
     expect(capturedInput().apiDispatchMeta.metadata.callerIp).toBeNull();
+  });
+});
+
+/**
+ * `handleFleshOut` — DX-348 Phase 1 (DX-349). Async card flesh-out route.
+ * The handler validates the body (`issue_id` required + format-checked),
+ * then forwards to `dispatch()` with a hard-coded `workspace: "issue-worker"`,
+ * `task: "/danx-flesh-out <issue_id>"`, and `issueId` set so the dispatch
+ * row links to the card.
+ *
+ * Test surface:
+ *   - 503 when dispatchApi is toggled off (same shape as handleLaunch).
+ *   - 400 on missing / blank / malformed issue_id.
+ *   - 400 when body.repo names a different worker.
+ *   - 200 happy path — captured dispatch() call carries the right workspace,
+ *     task, issueId, and apiDispatchMeta endpoint.
+ *   - ClaudeAuthError / WorkspaceCallerError map to the same status codes
+ *     as `handleLaunch` (test pins ClaudeAuthError → 503 + MCP resolve → 400
+ *     so the error-mapping chain doesn't silently drop a branch).
+ */
+describe("handleFleshOut — body validation + dispatch wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-flesh-out-1" });
+  });
+
+  it("returns 503 when dispatchApi is disabled (mirrors /api/launch contract)", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
+    );
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when body.repo names a different worker (cross-worker safety)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: "some-other-repo",
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /This worker manages "[^"]+", not "some-other-repo"/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when issue_id is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: issue_id",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when issue_id is whitespace-only", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "   ",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: issue_id",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["lowercase prefix", "dx-349"],
+    ["digit-only prefix", "12-349"],
+    ["no dash", "DX349"],
+    ["dash but no number", "DX-"],
+    ["trailing junk", "DX-349x"],
+    ["embedded space", "DX 349"],
+  ])("returns 400 on malformed issue_id (%s: %j)", async (_label, raw) => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: raw,
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /^Invalid issue_id ".*" — must match <PREFIX>-N/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 200 + spawns dispatch with the correct task / workspace / issueId on happy path", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+      api_token: "secret-bearer",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      job_id: "test-flesh-out-1",
+      status: "launched",
+    });
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+
+    type FleshOutDispatchInput = CapturedDispatchInput & {
+      workspace: string;
+      task: string;
+      apiToken?: string;
+      overlay: Record<string, string>;
+      issueId?: string;
+    };
+    const input = mockDispatchFn.mock.calls[0][0] as FleshOutDispatchInput;
+    expect(input.workspace).toBe("issue-worker");
+    expect(input.task).toBe("/danx-flesh-out DX-349");
+    expect(input.issueId).toBe("DX-349");
+    expect(input.apiToken).toBe("secret-bearer");
+    expect(input.overlay).toEqual({});
+    expect(input.apiDispatchMeta).toEqual({
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/flesh-out",
+        callerIp: null,
+        statusUrl: null,
+        initialPrompt: "/danx-flesh-out DX-349",
+        workspace: "issue-worker",
+      },
+    });
+  });
+
+  it("body without repo is accepted (validateRepoMatch is opt-in)", async () => {
+    // The dashboard proxy forwards `body.repo` verbatim, so dashboard-
+    // originated calls always carry it. But a direct in-network caller
+    // (curl from another worker container on `danxbot-net`) may omit
+    // the field. `validateRepoMatch` only enforces equality when the
+    // field is present, so the omit path must still 200.
+    const req = createMockReqWithBody("POST", {
+      issue_id: "DX-42",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = mockDispatchFn.mock.calls[0][0] as { issueId?: string };
+    expect(input.issueId).toBe("DX-42");
+  });
+
+  it("maps ClaudeAuthError from dispatch() to 503 (worker-config issue)", async () => {
+    const { ClaudeAuthError } = await import(
+      "../agent/claude-auth-preflight.js"
+    );
+    const summary =
+      "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only";
+    mockDispatchFn.mockRejectedValueOnce(
+      new ClaudeAuthError({ ok: false, reason: "readonly", summary }),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
+  });
+
+  it("maps ProjectsDirError from dispatch() to 503 (worker-config issue)", async () => {
+    const { ProjectsDirError } = await import(
+      "../agent/projects-dir-preflight.js"
+    );
+    const summary =
+      "Claude projects dir /home/danxbot/.claude/projects is not writable";
+    mockDispatchFn.mockRejectedValueOnce(
+      new ProjectsDirError({ ok: false, reason: "readonly", summary }),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
+  });
+
+  it("maps WorkspaceGateUnknownError to 500 (server-side bug)", async () => {
+    const { WorkspaceGateUnknownError } = await import(
+      "../workspace/resolve.js"
+    );
+    mockDispatchFn.mockRejectedValueOnce(
+      new WorkspaceGateUnknownError(
+        "Workspace gate 'unknown-gate' is not recognized by this resolver",
+      ),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    // Distinct from generic 500: an unknown gate is a server-side bug
+    // (the workspace YAML declares a gate the resolver doesn't know),
+    // not a caller-fixable input. Same status code, distinct log path.
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody()).error).toMatch(/unknown-gate/);
+  });
+
+  it("forwards status_url + api_token to dispatch() (statusUrl wiring)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+      api_token: "callback-bearer-xyz",
+      status_url: "https://laravel.example.com/agent/status",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = mockDispatchFn.mock.calls[0][0] as {
+      statusUrl?: string;
+      apiToken?: string;
+      apiDispatchMeta: { metadata: { statusUrl: string | null } };
+    };
+    expect(input.statusUrl).toBe("https://laravel.example.com/agent/status");
+    expect(input.apiToken).toBe("callback-bearer-xyz");
+    // The dashboard surfaces the callback URL from the trigger metadata,
+    // so the same value must reach both fields.
+    expect(input.apiDispatchMeta.metadata.statusUrl).toBe(
+      "https://laravel.example.com/agent/status",
+    );
+  });
+
+  it("returns 400 when issue_id is not a string (e.g. JSON number)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: 349,
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: issue_id",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("maps McpResolveError from dispatch() to 400 (caller-fixable)", async () => {
+    const { McpResolveError } = await import("../agent/mcp-types.js");
+    mockDispatchFn.mockRejectedValueOnce(
+      new McpResolveError("MCP placeholder ${FOO} unresolved"),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/MCP placeholder/);
+  });
+
+  it("maps WorkspaceNotFoundError to 400 (caller-fixable)", async () => {
+    const { WorkspaceNotFoundError } = await import(
+      "../workspace/resolve.js"
+    );
+    mockDispatchFn.mockRejectedValueOnce(
+      new WorkspaceNotFoundError(
+        'Workspace "issue-worker" not found under /repo/.danxbot/workspaces/',
+      ),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/issue-worker/);
+  });
+
+  it("maps an unknown dispatch failure to 500 (catch-all)", async () => {
+    mockDispatchFn.mockRejectedValueOnce(new Error("spawn ENOENT"));
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-349",
+    });
+    const res = createMockRes();
+
+    await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody())).toEqual({ error: "spawn ENOENT" });
   });
 });

@@ -20,6 +20,7 @@ import { getHealthStatus } from "./health.js";
 import {
   handleLaunch,
   handleResume,
+  handleFleshOut,
   handleCancel,
   handleListJobs,
   handleStatus,
@@ -65,6 +66,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "POST" && url.pathname === "/api/resume") {
       await handleResume(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/flesh-out") {
+      await handleFleshOut(req, res, repo);
       return;
     }
 

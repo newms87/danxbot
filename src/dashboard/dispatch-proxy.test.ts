@@ -20,6 +20,7 @@ import {
   makeResolveWorkerHost,
   handleLaunchProxy,
   handleResumeProxy,
+  handleFleshOutProxy,
   handleJobProxy,
   loadDispatchToken,
   clearCachedWorkerHost,
@@ -563,6 +564,146 @@ describe("handleResumeProxy", () => {
     );
     expect(status).toBe(404);
     expect(JSON.parse(body).error).toMatch(/session file not found/);
+  });
+});
+
+describe("handleFleshOutProxy", () => {
+  // DX-348 Phase 1 (DX-349) — async card flesh-out proxy. Mirrors the
+  // launch/resume pattern: same auth band, same body.repo → worker
+  // forwarder; the worker is the one that validates issue_id, the
+  // proxy is pass-through. These tests pin the upstream PATH
+  // (/api/flesh-out, not /api/launch) so a refactor cannot
+  // accidentally re-route flesh-out through launch.
+  let worker: FakeWorker;
+  let repos: RepoConfig[];
+
+  beforeAll(async () => {
+    worker = await startFakeWorker();
+    repos = [
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
+    ];
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => worker.server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    worker.requests.length = 0;
+    worker.respondWith(200, {
+      job_id: "flesh-out-abc",
+      status: "launched",
+    });
+  });
+
+  async function runFleshOut(
+    body: Record<string, unknown>,
+    opts: { token?: string; auth?: string } = {},
+  ): Promise<{ status: number; body: string }> {
+    const { req, res } = createMockReqRes("POST", "/api/flesh-out");
+    if (opts.auth) req.headers.authorization = opts.auth;
+    const bodyJson = JSON.stringify(body);
+    process.nextTick(() => {
+      req.emit("data", Buffer.from(bodyJson));
+      req.emit("end");
+    });
+    await handleFleshOutProxy(req, res, {
+      token: opts.token ?? "tok",
+      repos,
+      resolveHost: testHostResolver,
+    });
+    return {
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
+      body: (res as unknown as { _getBody: () => string })._getBody(),
+    };
+  }
+
+  it("rejects unauthenticated requests with 401 (missing header)", async () => {
+    const { status } = await runFleshOut({
+      repo: "platform",
+      issue_id: "DX-349",
+    });
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("rejects wrong-bearer requests with 401 (invalid_token path)", async () => {
+    // Distinct from the missing-header path above: `checkAuth` has a
+    // separate branch for `invalid_token` that runs the timing-safe
+    // comparison. Locking both paths makes a future refactor that
+    // collapses them visible.
+    const { status } = await runFleshOut(
+      {
+        repo: "platform",
+        issue_id: "DX-349",
+      },
+      { auth: "Bearer wrong-token" },
+    );
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("forwards POST to /api/flesh-out on the matching worker with body intact", async () => {
+    const { status, body } = await runFleshOut(
+      {
+        repo: "platform",
+        issue_id: "DX-349",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      job_id: "flesh-out-abc",
+      status: "launched",
+    });
+
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0].method).toBe("POST");
+    expect(worker.requests[0].url).toBe("/api/flesh-out");
+    expect(JSON.parse(worker.requests[0].body)).toEqual({
+      repo: "platform",
+      issue_id: "DX-349",
+      api_token: "t",
+    });
+  });
+
+  it("propagates upstream 400 verbatim when issue_id is malformed", async () => {
+    worker.respondWith(400, {
+      error: 'Invalid issue_id "dx-349" — must match <PREFIX>-N (e.g. DX-123)',
+    });
+    const { status, body } = await runFleshOut(
+      {
+        repo: "platform",
+        issue_id: "dx-349",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/Invalid issue_id/);
+  });
+
+  it("returns 404 when the repo is not configured", async () => {
+    const { status, body } = await runFleshOut(
+      {
+        repo: "unknown-repo",
+        issue_id: "DX-1",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(404);
+    expect(JSON.parse(body).error).toMatch(/unknown-repo/);
+    expect(worker.requests).toHaveLength(0);
   });
 });
 

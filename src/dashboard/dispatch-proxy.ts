@@ -606,6 +606,19 @@ export async function handleResumeProxy(
 }
 
 /**
+ * POST /api/flesh-out proxy — auth + body.repo → forward to worker. The
+ * worker's flesh-out handler validates `body.issue_id` and spawns
+ * `/danx-flesh-out <issue_id>` in the `issue-worker` workspace.
+ */
+export async function handleFleshOutProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  await forwardRepoBodyToWorker(req, res, deps, "/api/flesh-out");
+}
+
+/**
  * Proxy for status/cancel/stop routes. Requires `?repo=<name>` on the URL
  * because the dashboard does not store the jobId→worker mapping; workers do.
  */

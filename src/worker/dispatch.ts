@@ -404,6 +404,53 @@ function isWorkspaceCallerError(err: unknown): boolean {
 }
 
 /**
+ * Shared error-mapping for the three dispatch entry points (`handleLaunch`,
+ * `handleResume`, `handleFleshOut`). Each handler's catch block forwards
+ * `(err, res, opName)` here; the helper writes the appropriate 4xx/5xx
+ * and returns `true` when it owned the response, `false` when the caller
+ * must fall through to a route-specific branch (today: `StagedFilesError`,
+ * which only the staged-files-aware routes know how to map).
+ *
+ * The `opName` (`"Launch"` / `"Resume"` / `"Flesh-out"`) is interpolated
+ * into the structured log line so server-side grep'ing keeps working;
+ * the response body's `error` text comes verbatim from the thrown error
+ * (preserves the worker-config signals every external dispatcher already
+ * parses).
+ */
+function mapDispatchError(
+  err: unknown,
+  res: ServerResponse,
+  opName: string,
+): boolean {
+  if (err instanceof ClaudeAuthError) {
+    log.error(`${opName} failed: claude-auth preflight (${err.reason})`, err);
+    json(res, 503, { error: err.message });
+    return true;
+  }
+  if (err instanceof ProjectsDirError) {
+    log.error(`${opName} failed: projects-dir preflight (${err.reason})`, err);
+    json(res, 503, { error: err.message });
+    return true;
+  }
+  if (err instanceof McpResolveError) {
+    json(res, 400, { error: err.message });
+    return true;
+  }
+  if (err instanceof WorkspaceGateUnknownError) {
+    log.error(`${opName} failed: workspace gate unknown`, err);
+    json(res, 500, { error: err.message });
+    return true;
+  }
+  if (isWorkspaceCallerError(err)) {
+    json(res, 400, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
+  return false;
+}
+
+/**
  * `POST /api/launch` — operator-directed dispatch. Body shape declared
  * by `parseDispatchRequest`.
  *
@@ -459,39 +506,11 @@ export async function handleLaunch(
 
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
-    if (err instanceof ClaudeAuthError) {
-      // Worker-config issue, not a caller bug. 503 mirrors the
-      // dispatch-disabled branch — same shape for external dispatchers.
-      log.error(`Launch failed: claude-auth preflight (${err.reason})`, err);
-      json(res, 503, { error: err.message });
-      return;
-    }
-    if (err instanceof ProjectsDirError) {
-      // Same severity tier as auth — worker-config issue, 503. Trello
-      // cjAyJpgr-followup: the dir-perms class of broken bind that
-      // produces silent dispatch timeouts.
-      log.error(`Launch failed: projects-dir preflight (${err.reason})`, err);
-      json(res, 503, { error: err.message });
-      return;
-    }
-    if (err instanceof McpResolveError) {
-      json(res, 400, { error: err.message });
-      return;
-    }
-    if (err instanceof WorkspaceGateUnknownError) {
-      // Server-side bug: a workspace shipped on disk declares a gate the
-      // resolver doesn't know about. 500 (not 400) — fixing requires a
-      // danxbot code change, not a caller change.
-      log.error("Launch failed: workspace gate unknown", err);
-      json(res, 500, { error: err.message });
-      return;
-    }
-    if (isWorkspaceCallerError(err)) {
-      json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
+    // Shared 4xx/5xx mapping for ClaudeAuthError / ProjectsDirError /
+    // McpResolveError / WorkspaceGateUnknownError / workspace caller
+    // errors. `handleLaunch` adds the StagedFilesError branch on top
+    // (the staged-files-aware route is the only one that maps it).
+    if (mapDispatchError(err, res, "Launch")) return;
     if (err instanceof StagedFilesError) {
       // validation = caller body bug → 400; write = worker IO → 500.
       // Either branch leaves no files on disk thanks to the all-or-
@@ -611,31 +630,7 @@ export async function handleResume(
       status: "launched",
     });
   } catch (err) {
-    if (err instanceof ClaudeAuthError) {
-      log.error(`Resume failed: claude-auth preflight (${err.reason})`, err);
-      json(res, 503, { error: err.message });
-      return;
-    }
-    if (err instanceof ProjectsDirError) {
-      log.error(`Resume failed: projects-dir preflight (${err.reason})`, err);
-      json(res, 503, { error: err.message });
-      return;
-    }
-    if (err instanceof McpResolveError) {
-      json(res, 400, { error: err.message });
-      return;
-    }
-    if (err instanceof WorkspaceGateUnknownError) {
-      log.error("Resume failed: workspace gate unknown", err);
-      json(res, 500, { error: err.message });
-      return;
-    }
-    if (isWorkspaceCallerError(err)) {
-      json(res, 400, {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
+    if (mapDispatchError(err, res, "Resume")) return;
     if (err instanceof StagedFilesError) {
       // validation = caller body bug → 400; write = worker IO → 500.
       // Either branch leaves no files on disk thanks to the all-or-
@@ -648,6 +643,99 @@ export async function handleResume(
     log.error("Resume failed", err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Resume failed",
+    });
+  }
+}
+
+/**
+ * `POST /api/flesh-out` — async card flesh-out (DX-348 Phase 1).
+ *
+ * Body: `{repo?, issue_id, api_token?, status_url?}`. Spawns
+ * `/danx-flesh-out <issue_id>` in the `issue-worker` workspace; the
+ * dispatched agent probes the repo, rewrites the YAML's `description`,
+ * populates `ac[]`, optionally spawns phase children, and (when the card's
+ * `status` is `Review`) stamps the `triage{}` block — see the
+ * `danxbot:danx-flesh-out` plugin skill for the agent contract.
+ *
+ * Decoupled from `/api/launch` so external callers (Phase 2's Create-Card
+ * button) don't have to know the workspace name + task shape. Returns the
+ * dispatch metadata immediately; the agent's mutations stream back to the
+ * dashboard via the chokidar watcher → DB → SSE chain.
+ */
+export async function handleFleshOut(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: RepoContext,
+): Promise<void> {
+  try {
+    if (!isFeatureEnabled(repo, "dispatchApi")) {
+      json(res, 503, {
+        error: `Dispatch API is disabled for repo ${repo.name}`,
+      });
+      return;
+    }
+
+    const body = await parseBody(req);
+
+    // Cross-worker safety: the dashboard proxy forwards by `body.repo`, so
+    // a misrouted call should 400 here just like `/api/launch` does.
+    if (!validateRepoMatch(body, res, repo)) return;
+
+    const issueId = requireString(body.issue_id);
+    if (!issueId) {
+      json(res, 400, { error: "Missing or blank required field: issue_id" });
+      return;
+    }
+    // The flesh-out skill embeds the id literally in its `/danx-flesh-out
+    // <issue_id>` argument; reject non-`<PREFIX>-N` shapes here so a typo'd
+    // caller doesn't get a confusing dispatch failure deeper in the stack.
+    if (!/^[A-Z][A-Z0-9]*-\d+$/.test(issueId)) {
+      json(res, 400, {
+        error: `Invalid issue_id "${issueId}" — must match <PREFIX>-N (e.g. DX-123)`,
+      });
+      return;
+    }
+
+    const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
+    const apiToken =
+      typeof body.api_token === "string" ? body.api_token : undefined;
+
+    const task = `/danx-flesh-out ${issueId}`;
+    const apiDispatchMeta: DispatchTriggerMetadata = {
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/flesh-out",
+        callerIp,
+        statusUrl: statusUrl ?? null,
+        initialPrompt: task,
+        workspace: "issue-worker",
+      },
+    };
+
+    const { dispatchId } = await dispatch({
+      repo,
+      workspace: "issue-worker",
+      overlay: {},
+      task,
+      apiToken,
+      statusUrl,
+      apiDispatchMeta,
+      // Link the dispatch row to the card. The dashboard's per-card
+      // chat list filter (DX-84) and the worker's auto-sync-on-stop
+      // both key off this — without it, a flesh-out dispatch would
+      // not surface in the card drawer's activity feed.
+      issueId,
+    });
+
+    json(res, 200, { job_id: dispatchId, status: "launched" });
+  } catch (err) {
+    // No StagedFilesError branch here — the flesh-out route never
+    // validates staged files (`stagedFiles` is omitted on the
+    // dispatch input).
+    if (mapDispatchError(err, res, "Flesh-out")) return;
+    log.error("Flesh-out failed", err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Flesh-out failed",
     });
   }
 }
