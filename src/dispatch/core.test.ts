@@ -1692,17 +1692,21 @@ staging-paths:
     expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
-  it("removes every staged file when the dispatch reaches a terminal state via onComplete", async () => {
+  it("forwards every staged-file path to spawnAgent.stagedFilePaths so _cleanup reaps them on every termination path (DX-44)", async () => {
+    // Pre-DX-44 this test asserted that `onComplete` cleaned the
+    // staged files — but `onComplete` is NOT called by the inactivity
+    // timer, max-runtime timer, host onExit, or the docker-close else
+    // branch, so those paths leaked. DX-44 moved the cleanup into the
+    // universal `_cleanup` closure. The new contract is "spawnAgent
+    // receives the list of paths to reap"; the actual reap is unit-
+    // tested directly in `agent-cleanup.test.ts`.
     const overlay = { SCHEMA_DEFINITION_ID: "99" };
     const resolvedRoot = resolve(tmpRepoDir, "staging-99");
     const filePath = resolve(resolvedRoot, "schema.json");
 
-    let capturedOnComplete:
-      | ((job: ReturnType<typeof makeRunningJob>) => void)
-      | undefined;
+    let capturedOpts: Record<string, unknown> | undefined;
     mockSpawnAgent.mockImplementationOnce(async (opts: unknown) => {
-      capturedOnComplete = (opts as { onComplete?: typeof capturedOnComplete })
-        .onComplete;
+      capturedOpts = opts as Record<string, unknown>;
       return makeRunningJob();
     });
 
@@ -1715,10 +1719,12 @@ staging-paths:
       stagedFiles: [{ path: filePath, content: '{"a":1}' }],
     });
 
+    // File was written before spawn (pre-spawn staging contract).
     expect(existsSync(filePath)).toBe(true);
-    expect(capturedOnComplete).toBeDefined();
-    capturedOnComplete!(makeRunningJob());
-    expect(existsSync(filePath)).toBe(false);
+    // Path forwarded to the launcher via the new field so `_cleanup`
+    // can reap on every termination path.
+    expect(capturedOpts).toBeDefined();
+    expect(capturedOpts!.stagedFilePaths).toEqual([filePath]);
   });
 });
 

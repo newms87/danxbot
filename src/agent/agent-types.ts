@@ -381,6 +381,31 @@ export interface SpawnAgentOptions {
    */
   mcpSettingsPath?: string | null;
   /**
+   * DX-44 — per-spawn MCP settings dir (the parent of `mcpSettingsPath`).
+   * When set, `_cleanup`'s finally block removes it on every termination
+   * path. Set by `dispatch()` for every spawn so the cleanup is universal
+   * (inactivity timeout, max-runtime timeout, host-mode exit, docker
+   * close, jobStop, cancelJob). Pre-DX-44 cleanup lived in the dispatch-
+   * layer `onComplete` closure and leaked on every path that ran
+   * `_cleanup` but NOT `onComplete`.
+   */
+  mcpSettingsDir?: string;
+  /**
+   * DX-44 — per-dispatch staged file paths (absolute) written by
+   * `writeStagedFiles` before spawn. `_cleanup`'s finally block removes
+   * each file individually (the parent dir is the workspace's staging
+   * root and is shared across dispatches). Empty / omitted when the
+   * caller supplied no `staged_files`.
+   */
+  stagedFilePaths?: readonly string[];
+  /**
+   * DX-44 — per-dispatch substituted-settings file (absolute path to
+   * `settings.json` inside a `mkdtemp` dir under `os.tmpdir()`).
+   * `_cleanup`'s finally block removes the parent dir. Omitted when the
+   * workspace had no substituted settings file.
+   */
+  workspaceSettingsPath?: string;
+  /**
    * DX-260 (Phase 2 of DX-246) — inherited recover count for this
    * spawn's chain. Seeds `AgentJob.recoverCount` AND the new dispatch
    * row's `recover_count` column. Fresh launches get `0`; recover-

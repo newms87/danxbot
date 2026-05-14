@@ -66,6 +66,8 @@ import {
   preflightSystemdRun,
   SystemdPreflightError,
 } from "./agent/systemd-preflight.js";
+import { sweepStaleTmpDirs } from "./agent/tmp-dir-sweep.js";
+import { tmpdir } from "node:os";
 
 const log = createLogger("startup");
 
@@ -311,6 +313,37 @@ async function startWorkerMode(): Promise<void> {
     });
   } catch (err) {
     log.error(`[${repo.name}] Dispatch reattach failed`, err);
+  }
+
+  // DX-44 — startup sweep of stale per-dispatch /tmp dirs. Safety net
+  // for the SIGKILL / OOM / worker-crash leak class that no in-process
+  // cleanup hook can ever cover. Threshold = 2 × the longest single-
+  // dispatch inactivity timeout so a long-running but live dispatch's
+  // working dir is never reaped. Per-dispatch graceful-termination
+  // cleanup is owned by `agent-cleanup.ts`'s `_cleanup` closure; this
+  // sweep handles the residue from un-graceful exits.
+  //
+  // MUST run AFTER `reattachOrResolveDispatches`: that pass reattaches
+  // every alive non-terminal dispatch and runs `maybeRewriteMcpSettings`
+  // on its MCP file when the worker port changed. Sweeping before
+  // reattach would race against a long-running (>2h) dispatch's stale-
+  // mtime MCP dir — the file would be deleted before reattach could
+  // rewrite the stop URL into it.
+  try {
+    const swept = await sweepStaleTmpDirs({
+      tmpRoot: tmpdir(),
+      maxAgeMs: 2 * config.dispatch.agentTimeoutMs,
+    });
+    if (swept.removed.length > 0 || swept.errors.length > 0) {
+      log.info(
+        `[${repo.name}] /tmp danxbot-* sweep: removed=${swept.removed.length} errors=${swept.errors.length}`,
+      );
+    }
+  } catch (err) {
+    log.warn(
+      `[${repo.name}] /tmp danxbot-* sweep failed`,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 
   // Phase 3 (DX-142): process-table orphan scan. Catches dispatched

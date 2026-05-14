@@ -329,9 +329,15 @@ export interface DispatchInput {
    * Fired once the agent reaches a terminal state.
    *
    * Ordering guarantee (enforced inside `dispatch()`):
-   *   1. Internal MCP-settings cleanup runs FIRST so the callback observes
-   *      a fully disposed slot (no leftover temp dir).
-   *   2. `onComplete(job)` runs SECOND with the final `AgentJob`.
+   *   1. Per-spawn temp dirs (`mcpSettingsDir`, `stagedFilePaths`,
+   *      `workspaceSettingsPath`) are reaped by `_cleanup`'s finally
+   *      block BEFORE this callback runs — the callback observes a
+   *      fully-disposed slot. (DX-44 moved the cleanup off the
+   *      `onComplete` path; pre-DX-44 it ran here and leaked on every
+   *      termination path that fired `_cleanup` but not `onComplete`.)
+   *   2. The dispatch-layer wrapper inside `dispatch()` runs the TTL
+   *      timer drain + tracker-lock release, then invokes
+   *      `onComplete(job)` with the final `AgentJob`.
    *   3. Any `statusUrl` PUT (fired by the Laravel forwarder and
    *      `putStatus` inside the launcher) is independent and may land
    *      before, during, or after this callback — they are NOT mutually
@@ -774,6 +780,20 @@ async function runResolved(
         // that decouples row creation from `dispatch !== undefined`
         // does not silently drop the column.
         mcpSettingsPath: settingsPath,
+        // DX-44 — per-spawn temp paths threaded into `_cleanup`'s
+        // finally block. Pre-DX-44 these were cleaned in the
+        // `onComplete` closure below, which was NOT invoked by the
+        // inactivity timer, max-runtime timer, host-mode onExit, or
+        // the docker-close else branch — those paths leaked the dirs
+        // and produced the ~13k `/tmp/danxbot-mcp-*` accumulation the
+        // triage report described. The cleanup now lives in the
+        // universal `_cleanup` closure (`agent-cleanup.ts`); every
+        // termination path that fires `_cleanup` reaps them.
+        mcpSettingsDir: settingsDir,
+        stagedFilePaths: resolved.stagedFilePaths,
+        ...(resolved.settingsPath
+          ? { workspaceSettingsPath: resolved.settingsPath }
+          : {}),
         // Paired host_pid write — only the initial spawn does this, and
         // only when the caller supplies a YAML pair. Stall-recovery
         // respawns reuse the existing dispatch row, so re-stamping
@@ -784,15 +804,12 @@ async function runResolved(
         // `host_pid_at` from the initial spawn.
         pairedWriteYaml: isRespawn ? undefined : input.pairedWriteYaml,
         onComplete: (completedJob) => {
-          // See `DispatchInput.onComplete` — cleanup runs before the
-          // caller callback (the ordering guarantee is load-bearing).
-          // Staged files cleanup runs alongside the MCP settings cleanup;
-          // both must finish before the caller observes a terminal job.
-          cleanupMcpSettings(settingsDir);
-          cleanupStagedFiles(resolved.stagedFilePaths);
-          if (resolved.settingsPath) {
-            cleanupWorkspaceSettings(resolved.settingsPath);
-          }
+          // See `DispatchInput.onComplete`. DX-44 moved the per-spawn
+          // temp-dir cleanup OUT of this closure and into `_cleanup`'s
+          // finally block — `onComplete` now handles only the
+          // dispatch-layer business logic (TTL timer drain, tracker
+          // lock release, caller passthrough).
+          //
           // Phase 4b.2 (DX-289) — drain the TTL timer on terminal state.
           // Safe to call even when the timer was never armed
           // (non-poller dispatches): clearTtlTimer is a silent no-op

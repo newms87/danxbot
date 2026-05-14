@@ -4,11 +4,10 @@
  *
  * Lives outside launcher.ts because it owns ~80 LOC of subtle ordering
  * the launcher orchestration shouldn't have to read end-to-end every
- * time someone changes a fork branch. Behavior is byte-identical to the
- * pre-extraction inline implementation; the only abstraction is that
- * the per-spawn handles (timers, watcher, forwarder, dispatchTracker,
- * temp dirs) are passed in via `CleanupBuilderDeps` instead of captured
- * via a closure that also wraps the rest of spawnAgent.
+ * time someone changes a fork branch. The per-spawn handles (timers,
+ * watcher, forwarder, dispatchTracker, temp dirs) are passed in via
+ * `CleanupBuilderDeps` instead of captured via a closure that also
+ * wraps the rest of spawnAgent.
  *
  * Ordering contract preserved:
  *   1. Synchronous teardown FIRST — stops external observers (heartbeat
@@ -26,8 +25,24 @@
  *      Trello 69f77e9b77472aefac1317b2.
  *   4. Dispatch row finalize — only when status is non-running.
  *   5. Temp-dir cleanup runs in a `finally` so a synchronous throw from
- *      any observer cannot strand `/tmp/danxbot-prompt-*` or
- *      `/tmp/danxbot-term-*`.
+ *      any observer cannot strand the per-spawn dirs.
+ *
+ * Per-spawn temp dirs that the `finally` block must reap (DX-44):
+ *   - `promptDir`          (`/tmp/danxbot-prompt-*`, from `buildClaudeInvocation`)
+ *   - `termSettingsDir`    (`/tmp/danxbot-term-*`,   from `spawn-host-mode`)
+ *   - `mcpSettingsDir`     (`/tmp/danxbot-mcp-*`,    from `dispatch()`)
+ *   - `workspaceSettingsPath`'s parent dir
+ *                          (`/tmp/danxbot-workspace-settings-*`, from `resolveWorkspace`)
+ *   - `stagedFilePaths`    (files under the workspace's staging-paths roots)
+ *
+ * Pre-DX-44 the MCP / workspace-settings / staged paths were cleaned in
+ * the dispatch-layer `onComplete` closure. Every termination path that
+ * fired `_cleanup` but NOT `onComplete` (inactivity timeout, max-runtime
+ * timeout, host-mode exit, the docker-close handler's else branch when
+ * status was already set by a non-stop path) leaked them. On a dev
+ * workstation that grew to ~13k stale `/tmp/danxbot-mcp-*` dirs in a
+ * few weeks. Centralizing the cleanup here gives every termination path
+ * the same coverage — there is no "and ALSO call this" footgun anymore.
  *
  * Idempotency: the launcher caches the in-flight cleanup promise on the
  * first call so concurrent callers (close handler's `void cleanup()`
@@ -40,6 +55,7 @@
  */
 
 import { rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { createLogger } from "../logger.js";
 import { stopHeartbeat } from "./agent-status.js";
 import type { DispatchTracker } from "../dashboard/dispatch-tracker.js";
@@ -64,6 +80,28 @@ export interface CleanupBuilderDeps {
   promptDir: string | null;
   /** Set by the host fork after spawnHostMode allocates the dir. */
   getTermSettingsDir: () => string | undefined;
+  /**
+   * DX-44 — per-dispatch MCP settings dir (`/tmp/danxbot-mcp-*`).
+   * Created by `writeMcpSettingsFile` in `dispatch/core.ts` once per
+   * spawn (initial + each respawn). Undefined for ad-hoc spawns that
+   * bypass `dispatch()` and pass `mcpConfigPath` straight through; that
+   * branch owns its own cleanup.
+   */
+  mcpSettingsDir?: string;
+  /**
+   * DX-44 — files written by `writeStagedFiles` for this dispatch.
+   * Cleaned individually (the parent dir is the workspace's staging
+   * root and is shared across dispatches). Empty array when the caller
+   * supplied no `staged_files`.
+   */
+  stagedFilePaths?: readonly string[];
+  /**
+   * DX-44 — absolute path to the per-dispatch substituted-settings
+   * file (`/tmp/danxbot-workspace-settings-<rand>/settings.json`).
+   * The file's parent dir is removed. Undefined when the workspace
+   * did not need substitution (rare).
+   */
+  workspaceSettingsPath?: string;
 }
 
 export function buildCleanup(
@@ -79,6 +117,9 @@ export function buildCleanup(
     dispatchTracker,
     promptDir,
     getTermSettingsDir,
+    mcpSettingsDir,
+    stagedFilePaths,
+    workspaceSettingsPath,
   } = deps;
 
   return async function runCleanup(): Promise<void> {
@@ -160,6 +201,47 @@ export function buildCleanup(
       const termSettingsDir = getTermSettingsDir();
       if (termSettingsDir) {
         rmSync(termSettingsDir, { recursive: true, force: true });
+      }
+      // DX-44 — three more per-spawn paths that used to live in the
+      // dispatch-layer `onComplete` closure. Centralizing them here
+      // means every `_cleanup` invocation (close handler IF + ELSE,
+      // jobStop, cancelJob, inactivity timer, max-runtime timer, host
+      // onExit) reaps them. Each rm is independent + try-wrapped so
+      // one failing path cannot strand the others.
+      if (mcpSettingsDir) {
+        try {
+          rmSync(mcpSettingsDir, { recursive: true, force: true });
+        } catch (err) {
+          log.error(
+            `[Job ${jobId}] Failed to remove MCP settings dir ${mcpSettingsDir}`,
+            err,
+          );
+        }
+      }
+      if (workspaceSettingsPath) {
+        try {
+          rmSync(dirname(workspaceSettingsPath), {
+            recursive: true,
+            force: true,
+          });
+        } catch (err) {
+          log.error(
+            `[Job ${jobId}] Failed to remove workspace-settings dir for ${workspaceSettingsPath}`,
+            err,
+          );
+        }
+      }
+      if (stagedFilePaths) {
+        for (const path of stagedFilePaths) {
+          try {
+            rmSync(path, { force: true });
+          } catch (err) {
+            log.error(
+              `[Job ${jobId}] Failed to remove staged file ${path}`,
+              err,
+            );
+          }
+        }
       }
     }
   };

@@ -419,6 +419,20 @@ export async function attachMonitoringStack(
     dispatchTracker,
     promptDir,
     getTermSettingsDir: () => termSettingsDirToClean,
+    // DX-44 — every termination path that runs `_cleanup` also reaps
+    // these three per-spawn paths. Pre-DX-44 they lived in the
+    // dispatch-layer `onComplete` closure, which was NOT called by
+    // the inactivity timer, max-runtime timer, host onExit, or the
+    // docker-close else branch — those paths leaked the dirs.
+    ...(options.mcpSettingsDir !== undefined && {
+      mcpSettingsDir: options.mcpSettingsDir,
+    }),
+    ...(options.stagedFilePaths !== undefined && {
+      stagedFilePaths: options.stagedFilePaths,
+    }),
+    ...(options.workspaceSettingsPath !== undefined && {
+      workspaceSettingsPath: options.workspaceSettingsPath,
+    }),
   });
   let cleanupPromise: Promise<void> | undefined;
   function cleanup(): Promise<void> {
