@@ -267,6 +267,39 @@ export async function importIssues(
 }
 
 /**
+ * POST /api/triage — DX-518. Operator-directed ad-hoc triage dispatch.
+ * Forwards `{repo, issue_id, instructions?}` to the dashboard's triage
+ * proxy (DX-515 Phase 1), which in turn forwards to the worker's
+ * `/api/triage` route. The dispatched triage agent reads `instructions`
+ * as a `## Operator notes` block in its prompt; an omitted / null
+ * `instructions` triggers a default triage pass ahead of schedule.
+ *
+ * Returns the worker's dispatch metadata so the caller can correlate
+ * the new dispatch row from the SSE bus when needed. Errors surface as
+ * a `ToggleError` so the dialog can render the server's `error` string
+ * inline (4xx from validation) or a generic retry hint (5xx).
+ */
+export async function triggerTriage(
+  repo: string,
+  issueId: string,
+  instructions: string | null,
+): Promise<{ jobId?: string; status?: string }> {
+  const body: Record<string, unknown> = {
+    repo,
+    issue_id: issueId,
+  };
+  if (instructions !== null) body.instructions = instructions;
+  const res = await fetchWithAuth("/api/triage", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const json = (await res.json()) as { job_id?: string; status?: string };
+  return { jobId: json.job_id, status: json.status };
+}
+
+/**
  * POST /api/flesh-out — DX-349. Fire-and-forget dispatch to flesh out a
  * freshly-created stub card. The dashboard fires this after a successful
  * `createIssue` so the agent rewrites the description, populates ac[],

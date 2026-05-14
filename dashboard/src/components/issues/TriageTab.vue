@@ -6,9 +6,20 @@ import { ageBuckets, relativeTime } from "../../utils/relativeTime";
 import IceBadge from "./IceBadge.vue";
 import { ICE_TIER_META, type IceTierId } from "./issuePalette";
 
-const props = defineProps<{
-  issue: IssueDetail;
-}>();
+const props = withDefaults(
+  defineProps<{
+    issue: IssueDetail;
+    /**
+     * DX-518 — true while the operator's Triage button dispatch is in
+     * flight against this card (set by `IssuesPage.onTriageDispatched`,
+     * cleared by `IssuesPage.onUpdateIssue` when a fresh `triage.history[]`
+     * entry arrives via the SSE bus). Renders an inline pulse badge in
+     * the header so the operator knows the agent is reasoning.
+     */
+    inFlight?: boolean;
+  }>(),
+  { inFlight: false },
+);
 
 const triage = computed(() => props.issue.triage);
 
@@ -139,6 +150,15 @@ function axisStyle(score: number): Record<string, string> {
         :title="triage.expires_at"
         data-test="triage-expires"
       >{{ expiry.text }}</span>
+      <span
+        v-if="props.inFlight"
+        class="in-flight"
+        data-test="triage-in-flight"
+        title="Triage agent is running on this card — header refreshes when the new decision lands"
+      >
+        <span class="pulse-dot" />
+        Triage in flight…
+      </span>
     </header>
 
     <section v-if="showIce" class="ice-section" data-test="triage-ice">
@@ -236,6 +256,29 @@ function axisStyle(score: number): Record<string, string> {
 }
 .expiry-past {
   color: #fca5a5;
+}
+.in-flight {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #fcd34d;
+  background: rgb(245 158 11 / 0.10);
+  border: 1px solid rgb(245 158 11 / 0.35);
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-variant-numeric: tabular-nums;
+}
+.pulse-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fcd34d;
+  animation: triage-pulse 1.2s ease-in-out infinite;
+}
+@keyframes triage-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
 }
 .section-label {
   font-size: 11px;

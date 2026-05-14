@@ -57,6 +57,7 @@ import {
   fetchWithAuth,
   followDispatch,
   resetAllData,
+  triggerTriage,
 } from "./api";
 
 const TOKEN_KEY = "danxbot.authToken";
@@ -166,6 +167,66 @@ describe("fetchWithAuth", () => {
     expect(headers.get("Authorization")).toBe("Bearer tok-abc");
     expect(headers.get("Content-Type")).toBe("application/json");
     expect(headers.get("X-Custom")).toBe("yes");
+  });
+});
+
+describe("triggerTriage", () => {
+  it("POSTs to /api/triage with {repo, issue_id, instructions} when instructions is a string", async () => {
+    seedToken("ok");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ job_id: "job-1", status: "launched" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const res = await triggerTriage("danxbot", "DX-1", "re-score considering DX-269");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/triage");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(new Headers((init as RequestInit).headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    expect((init as RequestInit).body).toBe(
+      JSON.stringify({
+        repo: "danxbot",
+        issue_id: "DX-1",
+        instructions: "re-score considering DX-269",
+      }),
+    );
+    expect(res).toEqual({ jobId: "job-1", status: "launched" });
+  });
+
+  it("OMITS the instructions key entirely when instructions is null (default-triage path)", async () => {
+    seedToken("ok");
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ job_id: "job-2", status: "launched" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    await triggerTriage("danxbot", "DX-1", null);
+
+    const [, init] = fetchMock.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body).toEqual({ repo: "danxbot", issue_id: "DX-1" });
+    expect("instructions" in body).toBe(false);
+  });
+
+  it("throws a ToggleError carrying the server's error string on 4xx", async () => {
+    seedToken("ok");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: "instructions exceeds 2000-character limit (got 2050)" }),
+        { status: 400 },
+      ),
+    );
+
+    await expect(triggerTriage("danxbot", "DX-1", "x".repeat(2050))).rejects.toThrow(
+      "instructions exceeds 2000-character limit",
+    );
   });
 });
 

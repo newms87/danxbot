@@ -52,8 +52,15 @@ const props = withDefaults(
     scopedEpicId: string | null;
     selectedRepo: string;
     showCloseButton?: boolean;
+    /**
+     * DX-518 — true while the operator's `Triage` button submission is
+     * in flight against this card. Cleared by `IssuesPage.onUpdateIssue`
+     * when a fresh `triage.history[]` entry arrives via SSE. Forwarded
+     * to `TriageTab.vue` for the in-flight badge.
+     */
+    triageInFlight?: boolean;
   }>(),
-  { showCloseButton: true },
+  { showCloseButton: true, triageInFlight: false },
 );
 
 const emit = defineEmits<{
@@ -226,7 +233,11 @@ function onUpdateIssue(issue: Issue): void {
           @update:issue="onUpdateIssue"
         />
         <HistoryTab v-else-if="tab === 'history'" :issue="issue" />
-        <TriageTab v-else-if="tab === 'triage'" :issue="issue" />
+        <TriageTab
+          v-else-if="tab === 'triage'"
+          :issue="issue"
+          :in-flight="triageInFlight"
+        />
         <RetroTab v-else-if="tab === 'retro'" :issue="issue" />
         <RawTab v-else-if="tab === 'raw'" :issue="issue" />
       </div>
