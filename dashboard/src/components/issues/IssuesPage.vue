@@ -29,6 +29,26 @@ const emit = defineEmits<{
 }>();
 
 const {
+  q,
+  types,
+  blockedOnly,
+  showClosed,
+  scopedEpicId,
+  scopeMode,
+  showEpicChildren,
+  toggleType,
+} = useIssueFilters(selectedRepo);
+
+// DX-523 — closed cards beyond the recent-50 cap are pull-on-demand.
+// `showClosed` drives the GET /api/issues `include_closed` query param,
+// so flipping the toggle re-hydrates with the widened (or narrowed) scope
+// instead of being a pure client-side filter that silently hides anything
+// outside the recent slice.
+const includeClosed = computed<"recent" | "all">(() =>
+  showClosed.value ? "all" : "recent",
+);
+
+const {
   issues,
   loading,
   error,
@@ -37,7 +57,7 @@ const {
   moveIssueStatus,
   moveIssuePosition,
   applyIssueUpdate,
-} = useIssues(toRef(selectedRepo));
+} = useIssues(toRef(selectedRepo), includeClosed);
 
 function onUpdateIssue(updated: Issue): void {
   // Update the board projection + invalidate the detail cache.
@@ -83,17 +103,6 @@ function onReorder(
   const position = nextPosition(before?.position ?? null, after?.position ?? null);
   void moveIssuePosition(issue.id, position).catch(() => {});
 }
-
-const {
-  q,
-  types,
-  blockedOnly,
-  showClosed,
-  scopedEpicId,
-  scopeMode,
-  showEpicChildren,
-  toggleType,
-} = useIssueFilters(selectedRepo);
 
 const scopedEpicTitle = computed<string | null>(() => {
   if (!scopedEpicId.value) return null;

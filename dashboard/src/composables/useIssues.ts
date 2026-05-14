@@ -218,7 +218,10 @@ export function applyIssueEvent(
  * pending status onto every fresh hydrate so a SSE upsert mid-flight
  * doesn't snap back.
  */
-export function useIssues(repo: Ref<string>): UseIssues {
+export function useIssues(
+  repo: Ref<string>,
+  includeClosed?: Ref<"recent" | "all">,
+): UseIssues {
   const issues = ref<IssueListItem[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
@@ -290,7 +293,9 @@ export function useIssues(repo: Ref<string>): UseIssues {
     loading.value = true;
     try {
       const next = await buffer.hydrate(async () => {
-        const result = await fetchIssues(requestRepo);
+        const result = includeClosed
+          ? await fetchIssues(requestRepo, { includeClosed: includeClosed.value })
+          : await fetchIssues(requestRepo);
         if (cancelled || reqId !== currentReq) return issues.value;
         // Invalidate cached detail entries whose underlying mtime has
         // advanced. Mirrors pre-DX-226 polling behavior: re-open same
@@ -348,6 +353,16 @@ export function useIssues(repo: Ref<string>): UseIssues {
     detailCache.clear();
     void hydrate();
   });
+
+  // DX-523 — re-fetch the list whenever the include-closed scope flips.
+  // Closed cards beyond the recent-50 cap are pull-on-demand: toggling
+  // show-closed on the page widens the scope to "all"; toggling off
+  // narrows back to "recent" so the default payload stays minimal.
+  if (includeClosed) {
+    watch(includeClosed, () => {
+      void hydrate();
+    });
+  }
 
   onBeforeUnmount(() => {
     cancelled = true;

@@ -272,6 +272,16 @@ export interface IssueHistoryEntry {
   patch: unknown;
 }
 
+/**
+ * Default cap on the closed slice when `include_closed: "recent"`. Sized
+ * for the SPA's "Done (Recent)" 24h column — every Done card that fits in
+ * the recency window is reachable through this slice. Closed cards beyond
+ * the cap are pull-on-demand: the dashboard's `useIssues` composable
+ * widens `include_closed` to `"all"` when the operator flips the
+ * show-closed toggle (DX-523), trading payload size for full closed-tab
+ * visibility. `"recent"` payload stays minimal; `"all"` returns every
+ * closed row for the repo.
+ */
 const DEFAULT_CLOSED_LIMIT = 50;
 
 const STEM_SHAPE = /^([A-Z]{2,4})-\d+$/;

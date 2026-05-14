@@ -130,11 +130,14 @@ function makeIssueSnapshot(
   };
 }
 
-function mountWithIssues(repo: Ref<string>) {
+function mountWithIssues(
+  repo: Ref<string>,
+  includeClosed?: Ref<"recent" | "all">,
+) {
   const exposed = { ret: null as ReturnType<typeof useIssues> | null };
   const Host = defineComponent({
     setup() {
-      exposed.ret = useIssues(repo);
+      exposed.ret = useIssues(repo, includeClosed);
       return () => h("div");
     },
   });
@@ -417,6 +420,71 @@ describe("useIssues — hydrate + subscribe", () => {
     const refetched = await ret.fetchDetail("DX-1");
     expect(refetched).toBe(detail2);
     expect(mockFetchIssueDetail).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+});
+
+// ─── includeClosed thread-through (DX-523) ───────────────────────────────────
+
+describe("useIssues — includeClosed thread-through (DX-523)", () => {
+  it("threads the current includeClosed ref value to fetchIssues on initial hydrate", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const includeClosed = ref<"recent" | "all">("all");
+    const { wrapper } = mountWithIssues(ref("danxbot"), includeClosed);
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenCalledWith("danxbot", {
+      includeClosed: "all",
+    });
+    wrapper.unmount();
+  });
+
+  it("re-hydrates with the new value when includeClosed flips", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const includeClosed = ref<"recent" | "all">("recent");
+    const { wrapper } = mountWithIssues(ref("danxbot"), includeClosed);
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenLastCalledWith("danxbot", {
+      includeClosed: "recent",
+    });
+    expect(mockFetchIssues).toHaveBeenCalledTimes(1);
+
+    includeClosed.value = "all";
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenLastCalledWith("danxbot", {
+      includeClosed: "all",
+    });
+    expect(mockFetchIssues).toHaveBeenCalledTimes(2);
+
+    includeClosed.value = "recent";
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenLastCalledWith("danxbot", {
+      includeClosed: "recent",
+    });
+    expect(mockFetchIssues).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
+
+  it("does not re-hydrate when includeClosed is re-assigned to the same value", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const includeClosed = ref<"recent" | "all">("recent");
+    const { wrapper } = mountWithIssues(ref("danxbot"), includeClosed);
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenCalledTimes(1);
+
+    // Same-value re-assign should be a no-op per Vue's default watch
+    // semantics (value-change comparison). Locks against future
+    // {deep: true} or {flush: "sync"} regressions that would double-fetch.
+    includeClosed.value = "recent";
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("omits the opts arg when no includeClosed ref is provided (legacy callers unchanged)", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+    expect(mockFetchIssues).toHaveBeenCalledWith("danxbot");
     wrapper.unmount();
   });
 });
