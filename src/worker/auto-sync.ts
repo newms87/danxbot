@@ -43,7 +43,6 @@
  */
 
 import { reconcileIssue } from "../issue/reconcile.js";
-import { onDispatchTerminated } from "../dispatch/scheduler.js";
 import { createLogger } from "../logger.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 import type { ReconcileTrigger } from "../issue/reconcile-types.js";
@@ -88,39 +87,27 @@ export async function autoSyncTrackedIssue(
     // reconcile. No `issueId` → dispatch wasn't bound to a card YAML
     // (Slack chat, board-chat, ideator, or /api/launch without an issue),
     // so there is no YAML for reconcile to operate on.
-    if (row && row.issueId !== null) {
-      await deps.reconcile(
-        {
-          name: repo.name,
-          localPath: repo.localPath,
-          issuePrefix: repo.issuePrefix,
-        },
-        row.issueId,
-        "lifecycle",
-      );
-    }
+    if (!row || row.issueId === null) return;
+    await deps.reconcile(
+      {
+        name: repo.name,
+        localPath: repo.localPath,
+        issuePrefix: repo.issuePrefix,
+      },
+      row.issueId,
+      "lifecycle",
+    );
   } catch (err) {
     log.error(
       `[Dispatch ${jobId}] post-dispatch reconcile failed (non-fatal)`,
       err,
     );
-  } finally {
-    // Always poke the picker, regardless of whether reconcile fired or
-    // succeeded. The agent slot this dispatch occupied just freed up;
-    // the picker must get a chance to fill it from any other open ToDo
-    // card in the queue. Reconcile's `dispatchableChanged` poke flips
-    // ONLY when the dispatched card's eligibility changes (status: ToDo
-    // + dispatch: null + blocked: null + ...) — for self-Blocked /
-    // self-Done completions, the flag stays false→false and the picker
-    // would never fire without this explicit kick. See
-    // `scheduler.ts#onDispatchTerminated` header for the full contract.
-    try {
-      onDispatchTerminated(repo.name);
-    } catch (err) {
-      log.error(
-        `[Dispatch ${jobId}] onDispatchTerminated poke failed (non-fatal)`,
-        err,
-      );
-    }
   }
+  // The freed-agent picker poke does NOT live here. It MUST fire AFTER
+  // the dispatch row is marked terminal — otherwise `pickFreeAgent`
+  // reads `findOpenDispatches` and still sees this dispatch as live,
+  // returns null, and the picker silently no-ops. The caller
+  // (`handleStop` in `dispatch.ts`) wires `onDispatchTerminated()`
+  // AFTER `job.stop` (which updates the dispatch row to terminal) for
+  // exactly this reason.
 }

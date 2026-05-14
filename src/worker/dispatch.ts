@@ -45,6 +45,7 @@ import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { applyStrike } from "../dashboard/dispatch-tracker.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
+import { onDispatchTerminated } from "../dispatch/scheduler.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
 import {
@@ -1360,6 +1361,10 @@ async function handleStopFromDb(
       rawError: summary ?? null,
       timestampIso: new Date(terminatedAt).toISOString(),
     });
+    // Picker poke AFTER `updateDispatch` — the dispatch row is now
+    // terminal so `pickFreeAgent` no longer sees this dispatch in the
+    // open set. Same load-bearing ordering as the in-memory path.
+    onDispatchTerminated(repo.name);
     json(res, 200, { status });
     return;
   }
@@ -1388,6 +1393,10 @@ async function handleStopFromDb(
     rawError: summary ?? null,
     timestampIso: new Date(terminatedAt).toISOString(),
   });
+  // Picker poke AFTER `updateDispatch` — the dispatch row is now
+  // terminal so `pickFreeAgent` no longer sees this dispatch in the
+  // open set. Same load-bearing ordering as the in-memory path.
+  onDispatchTerminated(repo.name);
   json(res, 200, { status });
 }
 
@@ -1452,6 +1461,7 @@ export async function handleStop(
       // is the authoritative halt signal for the poller. See
       // `.claude/rules/agent-dispatch.md` "Critical failure flag".
       await job.stop("failed", summary);
+      onDispatchTerminated(repo.name);
       json(res, 200, { status });
       return;
     }
@@ -1499,6 +1509,7 @@ export async function handleStop(
       }
       await autoSyncTrackedIssue(jobId, repo);
       await job.stop("failed", summary);
+      onDispatchTerminated(repo.name);
       json(res, 200, { status });
       return;
     }
@@ -1523,6 +1534,17 @@ export async function handleStop(
     await autoSyncTrackedIssue(jobId, repo);
 
     await job.stop(status, summary);
+
+    // Picker poke AFTER `job.stop` — `job.stop` marks the dispatch row
+    // terminal, so `pickFreeAgent` no longer sees this dispatch in the
+    // open-dispatch set when it reads `findOpenDispatches`. Order is
+    // load-bearing: a poke fired BEFORE `job.stop` would race against
+    // `findOpenDispatches`, see this dispatch as still live, place the
+    // freed agent on the busy list, return null, and the picker would
+    // silently no-op (no log, no second pick). See
+    // `scheduler.ts#onDispatchTerminated` header for the freed-agent
+    // poke contract and the history that motivated it.
+    onDispatchTerminated(repo.name);
     json(res, 200, { status });
   } catch (err) {
     log.error("Stop failed", err);
