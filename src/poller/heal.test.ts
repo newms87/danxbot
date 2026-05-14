@@ -659,6 +659,42 @@ describe("healOrphanInvariantViolations — orphan dispatch scan (co-ownership r
   });
 
   // Co-ownership retired: a card with `assigned_agent: phil` and
+  // blocked-with-assignment — agent set status:Blocked but did not null
+  // assigned_agent. Operator rule: Blocked = agent declared "done from my
+  // side"; staying assigned is invalid (picker's resume-owned-card path
+  // would re-dispatch the same Blocked card every tick).
+  it("clears assigned_agent when status is Blocked but agent stamp remains", async () => {
+    const stuck = buildIssue({
+      id: "ISS-901",
+      status: "Blocked",
+      assigned_agent: "dani",
+      dispatch: null,
+    });
+    writeFileSync(resolve(openDir, "ISS-901.yml"), serializeIssue(stuck));
+
+    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
+
+    expect(result.scanned).toBe(1);
+    expect(result.healed).toEqual([
+      {
+        id: "ISS-901",
+        kind: "blocked-with-assignment",
+        staleAgent: "dani",
+        staleDispatchId: null,
+        verdict: null,
+      },
+    ]);
+    expect(result.errors).toEqual([]);
+
+    const reloaded = parseIssue(
+      readFileSync(resolve(openDir, "ISS-901.yml"), "utf-8"),
+      { expectedPrefix: "ISS" },
+    );
+    expect(reloaded.assigned_agent).toBeNull();
+    expect(reloaded.status).toBe("Blocked");
+    expect(reloaded.blocked).not.toBeNull();
+  });
+
   // `dispatch: null` is the steady state after a dispatch ends. No
   // heal action.
   it("leaves cards with assigned_agent + null dispatch alone (steady state, not an orphan)", async () => {
