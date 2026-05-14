@@ -80,6 +80,7 @@ vi.mock("../../agent/worktree-manager.js", () => ({
     teardown: vi.fn(),
     validate: vi.fn().mockResolvedValue({ state: "clean" }),
     syncWorktree: vi.fn().mockResolvedValue({ kind: "noop" }),
+    snapshotIfDirty: vi.fn().mockResolvedValue({ kind: "clean" }),
     ensureProvisioned: vi.fn(),
     fetchOrigin: vi.fn().mockResolvedValue(true),
   }),

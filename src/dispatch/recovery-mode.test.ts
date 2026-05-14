@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dispatchWithRecovery } from "./recovery-mode.js";
 import type {
+  SnapshotResult,
   SyncResult,
   WorktreeManager,
 } from "../agent/worktree-manager.js";
@@ -33,12 +34,14 @@ vi.mock("../logger.js", () => ({
 function mkManager(opts: {
   syncWorktree?: () => Promise<SyncResult>;
   fetchOrigin?: () => Promise<boolean>;
+  snapshotIfDirty?: () => Promise<SnapshotResult>;
 }): WorktreeManager & {
   calls: {
     syncWorktree: number;
     bootstrap: number;
     teardown: number;
     fetchOrigin: number;
+    snapshotIfDirty: number;
   };
 } {
   const calls = {
@@ -46,6 +49,7 @@ function mkManager(opts: {
     bootstrap: 0,
     teardown: 0,
     fetchOrigin: 0,
+    snapshotIfDirty: 0,
   };
   return {
     calls,
@@ -64,6 +68,12 @@ function mkManager(opts: {
     fetchOrigin: async () => {
       calls.fetchOrigin++;
       return opts.fetchOrigin ? opts.fetchOrigin() : true;
+    },
+    snapshotIfDirty: async () => {
+      calls.snapshotIfDirty++;
+      return opts.snapshotIfDirty
+        ? opts.snapshotIfDirty()
+        : { kind: "clean" };
     },
   };
 }
@@ -167,18 +177,22 @@ describe("dispatchWithRecovery", () => {
     expect(result.dispatchId).toBe("id-happy");
   });
 
-  it("fetchOrigin runs before syncWorktree (refresh cached origin/main BEFORE deciding to ff)", async () => {
+  it("ordering: fetchOrigin → snapshotIfDirty → syncWorktree → dispatch (DX-359)", async () => {
     const order: string[] = [];
     const dispatchMock = vi.fn(
-      async (_input: DispatchInput): Promise<DispatchResult> => ({
-        dispatchId: "id-order",
-        job: fakeJob(),
-      }),
+      async (_input: DispatchInput): Promise<DispatchResult> => {
+        order.push("dispatch");
+        return { dispatchId: "id-order", job: fakeJob() };
+      },
     );
     const manager = mkManager({
       fetchOrigin: async () => {
         order.push("fetchOrigin");
         return true;
+      },
+      snapshotIfDirty: async () => {
+        order.push("snapshotIfDirty");
+        return { kind: "clean" };
       },
       syncWorktree: async () => {
         order.push("syncWorktree");
@@ -192,7 +206,16 @@ describe("dispatchWithRecovery", () => {
       { dispatch: dispatchMock },
     );
 
-    expect(order).toEqual(["fetchOrigin", "syncWorktree"]);
+    // snapshotIfDirty MUST run AFTER fetchOrigin (so the agent branch
+    // is on top of the freshly-fetched origin/main when rebase replays
+    // the snapshot) and BEFORE syncWorktree (so the dirty tree is
+    // already clean when ff-only pull runs).
+    expect(order).toEqual([
+      "fetchOrigin",
+      "snapshotIfDirty",
+      "syncWorktree",
+      "dispatch",
+    ]);
   });
 
   it("dispatch proceeds when fetchOrigin returns false (transient network failure does not dead-letter)", async () => {
@@ -332,6 +355,151 @@ describe("dispatchWithRecovery", () => {
         ),
       );
       expect(settings.agents.alice.broken.suggested_steps).toEqual([]);
+    });
+  });
+
+  // ============================================================
+  // DX-359 — pre-sync WIP snapshot prevents agent quarantine after
+  // a prior dispatch died unclean leaving the worktree dirty.
+  // ============================================================
+
+  describe("snapshotIfDirty (DX-359)", () => {
+    let seeded: { repoLocalPath: string; cleanup: () => void };
+
+    beforeEach(() => {
+      seeded = seedRepo("alice");
+    });
+
+    afterEach(() => {
+      seeded.cleanup();
+    });
+
+    it("a dirty-tree snapshot commit unwedges ff-only pull (happy path: snapshotted → syncWorktree → dispatch)", async () => {
+      // The exact failure mode this is fixing: prior dispatch died with
+      // WIP in the worktree; without the snapshot pass, syncWorktree's
+      // ff-only pull would abort and the agent would land in broken=YES.
+      // With the snapshot pass, the WIP is committed FIRST and sync
+      // rebases the snapshot onto fresh origin/main.
+      const order: string[] = [];
+      const dispatchMock = vi.fn(
+        async (_input: DispatchInput): Promise<DispatchResult> => {
+          order.push("dispatch");
+          return { dispatchId: "id-snapshot-rebase", job: fakeJob() };
+        },
+      );
+      const manager = mkManager({
+        snapshotIfDirty: async () => {
+          order.push("snapshotIfDirty(snapshotted)");
+          return { kind: "snapshotted", sha: "abc123" };
+        },
+        syncWorktree: async () => {
+          order.push("syncWorktree(rebased)");
+          return { kind: "rebased", commits: 1 };
+        },
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      const result = await dispatchWithRecovery(
+        input,
+        { agentName: "alice", manager },
+        { dispatch: dispatchMock },
+      );
+
+      expect(result.dispatchId).toBe("id-snapshot-rebase");
+      expect(order).toEqual([
+        "snapshotIfDirty(snapshotted)",
+        "syncWorktree(rebased)",
+        "dispatch",
+      ]);
+      // Agent stays unbroken — the snapshot pass + rebase is a normal,
+      // non-error recovery path.
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toBeNull();
+    });
+
+    it("snapshotIfDirty abort → stamps agents.<name>.broken with snapshot reason + throws, never calls syncWorktree or dispatch", async () => {
+      const dispatchMock = vi.fn();
+      const syncWorktreeMock = vi.fn();
+      const manager = mkManager({
+        snapshotIfDirty: async () => ({
+          kind: "abort",
+          reason: "worktree HEAD not on agent branch",
+          details: "expected branch alice, got bob",
+        }),
+        syncWorktree: async () => {
+          syncWorktreeMock();
+          return { kind: "noop" };
+        },
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await expect(
+        dispatchWithRecovery(
+          input,
+          { agentName: "alice", manager },
+          { dispatch: dispatchMock },
+        ),
+      ).rejects.toThrow(/snapshotIfDirty aborted/);
+
+      // Critical: bailing on snapshot abort does NOT proceed into
+      // syncWorktree (would lose / duplicate the WIP) and does NOT
+      // spawn the agent (worktree state is corrupt).
+      expect(syncWorktreeMock).not.toHaveBeenCalled();
+      expect(dispatchMock).not.toHaveBeenCalled();
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toMatchObject({
+        reason: "snapshotIfDirty aborted: worktree HEAD not on agent branch",
+        suggested_steps: ["expected branch alice, got bob"],
+      });
+    });
+
+    it("clean tree → no snapshot, proceeds straight to syncWorktree (most common path)", async () => {
+      const dispatchMock = vi.fn(
+        async (_input: DispatchInput): Promise<DispatchResult> => ({
+          dispatchId: "id-clean",
+          job: fakeJob(),
+        }),
+      );
+      const manager = mkManager({
+        snapshotIfDirty: async () => ({ kind: "clean" }),
+        syncWorktree: async () => ({ kind: "noop" }),
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await dispatchWithRecovery(
+        input,
+        { agentName: "alice", manager },
+        { dispatch: dispatchMock },
+      );
+
+      expect(manager.calls.snapshotIfDirty).toBe(1);
+      expect(manager.calls.syncWorktree).toBe(1);
+      expect(dispatchMock).toHaveBeenCalledTimes(1);
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toBeNull();
     });
   });
 });

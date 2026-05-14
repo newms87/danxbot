@@ -122,6 +122,23 @@ export type SyncResult =
   | { kind: "rebased"; commits: number }
   | { kind: "abort"; reason: string; details: string };
 
+/**
+ * Result of `snapshotIfDirty` (DX-359).
+ *
+ * - `clean` — working tree had no uncommitted changes; no commit was
+ *   created.
+ * - `snapshotted` — working tree was dirty; one `wip(autosave): pre-
+ *   sync snapshot of prior-dispatch residue` commit was created on the
+ *   agent branch. `sha` is the resulting HEAD.
+ * - `abort` — could not snapshot (HEAD not on the agent branch, commit
+ *   failed). `dispatchWithRecovery` routes this through the same
+ *   `agents.<name>.broken` stamp + throw as a `syncWorktree` abort.
+ */
+export type SnapshotResult =
+  | { kind: "clean" }
+  | { kind: "snapshotted"; sha: string }
+  | { kind: "abort"; reason: string; details: string };
+
 export interface WorktreeManager {
   /** Absolute path of an agent's worktree, derived from `ctx.hostPath`. */
   worktreePath(ctx: WorktreeRepo, agentName: string): string;
@@ -181,6 +198,38 @@ export interface WorktreeManager {
    * stale than to dead-letter the card on flaky DNS). Never throws.
    */
   fetchOrigin(ctx: WorktreeRepo): Promise<boolean>;
+  /**
+   * Snapshot any uncommitted working-tree changes on the agent's branch
+   * as a single `wip(autosave): pre-sync snapshot of prior-dispatch
+   * residue` commit (DX-359).
+   *
+   * Background: the prep skill (`danxbot:danx-prep`) is the steady-state
+   * owner of WIP recovery — but it runs INSIDE the dispatched agent's
+   * session. When the prior dispatch died unclean (worker OOM, host
+   * reboot, terminal close), its WIP sits in the worktree and the NEXT
+   * dispatch's pre-flight `syncWorktree` ff-only pull aborts on the
+   * dirty tree before any prep skill can run. The result is
+   * `agents.<name>.broken` stamping the agent out of the rotation —
+   * exactly the failure mode this method exists to prevent.
+   *
+   * Called once by `dispatchWithRecovery` AFTER `fetchOrigin` and
+   * BEFORE `syncWorktree`. Same commit-first primitive the prep skill
+   * uses — the WIP is preserved on the agent branch (recoverable via
+   * git log later), the tree is clean, and `syncWorktree` proceeds
+   * through its normal ff / rebase path.
+   *
+   * Safety: refuses to commit unless HEAD is on the agent's own branch
+   * (defends against an unexpected detached HEAD or wrong-branch
+   * checkout — both of which mean something else has corrupted the
+   * worktree and committing would obscure the problem). On either
+   * branch-check failure or commit failure, returns `abort` so the
+   * caller can stamp `broken` exactly the same way as a `syncWorktree`
+   * abort.
+   */
+  snapshotIfDirty(
+    ctx: WorktreeRepo,
+    agentName: string,
+  ): Promise<SnapshotResult>;
 }
 
 /** Thin abstraction over `git` invocation so tests can stub command results. */
@@ -444,6 +493,71 @@ export function createWorktreeManager(
       log.info(`teardown(${agentName}): removed worktree at ${path}`);
     },
 
+    async snapshotIfDirty(ctx, agentName) {
+      assertAgentName(agentName);
+      const path = this.worktreePath(ctx, agentName);
+
+      const status = await runner.run(path, ["status", "--porcelain"]);
+      if (status.code !== 0) {
+        return buildSnapshotAbort(
+          "git status failed",
+          "git status",
+          status,
+        );
+      }
+      if (status.stdout.trim().length === 0) {
+        return { kind: "clean" };
+      }
+
+      // Guard: refuse to commit unless HEAD points at the agent's own
+      // branch. A detached HEAD or wrong-branch checkout means something
+      // else has corrupted the worktree state; committing on top would
+      // obscure that. Surface as an abort so the caller stamps broken
+      // and the operator investigates.
+      const branch = await runner.run(path, [
+        "rev-parse",
+        "--abbrev-ref",
+        "HEAD",
+      ]);
+      const branchName = branch.stdout.trim();
+      if (branch.code !== 0 || branchName !== agentName) {
+        return {
+          kind: "abort",
+          reason: "worktree HEAD not on agent branch",
+          details:
+            branch.code !== 0
+              ? branch.stderr.trim() ||
+                `git rev-parse exited with code ${branch.code}`
+              : `expected branch ${agentName}, got ${branchName || "(detached)"}`,
+        };
+      }
+
+      const add = await runner.run(path, ["add", "-A"]);
+      if (add.code !== 0) {
+        return buildSnapshotAbort("git add failed", "git add", add);
+      }
+
+      const commit = await runner.run(path, [
+        "commit",
+        "-m",
+        "wip(autosave): pre-sync snapshot of prior-dispatch residue",
+      ]);
+      if (commit.code !== 0) {
+        return buildSnapshotAbort(
+          "wip snapshot commit failed",
+          "git commit",
+          commit,
+        );
+      }
+
+      const head = await runner.run(path, ["rev-parse", "HEAD"]);
+      const sha = head.code === 0 ? head.stdout.trim() : "";
+      log.info(
+        `snapshotIfDirty(${ctx.hostPath}, ${agentName}): committed WIP snapshot ${sha.slice(0, 7)} on agent branch`,
+      );
+      return { kind: "snapshotted", sha };
+    },
+
     async syncWorktree(ctx, agentName) {
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
@@ -508,6 +622,25 @@ function buildAbort(
   cmdLabel: string,
   result: { stderr: string; code: number },
 ): SyncResult {
+  return {
+    kind: "abort",
+    reason,
+    details:
+      result.stderr.trim() || `${cmdLabel} exited with code ${result.code}`,
+  };
+}
+
+/**
+ * Same shape as `buildAbort` but typed as `SnapshotResult` so
+ * `snapshotIfDirty` can surface a structured abort identical in shape
+ * to `syncWorktree`'s abort path. `dispatchWithRecovery` routes both
+ * through the same `agents.<name>.broken` stamping logic.
+ */
+function buildSnapshotAbort(
+  reason: string,
+  cmdLabel: string,
+  result: { stderr: string; code: number },
+): SnapshotResult {
   return {
     kind: "abort",
     reason,

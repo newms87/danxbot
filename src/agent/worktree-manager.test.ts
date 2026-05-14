@@ -613,6 +613,197 @@ describe("WorktreeManager", () => {
     });
   });
 
+  // ============================================================
+  // snapshotIfDirty (DX-359) — commit WIP before sync to prevent
+  // ff-only pull abort + agents.<name>.broken quarantine when prior
+  // dispatch died mid-write.
+  // ============================================================
+
+  describe("snapshotIfDirty", () => {
+    it("returns {kind: 'clean'} when working tree has no uncommitted changes (no commit attempted)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          { match: "status --porcelain", response: { stdout: "" } },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toEqual({ kind: "clean" });
+      // No add / commit / rev-parse — clean path is single-call.
+      expect(runner.calls.map((c) => c.args[0])).toEqual(["status"]);
+    });
+
+    it("commits a wip(autosave) snapshot on the agent branch and returns {kind: 'snapshotted', sha} when tree dirty", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: { stdout: " M src/foo.ts\n?? src/new.ts\n" },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "alice\n" },
+          },
+          { match: "add -A", response: { stdout: "" } },
+          { match: "commit -m", response: { stdout: "ok" } },
+          {
+            match: "rev-parse HEAD",
+            response: { stdout: "deadbeefcafe1234\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toEqual({
+        kind: "snapshotted",
+        sha: "deadbeefcafe1234",
+      });
+      // Exact call sequence: status → branch check → add → commit → head sha.
+      const argvs = runner.calls.map((c) => c.args.join(" "));
+      expect(argvs).toEqual([
+        "status --porcelain",
+        "rev-parse --abbrev-ref HEAD",
+        "add -A",
+        "commit -m wip(autosave): pre-sync snapshot of prior-dispatch residue",
+        "rev-parse HEAD",
+      ]);
+      // Forbidden destructive ops MUST not appear.
+      expect(
+        argvs.some(
+          (a) =>
+            a.startsWith("reset") ||
+            a.startsWith("checkout") ||
+            a.startsWith("restore") ||
+            a.startsWith("stash") ||
+            (a.startsWith("clean") && a.includes("-f")),
+        ),
+      ).toBe(false);
+    });
+
+    it("returns {kind: 'abort'} when HEAD is detached (refuses to commit on no-branch)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: { stdout: " M src/foo.ts\n" },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "HEAD\n" }, // git uses literal "HEAD" for detached
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "worktree HEAD not on agent branch",
+      });
+      if (result.kind === "abort") {
+        expect(result.details).toContain("expected branch alice");
+      }
+      // No add, no commit — refuses to mutate a wrong-branch tree.
+      expect(runner.calls.some((c) => c.args[0] === "add")).toBe(false);
+      expect(runner.calls.some((c) => c.args[0] === "commit")).toBe(false);
+    });
+
+    it("returns {kind: 'abort'} when HEAD points at a different branch", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: { stdout: " M src/foo.ts\n" },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "bob\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "worktree HEAD not on agent branch",
+      });
+      if (result.kind === "abort") {
+        expect(result.details).toContain("got bob");
+      }
+    });
+
+    it("returns {kind: 'abort'} when git commit fails (e.g. missing identity)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: { stdout: " M src/foo.ts\n" },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "alice\n" },
+          },
+          { match: "add -A", response: { stdout: "" } },
+          {
+            match: "commit -m",
+            response: {
+              code: 1,
+              stderr:
+                "*** Please tell me who you are.\nfatal: empty ident name",
+            },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "wip snapshot commit failed",
+      });
+      if (result.kind === "abort") {
+        expect(result.details).toContain("empty ident name");
+      }
+    });
+
+    it("returns {kind: 'abort'} when git status itself fails (corrupt worktree)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: {
+              code: 128,
+              stderr: "fatal: not a git repository",
+            },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toMatchObject({
+        kind: "abort",
+        reason: "git status failed",
+      });
+    });
+
+    it("rejects an invalid agent name (defense-in-depth — same as syncWorktree)", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      await expect(wm.snapshotIfDirty(ctx, "../evil")).rejects.toThrow(
+        WorktreeError,
+      );
+    });
+  });
+
   describe("worktreePath construction", () => {
     it("places worktrees under .danxbot/worktrees/ regardless of trailing slashes", () => {
       const wm = createWorktreeManager(fakeRunner());

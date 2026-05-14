@@ -828,6 +828,7 @@ function mkWorktreeManager(opts: {
       if (opts.teardownImpl) await opts.teardownImpl();
     },
     syncWorktree: async () => ({ kind: "noop" }),
+    snapshotIfDirty: async () => ({ kind: "clean" }),
     ensureProvisioned: async () => {},
     fetchOrigin: async () => true,
   };
