@@ -59,10 +59,11 @@ function makeEntry(overrides: Partial<AgentLogEntry> = {}): AgentLogEntry {
 function makeAssistantEntry(
   content: Record<string, unknown>[],
   usage?: Record<string, number>,
+  messageId?: string,
 ): AgentLogEntry {
   return makeEntry({
     type: "assistant",
-    data: { content, usage, delta_ms: 0 },
+    data: { content, usage, delta_ms: 0, ...(messageId ? { messageId } : {}) },
   });
 }
 
@@ -668,6 +669,274 @@ describe("createLaravelForwarder", () => {
     await vi.advanceTimersByTimeAsync(5_000);
 
     expect(postCalls()).toHaveLength(1);
+  });
+});
+
+// ─── DX-39: usage dedup by message.id ─────────────────────────────────────
+
+describe("createLaravelForwarder — usage dedup by message.id (DX-39)", () => {
+  // Claude Code splits multi-block assistant turns into one JSONL line per
+  // content block but stamps the IDENTICAL response-level `message.usage` on
+  // every line. Without dedup, the forwarder POSTs the same usage payload
+  // 2-5× per turn and inflates downstream Laravel dashboards. Mirrors
+  // src/agent/usage-accumulator.ts + src/dashboard/jsonl-reader.ts.
+  const MSG_ID = "msg_01ABC123";
+
+  it("attaches `usage` exactly once across multi-block assistant entries sharing message.id", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "First" }],
+        SAMPLE_USAGE,
+        MSG_ID,
+      ),
+    );
+    consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "Second" }],
+        SAMPLE_USAGE,
+        MSG_ID,
+      ),
+    );
+    consume(
+      makeAssistantEntry(
+        [{ type: "tool_use", id: "t1", name: "Read", input: { x: 1 } }],
+        SAMPLE_USAGE,
+        MSG_ID,
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(postCalls()).toHaveLength(1);
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toHaveLength(3);
+
+    const usageCarriers = events.filter(
+      (e) => e.data && (e.data as Record<string, unknown>).usage !== undefined,
+    );
+    expect(usageCarriers).toHaveLength(1);
+    expect((usageCarriers[0].data as Record<string, unknown>).usage).toEqual(
+      SAMPLE_USAGE,
+    );
+
+    // Text + tool_use payloads still forward on the dedup'd entries.
+    expect(events[0]).toMatchObject({ type: "agent_event", message: "First" });
+    expect(events[1]).toMatchObject({ type: "agent_event", message: "Second" });
+    expect(events[2]).toMatchObject({
+      type: "tool_call",
+      message: "Read",
+      data: { tool: "Read", tool_use_id: "t1", input: { x: 1 } },
+    });
+  });
+
+  it("attaches usage on every entry when each carries a distinct message.id", async () => {
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "Turn 1" }],
+        SAMPLE_USAGE,
+        "msg_turn_1",
+      ),
+    );
+    consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "Turn 2" }],
+        SAMPLE_USAGE,
+        "msg_turn_2",
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = decodeBatch(postCalls()[0]);
+    const usageCarriers = events.filter(
+      (e) => e.data && (e.data as Record<string, unknown>).usage !== undefined,
+    );
+    expect(usageCarriers).toHaveLength(2);
+  });
+
+  it("does not strip usage from later turns that share data with an earlier non-usage entry", async () => {
+    // Sanity: a thinking-only entry that carries usage but no preceding
+    // duplicate must still emit the thinking fallback. Re-uses the existing
+    // attachUsageToAssistantEvents cascade.
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    consume(makeAssistantEntry([], SAMPLE_USAGE, MSG_ID));
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(decodeBatch(postCalls()[0])).toEqual([
+      { type: "thinking", data: { usage: SAMPLE_USAGE } },
+    ]);
+  });
+
+  it("dedup state is per-forwarder-instance (Set is closure-local, not module-scope)", async () => {
+    // Guard against a future refactor that hoists `seenForwardedMessageIds`
+    // to module scope — that would silently cross-contaminate concurrent
+    // dispatches (every dispatch beyond the first would drop legitimate
+    // first-sighting usage). Mirrors src/dashboard/jsonl-reader.test.ts.
+    const a = createLaravelForwarder(STATUS_URL, API_TOKEN);
+    const b = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    a.consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "From A" }],
+        SAMPLE_USAGE,
+        MSG_ID,
+      ),
+    );
+    b.consume(
+      makeAssistantEntry(
+        [{ type: "text", text: "From B" }],
+        SAMPLE_USAGE,
+        MSG_ID,
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const posts = postCalls();
+    expect(posts).toHaveLength(2);
+    for (const post of posts) {
+      const events = decodeBatch(post);
+      const usageCarriers = events.filter(
+        (e) => e.data && (e.data as Record<string, unknown>).usage !== undefined,
+      );
+      expect(usageCarriers).toHaveLength(1);
+    }
+  });
+
+  it("does not mutate the original entry's data object — sibling subscribers still see usage", async () => {
+    // The launcher wires multiple subscribers onto one SessionLogWatcher
+    // (forwarder + usage-accumulator). The dedup helper MUST shallow-clone
+    // the entry; mutating in place silently strips usage from sibling
+    // consumers that own their own dedup state. Regression guard.
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+    const sharedEntry = makeAssistantEntry(
+      [{ type: "text", text: "shared" }],
+      SAMPLE_USAGE,
+      MSG_ID,
+    );
+    const originalUsageRef = sharedEntry.data.usage;
+    const originalDataRef = sharedEntry.data;
+
+    consume(sharedEntry);
+    consume(sharedEntry); // second sighting — dedup path runs.
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // Identity, not just equality — proves no clone-into-original aliasing.
+    expect(sharedEntry.data).toBe(originalDataRef);
+    expect(sharedEntry.data.usage).toBe(originalUsageRef);
+    expect(sharedEntry.data.usage).toEqual(SAMPLE_USAGE);
+  });
+
+  it("lineage cascade still applies to dedup'd sub-agent entries (clone keeps lineage fields)", async () => {
+    // mapEntryToEvents stamps subagent_id / parent_session_id / agent_type
+    // onto every event AFTER the dedup helper strips usage. The shallow
+    // clone must carry those fields forward so dedup'd entries still emit
+    // lineage-stamped text / tool_use events to gpt-manager.
+    const LINEAGE = {
+      subagent_id: "agent-dedup",
+      parent_session_id: "sess-parent",
+      agent_type: "Explore",
+    };
+    const { consume } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    const firstEntry = makeEntry({
+      type: "assistant",
+      data: {
+        content: [{ type: "text", text: "Sub 1" }],
+        usage: SAMPLE_USAGE,
+        messageId: MSG_ID,
+        delta_ms: 0,
+        ...LINEAGE,
+      },
+    });
+    const secondEntry = makeEntry({
+      type: "assistant",
+      data: {
+        content: [{ type: "text", text: "Sub 2" }],
+        usage: SAMPLE_USAGE,
+        messageId: MSG_ID,
+        delta_ms: 0,
+        ...LINEAGE,
+      },
+    });
+
+    consume(firstEntry);
+    consume(secondEntry);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    const events = decodeBatch(postCalls()[0]);
+    expect(events).toHaveLength(2);
+    for (const event of events) {
+      expect(event.data).toMatchObject(LINEAGE);
+    }
+    // First entry kept usage; second's usage was stripped but lineage stayed.
+    expect((events[0].data as Record<string, unknown>).usage).toEqual(
+      SAMPLE_USAGE,
+    );
+    expect((events[1].data as Record<string, unknown>).usage).toBeUndefined();
+  });
+
+  it("warn-once flag is per-forwarder-instance (a fresh forwarder warns again)", async () => {
+    // The warn flag must NOT be module-scope; a fresh dispatch deserves its
+    // own signal if its JSONL stream also misses message.id. Mirrors the
+    // per-instance Set guard above.
+    vi.useRealTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const a = createLaravelForwarder(STATUS_URL, API_TOKEN);
+    a.consume(makeAssistantEntry([{ type: "text", text: "A" }], SAMPLE_USAGE));
+    await a.flush();
+
+    const b = createLaravelForwarder(STATUS_URL, API_TOKEN);
+    b.consume(makeAssistantEntry([{ type: "text", text: "B" }], SAMPLE_USAGE));
+    await b.flush();
+
+    const warnLines = errorSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((line) => typeof line === "string" && line.includes('"level":"warn"'))
+      .filter((line) => line.includes("laravel-forwarder"))
+      .filter((line) => line.includes("usage but no message.id"));
+    expect(warnLines).toHaveLength(2);
+
+    errorSpy.mockRestore();
+    vi.useFakeTimers();
+  });
+
+  it("forwards usage defensively + warns once when an assistant entry has usage but no message.id", async () => {
+    // Same fail-loud rationale as src/agent/usage-accumulator.ts:76-81 and
+    // src/dashboard/jsonl-reader.ts:310-315 — a missing id is malformed
+    // (never observed in real Claude Code output); we accumulate so a single
+    // bad line never silently zeroes billable usage.
+    vi.useRealTimers();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { consume, flush } = createLaravelForwarder(STATUS_URL, API_TOKEN);
+
+    // Three entries, all missing messageId. Defensive: every usage still
+    // forwards (no dedup possible without a key). Warn fires once.
+    consume(makeAssistantEntry([{ type: "text", text: "A" }], SAMPLE_USAGE));
+    consume(makeAssistantEntry([{ type: "text", text: "B" }], SAMPLE_USAGE));
+    consume(makeAssistantEntry([{ type: "text", text: "C" }], SAMPLE_USAGE));
+    await flush();
+
+    const events = decodeBatch(postCalls()[0]);
+    const usageCarriers = events.filter(
+      (e) => e.data && (e.data as Record<string, unknown>).usage !== undefined,
+    );
+    expect(usageCarriers).toHaveLength(3);
+
+    const warnLines = errorSpy.mock.calls
+      .map((c) => c[0] as string)
+      .filter((line) => typeof line === "string" && line.includes('"level":"warn"'))
+      .filter((line) => line.includes("laravel-forwarder"))
+      .filter((line) => line.includes("usage but no message.id"));
+    expect(warnLines).toHaveLength(1);
+
+    errorSpy.mockRestore();
+    vi.useFakeTimers();
   });
 });
 

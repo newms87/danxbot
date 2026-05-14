@@ -325,6 +325,14 @@ export function createLaravelForwarder(
   const { queue, retryDelaysMs } = options;
   let batch: EventPayload[] = [];
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Dedup `message.usage` by `message.id` so the downstream Laravel app sees
+  // one UsageEvent per real API response — Claude Code splits multi-block
+  // assistant turns into one JSONL line per content block but stamps the
+  // identical response-level `message.usage` on every line. Without dedup,
+  // gpt-manager's per-turn token totals inflate 2-5× (prod commit d11b63d).
+  // Closure-local Set mirrors src/agent/usage-accumulator.ts + src/dashboard/jsonl-reader.ts.
+  const seenForwardedMessageIds = new Set<string>();
+  let warnedMissingMessageId = false;
 
   function putSessionId(sessionId: string): void {
     void authedFetch(
@@ -385,6 +393,36 @@ export function createLaravelForwarder(
     }, BATCH_TIMEOUT_MS);
   }
 
+  /**
+   * Strip `usage` from a duplicate assistant entry so the response-level
+   * payload forwards exactly once per real API response. Returns the entry
+   * unchanged when no dedup is required (non-assistant, no usage, first
+   * sighting of a messageId, or — defensively — a usage entry with no
+   * messageId at all).
+   */
+  function dedupUsageByMessageId(entry: AgentLogEntry): AgentLogEntry {
+    if (entry.type !== "assistant") return entry;
+    if (entry.data.usage === undefined) return entry;
+    const messageId = entry.data.messageId as string | undefined;
+    if (!messageId) {
+      if (!warnedMissingMessageId) {
+        warnedMissingMessageId = true;
+        log.warn(
+          "Assistant entry has usage but no message.id — accumulating defensively. If this is a new Claude Code release, the dedup contract may need updating.",
+        );
+      }
+      return entry;
+    }
+    if (seenForwardedMessageIds.has(messageId)) {
+      // Shallow clone with usage stripped — leaves the original entry intact
+      // for other watcher subscribers (e.g. usage-accumulator) that own their
+      // own dedup state.
+      return { ...entry, data: { ...entry.data, usage: undefined } };
+    }
+    seenForwardedMessageIds.add(messageId);
+    return entry;
+  }
+
   function consume(entry: AgentLogEntry): void {
     if (
       entry.type === "system" &&
@@ -394,7 +432,7 @@ export function createLaravelForwarder(
       putSessionId(entry.data.session_id as string);
     }
 
-    const events = mapEntryToEvents(entry);
+    const events = mapEntryToEvents(dedupUsageByMessageId(entry));
     if (events.length === 0) return;
 
     batch.push(...events);
