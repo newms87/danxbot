@@ -50,6 +50,7 @@ import {
   handleReRunEvaluator,
 } from "./agents-toggles.js";
 import { handlePutIssuePrefix } from "./agents-prefix.js";
+import { handlePatchEffortSettings } from "./agents-effort.js";
 import {
   handleDeleteAgent,
   handlePatchAgent,
@@ -341,6 +342,23 @@ async function route(
       req,
       res,
       decodeURIComponent(agentIssuePrefixMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // PATCH /api/agents/:repo/effort-settings — DX-510. Operator-driven
+  // effort-level table + assignment prompt mutation. Same auth band as
+  // the toggle route — handler's own `requireUser` produces the 401;
+  // dispatch token rejected.
+  const agentEffortSettingsMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/effort-settings$/,
+  );
+  if (method === "PATCH" && agentEffortSettingsMatch) {
+    await handlePatchEffortSettings(
+      req,
+      res,
+      decodeURIComponent(agentEffortSettingsMatch[1]),
       dispatchDeps,
     );
     return true;

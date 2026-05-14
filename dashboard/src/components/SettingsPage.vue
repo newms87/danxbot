@@ -9,6 +9,7 @@ import {
 import { useAgents } from "../composables/useAgents";
 import RepoCard from "./agents/RepoCard.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
+import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
 import type { Feature } from "../types";
 
 /**
@@ -170,6 +171,10 @@ function dismissResult(): void {
           :busy-feature="busyFeature"
           @toggle="onToggle"
           @refresh="onTrelloRefresh"
+        />
+        <EffortLevelsSection
+          :repo="activeRepoName"
+          :settings="activeAgent.settings"
         />
       </template>
 

@@ -7,6 +7,8 @@ import type {
   Dispatch,
   DispatchDetail,
   DispatchFilters,
+  EffortLevelMapping,
+  EffortLevelName,
   Feature,
   Issue,
   IssueDetail,
@@ -269,7 +271,14 @@ export interface AgentCreateInput {
   avatar_path?: string;
 }
 
-export type AgentUpdateInput = Partial<Omit<AgentCreateInput, "name">>;
+export type AgentUpdateInput = Partial<Omit<AgentCreateInput, "name">> & {
+  /**
+   * DX-510 — operator-tunable per-agent effort label. Validated server-
+   * side against the seven canonical names; `null` / absent preserves
+   * the existing value (reader defaults to `"medium"`).
+   */
+  effortLevel?: EffortLevelName;
+};
 
 async function readJsonError(res: Response): Promise<string | undefined> {
   try {
@@ -628,6 +637,36 @@ export async function putIssuePrefix(
     }
     throw toggleError(res.status, message);
   }
+  return res.json();
+}
+
+export interface EffortSettingsPatch {
+  effortLevels?: EffortLevelMapping[];
+  effortAssignmentPrompt?: string;
+}
+
+/**
+ * PATCH /api/agents/:repo/effort-settings — DX-510. Operator updates
+ * to the effort ladder + the per-agent assignment prompt. Body MUST
+ * carry at least one of `effortLevels` / `effortAssignmentPrompt`; the
+ * server validates the array length + canonical name order and returns
+ * the refreshed `AgentSnapshot` so the SPA can commit without a second
+ * fetch. SSE `agent:updated` is published on the same write so other
+ * tabs reconcile in real time.
+ */
+export async function patchEffortSettings(
+  repo: string,
+  patch: EffortSettingsPatch,
+): Promise<AgentSnapshot> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/effort-settings`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
   return res.json();
 }
 

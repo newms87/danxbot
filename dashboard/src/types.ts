@@ -53,6 +53,9 @@ export type {
   AgentStrikeEntry,
   AgentStrikeTerminalStatus,
   AgentStrikes,
+  EffortKnob,
+  EffortLevelMapping,
+  EffortLevelName,
   Feature,
   FeatureOverride,
   Settings,
@@ -62,6 +65,25 @@ export type {
   SettingsDisplayWorker,
   SettingsMeta,
 } from "@backend/settings-file.js";
+
+/**
+ * Effort-level canonical name list, redeclared here so the Vue layer
+ * doesn't pull the backend module into its runtime bundle. Stays in
+ * lockstep with `EFFORT_LEVEL_NAMES` in `src/settings-file.ts` —
+ * adding a row is a two-file edit. The order is the ladder rendered
+ * by `EffortLevelsSection.vue` and the dropdown in `AgentCard.vue`.
+ */
+export const EFFORT_LEVEL_NAMES = [
+  "min",
+  "very_low",
+  "low",
+  "medium",
+  "high",
+  "very_high",
+  "max",
+] as const;
+
+export const DEFAULT_AGENT_EFFORT_LEVEL = "medium" as const;
 export type {
   AgentRosterEntry,
   AgentRosterResponse,

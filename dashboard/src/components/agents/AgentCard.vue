@@ -10,7 +10,15 @@
  * animates without a roster re-fetch.
  */
 import { computed } from "vue";
-import type { AgentBusyOn, AgentRosterEntry } from "../../types";
+import type {
+  AgentBusyOn,
+  AgentRosterEntry,
+  EffortLevelName,
+} from "../../types";
+import {
+  DEFAULT_AGENT_EFFORT_LEVEL,
+  EFFORT_LEVEL_NAMES,
+} from "../../types";
 import AgentAvatar from "./AgentAvatar.vue";
 import { useNowTick } from "../../composables/useNowTick";
 
@@ -22,7 +30,29 @@ const emit = defineEmits<{
   edit: [AgentRosterEntry];
   delete: [AgentRosterEntry];
   resolve: [AgentRosterEntry];
+  /**
+   * DX-510 — operator picked a new effort level for this agent. Parent
+   * owns the PATCH so optimistic state lives next to the roster.
+   */
+  effort: [agent: AgentRosterEntry, level: EffortLevelName];
 }>();
+
+// DX-510 — current effort label. `null` / undefined on the record means
+// the operator never picked one; the reader defaults to `"medium"`. We
+// surface that via the dropdown's bound value but render a `(default)`
+// suffix so the operator can tell a literal choice from the fallback.
+const effortLevel = computed<EffortLevelName>(
+  () => props.agent.effortLevel ?? DEFAULT_AGENT_EFFORT_LEVEL,
+);
+const effortIsDefault = computed<boolean>(
+  () => props.agent.effortLevel === undefined || props.agent.effortLevel === null,
+);
+const EFFORT_OPTIONS = EFFORT_LEVEL_NAMES;
+
+function onEffortChange(event: Event): void {
+  const target = event.target as HTMLSelectElement;
+  emit("effort", props.agent, target.value as EffortLevelName);
+}
 
 // DX-298 — broken-agent banner. The worker stamps `broken` via the
 // prep verdict route when an agent's worktree is in a bad state that
@@ -167,6 +197,24 @@ const brokenSetLabel = computed<string>(() => {
       >{{ cap }}</span>
     </div>
     <div class="schedule">{{ scheduleSummary }}</div>
+    <label
+      class="effort"
+      :data-test="`agent-effort-${agent.name}`"
+    >
+      <span class="effort-label">Effort</span>
+      <select
+        class="effort-select"
+        :value="effortLevel"
+        :data-test="`agent-effort-select-${agent.name}`"
+        @change="onEffortChange"
+      >
+        <option
+          v-for="name in EFFORT_OPTIONS"
+          :key="name"
+          :value="name"
+        >{{ name }}{{ effortIsDefault && name === effortLevel ? " (default)" : "" }}</option>
+      </select>
+    </label>
     <p class="bio">{{ agent.bio }}</p>
     <footer class="actions">
       <button
@@ -344,6 +392,34 @@ const brokenSetLabel = computed<string>(() => {
   font-size: 12px;
   color: #94a3b8;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.effort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.effort-label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+  color: #94a3b8;
+}
+.effort-select {
+  flex: 1;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #1e293b;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.effort-select:focus {
+  outline: 2px solid #60a5fa;
+  outline-offset: 1px;
 }
 .bio {
   margin: 0;

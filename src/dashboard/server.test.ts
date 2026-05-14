@@ -94,6 +94,11 @@ vi.mock("./agents-prefix.js", () => ({
   handlePutIssuePrefix: (...args: unknown[]) =>
     mockHandlePutIssuePrefix(...args),
 }));
+const mockHandlePatchEffortSettings = vi.fn();
+vi.mock("./agents-effort.js", () => ({
+  handlePatchEffortSettings: (...args: unknown[]) =>
+    mockHandlePatchEffortSettings(...args),
+}));
 vi.mock("./agents-crud.js", () => ({
   handleDeleteAgent: (...args: unknown[]) => mockHandleDeleteAgent(...args),
   handlePatchAgent: (...args: unknown[]) => mockHandlePatchAgent(...args),
@@ -240,6 +245,7 @@ describe("dashboard server", () => {
     mockHandlePatchToggle.mockReset();
     mockHandleClearAgentCriticalFailure.mockReset();
     mockHandlePutIssuePrefix.mockReset();
+    mockHandlePatchEffortSettings.mockReset();
     mockHandlePostAgent.mockReset();
     mockHandlePatchAgent.mockReset();
     mockHandleDeleteAgent.mockReset();
@@ -490,6 +496,25 @@ describe("dashboard server", () => {
       expect(mockHandlePatchAgent).toHaveBeenCalledTimes(1);
       expect(mockHandlePatchAgent.mock.calls[0][2]).toBe("danxbot");
       expect(mockHandlePatchAgent.mock.calls[0][3]).toBe("alice");
+    });
+
+    it("DX-510 — PATCH /api/agents/:repo/effort-settings dispatches to handlePatchEffortSettings (and NOT the broad :name PATCH route)", async () => {
+      mockHandlePatchEffortSettings.mockImplementation(
+        async (_req: http.IncomingMessage, res: http.ServerResponse) => {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end("{}");
+        },
+      );
+      const { req, res } = createMockReqRes(
+        "PATCH",
+        "/api/agents/danxbot/effort-settings",
+      );
+      await requestHandler(req, res);
+      expect(mockHandlePatchEffortSettings).toHaveBeenCalledTimes(1);
+      expect(mockHandlePatchEffortSettings.mock.calls[0][2]).toBe("danxbot");
+      // The broader /api/agents/:name PATCH MUST NOT swallow this — the
+      // effort-settings handler authenticates and validates differently.
+      expect(mockHandlePatchAgent).not.toHaveBeenCalled();
     });
 
     it("DELETE /api/agents/:name dispatches to handleDeleteAgent", async () => {

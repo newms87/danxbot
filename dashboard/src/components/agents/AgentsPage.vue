@@ -15,6 +15,7 @@ import type {
   AgentRosterEntry,
   AgentRosterResponse,
   AgentSchedule,
+  EffortLevelName,
   RepoInfo,
 } from "../../types";
 import { useStream } from "../../composables/useStream";
@@ -281,6 +282,52 @@ function askResolve(agent: AgentRosterEntry): void {
   resolveTarget.value = agent;
 }
 
+// DX-510 — effort dropdown change. Optimistic update so the dropdown
+// reflects the operator's pick before the round-trip; SSE
+// `agent:updated` from the server reconciles via `loadRoster` shortly
+// after. On failure we roll back to the prior value and surface the
+// server's error in the top-of-page banner (same pattern as the toggle
+// rollback in `useAgents`).
+async function onEffortChange(
+  agent: AgentRosterEntry,
+  level: EffortLevelName,
+): Promise<void> {
+  const idx = roster.value.findIndex((a) => a.name === agent.name);
+  if (idx === -1) return;
+  const previous = roster.value[idx].effortLevel;
+  roster.value = [
+    ...roster.value.slice(0, idx),
+    { ...roster.value[idx], effortLevel: level },
+    ...roster.value.slice(idx + 1),
+  ];
+  try {
+    const saved = await updateAgent(activeRepoName.value, agent.name, {
+      effortLevel: level,
+    });
+    const nextIdx = roster.value.findIndex((a) => a.name === saved.name);
+    if (nextIdx !== -1) {
+      roster.value = [
+        ...roster.value.slice(0, nextIdx),
+        { ...roster.value[nextIdx], ...saved },
+        ...roster.value.slice(nextIdx + 1),
+      ];
+    }
+    error.value = null;
+  } catch (err) {
+    const rollIdx = roster.value.findIndex((a) => a.name === agent.name);
+    if (rollIdx !== -1) {
+      roster.value = [
+        ...roster.value.slice(0, rollIdx),
+        { ...roster.value[rollIdx], effortLevel: previous },
+        ...roster.value.slice(rollIdx + 1),
+      ];
+    }
+    const te = err as ToggleError;
+    error.value =
+      te?.serverMessage ?? te?.message ?? "Save effort level failed.";
+  }
+}
+
 function cancelResolve(): void {
   resolveTarget.value = null;
   resolveError.value = null;
@@ -406,6 +453,7 @@ async function confirmResolve(): Promise<void> {
         @edit="openEdit"
         @delete="askDelete"
         @resolve="askResolve"
+        @effort="onEffortChange"
       />
     </div>
 

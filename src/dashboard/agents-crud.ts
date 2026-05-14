@@ -260,6 +260,12 @@ export async function handlePatchAgent(
           schedule: f.schedule ?? record.schedule,
           enabled: f.enabled ?? record.enabled,
           broken: f.broken === null ? null : record.broken,
+          // DX-510 — preserve operator-set level when the patch omits it.
+          // Absent on the record (unset → reader serves "medium" default)
+          // stays undefined; explicit patch lands the new label.
+          ...(f.effortLevel !== undefined
+            ? { effortLevel: f.effortLevel }
+            : {}),
           updated_at: new Date().toISOString(),
         };
         current[agentName] = updated;

@@ -632,6 +632,102 @@ describe("handlePatchAgent", () => {
       expect(event.topic).toBe("agent:updated");
     });
   });
+
+  // DX-510 — per-agent effort level. Operator-tunable knob on each
+  // agent that resolves to {model, effort} flags via the shared
+  // `effortLevels` table at dispatch time.
+  describe("DX-510 — effortLevel patch path", () => {
+    it("accepts effortLevel: 'high' and persists it on the agent record", async () => {
+      const req = authReqJSON("PATCH", { effortLevel: "high" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.effortLevel).toBe("high");
+      const [, patch] = mockWriteSettings.mock.calls[0];
+      expect(patch.agents.alice.effortLevel).toBe("high");
+    });
+
+    it("accepts every canonical effort level name", async () => {
+      const names = [
+        "min",
+        "very_low",
+        "low",
+        "medium",
+        "high",
+        "very_high",
+        "max",
+      ];
+      for (const name of names) {
+        vi.clearAllMocks();
+        mockReadSettings.mockReturnValue(
+          settingsWithAgents({ alice: validAgentRecord() }),
+        );
+        mockWriteSettings.mockResolvedValue(undefined);
+        const req = authReqJSON("PATCH", { effortLevel: name });
+        const res = createMockRes();
+        await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+        expect(res._getStatusCode()).toBe(200);
+        const body = JSON.parse(res._getBody());
+        expect(body.effortLevel).toBe(name);
+      }
+    });
+
+    it("returns 400 when effortLevel is not one of the canonical names", async () => {
+      const req = authReqJSON("PATCH", { effortLevel: "extreme" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(JSON.parse(res._getBody()).errors.join(" ")).toMatch(/effortLevel/);
+      expect(mockWriteSettings).not.toHaveBeenCalled();
+    });
+
+    it("returns 400 when effortLevel is not a string", async () => {
+      const req = authReqJSON("PATCH", { effortLevel: 3 });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(400);
+      expect(mockWriteSettings).not.toHaveBeenCalled();
+    });
+
+    it("bumps updated_at even when effortLevel is the only field in the patch", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({
+          alice: validAgentRecord(),
+        }),
+      );
+      const req = authReqJSON("PATCH", { effortLevel: "low" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.effortLevel).toBe("low");
+      expect(body.updated_at).not.toBe("2026-05-08T12:00:00Z");
+      expect(body.created_at).toBe("2026-05-08T12:00:00Z");
+    });
+
+    it("preserves prior effortLevel when patch omits the field", async () => {
+      mockReadSettings.mockReturnValue(
+        settingsWithAgents({
+          alice: {
+            ...validAgentRecord(),
+            effortLevel: "high",
+          },
+        }),
+      );
+      const req = authReqJSON("PATCH", { bio: "untouched-effort-level" });
+      const res = createMockRes();
+      await handlePatchAgent(req, res, "danxbot", "alice", tmpDeps());
+
+      expect(res._getStatusCode()).toBe(200);
+      const body = JSON.parse(res._getBody());
+      expect(body.effortLevel).toBe("high");
+    });
+  });
 });
 
 // ============================================================

@@ -12,10 +12,12 @@
 
 import {
   AGENT_CAPABILITIES,
+  EFFORT_LEVEL_NAMES,
   SCHEDULE_WINDOW_SHAPE,
   isValidIanaTimeZone,
   type AgentCapability,
   type AgentSchedule,
+  type EffortLevelName,
 } from "../settings-file.js";
 
 /**
@@ -39,6 +41,13 @@ export interface AgentValidationFields {
    * caller wants to clear; absence means leave unchanged.
    */
   broken?: null;
+  /**
+   * DX-510 — operator-tunable effort label that resolves to
+   * `{model, effort}` flags via the shared `effortLevels` table at
+   * dispatch time. Validated against `EFFORT_LEVEL_NAMES`; absence means
+   * the prior value (or the built-in default of `"medium"`) is preserved.
+   */
+  effortLevel?: EffortLevelName;
 }
 
 export function validateAgentFields(
@@ -123,6 +132,24 @@ export function validateAgentFields(
       );
     } else {
       fields.broken = null;
+    }
+  }
+
+  // DX-510 — per-agent effort level. Accepts any canonical name; absence
+  // preserves the existing value. POST does NOT require this — agents
+  // created without one default to "medium" via the reader's fallback.
+  if (has("effortLevel")) {
+    const value = body.effortLevel;
+    if (typeof value !== "string") {
+      errors.push("effortLevel must be a string");
+    } else if (
+      !(EFFORT_LEVEL_NAMES as readonly string[]).includes(value)
+    ) {
+      errors.push(
+        `effortLevel must be one of: ${EFFORT_LEVEL_NAMES.join(", ")}`,
+      );
+    } else {
+      fields.effortLevel = value as EffortLevelName;
     }
   }
 
