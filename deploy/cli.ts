@@ -38,6 +38,7 @@ import { syncRepos, runBootstrapScripts } from "./bootstrap-repos.js";
 import { clearCachedOutputs, writeCachedOutputs } from "./output-cache.js";
 import { resolveOutputs } from "./outputs-resolver.js";
 import { launchWorkers } from "./workers.js";
+import { provisionSfcDepsOnHost } from "./provision-sfc-deps-hook.js";
 import {
   pruneStaleDockerImages,
   uploadAndRestartInfra,
@@ -277,6 +278,20 @@ async function deploy(config: DeployConfig, target: string): Promise<void> {
     workerImage: ecrImage,
     claudeAuthDir: "/danxbot/claude-auth",
   });
+
+  // DX-540 — materialize /srv/sfc-deps/<v>/node_modules/ on the
+  // remote host so the DX-539 template-build endpoint can resolve
+  // its `deps_missing` gate against real provisioned deps. Idempotent
+  // and a no-op when no manifest source is configured. Wrapped in a
+  // try so a transient provisioning failure does not break the
+  // deploy — the hourly cron job catches up on the next tick.
+  try {
+    provisionSfcDepsOnHost(remote, { dryRun: isDryRun() });
+  } catch (err) {
+    console.log(
+      `  WARN: provision-sfc-deps hook failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 
   // Health
   const health = await waitForHealthy(`https://${config.domain}`);

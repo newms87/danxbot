@@ -13,5 +13,11 @@
 
 import type { CronJob } from "../types.js";
 import { reapOrphanDispatches } from "./reap-orphan-dispatches.js";
+import { provisionSfcDepsJob } from "./provision-sfc-deps.js";
+import { pruneSfcDepsJob } from "./prune-sfc-deps.js";
 
-export const jobs: CronJob[] = [reapOrphanDispatches];
+export const jobs: CronJob[] = [
+  reapOrphanDispatches,
+  provisionSfcDepsJob,
+  pruneSfcDepsJob,
+];
