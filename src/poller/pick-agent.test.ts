@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildReconcileTaskBody,
   findOwnedCard,
-  OwnedCardInvariantError,
   pickCardForAgent,
   pickFreeAgent,
 } from "./pick-agent.js";
@@ -312,31 +312,31 @@ describe("pickCardForAgent", () => {
 // findOwnedCard (DX-360) — resume-existing-card pre-check.
 // ============================================================
 describe("findOwnedCard", () => {
-  it("returns null when the agent owns no open card", () => {
+  it("returns kind=none when the agent owns no open card", () => {
     const open = [
       issue("DX-1", { assigned_agent: "bob" }),
       issue("DX-2", { assigned_agent: null }),
     ];
-    expect(findOwnedCard("alice", open)).toBeNull();
+    expect(findOwnedCard("alice", open)).toEqual({ kind: "none" });
   });
 
-  it("returns the agent's open card regardless of status (ToDo)", () => {
+  it("returns kind=single for the agent's open card regardless of status (ToDo)", () => {
     const open = [issue("DX-1", { assigned_agent: "alice", status: "ToDo" })];
     const out = findOwnedCard("alice", open);
-    expect(out?.id).toBe("DX-1");
+    expect(out.kind).toBe("single");
+    if (out.kind === "single") expect(out.card.id).toBe("DX-1");
   });
 
-  it("returns the agent's open card when status is In Progress", () => {
+  it("returns kind=single when status is In Progress", () => {
     const open = [
       issue("DX-1", { assigned_agent: "alice", status: "In Progress" }),
     ];
     const out = findOwnedCard("alice", open);
-    expect(out?.id).toBe("DX-1");
+    expect(out.kind).toBe("single");
+    if (out.kind === "single") expect(out.card.id).toBe("DX-1");
   });
 
-  it("returns the agent's open card when status is Blocked", () => {
-    // Agent gets dispatched to its OWN blocked card — agent decides
-    // whether to clear the block or hand off properly.
+  it("returns kind=single when status is Blocked", () => {
     const open = [
       issue("DX-1", {
         assigned_agent: "alice",
@@ -345,66 +345,163 @@ describe("findOwnedCard", () => {
       }),
     ];
     const out = findOwnedCard("alice", open);
-    expect(out?.id).toBe("DX-1");
+    expect(out.kind).toBe("single");
+    if (out.kind === "single") expect(out.card.id).toBe("DX-1");
   });
 
-  it("returns the agent's open card when status is Review", () => {
+  it("returns kind=single when status is Review", () => {
     const open = [
       issue("DX-1", { assigned_agent: "alice", status: "Review" }),
     ];
     const out = findOwnedCard("alice", open);
-    expect(out?.id).toBe("DX-1");
+    expect(out.kind).toBe("single");
+    if (out.kind === "single") expect(out.card.id).toBe("DX-1");
   });
 
-  it("ignores cards in terminal status (Done / Cancelled) — those are audit history only", () => {
-    // Closed-dir cards aren't expected in `openIssues`, but defense-in-
-    // depth: if a Done card with assigned_agent ever leaks into the
-    // input, findOwnedCard does NOT treat it as the agent's current
-    // assignment.
+  it("ignores cards in terminal status (Done / Cancelled) — audit only", () => {
     const open = [
       issue("DX-1", { assigned_agent: "alice", status: "Done" }),
       issue("DX-2", { assigned_agent: "alice", status: "Cancelled" }),
     ];
-    expect(findOwnedCard("alice", open)).toBeNull();
+    expect(findOwnedCard("alice", open)).toEqual({ kind: "none" });
   });
 
-  it("returns null when nothing in the input names the agent", () => {
+  it("returns kind=none when nothing names the agent", () => {
     const open = [
       issue("DX-1", { assigned_agent: "bob", status: "In Progress" }),
       issue("DX-2", { assigned_agent: null, status: "ToDo" }),
     ];
-    expect(findOwnedCard("alice", open)).toBeNull();
+    expect(findOwnedCard("alice", open)).toEqual({ kind: "none" });
   });
 
-  it("throws OwnedCardInvariantError when the agent owns 2+ open cards", () => {
-    const open = [
-      issue("DX-1", { assigned_agent: "alice", status: "In Progress" }),
-      issue("DX-2", { assigned_agent: "alice", status: "ToDo" }),
-    ];
-    let caught: unknown;
-    try {
-      findOwnedCard("alice", open);
-    } catch (err) {
-      caught = err;
+  // DX-501 — replaces the pre-DX-501 OwnedCardInvariantError throw.
+  it("returns kind=duplicates when the agent owns 2+ open cards", () => {
+    const a = issue("DX-1", { assigned_agent: "alice", status: "In Progress" });
+    const b = issue("DX-2", { assigned_agent: "alice", status: "ToDo" });
+    const out = findOwnedCard("alice", [a, b]);
+    expect(out.kind).toBe("duplicates");
+    if (out.kind === "duplicates") {
+      expect(out.cards.map((c) => c.id)).toEqual(["DX-1", "DX-2"]);
     }
-    expect(caught).toBeInstanceOf(OwnedCardInvariantError);
-    const e = caught as OwnedCardInvariantError;
-    expect(e.agentName).toBe("alice");
-    expect(e.cardIds).toEqual(["DX-1", "DX-2"]);
   });
 
-  it("Done + open mixed → only counts open as conflicting (does NOT throw)", () => {
-    // Closed cards carry assigned_agent forever as durable audit. They
-    // must NOT inflate the open-card count.
+  it("preserves input order in kind=duplicates.cards", () => {
+    const second = issue("DX-2", {
+      assigned_agent: "alice",
+      status: "In Progress",
+    });
+    const first = issue("DX-1", {
+      assigned_agent: "alice",
+      status: "ToDo",
+    });
+    const out = findOwnedCard("alice", [second, first]);
+    expect(out.kind).toBe("duplicates");
+    if (out.kind === "duplicates") {
+      expect(out.cards.map((c) => c.id)).toEqual(["DX-2", "DX-1"]);
+    }
+  });
+
+  it("Done + open mixed → counts only open, returns kind=single", () => {
     const open = [
       issue("DX-1", { assigned_agent: "alice", status: "Done" }),
       issue("DX-2", { assigned_agent: "alice", status: "In Progress" }),
     ];
     const out = findOwnedCard("alice", open);
-    expect(out?.id).toBe("DX-2");
+    expect(out.kind).toBe("single");
+    if (out.kind === "single") expect(out.card.id).toBe("DX-2");
   });
 
-  it("empty open list → null (no roster, no work)", () => {
-    expect(findOwnedCard("alice", [])).toBeNull();
+  it("empty open list → kind=none", () => {
+    expect(findOwnedCard("alice", [])).toEqual({ kind: "none" });
+  });
+});
+
+// ============================================================
+// buildReconcileTaskBody (DX-501) — pure prompt builder.
+// ============================================================
+describe("buildReconcileTaskBody", () => {
+  it("enumerates every owned card by id, title, and status", () => {
+    const cards = [
+      issue("DX-351", {
+        title: "Phase 4 reconcile coverage",
+        status: "In Progress",
+        assigned_agent: "murphy",
+      }),
+      issue("DX-354", {
+        title: "Phase 7 ideator stub",
+        status: "ToDo",
+        assigned_agent: "murphy",
+      }),
+    ];
+    const body = buildReconcileTaskBody("murphy", cards);
+
+    expect(body).toContain("You are murphy.");
+    expect(body).toContain("2 open cards");
+    expect(body).toContain("DX-351");
+    expect(body).toContain("DX-354");
+    expect(body).toContain("Phase 4 reconcile coverage");
+    expect(body).toContain("Phase 7 ideator stub");
+    expect(body).toContain("status: In Progress");
+    expect(body).toContain("status: ToDo");
+  });
+
+  it("instructs the agent to invoke /danx-next on the retained card", () => {
+    const body = buildReconcileTaskBody("dani", [
+      issue("DX-1", { assigned_agent: "dani" }),
+      issue("DX-2", { assigned_agent: "dani" }),
+    ]);
+    expect(body).toMatch(/\/danx-next <retained-id>/);
+    expect(body).toContain("assigned_agent: null");
+  });
+
+  it("warns about waiting_on / requires_human / Blocked gates on the retained card (DX-501 review)", () => {
+    const body = buildReconcileTaskBody("dani", [
+      issue("DX-1", { assigned_agent: "dani" }),
+      issue("DX-2", { assigned_agent: "dani" }),
+    ]);
+    expect(body).toMatch(/waiting_on/);
+    expect(body).toMatch(/requires_human/);
+    expect(body).toMatch(/Blocked/);
+  });
+
+  it("specifies structured comments[] shape rather than raw text append (DX-501 review)", () => {
+    const body = buildReconcileTaskBody("dani", [
+      issue("DX-1", { assigned_agent: "dani" }),
+      issue("DX-2", { assigned_agent: "dani" }),
+    ]);
+    // Reviewer flagged the original wording "append a one-line comment"
+    // as ambiguous against the comments[] schema. New body MUST name
+    // the {author, timestamp, text} fields explicitly.
+    expect(body).toMatch(/author/);
+    expect(body).toMatch(/timestamp/);
+    expect(body).toMatch(/text/);
+  });
+
+  it("includes the first description line as a hint when present", () => {
+    const body = buildReconcileTaskBody("murphy", [
+      issue("DX-1", {
+        assigned_agent: "murphy",
+        description: "Fix the picker reconcile branch\n\nMore detail here.",
+      }),
+    ]);
+    expect(body).toContain("Fix the picker reconcile branch");
+  });
+
+  it("omits the hint line when description is empty", () => {
+    const body = buildReconcileTaskBody("murphy", [
+      issue("DX-1", { assigned_agent: "murphy", description: "" }),
+    ]);
+    expect(body).not.toContain("hint:");
+  });
+
+  it("preserves the order of ownedCards in the enumeration", () => {
+    const body = buildReconcileTaskBody("murphy", [
+      issue("DX-9", { assigned_agent: "murphy", title: "Second" }),
+      issue("DX-1", { assigned_agent: "murphy", title: "First" }),
+    ]);
+    const ixSecond = body.indexOf("DX-9");
+    const ixFirst = body.indexOf("DX-1");
+    expect(ixSecond).toBeGreaterThan(-1);
+    expect(ixFirst).toBeGreaterThan(ixSecond);
   });
 });

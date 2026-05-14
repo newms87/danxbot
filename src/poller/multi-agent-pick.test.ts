@@ -900,23 +900,20 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.agent!.name).toBe("murphy");
   });
 
-  // DX-360 invariant: an agent owns AT MOST ONE non-terminal card.
-  // When the picker observes two open cards both stamped with the same
-  // `assigned_agent`, it cannot guess which one to resume — that is a
-  // data invariant violation. The picker logs + skips the agent this
-  // tick (no destructive clear) so an operator can manually resolve
-  // the duplicate stamp. Replaces the pre-DX-360 "durable audit allows
-  // multi-claim" behavior, which produced exactly the assign-new-card-
-  // while-prior-incomplete bug DX-360 closes.
-  it("skips the agent + dispatches nothing when two open cards share assigned_agent (DX-360 invariant violation)", async () => {
+  // DX-501 — replaces the pre-DX-501 "skip + manual operator clear" path.
+  // Duplicate `assigned_agent` ownership is fully resolvable from inside a
+  // dispatched session, so the picker dispatches a reconcile task body
+  // enumerating every stamped card. The agent decides which one to keep
+  // and releases the rest in-session.
+  it("dispatches a reconcile task body when two open cards share assigned_agent (DX-501)", async () => {
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
       job: {} as never,
     });
 
-    const a = issue("DX-1", { assigned_agent: "dani" });
-    const b = issue("DX-2", { assigned_agent: "dani" });
+    const a = issue("DX-1", { assigned_agent: "dani", title: "First card" });
+    const b = issue("DX-2", { assigned_agent: "dani", title: "Second card" });
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [a, b],
@@ -925,9 +922,194 @@ describe("tryMultiAgentDispatch", () => {
       now: NOW,
     });
 
-    expect(clearDispatchAndWrite).not.toHaveBeenCalled();
-    expect(result.dispatched).toBe(0);
-    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    // Reconcile target is the first duplicate (preserved order).
+    expect(dispatchInput.issueId).toBe("DX-1");
+    expect(dispatchInput.agent!.name).toBe("dani");
+    // Task body enumerates BOTH card ids and explicitly tells the agent
+    // to release extra stamps + call /danx-next on the retained card.
+    expect(dispatchInput.task).toContain("DX-1");
+    expect(dispatchInput.task).toContain("DX-2");
+    expect(dispatchInput.task).toContain("First card");
+    expect(dispatchInput.task).toContain("Second card");
+    expect(dispatchInput.task).toMatch(/Reconcile/);
+    expect(dispatchInput.task).toMatch(/\/danx-next <retained-id>/);
+    expect(dispatchInput.task).toContain("assigned_agent: null");
+    // No prep leg on reconcile dispatches.
+    expect(dispatchInput.task).not.toContain("/danx-prep");
+    // Reconcile is a fresh decision — never carries a resume session.
+    expect(dispatchInput.resumeSessionId).toBeUndefined();
+    // Reconcile always runs as `work` kind so the prep-verdict route
+    // does not gate the dispatch on a verdict that never comes.
+    expect(dispatchInput.dispatchKind).toBe("work");
+  });
+
+  it("reconcile dispatch skips the post-dispatch card-progress check (DX-501)", async () => {
+    writeSettings({ dani: agentRecord("dani") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const a = issue("DX-1", { assigned_agent: "dani" });
+    const b = issue("DX-2", { assigned_agent: "dani" });
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [a, b],
+      openIssues: [a, b],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    // Fire the onComplete the dispatch() mock would have called. The
+    // reconcile branch MUST suppress the progress check because the
+    // dispatch-target card may legitimately be the one the agent
+    // releases.
+    const onComplete = mockedDispatchWithRecovery.mock.calls[0][0].onComplete!;
+    await onComplete({
+      id: "did",
+      status: "completed",
+      summary: "reconcile done",
+    } as never);
+
+    expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
+  });
+
+  it("reconcile picks the In Progress duplicate as the dispatch target over a ToDo sibling (DX-501)", async () => {
+    writeSettings({ dani: agentRecord("dani") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const todoFirst = issue("DX-1", {
+      assigned_agent: "dani",
+      status: "ToDo",
+    });
+    const inProgressSecond = issue("DX-2", {
+      assigned_agent: "dani",
+      status: "In Progress",
+    });
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [todoFirst],
+      openIssues: [todoFirst, inProgressSecond],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    // DX-2 is picked despite being second in openIssues — In Progress
+    // outranks ToDo in the reconcile target selector.
+    expect(dispatchInput.issueId).toBe("DX-2");
+    // Enumeration still shows BOTH cards.
+    expect(dispatchInput.task).toContain("DX-1");
+    expect(dispatchInput.task).toContain("DX-2");
+  });
+
+  it("reconcile dispatch failure quarantines the agent but NOT the dispatch-target card (DX-501)", async () => {
+    writeSettings({ dani: agentRecord("dani") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+    const { isCardQuarantined, isAgentQuarantined } = await import(
+      "../dispatch/quarantine.js"
+    );
+
+    const a = issue("DX-1", { assigned_agent: "dani" });
+    const b = issue("DX-2", { assigned_agent: "dani" });
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [a, b],
+      openIssues: [a, b],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    const onComplete = mockedDispatchWithRecovery.mock.calls[0][0].onComplete!;
+    await onComplete({
+      id: "did",
+      status: "failed",
+      summary: "reconcile blew up",
+    } as never);
+
+    expect(
+      isAgentQuarantined({
+        repoName: "danxbot",
+        agentName: "dani",
+        now: NOW.getTime(),
+      }),
+    ).toBe(true);
+    // Dispatch target was DX-1 (first by reconcile target rank — both ToDo,
+    // tie → input order). The card MUST NOT be quarantined: reconcile
+    // targets are arbitrary, and quarantining one of the duplicates
+    // would block the next reconcile retry from hanging the dispatch
+    // row on the same YAML.
+    expect(
+      isCardQuarantined({
+        repoName: "danxbot",
+        cardId: "DX-1",
+        now: NOW.getTime(),
+      }),
+    ).toBe(false);
+    expect(
+      isCardQuarantined({
+        repoName: "danxbot",
+        cardId: "DX-2",
+        now: NOW.getTime(),
+      }),
+    ).toBe(false);
+  });
+
+  it("reconcile path does not corrupt remainingCards when target is not in dispatchable list (DX-501)", async () => {
+    // Regression test for the splice-poison class — owned.cards[0] may
+    // be In Progress (filtered out of `cards`). A naive
+    // `splice(remainingCards.indexOf(target), 1)` would chop the wrong
+    // card. We assert the OTHER agent still gets their fresh ToDo.
+    writeSettings({
+      dani: agentRecord("dani"),
+      phil: agentRecord("phil"),
+    });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const daniInProgress = issue("DX-1", {
+      assigned_agent: "dani",
+      status: "In Progress",
+    });
+    const daniTodo = issue("DX-2", {
+      assigned_agent: "dani",
+      status: "ToDo",
+    });
+    // phil's only candidate — must survive dani's reconcile splice.
+    const philTodo = issue("DX-9", {
+      assigned_agent: null,
+      status: "ToDo",
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      // `cards` excludes In Progress (listDispatchableYamls filter).
+      cards: [daniTodo, philTodo],
+      openIssues: [daniInProgress, daniTodo, philTodo],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(2);
+    const targets = mockedDispatchWithRecovery.mock.calls.map(
+      ([input]) => input.issueId,
+    );
+    // dani reconciles onto DX-1 (In Progress > ToDo by rank).
+    // phil gets DX-9. DX-2 stays untouched on this tick (dani owns it
+    // but is now busy after the reconcile dispatch).
+    expect(targets).toContain("DX-1");
+    expect(targets).toContain("DX-9");
   });
 
   // ============================================================

@@ -188,50 +188,116 @@ export function pickCardForAgent(input: PickCardForAgentInput): Issue | null {
  * payload signals the resume by passing `resumeSessionId` so the agent
  * has full prior context.
  *
- * Throws `OwnedCardInvariantError` when more than one non-terminal
- * card carries the same `assigned_agent`. This is a hard data
- * invariant — the writer of the second stamp violated it and the
- * picker cannot guess which card to resume. Caller catches + heals by
- * skipping the agent this tick + logging both card ids so an operator
- * can manually clear one stamp.
+ * DX-501: duplicate ownership (>1 open card stamped to the same
+ * agent) returns `{kind: "duplicates", cards}` instead of throwing.
+ * The picker dispatches a reconcile task body so the agent self-heals.
  */
-export class OwnedCardInvariantError extends Error {
-  constructor(
-    public readonly agentName: string,
-    public readonly cardIds: string[],
-  ) {
-    super(
-      `agent ${agentName} owns ${cardIds.length} open cards: ${cardIds.join(", ")} — invariant requires <=1`,
-    );
-    this.name = "OwnedCardInvariantError";
-  }
-}
 
 /**
- * Return the agent's single open card (Status ∉ {Done, Cancelled}) or
- * null when the agent has no open assignment. Throws
- * `OwnedCardInvariantError` on duplicate ownership.
+ * Discriminated result of `findOwnedCard` (DX-501 — replaces the prior
+ * throw-on-duplicate control flow). Callers branch on `kind`:
  *
- * `openIssues` is expected to be every non-terminal issue YAML for the
- * repo (the caller passes `listOpenYamls(repoLocalPath, prefix)`).
+ *   - `"none"`     — agent owns no open card; picker offers a fresh ToDo.
+ *   - `"single"`   — agent owns exactly one open card; picker resumes it.
+ *   - `"duplicates"` — agent owns 2+ open cards; picker dispatches a
+ *     **reconcile** task body so the agent itself releases the extra
+ *     stamps in-session. See `buildReconcileTaskBody` below.
+ */
+export type FindOwnedCardResult =
+  | { kind: "none" }
+  | { kind: "single"; card: Issue }
+  | { kind: "duplicates"; cards: readonly Issue[] };
+
+/**
+ * Resolve the agent's open-card ownership state. Returns a discriminated
+ * result the caller switches on — never throws.
+ *
+ * Status filter: only non-terminal cards count. Closed-dir cards carry
+ * `assigned_agent` forever as durable audit; treating them as live
+ * ownership would prevent every agent from ever picking up new work
+ * once it shipped its first card.
+ *
+ * Order preserved: `duplicates.cards` matches `openIssues` order. Caller
+ * uses it for the reconcile prompt enumeration and as the heuristic
+ * tiebreak when picking a dispatch target.
+ *
  * Pure — no DB queries, no filesystem reads.
+ *
+ * DX-501: pre-DX-501 this function threw `OwnedCardInvariantError` on
+ * duplicate ownership and the picker caught + skipped the agent for the
+ * tick. That state is fully self-healable — the agent has every card's
+ * description, recent comments, and worktree context — so the picker
+ * now dispatches a reconcile task body instead of punting to operator
+ * intervention. The error class is gone; control flow lives in the
+ * return value. A future "defensive invariant throw for picker-internal
+ * dup creation mid-tick" was considered (see DX-501 AC #6) and rejected
+ * — adding a throw the picker never catches would re-introduce the
+ * exact escape hatch this card removed.
  */
 export function findOwnedCard(
   agentName: string,
   openIssues: readonly Issue[],
-): Issue | null {
+): FindOwnedCardResult {
   const owned = openIssues.filter(
     (i) =>
       i.assigned_agent === agentName &&
       i.status !== "Done" &&
       i.status !== "Cancelled",
   );
-  if (owned.length === 0) return null;
-  if (owned.length > 1) {
-    throw new OwnedCardInvariantError(
-      agentName,
-      owned.map((i) => i.id),
-    );
-  }
-  return owned[0];
+  if (owned.length === 0) return { kind: "none" };
+  if (owned.length === 1) return { kind: "single", card: owned[0] };
+  return { kind: "duplicates", cards: owned };
+}
+
+/**
+ * Build the reconcile task body the picker hands to an agent that holds
+ * duplicate `assigned_agent` stamps (DX-501).
+ *
+ * The body is self-contained — no `/danx-prep` / `/danx-next` first leg,
+ * because the agent's first job is to decide which card it actually owns
+ * before any work skill runs. After the agent releases the extras, it
+ * invokes `/danx-next <retained-id>` on the retained card in the same
+ * session and the normal work pipeline takes over from there.
+ *
+ * Pure — no I/O. Callers feed the agent name + the duplicates list from
+ * `findOwnedCard`. Order of `ownedCards` is preserved verbatim in the
+ * enumeration so the prompt is stable across ticks (deterministic test
+ * assertion).
+ */
+export function buildReconcileTaskBody(
+  agentName: string,
+  ownedCards: readonly Issue[],
+): string {
+  const enumerated = ownedCards
+    .map((c, i) => {
+      const hint = c.description.trim().split("\n")[0].slice(0, 120);
+      return [
+        `${i + 1}. **${c.id}** — ${c.title}`,
+        `   status: ${c.status}`,
+        hint ? `   hint: ${hint}` : "",
+      ]
+        .filter((line) => line !== "")
+        .join("\n");
+    })
+    .join("\n\n");
+
+  return [
+    `You are ${agentName}.`,
+    "",
+    `Reconcile required: your \`assigned_agent\` stamp is on **${ownedCards.length} open cards** at once. The invariant is at-most-one. You must decide which ONE card is legitimately yours to continue and release the rest before any work pipeline starts.`,
+    "",
+    "## Cards currently stamped to you",
+    "",
+    enumerated,
+    "",
+    "## Reconcile procedure (do this BEFORE any /danx-next)",
+    "",
+    "1. **Inspect each card.** For every id listed above, call `mcp__danx-issue__danx_issue_get({id})` and read the YAML's description, AC, recent comments, and any prior dispatch history. Inspect your worktree state on your agent branch (`git log --oneline -20`, `git status`) for evidence of which card you were actively working.",
+    "2. **Decide which ONE card to retain.** Heuristic: the card with the most recent meaningful work on your branch, the freshest comments, and a status preference of `In Progress` over `Review` over `Blocked` over `ToDo`. Append a structured comment entry to the retained card's `comments[]` explaining the choice — shape: `{author: \"<your-name>\", timestamp: \"<ISO 8601 now>\", text: \"## Reconcile — retained this card\\n\\nReason: ...\"}`. No `id` field; the worker assigns one.",
+    "3. **Release every other card.** For each card NOT retained, `Edit` its YAML to set `assigned_agent: null` and clear the `dispatch` block if it still names you. Append a structured `comments[]` entry to that card with text `Released by reconcile dispatch — see <retained-id>`.",
+    "4. **Check the retained card's dispatch gates before resuming.** If the retained card has non-null `waiting_on`, non-null `requires_human`, or `status: \"Blocked\"`, you cannot just run `/danx-next` — those are dispatch gates `/danx-next` will refuse or mishandle. Resolve them first (clear `waiting_on` if every blocker is terminal; transition status off `Blocked` if you have the evidence; populate or clear `requires_human` per the workflow rules). If you cannot resolve them in this session, save your reasoning in a comment and call `danxbot_complete({status: \"completed\", summary: \"Reconcile complete — retained <id>; cannot resume this session due to <gate>\"})` instead of step 5.",
+    "5. **Resume normal work.** Once exactly one card carries your stamp AND its dispatch gates are clear, invoke `/danx-next <retained-id>` in this same session to enter the standard issue-card workflow on the retained card. `/danx-next` owns completion signaling from that point.",
+    "",
+    "Do not call `danxbot_complete` until either step 4's early-exit branch OR step 5's `/danx-next` finishes.",
+  ].join("\n");
 }

@@ -100,8 +100,8 @@ import type { Issue } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { DispatchKind } from "../agent/agent-types.js";
 import {
+  buildReconcileTaskBody,
   findOwnedCard,
-  OwnedCardInvariantError,
   pickCardForAgent,
   pickFreeAgent,
 } from "./pick-agent.js";
@@ -292,6 +292,19 @@ export async function tryMultiAgentDispatch(
   // hiccup doesn't mark the agent busy in the DB.
   const skipAgents = new Set<string>();
 
+  // DX-501: every "drop this card from the rest of the tick" branch
+  // below used to do `remainingCards.splice(remainingCards.indexOf(c), 1)`
+  // directly. When `c` came from `owned.cards[0]` (reconcile target
+  // OR DX-360 owned-card resume) it is NOT in `remainingCards` —
+  // `indexOf` returns -1 and the splice deletes the LAST element of
+  // `remainingCards` (off-by-one poison that corrupts sibling agents'
+  // candidates this tick). Helper guards with an explicit index check
+  // so the splice only runs on real membership.
+  const removeFromRemaining = (c: Issue): void => {
+    const i = remainingCards.indexOf(c);
+    if (i !== -1) remainingCards.splice(i, 1);
+  };
+
   // Build the picker's combined skip set per iteration so we don't
   // mutate `busy` itself (callers may inspect it post-loop, and the
   // semantics differ — `busy` is "real DB lock held", `skipAgents` is
@@ -324,44 +337,55 @@ export async function tryMultiAgentDispatch(
     // agent decides how to finish or escalate; ICE-sort ToDo only
     // applies when the agent has no open assignment.
     //
-    // Invariant: each agent owns at most ONE non-terminal card.
-    // `findOwnedCard` throws `OwnedCardInvariantError` on duplicate
-    // ownership — we log, skip this agent this tick, and rely on
-    // operator intervention to clear the duplicate stamp.
+    // DX-501 — duplicate ownership (>1 open card stamped to the same
+    // agent) is no longer punted to operator intervention. The picker
+    // dispatches a **reconcile** task body so the agent self-heals
+    // (release extras → resume on the retained card). The first card
+    // in the duplicates list is the dispatch target (the dispatch row +
+    // lock have to hang on SOME YAML); the agent decides in-session
+    // which card to keep and may release the target too.
     let card: Issue | null = null;
     let resumeSessionId: string | undefined;
-    try {
-      const owned = findOwnedCard(agent.name, openIssues);
-      if (owned !== null) {
-        card = owned;
-        // Latest dispatch's session UUID, newest-first. Skip rows whose
-        // sessionUuid is empty/null (failed-before-session-create rows).
-        // A missing UUID degrades to a fresh session — claude --resume
-        // is the optimisation, not a hard requirement.
-        try {
-          const prior = await listDispatchesByIssueId(owned.id);
-          const withSession = prior.find(
-            (d) => d.sessionUuid !== null && d.sessionUuid !== "",
-          );
-          resumeSessionId = withSession?.sessionUuid ?? undefined;
-        } catch (err) {
-          log.warn(
-            `[${repo.name}] resume-lookup failed for ${owned.id}: ${err instanceof Error ? err.message : String(err)} — proceeding without --resume`,
-          );
-        }
-        log.info(
-          `[${repo.name}] multi-agent pick (resume): ${agent.name} → ${owned.id} (status=${owned.status})${resumeSessionId ? ` --resume ${resumeSessionId.slice(0, 8)}` : ""}`,
+    let reconcileOwnedCards: readonly Issue[] = [];
+    const owned = findOwnedCard(agent.name, openIssues);
+    if (owned.kind === "single") {
+      card = owned.card;
+      // Latest dispatch's session UUID, newest-first. Skip rows whose
+      // sessionUuid is empty/null (failed-before-session-create rows).
+      // A missing UUID degrades to a fresh session — claude --resume
+      // is the optimisation, not a hard requirement.
+      try {
+        const prior = await listDispatchesByIssueId(owned.card.id);
+        const withSession = prior.find(
+          (d) => d.sessionUuid !== null && d.sessionUuid !== "",
+        );
+        resumeSessionId = withSession?.sessionUuid ?? undefined;
+      } catch (err) {
+        log.warn(
+          `[${repo.name}] resume-lookup failed for ${owned.card.id}: ${err instanceof Error ? err.message : String(err)} — proceeding without --resume`,
         );
       }
-    } catch (err) {
-      if (err instanceof OwnedCardInvariantError) {
-        log.error(
-          `[${repo.name}] ${err.message} — skipping ${agent.name} this tick; operator must clear duplicate assigned_agent stamps`,
-        );
-        skipAgents.add(agent.name);
-        continue;
-      }
-      throw err;
+      log.info(
+        `[${repo.name}] multi-agent pick (resume): ${agent.name} → ${owned.card.id} (status=${owned.card.status})${resumeSessionId ? ` --resume ${resumeSessionId.slice(0, 8)}` : ""}`,
+      );
+    } else if (owned.kind === "duplicates") {
+      reconcileOwnedCards = owned.cards;
+      // DX-501: prefer the card MOST LIKELY to be retained as the
+      // dispatch row + lock target — minimizes wasted stamp churn when
+      // the agent releases the others. Rank: In Progress > Review >
+      // Blocked > ToDo > any other status. Falls back to the first
+      // duplicate when ranks tie.
+      const rank = (s: Issue["status"]): number => {
+        if (s === "In Progress") return 0;
+        if (s === "Review") return 1;
+        if (s === "Blocked") return 2;
+        if (s === "ToDo") return 3;
+        return 4;
+      };
+      card = [...owned.cards].sort((a, b) => rank(a.status) - rank(b.status))[0];
+      log.warn(
+        `[${repo.name}] multi-agent pick (reconcile): ${agent.name} owns ${owned.cards.length} open cards (${owned.cards.map((c) => c.id).join(", ")}) — dispatching reconcile task on ${card.id} (status=${card.status})`,
+      );
     }
 
     if (card === null) {
@@ -379,6 +403,7 @@ export async function tryMultiAgentDispatch(
         break;
       }
     }
+    const isReconcileDispatch = reconcileOwnedCards.length > 0;
 
     // AC #2 of DX-221 — per-agent + per-card quarantine cooldown.
     // Replaces the deleted per-poller backoff window. A
@@ -409,7 +434,7 @@ export async function tryMultiAgentDispatch(
       log.info(
         `[${repo.name}] multi-agent pick: ${card.id} is quarantined — skipping`,
       );
-      remainingCards.splice(remainingCards.indexOf(card), 1);
+      removeFromRemaining(card);
       continue;
     }
 
@@ -437,7 +462,7 @@ export async function tryMultiAgentDispatch(
         log.info(
           `[${repo.name}] multi-agent pre-claim guard: card ${card.id} (${card.external_id}) has a live PID dispatch — skipping ${agent.name}`,
         );
-        remainingCards.splice(remainingCards.indexOf(card), 1);
+        removeFromRemaining(card);
         continue;
       }
     }
@@ -455,8 +480,16 @@ export async function tryMultiAgentDispatch(
     //   - separate mode + fresh card → prep; prep-only prompt shape.
     const wasPreviouslyClaimedByThisAgent =
       card.assigned_agent === agent.name;
+    // DX-501 — reconcile dispatches always run as `kind: "work"` with
+    // no prep leg. The reconcile body owns its own pre-work pass
+    // (inspecting + releasing the duplicate stamps) before any normal
+    // workflow skill runs, so prep would be redundant and the prep-
+    // verdict route's "stop on ok" branch would prematurely terminate
+    // the dispatch.
     const isPrepOnlyDispatch =
-      prepMode === "separate" && !wasPreviouslyClaimedByThisAgent;
+      !isReconcileDispatch &&
+      prepMode === "separate" &&
+      !wasPreviouslyClaimedByThisAgent;
     const dispatchKind: DispatchKind = isPrepOnlyDispatch ? "prep" : "work";
 
     // Pre-generate the dispatch UUID + start stamp so the YAML carries
@@ -517,7 +550,7 @@ export async function tryMultiAgentDispatch(
           `[${repo.name}] multi-agent lock acquire threw for ${card.id} (external_id=${card.external_id}) → ${agent.name}: ${err instanceof Error ? err.message : String(err)} — skipping this tick`,
         );
         skipAgents.add(agent.name);
-        remainingCards.splice(remainingCards.indexOf(card), 1);
+        removeFromRemaining(card);
         continue;
       }
       if (!lockResult.acquired) {
@@ -528,7 +561,7 @@ export async function tryMultiAgentDispatch(
         log.info(
           `[${repo.name}] multi-agent lock held by ${held.holder}@${held.host} (dispatch ${held.dispatchId}, ${ageM}m old) — skipping ${card.id}`,
         );
-        remainingCards.splice(remainingCards.indexOf(card), 1);
+        removeFromRemaining(card);
         continue;
       }
       if (lockResult.reclaimed) {
@@ -558,7 +591,7 @@ export async function tryMultiAgentDispatch(
         `[${repo.name}] multi-agent stamp failed for ${card.id} → ${agent.name}`,
         err,
       );
-      remainingCards.splice(remainingCards.indexOf(card), 1);
+      removeFromRemaining(card);
       continue;
     }
 
@@ -571,9 +604,11 @@ export async function tryMultiAgentDispatch(
     //     route lets the dispatch run past `verdict: "ok"` because
     //     `dispatchKind === "work"`, and the agent proceeds straight
     //     into the work workflow in the same session.
-    const task = isPrepOnlyDispatch
-      ? `/danx-prep ${stamped.id}`
-      : `/danx-prep ${stamped.id}\n\n/danx-next ${stamped.id}`;
+    const task = isReconcileDispatch
+      ? buildReconcileTaskBody(agent.name, reconcileOwnedCards)
+      : isPrepOnlyDispatch
+        ? `/danx-prep ${stamped.id}`
+        : `/danx-prep ${stamped.id}\n\n/danx-next ${stamped.id}`;
 
     try {
       await dispatchWithRecovery(
@@ -719,9 +754,15 @@ export async function tryMultiAgentDispatch(
             // exists to prevent. The card naturally stays in ToDo for
             // a throttled dispatch (no work happened), so the check
             // would always fire here without the guard.
+            // DX-501 — reconcile dispatches do not necessarily move the
+            // dispatch-target card off ToDo: the agent may release that
+            // very card and continue on a different one. Skip the
+            // progress check; the reconcile body owns its own success
+            // semantics.
             if (
               hasTrackerCoordinate(stamped) &&
               !skipCardProgressForPrep &&
+              !isReconcileDispatch &&
               job.status !== "throttled"
             ) {
               await runPostDispatchProgressCheck({
@@ -758,11 +799,23 @@ export async function tryMultiAgentDispatch(
                   agentName: agent.name,
                   reason: `dispatch ${job.id} failed on ${stamped.id}: ${job.summary || "(no summary)"}`,
                 });
-                quarantineCard({
-                  repoName: repo.name,
-                  cardId: stamped.id,
-                  reason: `dispatch ${job.id} failed: ${job.summary || "(no summary)"}`,
-                });
+                // DX-501: skip card-quarantine on reconcile failure.
+                // The dispatch-target card (cards[0]) was an arbitrary
+                // pick from the duplicates list — the agent may have
+                // intended to release it. Quarantining it would block
+                // the next reconcile retry from even hanging the
+                // dispatch row on the same YAML. Agent quarantine
+                // alone (above) is the right cooldown — it prevents
+                // hot-loop on a genuinely broken agent without
+                // poisoning a card that another agent might handle
+                // fine on the next tick.
+                if (!isReconcileDispatch) {
+                  quarantineCard({
+                    repoName: repo.name,
+                    cardId: stamped.id,
+                    reason: `dispatch ${job.id} failed: ${job.summary || "(no summary)"}`,
+                  });
+                }
                 try {
                   const fresh = loadLocalFromDisk(
                     repo.localPath,
@@ -805,11 +858,16 @@ export async function tryMultiAgentDispatch(
         agentName: agent.name,
         reason: `dispatch threw on ${card.id}: ${errMsg}`,
       });
-      quarantineCard({
-        repoName: repo.name,
-        cardId: card.id,
-        reason: `dispatch threw: ${errMsg}`,
-      });
+      // DX-501: see DX-501 note in the onComplete failed-branch above —
+      // reconcile dispatches do not quarantine their arbitrary
+      // dispatch-target card.
+      if (!isReconcileDispatch) {
+        quarantineCard({
+          repoName: repo.name,
+          cardId: card.id,
+          reason: `dispatch threw: ${errMsg}`,
+        });
+      }
       // Dispatch threw post-stamp → YAML carries a `dispatch:` block
       // pointing at a dispatchId that never made it into the DB. Without
       // clearing, every subsequent tick's `listDispatchableYamls` filter
@@ -836,7 +894,7 @@ export async function tryMultiAgentDispatch(
           clearErr,
         );
       }
-      remainingCards.splice(remainingCards.indexOf(card), 1);
+      removeFromRemaining(card);
       continue;
     }
 
