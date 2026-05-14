@@ -13,17 +13,18 @@
  *   1. `syncRepoFiles(repo)` — re-run the inject pipeline every tick
  *      so changes inside `.danxbot/config/` propagate to dispatched
  *      agents without a restart.
- *   2. `healExternalIds` — pre-tracker-call format heal so a stale
- *      `mem-N`-shaped id (left over from a prior in-memory test
- *      window) can't crash the tracker call below.
- *   3. `reapOrphans` — process-table orphan scan; SIGTERMs dispatched
+ *   2. `reapOrphans` — process-table orphan scan; SIGTERMs dispatched
  *      claude processes the DB lost track of.
- *   4. `runInvariantHeal` — clears the `dispatch` slot on cards whose
+ *   3. `runInvariantHeal` — clears the `dispatch` slot on cards whose
  *      dispatch is verifiably dead (orphan pre-stamp from legacy
  *      unscoped path / mid-spawn crash). `assigned_agent` is durable
  *      audit and is preserved. Surfaces back to scheduler via the
  *      reconcile-driven `onReconcileResult` event chain on the same
  *      tick.
+ *   4. `runOrphanInProgressHeal` (DX-329) — flips cards stuck at
+ *      `In Progress` + `dispatch: null` back to `ToDo` so the picker
+ *      can re-claim them. Complements `runInvariantHeal` (which
+ *      clears `dispatch` blocks but never flips `status`).
  *   5. `runInboundFetch` — Trello inbound: Needs Help comment scan +
  *      `tracker.fetchOpenCards` + bulk hydrate missing YAMLs. Gated
  *      on `trelloSync` per-repo toggle (DX-302).
@@ -51,7 +52,6 @@ import type { RepoContext } from "../types.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { readFlag } from "../critical-failure.js";
 import { reapOrphans } from "../worker/process-scan.js";
-import { healExternalIds } from "../poller/heal-external-id.js";
 import { runInvariantHeal, runOrphanInProgressHeal } from "../poller/heal.js";
 import {
   liveDispatchIssueIds,
@@ -255,52 +255,15 @@ async function _sync(repo: RepoContext): Promise<void> {
     syncRepoFiles(repo);
 
     // ONE tracker per repo, reused across every tick (see
-    // `getRepoTracker`). Resolved early so the external-id format
-    // heal below has a tracker to ask `isValidExternalId` against —
-    // every later helper reuses this instance, so any in-memory
-    // tracker stub state survives the tick and tests can assert on a
-    // single mock.
+    // `getRepoTracker`). Cached state (in-memory tracker stub cards
+    // for tests, Trello checklist + label id caches for production)
+    // survives the tick so tests can assert on a single mock.
     //
-    // DX-342 — `null` in YAML-only mode. The tracker-touching cron
-    // stages (external-id heal, inbound fetch) skip; everything else
-    // (process-table reaper, invariant heal, orphan IP heal, audit
-    // reconcile) runs unconditionally — those paths read YAML + DB
-    // only.
+    // DX-342 — `null` in YAML-only mode. `runInboundFetch` is the
+    // only tracker-gated cron stage; everything else (process-table
+    // reaper, invariant heal, orphan IP heal, audit reconcile) runs
+    // unconditionally — those paths read YAML + DB only.
     const tracker = getRepoTracker(repo);
-
-    // DX-150: per-tick `external_id` format heal pass. Walks open/
-    // AND closed/, blanks any external_id whose format the active
-    // tracker doesn't recognize (e.g. a `mem-N`-shaped id left over
-    // from a no-Trello window before a Trello-config landed). The
-    // blanked YAML re-enters the reconcile-driven push path (DX-218
-    // step 7) on its next chokidar event and gets a fresh
-    // tracker-native id. Pairs with DX-149 — DX-149 stopped the 400
-    // from crashing the worker; this stops the 400 from happening at
-    // all by removing the foreign id from disk. Runs BEFORE every
-    // tracker call (no `tracker.getCard` / `getComments` against the
-    // bad id ever fires).
-    //
-    // DX-342 — skipped in YAML-only mode. The heal pass needs an
-    // active tracker to ask `isValidExternalId` against; without one,
-    // there is no "foreign-tracker id" to detect (every id was
-    // minted by the SAME absent tracker).
-    if (tracker !== null) {
-      const externalIdHeal = healExternalIds(
-        repo.localPath,
-        tracker,
-        repo.issuePrefix,
-      );
-      for (const h of externalIdHeal.healed) {
-        log.info(
-          `[${repo.name}] Healed external_id mismatch on ${h.id}: ${h.oldExternalId} → "" (tracker.isValidExternalId rejected)`,
-        );
-      }
-      for (const e of externalIdHeal.errors) {
-        log.warn(
-          `[${repo.name}] external_id heal skipped malformed YAML at ${e.path}: ${e.message}`,
-        );
-      }
-    }
 
     // Phase 3 (DX-142) — process-table orphan scan. The DB-driven
     // reattach pass at boot + the YAML-driven invariant heal below

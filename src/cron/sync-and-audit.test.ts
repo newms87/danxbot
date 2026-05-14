@@ -134,10 +134,6 @@ const mockTracker = {
   // hydrateFromRemote calls updateCard when the remote title is missing
   // the `#ISS-N: ` prefix. Default to no-op resolved.
   updateCard: vi.fn(),
-  // DX-150: cheap synchronous shape check used by the per-tick external_id
-  // heal pass. Default true so ad-hoc fixtures (`ext-DX-N`) don't get
-  // mass-blanked when a test forgets to wire it.
-  isValidExternalId: vi.fn().mockReturnValue(true),
 };
 
 const mockCreateIssueTracker = vi.fn().mockReturnValue(mockTracker);
@@ -452,17 +448,6 @@ vi.mock("../agent/agent-locks.js", () => ({
   lastTerminalDispatchStatusByIssue: vi
     .fn()
     .mockResolvedValue(new Map<string, string>()),
-}));
-
-// DX-150: per-tick external_id format heal pass. Mocked so existing
-// tests' fake fs doesn't crash the real readdirSync; the wiring test
-// below overrides the implementation to assert call order vs
-// healLocalYamls / tracker.fetchOpenCards.
-const mockHealExternalIds = vi
-  .fn()
-  .mockReturnValue({ healed: [], errors: [] });
-vi.mock("../poller/heal-external-id.js", () => ({
-  healExternalIds: (...args: unknown[]) => mockHealExternalIds(...args),
 }));
 
 // DX-218 (Event-Driven Worker Phase 3) retired the per-tick retry-queue
@@ -2272,22 +2257,20 @@ describe("poll — runSync crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("survives an early-runSync throw from healExternalIds (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
+  it("survives an early-runSync throw from runInvariantHeal (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
     // Reviewer-recommended representative test for the deeper-in-runSync
-    // throw paths the wrap also covers (now: reapOrphans,
-    // runInvariantHeal, bulkSyncMissingYamls — the dispatch-decision
-    // paths the wrap used to cover were retired in DX-290). Pins the
+    // throw paths the wrap covers (runInvariantHeal,
+    // runOrphanInProgressHeal, runAuditPass; reapOrphans has its own
+    // inner try/catch and never reaches the outer wrap). Pins the
     // contract that the catch covers the WHOLE body, not just the
     // tracker subset.
     //
-    // DX-217 (Event-Driven Worker Phase 2): replaces an earlier test
-    // that used `healLocalYamls` for this same purpose. That helper was
-    // absorbed into `reconcileIssue` step 3c and no longer runs from
-    // `runSync`; `healExternalIds` is the next-best representative early
-    // path.
-    mockHealExternalIds.mockImplementationOnce(() => {
-      throw new Error("disk full during external_id heal pass");
-    });
+    // `runInvariantHeal` is a representative local-only stage that
+    // reaches the outer catch directly (the prior tracker-gated stage
+    // used here was retired).
+    mockRunInvariantHeal.mockRejectedValueOnce(
+      new Error("disk full during invariant heal pass"),
+    );
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
@@ -2296,7 +2279,7 @@ describe("poll — runSync crash isolation (DX-149)", () => {
     );
     expect(crashLogs).toHaveLength(1);
     expect(String(crashLogs[0][0])).toContain(
-      "disk full during external_id heal pass",
+      "disk full during invariant heal pass",
     );
     expect(mockDispatch).not.toHaveBeenCalled();
   });
@@ -2724,69 +2707,6 @@ describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
   // in `src/issue-tracker/retry-queue.test.ts`.
 });
 
-describe("poll — external_id heal pass (DX-150, Trello-decouple Phase 9)", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    _resetForTesting();
-    resetTrackerMocks();
-    mockSpawn.mockReturnValue(createFakeSpawnResult());
-    setupRepoConfigMocks();
-    mockHealLocalYamls.mockReset();
-    mockHealLocalYamls.mockReturnValue({ healed: [], errors: [] });
-    mockHealExternalIds.mockReset();
-    mockHealExternalIds.mockReturnValue({ healed: [], errors: [] });
-  });
-
-  it("calls healExternalIds BEFORE tracker.fetchOpenCards (AC #3)", async () => {
-    // DX-217 Phase 2: the original AC #3 ordered healExternalIds AFTER
-    // healLocalYamls. Phase 2 absorbed healLocalYamls into reconcile
-    // step 3c, so the AFTER-healLocalYamls leg of the ordering is
-    // irrelevant at the poller level. The remaining contract — the
-    // external_id heal precedes the tracker fetch so a foreign id is
-    // blanked before it can trigger a tracker 400 — still holds.
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockHealExternalIds).toHaveBeenCalledTimes(1);
-    const [path, trackerArg, prefix] = mockHealExternalIds.mock.calls[0]!;
-    expect(path).toBe(MOCK_REPO_CONTEXT.localPath);
-    expect(prefix).toBe(MOCK_REPO_CONTEXT.issuePrefix);
-    expect(trackerArg).toBe(mockTracker);
-
-    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
-
-    const healExternalOrder =
-      mockHealExternalIds.mock.invocationCallOrder[0]!;
-    const fetchOrder = mockTracker.fetchOpenCards.mock.invocationCallOrder[0]!;
-    expect(healExternalOrder).toBeLessThan(fetchOrder);
-
-    // Phase 2 anti-regression: healLocalYamls is NOT called from runSync
-    // (was previously asserted to run before healExternalIds; it now
-    // runs from reconcile, not the tick).
-    expect(mockHealLocalYamls).not.toHaveBeenCalled();
-  });
-
-  it("a non-empty healed[] is consumed without aborting the tick (AC #2)", async () => {
-    // Heal helper unit-tested in `heal-external-id.test.ts` — this
-    // test pins the integration: poller invokes the helper, receives
-    // a non-empty `healed[]`, and continues into the regular tick
-    // (tracker fetch fires).
-    mockHealExternalIds.mockReturnValue({
-      healed: [{ id: "DX-30", oldExternalId: "mem-2" }],
-      errors: [],
-    });
-
-    await poll(MOCK_REPO_CONTEXT);
-
-    expect(mockHealExternalIds).toHaveBeenCalledWith(
-      MOCK_REPO_CONTEXT.localPath,
-      mockTracker,
-      MOCK_REPO_CONTEXT.issuePrefix,
-    );
-    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
-  });
-});
-
-
 /**
  * DX-290 (Event-Driven Worker Phase 4b.3) — zero-dispatch spy invariant.
  *
@@ -2836,8 +2756,6 @@ describe("poll — DX-290 zero-dispatch invariant", () => {
 /**
  * DX-342 — YAML-only mode for the cron sweep. When `createIssueTracker`
  * returns null:
- *   - `healExternalIds` MUST NOT be called (no tracker to ask for
- *     `isValidExternalId`).
  *   - `runInboundFetch` MUST NOT be called (no `fetchOpenCards` round
  *     trip — verified by spying on the inner `mockTracker.fetchOpenCards`).
  *   - The null verdict caches in `noTrackerRepos` so a second `poll()`
@@ -2848,6 +2766,7 @@ describe("poll — DX-290 zero-dispatch invariant", () => {
  * runOrphanInProgressHeal, runAuditPass) still run via the existing
  * call paths — those are tested in their own describe blocks and are
  * not tracker-dependent.
+ *
  */
 describe("poll — YAML-only mode (DX-342, createIssueTracker returns null)", () => {
   beforeEach(() => {
@@ -2855,16 +2774,13 @@ describe("poll — YAML-only mode (DX-342, createIssueTracker returns null)", ()
     _resetForTesting();
     resetTrackerMocks();
     setupRepoConfigMocks();
-    mockHealExternalIds.mockReset();
-    mockHealExternalIds.mockReturnValue({ healed: [], errors: [] });
   });
 
-  it("skips healExternalIds AND skips runInboundFetch when createIssueTracker returns null", async () => {
+  it("skips runInboundFetch when createIssueTracker returns null", async () => {
     mockCreateIssueTracker.mockReturnValueOnce(null);
 
     await poll(MOCK_REPO_CONTEXT);
 
-    expect(mockHealExternalIds).not.toHaveBeenCalled();
     // runInboundFetch's tracker round-trip is the inner `fetchOpenCards`
     // call — spying on it covers the whole inbound path without needing
     // a separate mock module for the helper itself.

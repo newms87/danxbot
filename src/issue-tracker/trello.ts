@@ -21,16 +21,6 @@ const TRELLO_BASE = "https://api.trello.com/1";
 
 const AC_CHECKLIST_NAME = "Acceptance Criteria";
 
-/**
- * Trello card ids are 24-char lowercase hex MongoDB ObjectIds. The format
- * is documented at https://developer.atlassian.com/cloud/trello/rest/ and
- * stable since Trello's inception. Used by `isValidExternalId` so the
- * per-tick heal pass can detect any foreign-tracker id (e.g. a `mem-N`
- * left over from an in-memory test window) lurking in a YAML after a
- * tracker swap.
- */
-const TRELLO_EXTERNAL_ID_REGEX = /^[0-9a-f]{24}$/;
-
 interface TrelloLabelDto {
   id: string;
   name: string;
@@ -75,10 +65,6 @@ export class TrelloTracker implements IssueTracker {
   constructor(private readonly trello: TrelloConfig) {}
 
   // ---------- Public API ----------
-
-  isValidExternalId(id: string): boolean {
-    return TRELLO_EXTERNAL_ID_REGEX.test(id);
-  }
 
   async fetchOpenCards(): Promise<IssueRef[]> {
     // Two list ids map to `status: "Review"` (review + Action Items) —

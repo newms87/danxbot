@@ -687,24 +687,6 @@ export interface ManagedLabels {
 export interface IssueTracker {
   fetchOpenCards(): Promise<IssueRef[]>;
 
-  /**
-   * Cheap, synchronous shape check: does `id` look like an id this tracker
-   * could plausibly own? Used by the per-tick `healExternalIds` pass
-   * (DX-150) to detect YAMLs whose `external_id` was minted by a different
-   * tracker (e.g. a `mem-N`-shaped id left over from a prior in-memory
-   * window before the repo's Trello config landed). Tracker owns its id
-   * format → tracker validates.
-   *
-   * Implementations MUST NOT make a network call here — this runs against
-   * every YAML on every tick and a remote round-trip per id would be
-   * prohibitive. The check is pure-format: it answers "could this id ever
-   * have come from me?" not "does this id refer to a card I currently
-   * have?". A truly-deleted-on-the-tracker id still passes the format
-   * check; the missing-card error surfaces later via `getCard` /
-   * `getComments` against that id.
-   */
-  isValidExternalId(id: string): boolean;
-
   getCard(externalId: string): Promise<Issue>;
 
   createCard(input: CreateCardInput): Promise<{

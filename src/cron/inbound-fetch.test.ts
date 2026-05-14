@@ -77,7 +77,6 @@ function makeTracker(): IssueTracker {
     addAcItem: vi.fn(),
     updateAcItem: vi.fn(),
     deleteAcItem: vi.fn(),
-    isValidExternalId: vi.fn().mockReturnValue(true),
   } as unknown as IssueTracker;
 }
 

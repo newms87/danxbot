@@ -81,7 +81,8 @@ export function stampTrackerIds(
  *                   `updateCard`. Diffed via `local.title` vs
  *                   `remoteCard.title` (semantic title, prefix stripped).
  *   external_id   → tracker primary key. Created by `createCard` (orphan
- *                   recovery branch above) and `pushOrphans`.
+ *                   recovery branch above — `local.external_id === ""`
+ *                   short-circuit at Step 0).
  *   parent_id     → LOCAL-ONLY. Trackers expose no native parent concept;
  *                   `parent_id` references the parent's INTERNAL `ISS-N`
  *                   id, not its `external_id`. Sync passes through verbatim.

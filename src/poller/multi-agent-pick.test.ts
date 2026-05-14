@@ -123,7 +123,6 @@ import type { RepoContext } from "../types.js";
 function fakeTracker(): IssueTracker {
   return {
     fetchOpenCards: async () => [],
-    isValidExternalId: () => true,
     getCard: async () => {
       throw new Error("getCard not used in multi-agent-pick.test.ts");
     },
@@ -1301,7 +1300,6 @@ describe("tryMultiAgentDispatch", () => {
       const calls: string[] = [];
       return {
         fetchOpenCards: async () => [],
-        isValidExternalId: () => true,
         getCard: async () => {
           throw new Error("getCard not used");
         },
@@ -1437,7 +1435,6 @@ describe("tryMultiAgentDispatch", () => {
       const calls: string[] = [];
       const tracker: IssueTracker = {
         fetchOpenCards: async () => [],
-        isValidExternalId: () => true,
         getCard: async () => {
           throw new Error("getCard not used");
         },

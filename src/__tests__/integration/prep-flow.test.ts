@@ -160,7 +160,6 @@ let routeUrl: (dispatchId: string) => string;
 function fakeTracker(): IssueTracker {
   return {
     fetchOpenCards: async () => [],
-    isValidExternalId: () => true,
     getCard: async () => {
       throw new Error("getCard not used");
     },

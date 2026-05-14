@@ -387,43 +387,4 @@ describe("MemoryTracker", () => {
     expect(card.tracker).toBe("trello");
   });
 
-  describe("isValidExternalId (DX-150 — format heal contract)", () => {
-    // The regex MUST mirror the mint format in `createCard`
-    // (`mem-${nextExternalId++}`). A drift between the two would cause
-    // every freshly-minted memory-tracker card to self-heal on the very
-    // next poll tick and lose its external_id forever.
-    const tracker = new MemoryTracker();
-
-    it("accepts mem-N for any positive integer N", () => {
-      expect(tracker.isValidExternalId("mem-1")).toBe(true);
-      expect(tracker.isValidExternalId("mem-2")).toBe(true);
-      expect(tracker.isValidExternalId("mem-9999")).toBe(true);
-    });
-
-    it("accepts the actual ids createCard mints (drift guard)", async () => {
-      const fresh = new MemoryTracker();
-      const result = await fresh.createCard(defaultInput());
-      // The validator MUST agree with the mint, or every card self-heals
-      // immediately. This assertion binds the regex to the mint format
-      // — a refactor of either side that breaks symmetry trips here.
-      expect(fresh.isValidExternalId(result.external_id)).toBe(true);
-    });
-
-    it("rejects empty string (orphans handled by skip-before-validate path)", () => {
-      expect(tracker.isValidExternalId("")).toBe(false);
-    });
-
-    it("rejects 24-char hex Trello ids (foreign-tracker format)", () => {
-      expect(tracker.isValidExternalId("69fd1486208523401e60afcb")).toBe(false);
-    });
-
-    it("rejects mem- without a number", () => {
-      expect(tracker.isValidExternalId("mem-")).toBe(false);
-    });
-
-    it("rejects mem-<non-digit suffix>", () => {
-      expect(tracker.isValidExternalId("mem-abc")).toBe(false);
-      expect(tracker.isValidExternalId("mem-1a")).toBe(false);
-    });
-  });
 });

@@ -7,12 +7,12 @@
  * production code).
  *
  * The class is preserved verbatim from the retired `memory.ts` so the
- * existing test fixtures (yaml-lifecycle, heal-external-id, scheduler,
- * lock, sync, retry-queue, worker/issue-route, integration suites)
- * keep working between Phase 2 (this card) and Phase 4 without an
- * inline mass-rewrite. The `createIssueTracker` production branch
- * that read `DANXBOT_TRACKER === "memory"` is gone — this stub is
- * reachable only via direct test imports.
+ * existing test fixtures (yaml-lifecycle, scheduler, lock, sync,
+ * retry-queue, worker/issue-route, integration suites) keep working
+ * between Phase 2 (this card) and Phase 4 without an inline
+ * mass-rewrite. The `createIssueTracker` production branch that read
+ * `DANXBOT_TRACKER === "memory"` is gone — this stub is reachable
+ * only via direct test imports.
  */
 import {
   isTriaged,
@@ -29,19 +29,6 @@ import {
   type ManagedLabels,
   type RequiresHuman,
 } from "./interface.js";
-
-/**
- * Prefix for stub-minted external_ids. Both the mint (`createCard`)
- * and the format validator (`isValidExternalId`) MUST go through this
- * constant so a regression that drifts one without the other is
- * impossible — drift would make every freshly-minted card
- * self-heal-and-blank on the very next poll tick. Keep the name +
- * shape stable; the heal pass relies on this being a one-place edit.
- */
-const MEMORY_EXTERNAL_ID_PREFIX = "mem-";
-const MEMORY_EXTERNAL_ID_REGEX = new RegExp(
-  `^${MEMORY_EXTERNAL_ID_PREFIX}\\d+$`,
-);
 
 function cloneTriage(t: IssueTriage): IssueTriage {
   return {
@@ -139,17 +126,6 @@ export class MemoryTracker implements IssueTracker {
     }
   }
 
-  /**
-   * Mirror of `createCard`'s mint format (`MEMORY_EXTERNAL_ID_PREFIX` +
-   * sequence number). A YAML carrying a real `mem-N` round-trips as
-   * valid; a foreign-tracker id (e.g. a 24-hex Trello id) is recognized
-   * as invalid by the per-tick heal pass (DX-150). Both sides go through
-   * the shared constant so the validate/mint pair never drift.
-   */
-  isValidExternalId(id: string): boolean {
-    return MEMORY_EXTERNAL_ID_REGEX.test(id);
-  }
-
   getRequestLog(): RequestLogEntry[] {
     return [...this.requestLog];
   }
@@ -202,7 +178,7 @@ export class MemoryTracker implements IssueTracker {
     ac: { check_item_id: string }[];
   }> {
     this.consumeWriteRejection();
-    const externalId = `${MEMORY_EXTERNAL_ID_PREFIX}${this.nextExternalId++}`;
+    const externalId = `mem-${this.nextExternalId++}`;
     const ac: IssueAcItem[] = input.ac.map((item) => ({
       check_item_id: this.allocCheckItemId(),
       title: item.title,

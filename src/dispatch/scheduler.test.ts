@@ -161,7 +161,6 @@ function makeMemoryTracker(): IssueTracker {
 function makeFakeTracker(getCardImpl: () => Promise<Issue> | Issue): IssueTracker {
   return {
     fetchOpenCards: async () => [],
-    isValidExternalId: () => true,
     getCard: async (id: string) => {
       const result = getCardImpl();
       return result instanceof Promise ? await result : result;
