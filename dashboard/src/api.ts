@@ -735,6 +735,34 @@ export function followChatSession(
  * dedicated follow-route implementation so the existing `DispatchDetail.vue`
  * caller (which passes a no-op `onError`) stays unchanged.
  */
+// ── Per-card chat (DX-352 Phase 4) ───────────────────────────────────
+//
+// Symmetric with the `POST /api/chat` worker route (DX-351 Phase 3).
+// Independent of the DX-84 board-chat wrappers above: that path posts
+// to `/api/chat/sessions/:jobId/resume` with a `jobId`; this one posts
+// to `/api/chat` with `{repo, issue_id}` and lets the worker decide
+// FRESH vs RESUME from the per-card `chat-sessions/<id>.json` cache.
+// Per-card chat surfaces under the issue drawer's Chat tab and rides
+// the stable `chat:<ISS-N>` SSE alias topic.
+export async function sendChatMessage(
+  repo: string,
+  issueId: string,
+  text: string,
+): Promise<{ job_id: string; parent_job_id: string | null; status: string }> {
+  const res = await fetchWithAuth("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, issue_id: issueId, text }),
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `sendChatMessage failed: ${res.status}${body ? ` — ${body}` : ""}`,
+    );
+  }
+  return res.json();
+}
+
 export function followDispatch(
   id: string,
   onBlock: (block: JsonlBlock) => void,

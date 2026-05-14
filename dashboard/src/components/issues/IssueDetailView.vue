@@ -10,7 +10,7 @@ import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
 import HistoryTab from "./HistoryTab.vue";
 import RequiresHumanPanel from "./RequiresHumanPanel.vue";
-import AgentChat from "../chat/AgentChat.vue";
+import IssueChatTab from "./IssueChatTab.vue";
 import { acCounts } from "./acCounts";
 
 type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "retro" | "raw";
@@ -197,7 +197,7 @@ function onUpdateIssue(issue: Issue): void {
         >{{ t.label }}</button>
       </div>
       <div v-if="tab === 'chat'" class="chat-body">
-        <AgentChat mode="issue" :issue="issue" :repo="props.selectedRepo" />
+        <IssueChatTab :issue="issue" :repo="props.selectedRepo" />
       </div>
       <div v-else class="body">
         <OverviewTab
