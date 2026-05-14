@@ -70,6 +70,7 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
 
   afterEach(() => {
     rmSync(localPath, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
   it("no-ops when getDispatch returns null (row already cleaned up)", async () => {
@@ -281,6 +282,109 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
       ).resolves.toBeUndefined();
 
       expect(onDispatchTerminated).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("error logging (silent swallow must be detectable in production logs)", () => {
+    // The catch in autoSyncTrackedIssue MUST log every failure it
+    // swallows — silent suppression would leave production debugging
+    // with no breadcrumb when the post-dispatch reconcile path
+    // mis-behaves. These tests pin the log-fires-on-error contract so a
+    // future refactor that drops the `log.error(...)` call (or replaces
+    // it with a no-op) fails CI instead of shipping silent.
+    //
+    // The logger (`src/logger.ts`) writes error-level entries through
+    // `console.error` as a JSON string, so a `console.error` spy catches
+    // the produced log without coupling these tests to logger internals.
+
+    it("logs through console.error when getDispatch throws", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const getDispatch = vi.fn().mockRejectedValue(new Error("DB down"));
+      const reconcile = vi.fn();
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(errorSpy).toHaveBeenCalled();
+      const messages = errorSpy.mock.calls.map((args) => String(args[0]));
+      // Assert the underlying error message + component made it through;
+      // headline log wording is intentionally not pinned (cosmetic
+      // rewording of the headline shouldn't fail this test — losing the
+      // log call entirely should).
+      expect(messages.some((s) => s.includes("DB down"))).toBe(true);
+      expect(messages.some((s) => s.includes("post-dispatch-reconcile"))).toBe(true);
+    });
+
+    it("logs through console.error when reconcile throws", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockRejectedValue(new Error("reconcile boom"));
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(errorSpy).toHaveBeenCalled();
+      const messages = errorSpy.mock.calls.map((args) => String(args[0]));
+      expect(messages.some((s) => s.includes("reconcile boom"))).toBe(true);
+      expect(messages.some((s) => s.includes("post-dispatch-reconcile"))).toBe(true);
+    });
+
+    it("logs through console.error when onDispatchTerminated throws (the finally-branch failure mode)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(onDispatchTerminated).mockImplementation(() => {
+        throw new Error("scheduler down");
+      });
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(errorSpy).toHaveBeenCalled();
+      const messages = errorSpy.mock.calls.map((args) => String(args[0]));
+      expect(messages.some((s) => s.includes("scheduler down"))).toBe(true);
+      expect(messages.some((s) => s.includes("post-dispatch-reconcile"))).toBe(true);
+    });
+  });
+
+  describe("ReconcileRepoContext shape — no RepoContext leak", () => {
+    // The reconcile seam is typed to accept only the trimmed
+    // `ReconcileRepoContext` ({name, localPath, issuePrefix}). At the
+    // call site in `auto-sync.ts` we build a fresh object literal
+    // selecting only those three keys, so callers cannot accidentally
+    // leak the wider `RepoContext` shape (trello creds, db creds, slack
+    // token, githubToken, workerPort, trelloEnabled, etc.) into the
+    // reconcile pipeline.
+    //
+    // This is structurally enforced by `--noEmit` typecheck today, but a
+    // future refactor that loosens the seam type to `RepoContext` would
+    // break the boundary silently. These tests pin the runtime shape so
+    // the contract is double-anchored (types + runtime).
+    it("passes ONLY {name, localPath, issuePrefix} to reconcile — does not leak the wider RepoContext", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: "TEST-42" });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(reconcile).toHaveBeenCalledOnce();
+      const [ctxArg] = reconcile.mock.calls[0] as [Record<string, unknown>, string, string];
+      expect(Object.keys(ctxArg).sort()).toEqual([
+        "issuePrefix",
+        "localPath",
+        "name",
+      ]);
+      expect(ctxArg).not.toHaveProperty("trello");
+      expect(ctxArg).not.toHaveProperty("db");
+      expect(ctxArg).not.toHaveProperty("slack");
+      expect(ctxArg).not.toHaveProperty("githubToken");
+      expect(ctxArg).not.toHaveProperty("workerPort");
+      expect(ctxArg).not.toHaveProperty("trelloEnabled");
+      expect(ctxArg).not.toHaveProperty("url");
+      expect(ctxArg).not.toHaveProperty("hostPath");
     });
   });
 });
