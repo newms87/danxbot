@@ -101,13 +101,28 @@ export interface SettingsOverrides {
   ideator: FeatureOverride;
   autoTriage: FeatureOverride;
   /**
-   * DX-302 — when set to `false`, every Trello inbound + outbound call
-   * path no-ops for this repo (poller inbound hydration + comment pull,
-   * worker auto-sync, retry queue). Cards continue to flow through the
-   * local YAML + DB normally; the Trello board freezes at its last-
-   * synced state until the toggle is re-enabled. Distinct from
-   * `issuePoller`, which halts the WHOLE per-tick poll (including
-   * local-YAML dispatch) — `trelloSync` halts only the Trello legs.
+   * Trello side-system pause. When `false`, every Trello inbound +
+   * outbound call path no-ops for this repo. Allowed gate sites are
+   * exactly THREE (see `.claude/rules/agent-dispatch.md` Forbidden
+   * Patterns row + CLAUDE.md "Trello Is Background Infrastructure"):
+   *
+   *   1. Trello inbound module (`src/cron/inbound-fetch.ts`) — skips
+   *      tracker fetch, comment pull, Needs-Help heal.
+   *   2. Trello push step INSIDE reconcile (`src/issue/reconcile.ts:614`,
+   *      step 7) — skips `pushTrelloDiff`. Every OTHER reconcile step
+   *      (parent-derive, file move, hash diff, dispatchable fanout,
+   *      `onReconcileResult` poke, parent recurse) runs unconditionally.
+   *   3. Trello retry queue (`src/issue-tracker/retry-queue.ts`) —
+   *      defers re-attempts of failed pushes.
+   *
+   * Anywhere else gating issue-tracker business logic on this flag is
+   * a coupling violation. Cards continue to flow through the local YAML
+   * + DB normally; the Trello board freezes at its last-synced state
+   * until the toggle is re-enabled.
+   *
+   * Distinct from `issuePoller`, which halts the WHOLE per-tick poll
+   * (including local-YAML dispatch) — `trelloSync` halts ONLY the
+   * Trello legs and never blocks dispatching.
    */
   trelloSync: FeatureOverride;
 }

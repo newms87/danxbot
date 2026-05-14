@@ -605,6 +605,45 @@ export function kickPickerOnceAtBoot(repoName: string): void {
 }
 
 /**
+ * Post-dispatch-termination picker kick. Fired from `handleStop` after
+ * every dispatch reaches a terminal state, regardless of trigger source
+ * or outcome (completed / failed / cancelled / agent_blocked / etc.).
+ *
+ * Why this hook is required: the picker is event-driven (post-DX-290) —
+ * it fires on `onReconcileResult({dispatchableChanged: true})`,
+ * `onAgentRosterChange`, or `kickPickerOnceAtBoot`. The post-dispatch
+ * `reconcileIssue` call (`autoSyncTrackedIssue`) computes
+ * `dispatchableChanged` for the dispatched card only, and the flag flips
+ * only when the card's eligibility actually changes (e.g. status: ToDo +
+ * dispatch: null + blocked: null + etc.). When an agent self-Blocks or
+ * moves the card to Done, eligibility stays `false → false` → no poke
+ * → picker idle even though the agent is now free to pick another card.
+ *
+ * The freed-agent class of poke is what this hook exists for: signal
+ * "an agent slot opened up, give the picker a chance to fill it from
+ * any other open ToDo card in the queue." Same single-flight mutex as
+ * every other poke (`firePickerWithMutex`) so concurrent reconciles can
+ * not land a duplicate picker pass on the same `busy`/`assigned`
+ * snapshot.
+ *
+ * History: prior to this hook, `autoSyncTrackedIssue` gated its
+ * `reconcileIssue` call on `trelloSync.enabled`. On Trello-disabled
+ * repos, post-dispatch reconcile never ran, the `onReconcileResult`
+ * poke never fired, and the picker silently froze after every dispatch
+ * (queue stranded with cards visible but never dispatched). The gate
+ * removal alone is necessary but not sufficient — the picker also needs
+ * an explicit signal when an agent slot frees up, which the dispatch-
+ * able-diff path cannot provide for non-flipping completions.
+ */
+export function onDispatchTerminated(repoName: string): void {
+  const runPicker = pickersByRepo.get(repoName);
+  if (!runPicker) return;
+  setImmediate(() => {
+    void firePickerWithMutex(repoName);
+  });
+}
+
+/**
  * Reconcile-result poke from the chokepoint in `src/issue/reconcile.ts`
  * (Phase 4b.1 / DX-288). Fires the registered picker for the repo
  * when reconcile flipped a field the dispatch scheduler keys on

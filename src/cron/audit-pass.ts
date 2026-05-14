@@ -78,9 +78,14 @@ export async function runAuditPass(
   const openDir = join(repo.localPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) return result;
 
+  // Informational log only — DOES NOT short-circuit the audit pass.
+  // `reconcileIssue` runs unconditionally for every card below; the
+  // Trello push step inside reconcile (step 7) self-gates on the same
+  // override flag (`src/issue/reconcile.ts:614`). Trello sync is a side
+  // system; the issue-tracker convergence pass must NEVER gate on it.
   if (isTrelloSyncOverrideDisabled(repo.localPath)) {
     log.info(
-      `[${repo.name}] trelloSync override=false — skipping outbound tracker pushes this audit pass (will re-fire on next reconcile after re-enable)`,
+      `[${repo.name}] trelloSync override=false — reconcile will skip the Trello push step for each card (every other reconcile step runs as normal)`,
     );
   }
 

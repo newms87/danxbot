@@ -1,17 +1,16 @@
 /**
- * Unit tests for `autoSyncTrackedIssue` (Phase 3 of tracker-agnostic-
- * agents — Trello wsb4TVNT). Verifies that `danxbot_complete`
- * automatically pushes the dispatch's tracked issue YAML to the tracker
- * before the agent process terminates. DX-157 made this the SOLE
- * agent-driven post-edit tracker push (the legacy save HTTP route was
- * retired); the chokidar watcher mirrors agent edits to the DB on every
- * file write, while this auto-sync runs once on `danxbot_complete` to
- * cut the up-to-60s tracker lag the per-tick poller mirror would
- * otherwise produce.
+ * Integration tests for `autoSyncTrackedIssue` — the post-dispatch
+ * reconcile fired from `handleStop` on every dispatch terminal state.
+ * See `src/worker/auto-sync.ts` module header for the decoupling
+ * invariant (Trello is NOT consulted at this layer; this module runs
+ * for every dispatch carrying an `issueId` regardless of trigger source
+ * or `trelloSync` setting).
  *
- * Mocks the DB lookup (`getDispatch`) + the actual sync invocation
- * (`runSync`) via the `AutoSyncDeps` injection seam, so tests don't need
- * a live MySQL pool, dispatch row, or filesystem layout.
+ * The unit-level mock coverage lives at `src/worker/auto-sync.test.ts`.
+ * This file adds DB-backed assertions: with a real `issues` row in the
+ * mirror table, confirm `reconcileIssue` is invoked with the
+ * dispatch row's `issueId` directly (no `findByExternalId` translation —
+ * that step was removed when the Trello-trigger filter was dropped).
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
@@ -28,7 +27,6 @@ import {
   vi,
 } from "vitest";
 import { autoSyncTrackedIssue } from "../../worker/auto-sync.js";
-import { writeIssue } from "../../poller/yaml-lifecycle.js";
 import { createEmptyIssue } from "../../issue-tracker/yaml.js";
 import { canonicalize, sha256 } from "../../db/canonicalize.js";
 import { createTestDb, type TestDbHandle } from "../../db/test-db.js";
@@ -133,13 +131,13 @@ function buildRepo(): RepoContext {
   };
 }
 
-function buildTrelloRow(cardId: string): Dispatch {
+function buildDispatchRow(overrides: Partial<Dispatch> = {}): Dispatch {
   return {
     id: "job-1",
     repoName: "test",
     trigger: "trello",
     triggerMetadata: {
-      cardId,
+      cardId: "card-99",
       cardName: "test card",
       cardUrl: "",
       listId: "",
@@ -150,7 +148,7 @@ function buildTrelloRow(cardId: string): Dispatch {
     sessionUuid: null,
     jsonlPath: null,
     parentJobId: null,
-    issueId: null,
+    issueId: "ISS-9",
     status: "running",
     startedAt: 0,
     completedAt: null,
@@ -173,10 +171,11 @@ function buildTrelloRow(cardId: string): Dispatch {
     mcpSettingsPath: null,
     recoverCount: 0,
     parentRecoverId: null,
-  };
+    ...overrides,
+  } as Dispatch;
 }
 
-describe("autoSyncTrackedIssue", () => {
+describe("autoSyncTrackedIssue (DB-backed)", () => {
   beforeEach(async () => {
     scratchRoot = mkdtempSync(join(tmpdir(), "danxbot-autosync-"));
     if (handle) {
@@ -190,39 +189,92 @@ describe("autoSyncTrackedIssue", () => {
   });
 
   it.skipIf(!handle)(
-    "AC #4: translates trello cardId → internal id via findByExternalId, then calls runSync",
+    "calls reconcile with the dispatch row's issueId directly (no external-id translation)",
     async () => {
-    // Seed an `issues` row that maps external_id "card-99" → id "ISS-9".
-    // findByExternalId queries the DB by repo_name + external_id and
-    // auto-sync extracts `.id` from the resulting Issue.
-    const repo = buildRepo();
-    const issue = {
-      ...createEmptyIssue({
-        id: "ISS-9",
-        external_id: "card-99",
-        title: "Tracked card",
-      }),
-    };
-    await seedDb(issue);
-    void writeIssue;
+      // Seed an `issues` row so the mirror has something to reconcile
+      // against. Auto-sync no longer reads `triggerMetadata.cardId` —
+      // it reads `dispatch.issueId` and hands it straight to reconcile.
+      const repo = buildRepo();
+      const issue = {
+        ...createEmptyIssue({
+          id: "ISS-9",
+          external_id: "card-99",
+          title: "Tracked card",
+        }),
+      };
+      await seedDb(issue);
 
-    const reconcile = vi.fn().mockResolvedValue(undefined);
-    const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-99"));
-    await autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile });
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+      const getDispatch = vi.fn().mockResolvedValue(buildDispatchRow());
 
-    expect(reconcile).toHaveBeenCalledTimes(1);
-    expect(reconcile).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "test", localPath: scratchRoot }),
-      "ISS-9",
-      "lifecycle",
-    );
+      await autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile });
+
+      expect(reconcile).toHaveBeenCalledTimes(1);
+      expect(reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "test", localPath: scratchRoot }),
+        "ISS-9",
+        "lifecycle",
+      );
     },
   );
 
-  it("skips runSync when no local YAML carries the trello cardId (no migration done)", async () => {
-    // No YAML file on disk → findByExternalId returns null → no sync.
+  it("decoupling invariant: Slack-triggered dispatches with an issueId DO reconcile", async () => {
+    // Pre-decoupling, this module short-circuited on `trigger !== 'trello'`.
+    // Post-decoupling, every dispatch carrying an `issueId` reconciles —
+    // a Slack-routed deep-agent that worked on a card is no different
+    // from a Trello-routed one once the work is done.
+    const repo = buildRepo();
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    const getDispatch = vi.fn().mockResolvedValue(
+      buildDispatchRow({
+        trigger: "slack",
+        triggerMetadata: {
+          channelId: "C0",
+          threadTs: "0",
+          messageTs: "0",
+          user: "u",
+          userName: null,
+          messageText: "",
+        },
+        issueId: "ISS-42",
+      }),
+    );
+    await autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile });
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.any(Object),
+      "ISS-42",
+      "lifecycle",
+    );
+  });
+
+  it("decoupling invariant: api-triggered dispatches with an issueId DO reconcile", async () => {
+    const repo = buildRepo();
+    const reconcile = vi.fn().mockResolvedValue(undefined);
+    const getDispatch = vi.fn().mockResolvedValue(
+      buildDispatchRow({
+        trigger: "api",
+        triggerMetadata: {
+          endpoint: "/api/launch",
+          callerIp: null,
+          statusUrl: null,
+          initialPrompt: "",
+        },
+        issueId: "ISS-7",
+      }),
+    );
+    await autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile });
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.any(Object),
+      "ISS-7",
+      "lifecycle",
+    );
+  });
+
+  it("skips reconcile when dispatch row has no issueId (Slack chat / board-chat / ideator runs)", async () => {
     const reconcile = vi.fn();
-    const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("ghost"));
+    const getDispatch = vi
+      .fn()
+      .mockResolvedValue(buildDispatchRow({ issueId: null }));
     await autoSyncTrackedIssue("job-1", buildRepo(), {
       getDispatch,
       reconcile,
@@ -230,47 +282,7 @@ describe("autoSyncTrackedIssue", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("skips sync for slack-triggered dispatches", async () => {
-    const reconcile = vi.fn();
-    const getDispatch = vi.fn().mockResolvedValue({
-      ...buildTrelloRow("ignored"),
-      trigger: "slack",
-      triggerMetadata: {
-        channelId: "C0",
-        threadTs: "0",
-        messageTs: "0",
-        user: "u",
-        userName: null,
-        messageText: "",
-      },
-    });
-    await autoSyncTrackedIssue("job-1", buildRepo(), {
-      getDispatch,
-      reconcile,
-    });
-    expect(reconcile).not.toHaveBeenCalled();
-  });
-
-  it("skips sync for api-triggered dispatches", async () => {
-    const reconcile = vi.fn();
-    const getDispatch = vi.fn().mockResolvedValue({
-      ...buildTrelloRow("ignored"),
-      trigger: "api",
-      triggerMetadata: {
-        endpoint: "/api/launch",
-        callerIp: null,
-        statusUrl: null,
-        initialPrompt: "",
-      },
-    });
-    await autoSyncTrackedIssue("job-1", buildRepo(), {
-      getDispatch,
-      reconcile,
-    });
-    expect(reconcile).not.toHaveBeenCalled();
-  });
-
-  it("skips sync when the dispatch row is missing", async () => {
+  it("skips reconcile when the dispatch row is missing", async () => {
     const reconcile = vi.fn();
     const getDispatch = vi.fn().mockResolvedValue(null);
     await autoSyncTrackedIssue("job-1", buildRepo(), {
@@ -289,66 +301,11 @@ describe("autoSyncTrackedIssue", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
-  it("never throws when runSync rejects (non-fatal)", async () => {
+  it("never throws when reconcile rejects (non-fatal — tracker hiccup must not stall terminal state)", async () => {
     const reconcile = vi.fn().mockRejectedValue(new Error("sync exploded"));
-    const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-1"));
+    const getDispatch = vi.fn().mockResolvedValue(buildDispatchRow());
     await expect(
       autoSyncTrackedIssue("job-1", buildRepo(), { getDispatch, reconcile }),
     ).resolves.toBeUndefined();
   });
-
-  it("skips sync when trello dispatch row has empty cardId", async () => {
-    const reconcile = vi.fn();
-    const getDispatch = vi.fn().mockResolvedValue({
-      ...buildTrelloRow(""),
-    });
-    await autoSyncTrackedIssue("job-1", buildRepo(), {
-      getDispatch,
-      reconcile,
-    });
-    expect(reconcile).not.toHaveBeenCalled();
-  });
-
-  it("skips sync when trello dispatch row has missing cardId field entirely", async () => {
-    const reconcile = vi.fn();
-    const trelloRow = buildTrelloRow("temp");
-    // Strip cardId off the metadata object completely — simulates an
-    // earlier-format dispatch row missing the field.
-    const meta = { ...trelloRow.triggerMetadata } as Record<string, unknown>;
-    delete meta.cardId;
-    const getDispatch = vi.fn().mockResolvedValue({
-      ...trelloRow,
-      triggerMetadata: meta,
-    });
-    await autoSyncTrackedIssue("job-1", buildRepo(), {
-      getDispatch,
-      reconcile,
-    });
-    expect(reconcile).not.toHaveBeenCalled();
-  });
-
-  it.skipIf(!handle)(
-    "logs but does not throw when runSync reports validation errors",
-    async () => {
-    const repo = buildRepo();
-    const issue = {
-      ...createEmptyIssue({
-        id: "ISS-1",
-        external_id: "card-1",
-        title: "Tracked",
-      }),
-    };
-    await seedDb(issue);
-
-    const reconcile = vi.fn().mockResolvedValue({
-      ok: false,
-      errors: ["missing required field: title"],
-    });
-    const getDispatch = vi.fn().mockResolvedValue(buildTrelloRow("card-1"));
-    await expect(
-      autoSyncTrackedIssue("job-1", repo, { getDispatch, reconcile }),
-    ).resolves.toBeUndefined();
-    expect(reconcile).toHaveBeenCalledTimes(1);
-    },
-  );
 });

@@ -1,47 +1,56 @@
 /**
- * Best-effort tracker push on the dispatch's tracked issue (DX-218 /
- * Phase 3 of the Event-Driven Worker epic). Wired into `handleStop` so
- * an agent that calls `danxbot_complete` after editing its YAML still
- * gets that YAML pushed to the tracker before the process exits —
- * without waiting up to ~30-60s for the next poller tick to mirror it.
+ * Post-dispatch reconcile — fired from `handleStop` after every dispatch
+ * reaches a terminal status, regardless of trigger source or Trello
+ * configuration. This module is named `auto-sync.ts` for historical
+ * reasons; its actual responsibility is **business-logic** post-dispatch
+ * convergence, NOT Trello sync.
  *
- * Phase 3 changed the implementation: instead of running its own
- * tracker push (the legacy `syncTrackedIssueOnComplete` → `runSync`
- * chain), this module now calls `reconcileIssue(..., "lifecycle")`.
- * Reconcile owns step 7 (outbound tracker push via `pushTrelloDiff`),
- * which goes through the per-card serial queue so concurrent reconciles
- * for the same card don't race each other on Trello. The `lifecycle`
- * trigger tells reconcile to AWAIT the trailing tracker push before
- * returning; the dashboard sees terminal tracker state by the time
- * `handleStop` SIGTERMs the agent.
+ * # Decoupling invariant (load-bearing)
  *
- * Lookup chain:
- *   1. `getDispatch(jobId)` → trigger metadata.
- *   2. `trigger === "trello"` && `metadata.cardId` → tracker-native
- *      external_id. Translate to internal `id` via the local YAML
- *      directory (`findByExternalId`); skip if no local file mirrors
- *      that external_id.
- *   3. Anything else (Slack, api, missing row) → no-op.
+ * The issue-tracker business logic — dispatch lifecycle, scheduler poke,
+ * dispatchable-set diff, parent recurse — MUST run for every terminal
+ * dispatch carrying an `issueId`. Trello is a side system; whether
+ * `trelloSync` is enabled or disabled, whether the dispatch was triggered
+ * by Trello, Slack, /api/launch, or the poller, makes ZERO difference to
+ * whether this reconcile fires. The trelloSync override only gates the
+ * Trello push step INSIDE `reconcileIssue` (step 7, gated at
+ * `src/issue/reconcile.ts:614`); every other reconcile step — including
+ * `dispatchableChanged` fanout that pokes the picker — runs unconditionally.
+ *
+ * **Why this matters.** Pre-DX-{this-fix}, the gate at the top of this
+ * module short-circuited the reconcile call when `trelloSync.enabled =
+ * false`, so the `onReconcileResult` poke chain never fired and the
+ * picker sat idle after every dispatch on a Trello-disabled repo. That
+ * bug coupled the picker's liveness to a side-system flag — exactly the
+ * coupling the operator wants none of.
+ *
+ * # Behavior
+ *
+ *   1. Look up the dispatch row by `jobId`.
+ *   2. Skip if the row is missing OR has no `issueId` (Slack chats,
+ *      board-chat sessions, ideator runs, /api/launch invocations that
+ *      didn't pass an issue — none of those carry an issue YAML to
+ *      reconcile against).
+ *   3. Call `reconcileIssue(repo, issueId, "lifecycle")`. The "lifecycle"
+ *      trigger tells reconcile to AWAIT the trailing tracker push (if
+ *      Trello is enabled) before returning so the dashboard sees terminal
+ *      tracker state by the time `handleStop` SIGTERMs the agent.
  *
  * Errors (DB lookup failure, reconcile exception) are logged and
- * swallowed — a tracker hiccup must NEVER block the agent's terminal
- * state from landing. The agent already passed `danxbot_complete`; the
- * worker must not turn that into a stall.
+ * swallowed — a tracker hiccup or reconcile bug must NEVER block the
+ * agent's terminal state from landing. The agent already passed
+ * `danxbot_complete`; the worker must not turn that into a stall.
  */
 
 import { reconcileIssue } from "../issue/reconcile.js";
-import { findByExternalId } from "../poller/yaml-lifecycle.js";
+import { onDispatchTerminated } from "../dispatch/scheduler.js";
 import { createLogger } from "../logger.js";
-import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
-import type {
-  Dispatch,
-  TrelloTriggerMetadata,
-} from "../dashboard/dispatches.js";
+import type { Dispatch } from "../dashboard/dispatches.js";
 import type { ReconcileTrigger } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { RepoContext } from "../types.js";
 
-const log = createLogger("auto-sync");
+const log = createLogger("post-dispatch-reconcile");
 
 export interface AutoSyncDeps {
   getDispatch: (jobId: string) => Promise<Dispatch | null>;
@@ -74,45 +83,44 @@ export async function autoSyncTrackedIssue(
   },
 ): Promise<void> {
   try {
-    // DX-302 — per-repo `trelloSync` operator override. When the
-    // operator has explicitly flipped it off in
-    // `<repo>/.danxbot/settings.json`, every Trello outbound call must
-    // no-op; auto-sync is one of the four outbound paths the epic gates.
-    // Checked BEFORE the dispatch lookup so a disabled-Trello repo
-    // doesn't even probe the DB for the per-dispatch trigger row.
-    //
-    // We consult ONLY the explicit override (not the env default) so
-    // existing tests + production code that fire a Trello-trigger
-    // auto-sync against a repo without `DANX_TRELLO_ENABLED` env (e.g.
-    // the system-test fixture) keep working — the trigger filter on
-    // the dispatch row is the canonical "is this a Trello sync"
-    // signal, and this gate is the additive operator-pause on top.
-    if (isTrelloSyncOverrideDisabled(repo.localPath)) {
-      log.info(
-        `[${repo.name}] trello sync disabled via settings override — skipping auto-sync for dispatch ${jobId}`,
-      );
-      return;
-    }
     const row = await deps.getDispatch(jobId);
-    if (!row || row.trigger !== "trello") return;
-    const meta = row.triggerMetadata as TrelloTriggerMetadata;
-    const externalId = meta.cardId;
-    if (!externalId) return;
-    const local = await findByExternalId(repo.localPath, externalId);
-    if (!local) return;
-    await deps.reconcile(
-      {
-        name: repo.name,
-        localPath: repo.localPath,
-        issuePrefix: repo.issuePrefix,
-      },
-      local.id,
-      "lifecycle",
-    );
+    // No row → dispatch already cleaned up by another path; nothing to
+    // reconcile. No `issueId` → dispatch wasn't bound to a card YAML
+    // (Slack chat, board-chat, ideator, or /api/launch without an issue),
+    // so there is no YAML for reconcile to operate on.
+    if (row && row.issueId !== null) {
+      await deps.reconcile(
+        {
+          name: repo.name,
+          localPath: repo.localPath,
+          issuePrefix: repo.issuePrefix,
+        },
+        row.issueId,
+        "lifecycle",
+      );
+    }
   } catch (err) {
     log.error(
-      `[Dispatch ${jobId}] danxbot_complete auto-sync failed (non-fatal)`,
+      `[Dispatch ${jobId}] post-dispatch reconcile failed (non-fatal)`,
       err,
     );
+  } finally {
+    // Always poke the picker, regardless of whether reconcile fired or
+    // succeeded. The agent slot this dispatch occupied just freed up;
+    // the picker must get a chance to fill it from any other open ToDo
+    // card in the queue. Reconcile's `dispatchableChanged` poke flips
+    // ONLY when the dispatched card's eligibility changes (status: ToDo
+    // + dispatch: null + blocked: null + ...) — for self-Blocked /
+    // self-Done completions, the flag stays false→false and the picker
+    // would never fire without this explicit kick. See
+    // `scheduler.ts#onDispatchTerminated` header for the full contract.
+    try {
+      onDispatchTerminated(repo.name);
+    } catch (err) {
+      log.error(
+        `[Dispatch ${jobId}] onDispatchTerminated poke failed (non-fatal)`,
+        err,
+      );
+    }
   }
 }

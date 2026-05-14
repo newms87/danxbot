@@ -203,11 +203,25 @@ The backend tracker (Trello) is a **one-way mirror** with two narrow inbound exc
 
 Outbound (every tick): every YAML field — title, description, status, AC, phases, labels, comments, blocked record — is pushed to the tracker so humans see current state.
 
-### Trello Is Background Infrastructure — Never In The Agent's Critical Path
+### Trello Is Background Infrastructure — 100% Decoupled From Issue-Tracker Business Logic
 
-**The agent flow (read YAML → edit YAML → done) MUST NOT depend on Trello.** Load-bearing architectural rule. The MCP server (`@thehammer/danx-issue-mcp`) is YAML-only (DX-203); agent edits go through `Edit` / `Write` and the chokidar watcher (`src/db/issues-mirror.ts`) mirrors to Postgres on file events; the worker's poll loop + post-completion auto-sync (`src/worker/auto-sync.ts`) push YAML→Trello asynchronously. Trello errors surface ONLY in the dashboard.
+**Trello is a side system. Erasing it must have ZERO effect on the issue tracker.** Load-bearing architectural rule. The issue tracker — YAML on disk + DB mirror + dispatch lifecycle + picker + reconcile + scheduler poke chain — runs identically whether Trello is enabled, disabled, or removed entirely.
 
-Forbidden: calling `mcp__trello__*` from agent flow; re-introducing tracker plumbing into `@thehammer/danx-issue-mcp`; treating "Trello unreachable" as agent-blocking; surfacing Trello creds to dispatched agents.
+The ONLY Trello surface area:
+
+1. **Inbound loop (when enabled).** `src/cron/inbound-fetch.ts` polls the tracker every cron tick: hydrates new cards into fresh YAMLs, pulls human comments into `comments[]`, flips Needs-Help cards back to ToDo. Gated entirely on `trelloSync.enabled`; disabled = skip the whole inbound module. Side effect on issue tracker: writes new YAMLs (chokidar → reconcile fires as if a human created the file). No business-logic dependency.
+2. **Outbound push (when enabled).** A single step inside `reconcileIssue` (`src/issue/reconcile.ts:614` — step 7, `pushTrelloDiff`) pushes the diff to the tracker when the YAML changes. Gated by `trelloSync.enabled` AT THIS ONE LINE. The rest of reconcile (parent-derive, file-move heal, hash-diff, dispatchable fanout, scheduler poke, recurse parent/dependents) runs unconditionally.
+
+**Forbidden — coupling issue-tracker business logic to Trello:**
+- Gating `reconcileIssue` invocation on `trelloSync.enabled` (the call site, not the push step). Reconcile is business logic — it MUST always run when triggered (chokidar event, lifecycle event, audit pass). The Trello push is one of its eight steps and gates itself.
+- Gating the picker / scheduler / `onReconcileResult` / `onAgentRosterChange` / `kickPickerOnceAtBoot` on `trelloSync`. Picker dispatching is independent of Trello availability.
+- Gating `autoSyncTrackedIssue` (the post-dispatch reconcile in `src/worker/auto-sync.ts`) on `trelloSync` or on dispatch trigger source. Every dispatch with `issueId` non-null MUST reconcile post-completion regardless of trigger or Trello flag (history: a prior version of this module short-circuited on `trelloSync=false` → picker silently froze every Trello-disabled repo).
+- Treating "Trello unreachable" as agent-blocking. Trello errors surface ONLY in the dashboard system-errors stream; they never block dispatch, never propagate to the agent.
+- Calling `mcp__trello__*` from agent flow.
+- Re-introducing tracker plumbing into `@thehammer/danx-issue-mcp` (DX-203 retired it; the MCP is YAML-only).
+- Surfacing Trello creds to dispatched agents (env scrub at workspace boundary).
+
+**Decoupling invariant** — the codebase, the docs, the tests, and the operator-visible surface must all read: "the issue tracker would run identically if every Trello-shaped file in `src/issue-tracker/`, every Trello-gated branch, and every Trello-shaped reconcile step were deleted in one commit." Reviewer agents and pipeline gates MUST flag any new code that adds a Trello-coupled branch outside the two surfaces above.
 
 Full table + implications: `.claude/rules/agent-dispatch.md` Forbidden Patterns row + `danxbot:danxbot` skill.
 
