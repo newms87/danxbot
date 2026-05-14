@@ -207,6 +207,169 @@ history: []
   });
 });
 
+/**
+ * DX-347 — ac[].check_item_id auto-heal on read.
+ *
+ * `check_item_id` is a sync-layer-only Trello checkItem id; it carries
+ * zero semantic meaning to agents. Before DX-347 the validator
+ * hard-rejected any ac item whose `check_item_id` was absent / null /
+ * non-string, which meant a single missing field unparseably-corrupted
+ * the entire YAML: the orphan-heal scan skipped it, chokidar mirrored
+ * `{_malformed: true}`, the poller went blind to the card, and the
+ * dashboard 500'd. The schema's own docstring already promised "new
+ * items use `check_item_id: ""` and the worker assigns" — yet the
+ * validator did not honor that contract on the read side.
+ *
+ * The auto-heal: any non-string / missing `check_item_id` materializes
+ * as `""`. The sync layer (`src/issue-tracker/sync.ts:346`) already
+ * treats empty `check_item_id` as "new item" → `addAcItem` stamps the
+ * tracker-assigned id back onto the local YAML on the next sync.
+ * Auto-heal is purely a read-side relaxation; the tracker still owns
+ * id assignment.
+ */
+describe("validateAcList — DX-347 check_item_id auto-heal", () => {
+  function yamlWithAc(acBlock: string): string {
+    return `schema_version: 7
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+${acBlock}comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+history: []
+`;
+  }
+
+  it("ac item missing check_item_id parses with check_item_id = '' (no reject)", () => {
+    const txt = yamlWithAc(`ac:
+  - title: AC1 — new item the agent wrote without the optional field
+    checked: false
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(issue.ac).toHaveLength(1);
+    expect(issue.ac[0]).toEqual({
+      check_item_id: "",
+      title: "AC1 — new item the agent wrote without the optional field",
+      checked: false,
+    });
+  });
+
+  it("ac item with explicit `check_item_id: null` auto-heals to ''", () => {
+    const txt = yamlWithAc(`ac:
+  - check_item_id: null
+    title: AC1
+    checked: true
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(issue.ac[0]?.check_item_id).toBe("");
+    expect(issue.ac[0]?.title).toBe("AC1");
+    expect(issue.ac[0]?.checked).toBe(true);
+  });
+
+  it("ac item with numeric check_item_id (yaml-parsed int) auto-heals to ''", () => {
+    // Real-world case: a hand-edit or stale-format tracker import that
+    // emits an integer where a string is expected.
+    const txt = yamlWithAc(`ac:
+  - check_item_id: 12345
+    title: AC1
+    checked: false
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(issue.ac[0]?.check_item_id).toBe("");
+  });
+
+  it("ac item with boolean check_item_id auto-heals to ''", () => {
+    const txt = yamlWithAc(`ac:
+  - check_item_id: false
+    title: AC1
+    checked: false
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(issue.ac[0]?.check_item_id).toBe("");
+  });
+
+  it("preserves existing non-empty check_item_id values untouched", () => {
+    const txt = yamlWithAc(`ac:
+  - check_item_id: "chk-tracker-real-id-abc"
+    title: AC1
+    checked: true
+  - title: AC2
+    checked: false
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    expect(issue.ac[0]?.check_item_id).toBe("chk-tracker-real-id-abc");
+    // Second item with no field → healed to empty.
+    expect(issue.ac[1]?.check_item_id).toBe("");
+  });
+
+  it("still rejects non-mapping ac entries (auto-heal does NOT cover shape errors)", () => {
+    const txt = yamlWithAc(`ac:
+  - "just a string, not a mapping"
+`);
+    expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+      /ac\[0\] must be a mapping/,
+    );
+  });
+
+  it("still rejects ac items missing required title / checked (auto-heal scope is narrow)", () => {
+    const missingTitle = yamlWithAc(`ac:
+  - checked: false
+`);
+    expect(() => parseIssue(missingTitle, { expectedPrefix: "DX" })).toThrow(
+      /ac\[0\]\.title must be a string/,
+    );
+    const missingChecked = yamlWithAc(`ac:
+  - title: AC1
+`);
+    expect(() => parseIssue(missingChecked, { expectedPrefix: "DX" })).toThrow(
+      /ac\[0\]\.checked must be a boolean/,
+    );
+  });
+
+  it("round-trip: parse(yaml-with-missing-check_item_id) → serialize → parse — stable empty check_item_id, no synthetic value leak", () => {
+    const txt = yamlWithAc(`ac:
+  - title: AC1
+    checked: false
+  - title: AC2
+    checked: true
+`);
+    const issue = parseIssue(txt, { expectedPrefix: "DX" });
+    const serialized = serializeIssue(issue);
+    // Serializer emits `check_item_id: ""` explicitly so a second
+    // reader sees the healed value without re-running the heal.
+    expect(serialized).toMatch(/check_item_id:\s*['"]{2}/);
+    const reparsed = parseIssue(serialized, { expectedPrefix: "DX" });
+    expect(reparsed.ac).toHaveLength(2);
+    expect(reparsed.ac[0]?.check_item_id).toBe("");
+    expect(reparsed.ac[1]?.check_item_id).toBe("");
+    expect(reparsed.ac[0]?.title).toBe("AC1");
+    expect(reparsed.ac[1]?.title).toBe("AC2");
+    expect(reparsed.ac[1]?.checked).toBe(true);
+  });
+});
+
 describe("serializeIssue — requires_human tolerates undefined", () => {
   /**
    * Regression: pre-DX-231 YAMLs lack the `requires_human` field

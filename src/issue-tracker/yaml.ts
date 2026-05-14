@@ -1435,9 +1435,17 @@ function validateAcList(value: unknown): IssueAcItem[] | string {
     const item = value[i];
     if (!isPlainObject(item)) return `ac[${i}] must be a mapping`;
     const v = item as Record<string, unknown>;
-    if (typeof v.check_item_id !== "string") {
-      return `ac[${i}].check_item_id must be a string`;
-    }
+    // DX-347: `check_item_id` is a sync-layer-only Trello id. Absent /
+    // null / non-string → auto-heal to "". The sync path
+    // (`src/issue-tracker/sync.ts:346` ac-reconcile) already treats
+    // empty `check_item_id` as "new item" → `addAcItem` stamps the
+    // tracker-assigned id back on next sync. The dashboard's PATCH
+    // route (`src/dashboard/issue-write.ts:303`) already uses this
+    // same heal shape on the WRITE side; this brings the READ side
+    // into alignment. Hard-rejecting here turned a single missing
+    // optional field into a YAML-wide parse failure, masking the card
+    // from orphan-heal / poller / dashboard.
+    const checkItemId = typeof v.check_item_id === "string" ? v.check_item_id : "";
     if (typeof v.title !== "string") {
       return `ac[${i}].title must be a string`;
     }
@@ -1445,7 +1453,7 @@ function validateAcList(value: unknown): IssueAcItem[] | string {
       return `ac[${i}].checked must be a boolean`;
     }
     out.push({
-      check_item_id: v.check_item_id,
+      check_item_id: checkItemId,
       title: v.title,
       checked: v.checked,
     });
