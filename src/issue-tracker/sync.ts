@@ -459,10 +459,19 @@ export async function syncIssue(
       local.retro,
       options.actionItemTitles,
     );
-    const managed = findCommentByMarker(
-      knownCommentsForRetro,
-      RETRO_COMMENT_MARKER,
-    );
+    // DX-503: detect the worker's own prior retro POST regardless of
+    // local-YAML state. The inbound merge above strips every comment
+    // whose body starts with `DANXBOT_COMMENT_MARKER` (echo-loop guard
+    // via `isBotMirroredComment`), so a managed retro that landed on
+    // the tracker but whose id never made it back into `local.comments[]`
+    // — persistIfDifferent missed, agent rewrote the YAML, fresh
+    // dispatch reloaded from stale source — is invisible to a
+    // local-only lookup. Cross-check `remoteComments` (the unfiltered
+    // view) so the worker recognizes its own POST and resolves to
+    // edit-in-place / no-op instead of accruing a duplicate.
+    const managed =
+      findCommentByMarker(knownCommentsForRetro, RETRO_COMMENT_MARKER) ??
+      findCommentByMarker(remoteComments, RETRO_COMMENT_MARKER);
     if (managed) {
       // Already worker-managed — only write if body changed.
       if (managed.text !== desiredText) {
@@ -470,11 +479,17 @@ export async function syncIssue(
         writes++;
         editedCommentTexts.set(managed.id, desiredText);
       }
-    } else if (hasLegacyRetroComment(knownCommentsForRetro)) {
+    } else if (
+      hasLegacyRetroComment(knownCommentsForRetro) ||
+      hasLegacyRetroComment(remoteComments)
+    ) {
       // Mid-flight Phase 4 dispatch already appended a manual `## Retro`
       // comment without our marker — don't post a duplicate. Leaving the
       // legacy shape in place is per spec (Out of scope: migrating
-      // already-Done cards' legacy retro comments).
+      // already-Done cards' legacy retro comments). Same DX-503
+      // remote-view fallback: a legacy retro is bot-mirrored too, so
+      // the inbound filter strips it; consult the unfiltered remote
+      // view to catch it when local.comments[] is stale.
     } else {
       const result = await tracker.addComment(local.external_id, desiredText);
       writes++;

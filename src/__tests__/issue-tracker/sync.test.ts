@@ -844,6 +844,225 @@ describe("syncIssue", () => {
     );
   });
 
+  // DX-503 — duplicate retro regression.
+  //
+  // Symptom in prod: a Done card lands with two `## Retro` comments on
+  // the tracker.
+  //
+  // Root cause: the inbound `newRemote` filter at the top of `syncIssue`
+  // strips every comment whose body starts with `DANXBOT_COMMENT_MARKER`
+  // (echo-loop guard — see `isBotMirroredComment`). The worker's own
+  // prior retro POST carries that marker as its FIRST line, so the
+  // inbound view never re-includes it. The retro renderer's three-branch
+  // lookup (`findCommentByMarker` → `hasLegacyRetroComment` → fresh
+  // `addComment`) ONLY consults `knownCommentsForRetro` (= local +
+  // `newRemote`); if `local.comments[]` doesn't carry the retro id —
+  // because the agent re-Wrote the YAML and clobbered persistIfDifferent's
+  // stamp, or a fresh dispatch picked up the card mid-flight before the
+  // mirror loop closed — neither branch fires the "already posted, skip
+  // / edit" path. Renderer falls through to `addComment` and the tracker
+  // accrues a second retro.
+  //
+  // Fix surface: the retro detection lookup MUST consult the unfiltered
+  // `remoteComments` view as a fallback so the worker recognizes its own
+  // prior POST regardless of local YAML state.
+  it("DX-503: retro renderer detects worker-rendered retro on the remote even when local.comments[] does not carry the retro id (no duplicate)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    // Tick 1: agent saves Done with retro → syncIssue posts retro.
+    const tick1Local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "g", bad: "b", action_item_ids: [], commits: [] },
+    };
+    await syncIssue(tracker, tick1Local);
+
+    const afterTick1 = await tracker.getComments(external_id);
+    const retroAfterTick1 = afterTick1.filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retroAfterTick1).toHaveLength(1);
+
+    // Tick 2: simulate the prod failure mode — local.comments[] is empty
+    // (agent re-Wrote the YAML, persistIfDifferent never landed, or a
+    // fresh dispatch reloaded from a stale source). Status + retro
+    // unchanged from tick 1, so renderer's `desiredText` is byte-identical
+    // to what's already on the tracker.
+    const tick2Local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      comments: [],
+      status: "Done",
+      retro: { good: "g", bad: "b", action_item_ids: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, tick2Local);
+
+    const log = tracker.getRequestLog();
+    expect(
+      log.filter((l) => l.method === "addComment"),
+      "renderer must consult the unfiltered remote view; bot-mirror filter blinds it to its own prior retro POST",
+    ).toEqual([]);
+
+    const afterTick2 = await tracker.getComments(external_id);
+    const retros = afterTick2.filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+  });
+
+  // Same mechanism, edit path: stale local + retro body change must
+  // resolve to editComment on the remote retro, not addComment.
+  it("DX-503: stale local.comments[] + retro body change resolves to editComment on the remote retro, never a fresh addComment", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    // Tick 1.
+    const tick1Local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "v1", bad: "b", action_item_ids: [], commits: [] },
+    };
+    await syncIssue(tracker, tick1Local);
+
+    // Tick 2 — stale local view but the agent updated `retro.good`.
+    const tick2Local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      comments: [],
+      status: "Done",
+      retro: { good: "v2", bad: "b", action_item_ids: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, tick2Local);
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "editComment")).toBe(true);
+    expect(log.some((l) => l.method === "addComment")).toBe(false);
+
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+    expect(retros[0].text).toContain("**What went well:** v2");
+  });
+
+  // DX-503 — legacy-shape variant of the same blind spot. A Phase-4 retro
+  // (DANXBOT_COMMENT_MARKER + ## Retro, NO RETRO_COMMENT_MARKER) is also
+  // bot-mirrored, so the inbound filter also strips it. Stale local +
+  // legacy retro on remote must still resolve to the no-op `legacy` branch,
+  // not a fresh addComment.
+  it("DX-503: legacy retro on remote is NOT duplicated when local.comments[] is stale", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    const legacyText = `${DANXBOT_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** old\n`;
+    await tracker.addComment(external_id, legacyText);
+
+    // Local view does NOT carry the legacy retro id (stale or fresh agent).
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      comments: [],
+      status: "Done",
+      retro: { good: "new", bad: "", action_item_ids: [], commits: [] },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+
+    const log = tracker.getRequestLog();
+    expect(
+      log.filter((l) => l.method === "addComment"),
+      "legacy retro on the remote must suppress fresh post even when local view is stale",
+    ).toEqual([]);
+
+    const allComments = await tracker.getComments(external_id);
+    const retroish = allComments.filter((c) => c.text.includes("## Retro"));
+    expect(retroish).toHaveLength(1);
+  });
+
+  // DX-503 — locks the spec invariant that legacy retros are NEVER
+  // edited (no RETRO_COMMENT_MARKER to re-locate); the renderer no-ops
+  // on the legacy branch regardless of body delta. Without this pin a
+  // future contributor could "helpfully" wire legacy editing through
+  // `hasLegacyRetroComment` and accidentally migrate Phase-4 retros.
+  it("DX-503: stale local + legacy retro on remote + retro body change resolves to no-op (legacy is NEVER edited)", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    const legacyText = `${DANXBOT_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** legacy v1\n`;
+    await tracker.addComment(external_id, legacyText);
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      comments: [],
+      status: "Done",
+      retro: {
+        good: "fresh body that differs from legacy",
+        bad: "",
+        action_item_ids: [],
+        commits: [],
+      },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "addComment")).toBe(false);
+    expect(log.some((l) => l.method === "editComment")).toBe(false);
+
+    const allComments = await tracker.getComments(external_id);
+    const retroish = allComments.filter((c) => c.text.includes("## Retro"));
+    expect(retroish).toHaveLength(1);
+    expect(retroish[0].text).toBe(legacyText);
+  });
+
+  // DX-503 — marker-poisoning robustness. `isBotMirroredComment` is
+  // anchored `startsWith(DANXBOT_COMMENT_MARKER)`. A retro that lost
+  // its leading DANXBOT marker (tracker normalization, hand-edited
+  // body, etc.) but still carries RETRO_COMMENT_MARKER somewhere in
+  // the body does NOT trip the bot-mirror filter → flows through the
+  // normal inbound merge → lands in local.comments[] via newRemote
+  // → `findCommentByMarker(knownCommentsForRetro, ...)` hits it. Pins
+  // that the OR-fallback's first arm still does work in that path.
+  it("DX-503: retro carrying RETRO_COMMENT_MARKER but missing leading DANXBOT_COMMENT_MARKER is visible via the normal inbound merge", async () => {
+    const tracker = new MemoryTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    // Hand-craft a retro that lost the leading marker but kept the
+    // retro marker mid-body.
+    const poisonedText = `${RETRO_COMMENT_MARKER}\n\n## Retro\n\n**What went well:** prior body\n`;
+    await tracker.addComment(external_id, poisonedText);
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      comments: [],
+      status: "Done",
+      retro: {
+        good: "prior body",
+        bad: "",
+        action_item_ids: [],
+        commits: [],
+      },
+    };
+    tracker.clearRequestLog();
+    await syncIssue(tracker, local);
+
+    // `isBotMirroredComment` did NOT strip the comment (no leading
+    // DANXBOT marker), so the inbound merge added it to local via
+    // `newRemote` → `findCommentByMarker(knownCommentsForRetro, ...)`
+    // found it via the FIRST arm of the OR-fallback. Body differs from
+    // desiredText (which carries both markers as the canonical shape),
+    // so editComment fires once. The key guarantee: NO addComment.
+    const log = tracker.getRequestLog();
+    expect(
+      log.filter((l) => l.method === "addComment"),
+      "marker-poisoned retro must not produce a duplicate",
+    ).toEqual([]);
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+  });
+
   it("legacy `## Retro` comment without our marker is NOT duplicated by the renderer", async () => {
     const tracker = new MemoryTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
