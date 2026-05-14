@@ -171,6 +171,22 @@ export async function listDispatchableYamls(
 }
 
 /**
+ * Return every open (non-terminal) issue regardless of status. Used by
+ * the picker's resume-existing-card pre-check (DX-360) — an agent
+ * carrying an open `assigned_agent` claim must be re-dispatched to that
+ * card before any new ToDo is offered. No sort applied; caller picks
+ * the order they want.
+ */
+export async function listOpenYamls(
+  repoLocalPath: string,
+  _prefix: string,
+): Promise<Issue[]> {
+  const repoName = repoNameFromPath(repoLocalPath);
+  const rows = await dbListOpenIssues(repoName);
+  return rows.map((r) => r.issue);
+}
+
+/**
  * Return every In Progress issue. Used by the orphan-resume / stuck-card
  * recovery path. FIFO `mirror_updated_at` ordering — oldest first so the
  * longest-running orphan is reconciled first.

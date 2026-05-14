@@ -27,7 +27,7 @@ import {
   kickPickerOnceAtBoot,
   onReconcileResult,
 } from "./dispatch/scheduler.js";
-import { listDispatchableYamls } from "./poller/local-issues.js";
+import { listDispatchableYamls, listOpenYamls } from "./poller/local-issues.js";
 import { clearDispatchAndWrite, loadLocal } from "./poller/yaml-lifecycle.js";
 import { tryMultiAgentDispatch } from "./poller/multi-agent-pick.js";
 import { recordSystemError } from "./dashboard/system-errors.js";
@@ -498,10 +498,10 @@ async function startWorkerMode(): Promise<void> {
     repo,
     tracker: repoTracker,
     runPicker: async ({ now }) => {
-      const allCards = await listDispatchableYamls(
-        repo.localPath,
-        repo.issuePrefix,
-      );
+      const [allCards, openIssues] = await Promise.all([
+        listDispatchableYamls(repo.localPath, repo.issuePrefix),
+        listOpenYamls(repo.localPath, repo.issuePrefix),
+      ]);
       // DX-290: operator-facing pickup-name-prefix filter. Migrated
       // from `runSync`'s deleted dispatch-decision block so the toggle in
       // `<repo>/.danxbot/settings.json` continues to work — when set,
@@ -519,6 +519,7 @@ async function startWorkerMode(): Promise<void> {
       await tryMultiAgentDispatch({
         repo,
         cards,
+        openIssues,
         tracker: repoTracker,
         now,
       });

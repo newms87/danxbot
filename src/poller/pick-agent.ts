@@ -163,3 +163,75 @@ export function pickCardForAgent(input: PickCardForAgentInput): Issue | null {
   }
   return null;
 }
+
+/**
+ * DX-360 — resolve the agent's existing open card BEFORE the picker
+ * offers any fresh ToDo.
+ *
+ * Contract: an agent may own AT MOST ONE non-terminal card at a time
+ * (closed cards in `<repo>/.danxbot/issues/closed/` carry historical
+ * `assigned_agent` for audit and don't count). The picker's first
+ * obligation on every tick is to resume that card if it exists —
+ * regardless of card status (ToDo / In Progress / Blocked / Review /
+ * waiting_on / requires_human). The agent itself is the decision-maker
+ * on resumption:
+ *
+ *   - Finish the work if it's near-complete and valid → commit + sync
+ *     back to main.
+ *   - Card is genuinely blocked → unassign self, flip status to
+ *     Blocked / Waiting On / Cancelled with the right reason, clean
+ *     the worktree of any stale WIP.
+ *   - Work is invalid → discard + clean worktree + transition card.
+ *
+ * In every case the agent's job is to return the system to a valid
+ * state. The picker's job is to GET them onto the card; the dispatch
+ * payload signals the resume by passing `resumeSessionId` so the agent
+ * has full prior context.
+ *
+ * Throws `OwnedCardInvariantError` when more than one non-terminal
+ * card carries the same `assigned_agent`. This is a hard data
+ * invariant — the writer of the second stamp violated it and the
+ * picker cannot guess which card to resume. Caller catches + heals by
+ * skipping the agent this tick + logging both card ids so an operator
+ * can manually clear one stamp.
+ */
+export class OwnedCardInvariantError extends Error {
+  constructor(
+    public readonly agentName: string,
+    public readonly cardIds: string[],
+  ) {
+    super(
+      `agent ${agentName} owns ${cardIds.length} open cards: ${cardIds.join(", ")} — invariant requires <=1`,
+    );
+    this.name = "OwnedCardInvariantError";
+  }
+}
+
+/**
+ * Return the agent's single open card (Status ∉ {Done, Cancelled}) or
+ * null when the agent has no open assignment. Throws
+ * `OwnedCardInvariantError` on duplicate ownership.
+ *
+ * `openIssues` is expected to be every non-terminal issue YAML for the
+ * repo (the caller passes `listOpenYamls(repoLocalPath, prefix)`).
+ * Pure — no DB queries, no filesystem reads.
+ */
+export function findOwnedCard(
+  agentName: string,
+  openIssues: readonly Issue[],
+): Issue | null {
+  const owned = openIssues.filter(
+    (i) =>
+      i.assigned_agent === agentName &&
+      i.status !== "Done" &&
+      i.status !== "Cancelled",
+  );
+  if (owned.length === 0) return null;
+  if (owned.length > 1) {
+    throw new OwnedCardInvariantError(
+      agentName,
+      owned.map((i) => i.id),
+    );
+  }
+  return owned[0];
+}

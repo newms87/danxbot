@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { pickCardForAgent, pickFreeAgent } from "./pick-agent.js";
+import {
+  findOwnedCard,
+  OwnedCardInvariantError,
+  pickCardForAgent,
+  pickFreeAgent,
+} from "./pick-agent.js";
 import type { AgentRecordWithName } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
 
@@ -300,5 +305,106 @@ describe("pickCardForAgent", () => {
       assigned: new Map([["DX-1", "alice"]]),
     });
     expect(out?.id).toBe("DX-2");
+  });
+});
+
+// ============================================================
+// findOwnedCard (DX-360) — resume-existing-card pre-check.
+// ============================================================
+describe("findOwnedCard", () => {
+  it("returns null when the agent owns no open card", () => {
+    const open = [
+      issue("DX-1", { assigned_agent: "bob" }),
+      issue("DX-2", { assigned_agent: null }),
+    ];
+    expect(findOwnedCard("alice", open)).toBeNull();
+  });
+
+  it("returns the agent's open card regardless of status (ToDo)", () => {
+    const open = [issue("DX-1", { assigned_agent: "alice", status: "ToDo" })];
+    const out = findOwnedCard("alice", open);
+    expect(out?.id).toBe("DX-1");
+  });
+
+  it("returns the agent's open card when status is In Progress", () => {
+    const open = [
+      issue("DX-1", { assigned_agent: "alice", status: "In Progress" }),
+    ];
+    const out = findOwnedCard("alice", open);
+    expect(out?.id).toBe("DX-1");
+  });
+
+  it("returns the agent's open card when status is Blocked", () => {
+    // Agent gets dispatched to its OWN blocked card — agent decides
+    // whether to clear the block or hand off properly.
+    const open = [
+      issue("DX-1", {
+        assigned_agent: "alice",
+        status: "Blocked",
+        blocked: { reason: "x", timestamp: "2026-04-20T00:00:00Z" },
+      }),
+    ];
+    const out = findOwnedCard("alice", open);
+    expect(out?.id).toBe("DX-1");
+  });
+
+  it("returns the agent's open card when status is Review", () => {
+    const open = [
+      issue("DX-1", { assigned_agent: "alice", status: "Review" }),
+    ];
+    const out = findOwnedCard("alice", open);
+    expect(out?.id).toBe("DX-1");
+  });
+
+  it("ignores cards in terminal status (Done / Cancelled) — those are audit history only", () => {
+    // Closed-dir cards aren't expected in `openIssues`, but defense-in-
+    // depth: if a Done card with assigned_agent ever leaks into the
+    // input, findOwnedCard does NOT treat it as the agent's current
+    // assignment.
+    const open = [
+      issue("DX-1", { assigned_agent: "alice", status: "Done" }),
+      issue("DX-2", { assigned_agent: "alice", status: "Cancelled" }),
+    ];
+    expect(findOwnedCard("alice", open)).toBeNull();
+  });
+
+  it("returns null when nothing in the input names the agent", () => {
+    const open = [
+      issue("DX-1", { assigned_agent: "bob", status: "In Progress" }),
+      issue("DX-2", { assigned_agent: null, status: "ToDo" }),
+    ];
+    expect(findOwnedCard("alice", open)).toBeNull();
+  });
+
+  it("throws OwnedCardInvariantError when the agent owns 2+ open cards", () => {
+    const open = [
+      issue("DX-1", { assigned_agent: "alice", status: "In Progress" }),
+      issue("DX-2", { assigned_agent: "alice", status: "ToDo" }),
+    ];
+    let caught: unknown;
+    try {
+      findOwnedCard("alice", open);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(OwnedCardInvariantError);
+    const e = caught as OwnedCardInvariantError;
+    expect(e.agentName).toBe("alice");
+    expect(e.cardIds).toEqual(["DX-1", "DX-2"]);
+  });
+
+  it("Done + open mixed → only counts open as conflicting (does NOT throw)", () => {
+    // Closed cards carry assigned_agent forever as durable audit. They
+    // must NOT inflate the open-card count.
+    const open = [
+      issue("DX-1", { assigned_agent: "alice", status: "Done" }),
+      issue("DX-2", { assigned_agent: "alice", status: "In Progress" }),
+    ];
+    const out = findOwnedCard("alice", open);
+    expect(out?.id).toBe("DX-2");
+  });
+
+  it("empty open list → null (no roster, no work)", () => {
+    expect(findOwnedCard("alice", [])).toBeNull();
   });
 });

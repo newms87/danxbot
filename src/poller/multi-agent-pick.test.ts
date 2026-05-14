@@ -14,6 +14,16 @@ vi.mock("../dispatch/core.js", () => ({
 vi.mock("../dispatch/recovery-mode.js", () => ({
   dispatchWithRecovery: vi.fn(),
 }));
+// DX-360 — picker's resume-existing-card pre-check calls
+// `listDispatchesByIssueId` to find the prior session UUID. Stub
+// returns empty by default; tests asserting resume behavior override
+// per-call. Mocking here keeps the test file off the
+// `dashboard/dispatches-db.js` → `db/connection.js` hard-requires
+// `DANXBOT_DB_*` chain (same isolation rationale as the scheduler
+// mock above).
+vi.mock("../dashboard/dispatches-db.js", () => ({
+  listDispatchesByIssueId: vi.fn().mockResolvedValue([]),
+}));
 // Stub the scheduler module so the multi-agent test doesn't drag in
 // the DB connection chain (`dashboard/dispatches-db.js` →
 // `db/connection.js` hard-requires DANXBOT_DB_*). The scheduler is the
@@ -890,10 +900,15 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.agent!.name).toBe("murphy");
   });
 
-  // Co-ownership retired: with `assigned_agent` as durable audit,
-  // multiple ToDo cards can legitimately name the same agent (re-bounced
-  // cards, multi-phase work).
-  it("does NOT clear duplicate assigned_agent across open cards (durable audit allows multi-claim)", async () => {
+  // DX-360 invariant: an agent owns AT MOST ONE non-terminal card.
+  // When the picker observes two open cards both stamped with the same
+  // `assigned_agent`, it cannot guess which one to resume — that is a
+  // data invariant violation. The picker logs + skips the agent this
+  // tick (no destructive clear) so an operator can manually resolve
+  // the duplicate stamp. Replaces the pre-DX-360 "durable audit allows
+  // multi-claim" behavior, which produced exactly the assign-new-card-
+  // while-prior-incomplete bug DX-360 closes.
+  it("skips the agent + dispatches nothing when two open cards share assigned_agent (DX-360 invariant violation)", async () => {
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
@@ -905,15 +920,173 @@ describe("tryMultiAgentDispatch", () => {
     const result = await tryMultiAgentDispatch({
       repo: fakeRepo(),
       cards: [a, b],
+      openIssues: [a, b],
       tracker: fakeTracker(),
       now: NOW,
     });
 
     expect(clearDispatchAndWrite).not.toHaveBeenCalled();
-    // First card dispatches; second is left untouched.
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+  });
+
+  // ============================================================
+  // DX-360 — resume-existing-card pre-check (the actual feature).
+  // ============================================================
+
+  it("dispatches the agent to its OPEN assigned card (status=In Progress) before any fresh ToDo pick", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    // murphy carries an In Progress assigned card (DX-351) — picker
+    // MUST resume it rather than offer the fresh ToDo (DX-354).
+    const inProgress = issue("DX-351", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+    });
+    const freshTodo = issue("DX-354", {
+      assigned_agent: null,
+      status: "ToDo",
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [freshTodo], // listDispatchableYamls excludes In Progress
+      openIssues: [inProgress, freshTodo],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    expect(dispatchInput.issueId).toBe("DX-1");
+    // Resumed onto murphy's existing card, NOT the fresh ToDo.
+    expect(dispatchInput.issueId).toBe("DX-351");
+    expect(dispatchInput.agent!.name).toBe("murphy");
+  });
+
+  it("threads resumeSessionId from the latest dispatch row when one carries a sessionUuid", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const db = await import("../dashboard/dispatches-db.js");
+    vi.mocked(db.listDispatchesByIssueId).mockResolvedValueOnce([
+      {
+        id: "newest-dispatch-uuid",
+        sessionUuid: "sess-abc-123",
+      } as never,
+      {
+        id: "older-dispatch-uuid",
+        sessionUuid: "sess-stale-old",
+      } as never,
+    ]);
+
+    const owned = issue("DX-351", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+    });
+
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [owned],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    // Newest sessionUuid wins (listDispatchesByIssueId is newest-first).
+    expect(dispatchInput.resumeSessionId).toBe("sess-abc-123");
+  });
+
+  it("omits resumeSessionId when no prior dispatch row has a sessionUuid (degrades to fresh session)", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const db = await import("../dashboard/dispatches-db.js");
+    vi.mocked(db.listDispatchesByIssueId).mockResolvedValueOnce([
+      { id: "dispatch-1", sessionUuid: null } as never,
+      { id: "dispatch-2", sessionUuid: "" } as never,
+    ]);
+
+    const owned = issue("DX-351", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+    });
+
+    await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [owned],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+    expect(dispatchInput.resumeSessionId).toBeUndefined();
+  });
+
+  it("resumes a Blocked card (status filter does NOT gate the agent's own card)", async () => {
+    // Per DX-360 contract: the agent owns the card, so the agent
+    // decides whether to clear the block or escalate properly. The
+    // picker dispatches regardless of card status (except Done /
+    // Cancelled, which are terminal audit).
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const blocked = issue("DX-351", {
+      assigned_agent: "murphy",
+      status: "Blocked",
+      blocked: {
+        reason: "stale spec",
+        timestamp: "2026-05-13T00:00:00Z",
+      },
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [blocked],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe(
+      "DX-351",
+    );
+  });
+
+  it("falls through to fresh ToDo pick when the agent has no open assigned card", async () => {
+    writeSettings({ alice: agentRecord("alice") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const todo = issue("DX-100", { status: "ToDo" });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [todo],
+      openIssues: [todo],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-100");
   });
 
   it("AC #1: dispatch() throw post-stamp → end-state YAML has dispatch=null; assigned_agent stays as durable audit so the next tick self-claim path works", async () => {

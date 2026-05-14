@@ -99,7 +99,13 @@ import {
 import type { Issue } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { DispatchKind } from "../agent/agent-types.js";
-import { pickCardForAgent, pickFreeAgent } from "./pick-agent.js";
+import {
+  findOwnedCard,
+  OwnedCardInvariantError,
+  pickCardForAgent,
+  pickFreeAgent,
+} from "./pick-agent.js";
+import { listDispatchesByIssueId } from "../dashboard/dispatches-db.js";
 import {
   buildStartStamp,
 } from "./dispatch-liveness-yaml.js";
@@ -133,6 +139,20 @@ export interface MultiAgentPickInput {
    * helper preserves their order; it does not re-rank.
    */
   cards: readonly Issue[];
+  /**
+   * Every open (non-terminal) issue YAML for the repo (DX-360). Used by
+   * the resume-existing-card pre-check: before offering an agent a
+   * fresh ToDo from `cards`, the picker scans `openIssues` for a card
+   * with `assigned_agent === agent.name` and, if found, dispatches
+   * that card with the prior session UUID for `--resume`. The agent
+   * itself decides on resumption whether to finish, escalate, or
+   * cancel. Superset of `cards` — includes In Progress / Blocked /
+   * Review / waiting_on / requires_human cards that `cards` filters
+   * out as non-dispatchable. Optional for back-compat with pre-DX-360
+   * tests; production callers ALWAYS pass this. When absent, defaults
+   * to `cards` (degrades to pre-DX-360 picker behavior — no resume).
+   */
+  openIssues?: readonly Issue[];
   /**
    * Resolved tracker for this repo. The picker calls
    * `tryAcquireLock` BEFORE dispatching so a sibling worker (local
@@ -184,6 +204,7 @@ export async function tryMultiAgentDispatch(
   input: MultiAgentPickInput,
 ): Promise<MultiAgentPickResult> {
   const { repo, cards, tracker, now } = input;
+  const openIssues: readonly Issue[] = input.openIssues ?? cards;
   const roster: AgentRecordWithName[] = readAgents(repo.localPath);
   if (roster.length === 0) {
     // No agents configured → caller falls through to the legacy
@@ -191,7 +212,12 @@ export async function tryMultiAgentDispatch(
     // single-card path still runs.
     return { dispatched: 0 };
   }
-  if (cards.length === 0) {
+  // DX-360 — pre-DX-360 we also short-circuited on `cards.length === 0`,
+  // but the resume-existing-card path needs to fire even when no fresh
+  // ToDo exists (the agent's owned card may be In Progress / Blocked
+  // and therefore absent from `cards`). Only short-circuit when there
+  // is also nothing to resume.
+  if (cards.length === 0 && openIssues.length === 0) {
     return { dispatched: 0 };
   }
 
@@ -276,7 +302,13 @@ export async function tryMultiAgentDispatch(
     return combined;
   };
 
-  while (remainingCards.length > 0) {
+  // DX-360 — loop iterates agents (not cards). Each iteration may
+  // dispatch an owned-card resume (card NOT in `remainingCards`) OR a
+  // fresh ToDo pick (card from `remainingCards`). The loop exits when
+  // `pickFreeAgent` returns null (every eligible agent is busy /
+  // quarantined / skipped) OR when neither owned-card nor fresh ToDo
+  // is available for the next free agent.
+  while (true) {
     const agent = pickFreeAgent({
       roster,
       busy: pickerSkipSet(),
@@ -284,18 +316,68 @@ export async function tryMultiAgentDispatch(
       repoName: repo.name,
     });
     if (agent === null) break;
-    const card = pickCardForAgent({
-      cards: remainingCards,
-      agentName: agent.name,
-      assigned,
-    });
+
+    // DX-360 — resume-existing-card pre-check. Before offering this
+    // agent any fresh ToDo from `remainingCards`, scan every open YAML
+    // for a card whose `assigned_agent` names this agent. The picker's
+    // first obligation is to put the agent BACK on that card so the
+    // agent decides how to finish or escalate; ICE-sort ToDo only
+    // applies when the agent has no open assignment.
+    //
+    // Invariant: each agent owns at most ONE non-terminal card.
+    // `findOwnedCard` throws `OwnedCardInvariantError` on duplicate
+    // ownership — we log, skip this agent this tick, and rely on
+    // operator intervention to clear the duplicate stamp.
+    let card: Issue | null = null;
+    let resumeSessionId: string | undefined;
+    try {
+      const owned = findOwnedCard(agent.name, openIssues);
+      if (owned !== null) {
+        card = owned;
+        // Latest dispatch's session UUID, newest-first. Skip rows whose
+        // sessionUuid is empty/null (failed-before-session-create rows).
+        // A missing UUID degrades to a fresh session — claude --resume
+        // is the optimisation, not a hard requirement.
+        try {
+          const prior = await listDispatchesByIssueId(owned.id);
+          const withSession = prior.find(
+            (d) => d.sessionUuid !== null && d.sessionUuid !== "",
+          );
+          resumeSessionId = withSession?.sessionUuid ?? undefined;
+        } catch (err) {
+          log.warn(
+            `[${repo.name}] resume-lookup failed for ${owned.id}: ${err instanceof Error ? err.message : String(err)} — proceeding without --resume`,
+          );
+        }
+        log.info(
+          `[${repo.name}] multi-agent pick (resume): ${agent.name} → ${owned.id} (status=${owned.status})${resumeSessionId ? ` --resume ${resumeSessionId.slice(0, 8)}` : ""}`,
+        );
+      }
+    } catch (err) {
+      if (err instanceof OwnedCardInvariantError) {
+        log.error(
+          `[${repo.name}] ${err.message} — skipping ${agent.name} this tick; operator must clear duplicate assigned_agent stamps`,
+        );
+        skipAgents.add(agent.name);
+        continue;
+      }
+      throw err;
+    }
+
     if (card === null) {
-      // No remaining card the agent can claim. Other agents in the
-      // roster might still find candidates — but with the picker's
-      // first-by-name tiebreak, every later agent sees the same
-      // cards minus the one we couldn't claim, so they'd hit the same
-      // wall. Bail out.
-      break;
+      card = pickCardForAgent({
+        cards: remainingCards,
+        agentName: agent.name,
+        assigned,
+      });
+      if (card === null) {
+        // No remaining card the agent can claim. Other agents in the
+        // roster might still find candidates — but with the picker's
+        // first-by-name tiebreak, every later agent sees the same
+        // cards minus the one we couldn't claim, so they'd hit the same
+        // wall. Bail out.
+        break;
+      }
     }
 
     // AC #2 of DX-221 — per-agent + per-card quarantine cooldown.
@@ -513,6 +595,16 @@ export async function tryMultiAgentDispatch(
           dispatchId,
           issueId: stamped.id,
           agent: { name: agent.name, bio: agent.bio },
+          // DX-360 — resume the agent's prior session when the picker
+          // resolved via `findOwnedCard`. `claude --resume <uuid>`
+          // loads the JSONL transcript so the agent inherits full
+          // context (prior tool calls, scratch state, etc.) and the
+          // task body's `/danx-prep` + `/danx-next` becomes the next
+          // turn in the same conversation. Undefined for fresh picks
+          // and for owned-card cases where no prior dispatch row
+          // carried a sessionUuid (rare — happens when the prior
+          // dispatch died before claude wrote its first JSONL entry).
+          resumeSessionId,
           // DX-296 — discriminator the prep-verdict route reads via
           // `getActiveJob(dispatchId)?.dispatchKind` on every verdict
           // POST. Stamped on `AgentJob` at construction time inside
@@ -754,7 +846,13 @@ export async function tryMultiAgentDispatch(
     // `dispatch()` synchronously).
     busy.add(agent.name);
     assigned.set(stamped.id, agent.name);
-    remainingCards.splice(remainingCards.indexOf(card), 1);
+    // DX-360 — owned-card resume may have selected a card NOT in
+    // `remainingCards` (e.g. status=In Progress filtered out of the
+    // dispatchable list). `indexOf` returns -1 → naïve `splice(-1, 1)`
+    // would remove the LAST element of `remainingCards` (off-by-one
+    // poison). Guard with the explicit index check.
+    const idx = remainingCards.indexOf(card);
+    if (idx !== -1) remainingCards.splice(idx, 1);
     dispatched++;
   }
 
