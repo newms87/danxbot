@@ -1,26 +1,36 @@
 ---
 name: danx-prep
-description: MANDATORY when the dispatch prompt begins with `/danx-prep <PREFIX>-N`. Runs the pre-dispatch prep step on the agent's worktree — uncommitted-work recovery, branch sync, conflict check against in-progress siblings, card sanity check — then emits a verdict via `mcp__danxbot__danxbot_prep_verdict`. NEVER runs `git stash`, `git reset --hard`, `git checkout <ref>`, `git restore`, or `git clean -f`; commit-first is the only recovery primitive.
+description: "MANDATORY when the dispatch prompt begins with `/danx-prep <PREFIX>-N`. Runs the pre-dispatch prep step on the agent's worktree — conflict check vs the in-progress sibling list the worker pre-resolved into the prompt, uncommitted-work recovery + assignment reshuffle (with a narrow orphan-discard exception), branch sync with conflict-resolve-in-place + push, card sanity check — then emits a verdict via `mcp__danxbot__danxbot_prep_verdict`. Destructive git ops (`git stash`, `git reset --hard`, `git checkout <ref>`, `git restore`, `git clean -f`) remain BANNED except in the one narrow orphan-discard window Step 3 spells out. Self-block via the `agent_blocked` status on `danxbot_complete` when the prep environment itself wedges and a human must intervene."
 ---
 
 # Danx Prep
 
-You are running because the poller dispatched you with `/danx-prep <PREFIX>-N`. The candidate card the dispatch picked is the one named in that argument.
+You are running because the poller dispatched you with `/danx-prep <PREFIX>-N` (and optionally `/danx-next <PREFIX>-N` on the next line). The candidate card the dispatch picked is the one named in that argument; the worker has already flipped that card's status to `In Progress` before spawning you (auto-flip), so the YAML on disk reads `status: In Progress` even on the very first turn.
 
-Your job is to bring the worktree to a state where the candidate is safe to work — recover any uncommitted work from a prior session, sync the branch against `origin/main`, and check for file-scope overlap with cards other agents are currently working on. At the end you emit ONE verdict via `mcp__danxbot__danxbot_prep_verdict`. The worker route applies the YAML / settings side-effects and decides whether the dispatch continues.
+The worker also injected the in-progress sibling list into your prompt as a single line:
 
-**Two prep modes** are configured per repo via `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json`:
+```
+In Progress cards: [<PREFIX>-A, <PREFIX>-B, ...]
+```
 
-- **Combined** — your dispatch prompt contains `/danx-prep <PREFIX>-N` AND a `/danx-next` body. After you emit verdict `ok` the worker leaves the dispatch running and you proceed straight into the `/danx-next` workflow in the same session.
-- **Separate** — your dispatch prompt contains ONLY `/danx-prep <PREFIX>-N`. After emitting the verdict you call `danxbot_complete` and exit. The poller picks the card again on the next tick for the actual work dispatch.
+That list is the work-set against which you check for conflicts in Step 2 — DO NOT enumerate the issues directory yourself.
 
-Both modes share the same skill body, the same MCP tool, the same worktree.
+Your job: bring the worktree to a state where the candidate is safe to work, then emit ONE verdict via `mcp__danxbot__danxbot_prep_verdict`. The worker route applies the YAML / settings side-effects and decides whether the dispatch continues.
 
-## ABSOLUTE BAN — destructive git ops
+**Two prep modes** (per repo via `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json`):
 
-`git stash`, `git stash push`, `git stash pop`, `git reset --hard`, `git checkout <ref>`, `git checkout -- <path>`, `git restore`, `git restore --staged`, `git clean -f`, `git push --force`, `git push --force-with-lease` are FORBIDDEN at every step of this skill. They destroy uncommitted work irrecoverably. The only allowed recovery primitive is **commit first** — the commit is the recoverable trail, anything else can be reset by a human later.
+- **Combined** — prompt has `/danx-prep <PREFIX>-N` AND `/danx-next <PREFIX>-N`. Verdict `ok` keeps the dispatch running; you proceed straight into `/danx-next`.
+- **Separate** — prompt has only `/danx-prep <PREFIX>-N`. After the verdict you call `danxbot_complete` and exit. Poller re-picks the card next tick for the work dispatch.
 
-If a sync step needs more than `git fetch` + `git pull --ff-only` + `git rebase`, **abort**. Emit verdict `abort` with a clear reason instead of attempting a destructive recovery.
+Both modes share the same body, the same MCP tools, the same worktree.
+
+## ABSOLUTE BAN — destructive git ops (with ONE narrow exception)
+
+`git stash`, `git stash push`, `git stash pop`, `git reset --hard`, `git checkout <ref>`, `git checkout -- <path>`, `git restore`, `git restore --staged`, `git clean -f`, `git push --force` are FORBIDDEN at every step of this skill — they destroy uncommitted work irrecoverably. The default recovery primitive is **commit first**.
+
+**The ONE narrow exception** — in Step 3, the orphan-discard window: when uncommitted residue matches NO recently-updated card (24h file-timestamp window) AND you are certain the work is incomplete junk that MUST be discarded to recover a valid state — you may run a systematic reset of the modified files. See Step 3 "Branch C (orphan discard)" for the gate.
+
+`git push --force-with-lease` IS allowed in Step 4 after a successful rebase — it is not destructive (it refuses to overwrite remote work the agent has not seen).
 
 User-facing rule reference: `~/web/claude-plugins/dev/skills/git-discipline/SKILL.md` "Never Destroy Work. Ever."
 
@@ -29,7 +39,9 @@ User-facing rule reference: `~/web/claude-plugins/dev/skills/git-discipline/SKIL
 ## Step 1 — Read context
 
 1. Read the candidate YAML at `<worktree>/.danxbot/issues/open/<PREFIX>-N.yml` to learn the work scope — `description`, `ac[]`, `comments[]`, file paths mentioned anywhere.
-2. Run:
+2. Parse the `In Progress cards: [...]` line from the prompt body. That is the sibling work-set for Step 2.
+3. Read every sibling YAML the line names (skip the candidate's own id). Defensive cap: 20 cards.
+4. Run:
 
    ```bash
    git fetch origin --quiet
@@ -37,175 +49,169 @@ User-facing rule reference: `~/web/claude-plugins/dev/skills/git-discipline/SKIL
    git rev-list --left-right --count origin/main...HEAD
    ```
 
-   Capture: the uncommitted-changes set, the ahead count, the behind count.
-3. List `<worktree>/.danxbot/issues/open/*.yml`. Read every YAML whose `status: In Progress` (exclude the candidate itself). Defensive cap: 20 cards.
+   Capture: uncommitted-changes set, ahead count, behind count.
 
 This is read-only. No edits, no commits yet.
 
 ---
 
-## Step 2 — Uncommitted work recovery
+## Step 2 — Conflict check against in-progress siblings
 
-If `git status --porcelain` from Step 1 is empty → skip to Step 3.
-
-If non-empty, **commit the work as-is — do not stash, do not reset, do not discard**.
-
-First, identify your own agent name: the literal between `You are ` and the trailing period on the first line of your dispatch prompt (the persona block — see `<worktree>/.danxbot/workspaces/issue-worker/CLAUDE.md` "Path placeholder convention"). The orchestrator stamps this onto every card it claims, so matching against it is the strongest "this is the card I was just working on" signal.
-
-Then compute the set of modified paths from the porcelain output and score every YAML under `<worktree>/.danxbot/issues/{open,closed}/` against them:
-
-- Direct mention of any modified path in the YAML's `description` / `comments[].text` / `ac[].title` → **+3 per path**.
-- YAML's `assigned_agent` equals your agent name → **+2**.
-- YAML's most recent timestamp (any comment / history / dispatch field) is within the last 24h → **+1**.
-
-**Tie-breaker rule** (applies to both branches): most recent activity timestamp first; if still tied, lowest `<PREFIX>-N` numeric suffix.
-
-### Branch A — at least one YAML scored above 0 (winner found)
-
-Pick the highest-scoring YAML (tie-breaker per the rule above). Then, in this exact order:
-
-1. **Append a comment** to the winning YAML (use the `Edit` tool against `<worktree>/.danxbot/issues/<state>/<PREFIX>-N.yml`):
-   - `author: "danxbot"`
-   - `timestamp:` current ISO 8601
-   - `text:` multi-line markdown body:
-
-     ```
-     ## Recovered uncommitted work — Phase 4 prep
-
-     The pre-dispatch prep step found uncommitted changes on the agent's worktree from a prior session and committed them as-is.
-
-     **Files (uncommitted residue from a prior dispatch):**
-
-     - <path 1>
-     - <path 2>
-
-     **Heuristic match score:** <total score> (highest of N candidates examined).
-
-     The committed sha is the most recent `wip:` commit on the agent's branch.
-     ```
-   - No `id` field.
-
-2. **Commit** the WIP residue AND the YAML comment-append together — one commit, no leftover diff:
-
-   ```bash
-   git add -A
-   git commit -m "wip: recovered uncommitted work — see <winner-PREFIX>-N comment"
-   ```
-
-   Capture the resulting sha (only for log purposes — the comment itself does not need a sha-back-reference because `git log` next to the comment timestamp resolves both).
-
-3. Proceed to Step 3.
-
-### Branch B — no YAML scored above 0 (orphan recovery)
-
-The modified paths reference no existing card. Create a fresh Action Items card so the orphan recovery has a durable home, then commit. Order matters:
-
-1. Call `mcp__danx-issue__danx_issue_create`:
-
-   ```
-   mcp__danx-issue__danx_issue_create({
-     type: "Bug",
-     title: "Investigate orphan uncommitted work — recovered by danx-prep",
-     description: <multi-line body with the file list and the heuristic-score table>,
-     ac: [{title: "Inspect the wip commit and decide whether to keep, fold into another card, or revert via a follow-up commit"}],
-   })
-   ```
-
-   Capture the returned `<PREFIX>-N` from the tool's response.
-
-2. **Append a comment** to the freshly-created card (same shape as Branch A step 1).
-
-3. **Commit** the WIP residue AND the YAML create + comment-append together:
-
-   ```bash
-   git add -A
-   git commit -m "wip: recovered orphan uncommitted work — see <new-PREFIX>-N"
-   ```
-
-4. Proceed to Step 3.
-
-### Post-Step-2 invariant
-
-After Branch A or Branch B completes, `git status --porcelain` MUST be empty (the single commit swept up both the prior-session residue and the YAML comment / new-YAML write you just performed). Re-run it; if anything remains, emit verdict `abort` — the recovery did not work as expected and you must NOT attempt a destructive cleanup.
-
----
-
-## Step 3 — Branch sync
-
-Read `ahead` and `behind` from Step 1's `git rev-list --left-right --count`. Branch on the pair:
-
-| Pair | Action |
-|---|---|
-| `ahead=0, behind=0` | No-op. Branch is at `origin/main`. |
-| `ahead=0, behind>0` | `git pull --ff-only origin main`. If the pull refuses (history diverged), emit verdict `abort` with reason `"branch sync: pull --ff-only refused — history diverged from origin/main"`. |
-| `ahead>0` | `git rebase origin/main`. If the rebase reports a conflict: run `git rebase --abort`, then emit verdict `abort` with reason `"branch sync: rebase conflict against origin/main"` and `suggested_steps: ["inspect the worktree by hand", "resolve conflicts manually + commit", "if irrecoverable, clear the broken record via the dashboard"]`. |
-
-After every successful sync, re-run `git rev-list --left-right --count origin/main...HEAD` — the pair MUST be `0\t0` (sync is idempotent). If not, emit verdict `abort`.
-
-**Do not run `git pull` without `--ff-only`.** A non-ff pull would merge silently and corrupt the linear history the squash-on-finalize flow assumes.
-
----
-
-## Step 4 — Conflict check (file-scope overlap)
-
-For each in-progress sibling YAML you read in Step 1, reason about file-scope overlap with the candidate:
+For each sibling YAML you read in Step 1, reason about file-scope overlap with the candidate:
 
 - File paths mentioned in `description` / `ac[].title` / `comments[].text` of BOTH cards.
 - Module / domain proximity — same source file, same component, same generated artifact.
 
-**Overlap is mutual exclusion, NOT precedence.** "A and B cannot both be In Progress because their work spaces collide" — neither one consumes the other's output. If overlap is detected:
+**Overlap is mutual exclusion, NOT precedence.** Neither card consumes the other's output; they simply cannot both be In Progress on the same code region simultaneously.
 
-- Emit verdict `conflict_on` with:
-  - `reason:` one sentence naming the overlapping module / file.
-  - `conflict_with: ["<PREFIX>-X", "<PREFIX>-Y", ...]` listing every overlapping sibling's id.
+If overlap is detected → emit verdict `conflict_on` IMMEDIATELY:
 
-The worker appends one `{id, reason}` entry per partner to the candidate YAML's `conflict_on[]` (sharing the verdict's `reason` per entry; dedupe by id). The poller's `isAnyKindBlocked` filter (`src/poller/local-issues.ts`) walks `conflict_on[]` in BOTH directions — the gate is symmetric, so you do NOT need to also stamp the partner. The gate auto-resolves the moment the partner reaches terminal status.
+```
+mcp__danxbot__danxbot_prep_verdict({
+  verdict: "conflict_on",
+  reason: "<one sentence naming the overlapping module/file>",
+  conflict_with: ["<PREFIX>-X", "<PREFIX>-Y", ...],
+})
+```
 
-**Never emit `waiting_on` for file-scope overlap.** `waiting_on` is the one-way precedence field ("A consumes B's output; A waits for B to ship") — a different semantic. The MCP tool rejects `verdict: "waiting_on"` and `blocked_by:` arg names with an explicit hint pointing at the new names.
+The worker appends one `{id, reason}` entry per partner to the candidate YAML's `conflict_on[]`. The poller's two-way `isAnyKindBlocked` filter then skips the candidate while any partner is non-terminal.
 
-If no overlap → continue to Step 5.
+**Abort the rest of this skill on `conflict_on`.** Do not touch any files, do not sync, do not commit. The worker stops the dispatch.
+
+If no overlap → continue to Step 3.
 
 ---
 
-## Step 5 — Card-itself sanity check (self-stuck check)
+## Step 3 — Uncommitted work recovery + assignment reshuffle
 
-Does the candidate describe work that an autonomous agent can perform right now? This is the **self-stuck** check — distinct from the file-scope overlap check in Step 4 (`conflict_on`). Mechanical reasons to block:
+If `git status --porcelain` from Step 1 is empty → skip to Step 4.
+
+If non-empty, you have residue from a prior session. Default: **commit it on the agent's branch** — never stash, never reset, except in the narrow orphan-discard window below.
+
+Identify the residue's owner card by scoring every YAML under `<worktree>/.danxbot/issues/{open,closed}/` against the modified-path set, restricted to YAMLs whose **most recent file timestamp (YAML mtime) is within the last 24h**:
+
+- Direct mention of any modified path in `description` / `comments[].text` / `ac[].title` → **+3 per path**.
+- YAML's `assigned_agent` equals your agent name (from the persona block) → **+2**.
+- YAML's most recent comment / history timestamp is within the last 24h → **+1**.
+
+Tie-breaker: most recent activity first; if still tied, lowest `<PREFIX>-N`.
+
+### Branch A — winner found (highest score > 0)
+
+The residue belongs to a real card. Do the assignment reshuffle so the poller's invariants stay consistent.
+
+1. **Unassign yourself from the candidate** the dispatch picked: Edit `<worktree>/.danxbot/issues/open/<PREFIX>-N.yml` to set `assigned_agent: null` AND `status: ToDo` (revert the auto-flip the worker just performed — the candidate is going back into the pool).
+2. **Assign yourself to the resolved owner card** (the winner). Edit that YAML to `assigned_agent: <your-agent-name>` AND `status: In Progress`.
+3. **Append a recovery comment** to the owner card explaining: residue files, score, what you intend to do with the work (finish vs commit-as-WIP for human review). Use markdown.
+4. Decide what to do with the residue:
+   - **If the work is complete and you can verify it (passes tests, matches the card's AC)** — commit it cleanly with a real commit message describing the finished work.
+   - **If the work is partial but coherent** — commit it as `wip:` so the next session can resume.
+   - **If you cannot decide** — commit as `wip:` and emit verdict `blocked` after this step with a clear reason for the next agent / operator.
+5. `git add -A && git commit -m "<message>"`. Push when you reach Step 4.
+6. Proceed to Step 4 — but note that the candidate id you were dispatched on has changed. The verdict you emit at Step 6 still references the ORIGINAL candidate the dispatch picked (the prep route reads `issue_id` off the dispatch row).
+
+### Branch B — no winner (orphan, OR all candidates outside 24h window)
+
+The residue references no recently-updated card. You have two paths:
+
+#### Branch B.1 — File an Action Items orphan card (default)
+
+1. `mcp__danx-issue__danx_issue_create` an Action Items / Bug card titled "Investigate orphan uncommitted work — recovered by danx-prep" with file list + score table in the description.
+2. **Unassign yourself from the candidate** (set `assigned_agent: null` + `status: ToDo` on the candidate YAML).
+3. Append a recovery comment to the new orphan card describing what you found.
+4. `git add -A && git commit -m "wip: recovered orphan uncommitted work — see <new-PREFIX>-N"`.
+5. Proceed to Step 4.
+
+#### Branch B.2 — Narrow orphan-discard window (RARE)
+
+ALL of the following gates MUST hold:
+
+1. No YAML (open OR closed) scored above 0 in the 24h window.
+2. The modified files do NOT form a coherent change — partial edits, half-finished scaffolding, broken syntax, debug output left behind.
+3. Keeping the residue would corrupt the next agent's view of the codebase (e.g., a half-applied refactor that would mislead reading-the-code).
+4. You can state in one sentence WHY this residue is junk.
+
+When ALL four gates hold, you may discard the residue via systematic per-file reset — the worktree-guard hook still rejects `git reset --hard` / `git clean -f`, so work within what's allowed:
+
+- For tracked files with modifications: `git checkout HEAD -- <file>` for EACH path individually (the worktree-guard hook permits per-path checkout in this prep skill's narrow case — single-file reverts of TRACKED paths are allowed; whole-tree `git reset --hard` is not).
+- For untracked files: `rm <file>` for each path individually.
+
+Steps in order:
+
+1. Append a comment to a fresh Action Items card via `danx_issue_create` documenting WHAT was discarded + WHY — the audit trail survives the discard.
+2. **Unassign yourself from the candidate** (set `assigned_agent: null` + `status: ToDo`).
+3. Per-file checkout / rm to clear the residue.
+4. Verify `git status --porcelain` is now empty.
+5. Proceed to Step 4.
+
+If you cannot articulate WHY in step 4 of the gate, you are not in Branch B.2 — fall back to Branch B.1 and let a human decide.
+
+### Post-Step-3 invariant
+
+After Branch A / B.1 / B.2 completes, `git status --porcelain` MUST be empty. If anything remains, emit verdict `blocked` with reason `"Step 3 recovery did not zero the working tree — manual inspection required"` and stop here.
+
+---
+
+## Step 4 — Branch sync (DO NOT ABORT — resolve conflicts in place)
+
+Read `ahead` and `behind` from Step 1's `git rev-list --left-right --count`.
+
+| Pair | Action |
+|---|---|
+| `ahead=0, behind=0` | No-op. Branch is at `origin/main`. Skip to Step 5. |
+| `ahead=0, behind>0` | `git pull --ff-only origin main`. Then push: `git push` (no force needed — your branch was an ancestor). |
+| `ahead>0` | `git rebase origin/main`. **If conflicts surface, RESOLVE THEM IN PLACE.** Read each conflicted file, reconcile the two sides using your understanding of both the candidate work AND the upstream change, `git add <file>`, `git rebase --continue`. Repeat until rebase reports `Successfully rebased`. Then `git push --force-with-lease`. |
+
+**DO NOT `git rebase --abort`.** No one else is going to resolve these conflicts — if you cannot resolve them, no one can. Work through them file by file using semantic understanding.
+
+Only escalate to verdict `agent_blocked` (Step 5 self-block path) if a conflict involves a region where you genuinely cannot tell which side is correct — for example, a half-finished refactor on `main` that contradicts your work and you can't reconstruct intent from either side. Document the exact file + region in the `summary` of the self-block.
+
+After every successful sync + push, re-run `git rev-list --left-right --count origin/main...HEAD` — pair MUST be `0\t0`. If not, emit `agent_blocked` with the diagnostic.
+
+**`git pull --ff-only` only.** Never `git pull` without `--ff-only` — a non-ff pull would merge silently and corrupt the linear history downstream flows depend on.
+
+**`git push --force-with-lease` only**, never `git push --force`. `--force-with-lease` refuses to overwrite remote SHAs the agent has not seen, so a concurrent push (rare on agent-owned branches but possible) refuses cleanly instead of stomping.
+
+---
+
+## Step 5 — Self-stuck check (card sanity)
+
+Does the candidate describe work an autonomous agent can perform right now? Mechanical reasons to escalate:
 
 - AC items are impossible to satisfy (refer to non-existent files, contradict the description, depend on credentials only a human can rotate).
-- Spec is ambiguous in a way that changes the goal of the card or its implementation plan.
+- Spec is ambiguous in a way that changes the goal of the card.
 - Scope crosses red-line architectural decisions only a human can make.
 - Card matches the "Blocked — Hard Gate Before Saving" criteria in `danxbot:issue-card-workflow`.
 
-If any apply → emit verdict `blocked` with a one-sentence reason. The worker stamps `status: "Blocked"` + `blocked: {reason, timestamp}` on the candidate YAML.
+If any apply — **load the `danxbot:issue-blocker` skill first**. Its 8-item gating checklist distinguishes a real human-only block from a punt. Only if the gate passes:
 
-Otherwise → emit verdict `ok`.
+- For card-itself stuckness → emit verdict `blocked` (Step 6).
+- For prep-environment failure (your worktree is wedged, branch sync failed irrecoverably, MCP tool unreachable) → call `danxbot_complete({status: "agent_blocked", summary: "<one-sentence reason>"})` directly INSTEAD of emitting a verdict. The MCP server stamps `status: Blocked` + `blocked: {reason: summary, timestamp}` on the candidate YAML and terminates the dispatch as failed. Use this when you got past Step 2 / 3 / 4 but the environment will not let you proceed safely.
+
+Otherwise → continue to Step 6 with verdict `ok`.
 
 ---
 
 ## Step 6 — Emit verdict
 
-Call `mcp__danxbot__danxbot_prep_verdict` **exactly once** with the verdict you reached. Do not loop or retry on the ack; the worker route is idempotent only for the specific dispatch row it carries, so a second call within the same dispatch is a double-stamp.
+Call `mcp__danxbot__danxbot_prep_verdict` **exactly once**:
 
 ```
 mcp__danxbot__danxbot_prep_verdict({
   verdict: "ok" | "conflict_on" | "blocked" | "abort",
   reason: "<one-sentence justification — non-empty>",
-  conflict_with: ["DX-273", "DX-274"],         // actual repo ids — REQUIRED iff verdict === "conflict_on"
-  broken_details: { suggested_steps: [...] },  // REQUIRED iff verdict === "abort"
+  conflict_with: ["<PREFIX>-X"],           // REQUIRED iff verdict === "conflict_on"
+  broken_details: { suggested_steps: [] }, // REQUIRED iff verdict === "abort"
 })
 ```
 
-The `conflict_with` entries above are illustrative. Replace them with the concrete `<PREFIX>-N` ids of the cards your repo uses (e.g. `DX-273`, `SG-12`). The validator rejects the literal placeholder `"<PREFIX>-N"` — it tests each entry against `^${repo prefix}-\d+$`.
+The MCP tool requires the dispatch row's `issue_id` for `conflict_on` / `blocked`, and `agent_name` for `abort`. Both are populated by the poller. The route returns the applied side-effects (`conflict_on[]` entries appended, `blocked` record stamped, `agents.<name>.broken` stamped).
 
-The MCP tool returns the worker's ack — the applied side-effects (`conflict_on[]` entries appended, `blocked` record stamped, `agents.<name>.broken` stamped). The ack is informational.
+Reject-on-call patterns the tool surfaces back:
 
-The MCP tool requires the dispatch row to carry `issue_id` for `conflict_on` / `blocked` (the candidate card to stamp) and `agent_name` for `abort` (the agent to mark broken). Both are populated by the poller's standard agent-bound dispatch path; missing either returns a 400 from the worker route — surface the ack message back to the dispatch and stop output instead of retrying.
-
-Reject-on-call patterns the tool surfaces back — do NOT retry on the old shape, fix the call shape and emit the verdict once:
-
-- `verdict: "waiting_on"` → renamed to `conflict_on`. The MCP server rejects with a hint.
-- `blocked_by:` arg → renamed to `conflict_with`. Same rejection.
-- Empty `reason` → rejected. Always supply a sentence.
+- `verdict: "waiting_on"` → renamed `conflict_on`.
+- `blocked_by:` arg → renamed `conflict_with`.
+- Empty `reason` → rejected.
 - Missing `conflict_with` when `verdict === "conflict_on"` → rejected.
 - Missing `broken_details` when `verdict === "abort"` → rejected.
 
@@ -215,42 +221,55 @@ Reject-on-call patterns the tool surfaces back — do NOT retry on the old shape
 
 After the verdict ack returns:
 
-- **Combined mode** (your prompt contained `/danx-next` after `/danx-prep`):
-  - Verdict `ok` → proceed with the `/danx-next` body. The work dispatch runs in the same session.
-  - Verdict `conflict_on` / `blocked` / `abort` → DO NOT begin the work body. The worker has already stopped the dispatch via the verdict route. Stop output here.
+- **Combined mode** (prompt contained `/danx-next` after `/danx-prep`):
+  - `ok` → proceed with `/danx-next`. Work dispatch continues in the same session.
+  - `conflict_on` / `blocked` / `abort` → DO NOT begin the work body. The worker already stopped the dispatch. Stop output here.
 
-- **Separate mode** (your prompt contained ONLY `/danx-prep`):
-  - For ANY verdict, call `danxbot_complete({status: "completed", summary: "prep <verdict>: <reason>"})` and exit.
-  - Exception: for verdict `abort`, the worker route already calls `job.stop("failed", ...)` after applying the broken stamp — the dispatch may finalize before your `danxbot_complete` lands. Either outcome is fine; just call it.
+- **Separate mode** (prompt contained only `/danx-prep`):
+  - ANY verdict → call `danxbot_complete({status: "completed", summary: "prep <verdict>: <reason>"})` and exit.
+  - Exception: for `abort`, the worker route may have already called `job.stop("failed", ...)`. Call `danxbot_complete` anyway; the second call is idempotent on a terminal row.
 
 ---
 
 ## Forbidden patterns inside this skill
 
-Enumerate so a future agent reading this body never reaches for them.
-
 | Pattern | Why forbidden |
 |---|---|
-| `git stash` / `git stash push` / `git stash pop` | Hides work from the commit history; a subsequent `git reset` or `git clean` discards the stash. Commit-first is the only recovery primitive. |
-| `git reset --hard` | Discards uncommitted work irrecoverably. |
-| `git checkout <ref>` / `git checkout -- <path>` | Overwrites working-tree state without a commit; same destructive class as reset. |
-| `git restore` / `git restore --staged` | Equivalent of `git checkout -- <path>` under the new git CLI. Same prohibition. |
-| `git clean -f` (any flags) | Deletes untracked files irrecoverably. |
-| `git push --force` / `git push --force-with-lease` | Rewrites remote history; outside the worktree-guard scope but never legitimate from a prep step. |
-| Writing to any path outside the worktree | The worktree-guard `PreToolUse` hook rejects this; never attempt to bypass via shell-escapes. Edits go to `<worktree>/...` only. The single approved out-of-worktree write is the Action Items card creation in Step 2 step 6, which goes through `mcp__danx-issue__danx_issue_create` and the watcher mirror, NOT a direct filesystem write. |
-| Reading or calling `mcp__trello__*` | Trello is background infrastructure; never agent path. Issues are local YAMLs. |
-| Returning a verdict without inspecting the in-progress YAMLs | No "I assume no conflict." Read every YAML with `status: "In Progress"` in Step 1 — verdict accuracy is load-bearing for the poller's two-way conflict gate. |
-| Emitting `waiting_on` as the verdict for file-scope overlap | The verdict is `conflict_on`. Use `waiting_on` ONLY when the candidate genuinely consumes the partner's output (one-way precedence). The MCP tool rejects the old verdict name. |
-| Emitting `blocked_by:` as the arg name for conflict partners | Renamed to `conflict_with`. The MCP tool rejects the old arg name. |
+| `git stash` / `git stash push` / `git stash pop` | Hides work from the commit history; subsequent reset or clean discards the stash. Commit-first only. |
+| `git reset --hard` (any flags) | Discards uncommitted work irrecoverably. The narrow orphan-discard window in Step 3 uses per-file `git checkout HEAD -- <file>` / `rm`, NOT whole-tree reset. |
+| `git clean -f` (any flags) | Deletes untracked files irrecoverably. Step 3 B.2 uses per-file `rm` only. |
+| `git checkout <ref>` (branch / commit switch) | Discards uncommitted work. Distinct from per-file `git checkout HEAD -- <path>` which IS allowed in Step 3 B.2. |
+| `git rebase --abort` | NEVER abort a Step 4 rebase. Resolve conflicts in place file by file. Escalate to `agent_blocked` only when a region is genuinely unreconcilable. |
+| `git push --force` (no `--force-with-lease`) | Stomps any concurrent remote push. Step 4 uses `--force-with-lease` after rebase. |
+| Enumerating `<worktree>/.danxbot/issues/open/*.yml` for the sibling list | The worker pre-resolved the list and injected `In Progress cards: [...]` into your prompt body. Parse the line; do not search. |
+| `mcp__trello__*` | Trello is background infrastructure. Issues are local YAMLs. |
+| Returning a verdict without inspecting the siblings in `In Progress cards: [...]` | Verdict accuracy is load-bearing for the poller's two-way conflict gate. |
+| Emitting `waiting_on` as the verdict for file-scope overlap | Verdict is `conflict_on`. `waiting_on` is the dep-chain field (one-way precedence) — different semantic. The MCP tool rejects the old verdict name. |
+
+---
+
+## Self-block via `agent_blocked` (Step 5 detail)
+
+`danxbot_complete({status: "agent_blocked", summary})` is the agent's self-block primitive when the prep ENVIRONMENT (not the candidate's spec) wedges. The MCP server requires the dispatch row to carry `issue_id` — the worker stamps `status: Blocked` + `blocked: {reason: summary, timestamp: now}` on that card's YAML and ends the dispatch as `failed`.
+
+Use this only when:
+
+- You completed Step 2 (conflict check passed) AND Step 3 (working tree zeroed).
+- Step 4 sync hit an unreconcilable rebase conflict you cannot semantically resolve, OR a downstream tool / MCP repeatedly errored after exhaustion of in-session retries.
+- Load the `danxbot:issue-blocker` plugin skill FIRST — its 8-item gate guards against punting.
+
+The `summary` becomes the `blocked.reason` verbatim. Make it one sentence stating the exact wedge: "Rebase conflict in `src/foo.ts:42` between candidate's rename and main's deletion — neither side has enough context to reconstruct intent."
+
+For card-itself stuckness (impossible AC, ambiguous spec) — use the `blocked` verdict in Step 6 instead. The two paths land at the same on-disk state (`status: Blocked` + `blocked` record) but the verdict path is the right semantic when you have not yet entered the work body.
 
 ---
 
 ## Why this skill exists
 
-The retired `runConflictCheck` (`src/dispatch/conflict-check.ts`, deleted in DX-297) was a separate Claude dispatch in the shared `issue-worker` workspace, capped at 90s. Three failure modes routinely fired false-positive conflicts:
+Replaces the retired `runConflictCheck` + `dispatchInRecoveryMode` precursor pair (DX-297). Three failure modes those introduced:
 
-1. The check's session timed out → conservative `ok: false` → `waiting_on` stamp on the candidate. Pattern observed on DX-273 + DX-274.
-2. The check ran in the shared workspace cwd, not the agent's worktree → it could not triage "is my branch ready to take new work?" alongside the file-overlap question.
-3. Branch prep was a separate concern (`fetchOrigin` + `validate` + `resetClean`) inside `dispatchWithRecovery` that ran AFTER conflict-check and used a destructive `git reset --hard` on every "clean" path.
+1. The conflict check ran in a separate 90s-capped session → timeouts produced false-positive `waiting_on` stamps (DX-273, DX-274).
+2. The check ran in the shared `issue-worker` workspace cwd, not the agent's worktree — could not reason about branch state.
+3. Recovery was a destructive `git reset --hard` on every "clean" path → silent loss of work.
 
-This skill collapses all three concerns into a single pre-agent dispatch on the **target agent's worktree** that is read-write only via the commit-first primitive. The legacy two-step gauntlet (conflict-check + recovery + work) is replaced by one prep step followed by the work (combined) or two prep+work dispatches (separate).
+This skill collapses all three concerns into a single pre-agent dispatch on the **agent's worktree** that uses commit-first as the only recovery primitive (with the one narrow orphan-discard exception spelled out above), resolves rebase conflicts in place, and pushes after sync so concurrent agents see a consistent remote.

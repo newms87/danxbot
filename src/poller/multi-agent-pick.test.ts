@@ -1611,7 +1611,7 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
       expect(dispatchInput.dispatchKind).toBe("work");
     });
 
@@ -1631,7 +1631,7 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("/danx-prep DX-1");
+      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1");
       expect(dispatchInput.dispatchKind).toBe("prep");
     });
 
@@ -1663,7 +1663,7 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
       expect(dispatchInput.dispatchKind).toBe("work");
     });
 
@@ -1707,13 +1707,13 @@ describe("tryMultiAgentDispatch", () => {
       // mode), even though settings.json flipped to combined between
       // them.
       expect(mockedDispatchWithRecovery.mock.calls[0][0].task).toBe(
-        "/danx-prep DX-1",
+        "In Progress cards: []\n\n/danx-prep DX-1",
       );
       expect(mockedDispatchWithRecovery.mock.calls[0][0].dispatchKind).toBe(
         "prep",
       );
       expect(mockedDispatchWithRecovery.mock.calls[1][0].task).toBe(
-        "/danx-prep DX-2",
+        "In Progress cards: []\n\n/danx-prep DX-2",
       );
       expect(mockedDispatchWithRecovery.mock.calls[1][0].dispatchKind).toBe(
         "prep",
@@ -1741,7 +1741,7 @@ describe("tryMultiAgentDispatch", () => {
       });
       expect(tick1Result.dispatched).toBe(1);
       const tick1Dispatch = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(tick1Dispatch.task).toBe("/danx-prep DX-1");
+      expect(tick1Dispatch.task).toBe("In Progress cards: []\n\n/danx-prep DX-1");
       expect(tick1Dispatch.dispatchKind).toBe("prep");
 
       // Tick 2 — assigned_agent stamp survived. The DB assignedCards
@@ -1762,7 +1762,7 @@ describe("tryMultiAgentDispatch", () => {
       expect(tick2Result.dispatched).toBe(1);
       // Second call to dispatchWithRecovery — index 1.
       const tick2Dispatch = mockedDispatchWithRecovery.mock.calls[1][0];
-      expect(tick2Dispatch.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(tick2Dispatch.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
       expect(tick2Dispatch.dispatchKind).toBe("work");
     });
   });

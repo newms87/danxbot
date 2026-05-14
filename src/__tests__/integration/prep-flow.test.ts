@@ -452,7 +452,7 @@ describe("prep flow integration — picker → route → onComplete", () => {
 
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+    expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
     expect(dispatchInput.dispatchKind).toBe("work");
     // Route's job.stop never fires for ok+work → dispatch ran to its
     // natural completion. Picker's progress check fires because the
@@ -487,7 +487,7 @@ describe("prep flow integration — picker → route → onComplete", () => {
 
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    expect(dispatchInput.task).toBe("/danx-prep DX-1");
+    expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1");
     expect(dispatchInput.dispatchKind).toBe("prep");
     // Card-progress check MUST be skipped — the prep-only dispatch
     // does NOT progress the card; running the check would write a
@@ -531,7 +531,7 @@ describe("prep flow integration — picker → route → onComplete", () => {
 
     expect(result.dispatched).toBe(1);
     const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-    expect(dispatchInput.task).toBe("/danx-prep DX-1\n\n/danx-next DX-1");
+    expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
     expect(dispatchInput.dispatchKind).toBe("work");
     expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
   });

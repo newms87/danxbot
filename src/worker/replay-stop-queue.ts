@@ -48,6 +48,7 @@ import {
   isCompleteStatus,
   mapCompleteToTerminalStatus,
 } from "../mcp/danxbot-server.js";
+import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("replay-stop-queue");
@@ -85,6 +86,7 @@ export interface ReplayStopQueueDeps {
   updateDispatchFn?: typeof updateDispatch;
   autoSync?: typeof autoSyncTrackedIssue;
   writeFlagFn?: typeof writeFlag;
+  stampBlocked?: typeof stampIssueBlocked;
 }
 
 /**
@@ -142,6 +144,7 @@ export async function replayStopQueue(
   const updateFn = deps.updateDispatchFn ?? updateDispatch;
   const autoSync = deps.autoSync ?? autoSyncTrackedIssue;
   const writeFlagFn = deps.writeFlagFn ?? writeFlag;
+  const stampIssueBlockedFn = deps.stampBlocked ?? stampIssueBlocked;
 
   for (const file of files) {
     const fullPath = join(dir, file);
@@ -179,10 +182,49 @@ export async function replayStopQueue(
         continue;
       }
 
+      // agent_blocked: stamp the candidate YAML before finalizing the
+      // row. Boot replay mirrors the live handleStop ordering. Missing
+      // issueId is non-fatal here (row still finalizes as failed); a
+      // queue entry produced by a live agent_blocked call ALWAYS
+      // carries a dispatch row with issueId (the MCP server gates on
+      // it), so the no-issueId branch is defensive only.
+      const terminatedAt = Date.now();
+      if (entry.status === "agent_blocked") {
+        if (dispatch.issueId) {
+          try {
+            stampIssueBlockedFn({
+              repoLocalPath: repo.localPath,
+              candidateId: dispatch.issueId,
+              expectedPrefix: repo.issuePrefix,
+              reason: entry.summary,
+              timestamp: new Date(terminatedAt).toISOString(),
+            });
+          } catch (err) {
+            log.error(
+              `[${repo.name}] replay stampIssueBlocked failed for ${dispatch.issueId} (continuing finalize)`,
+              err,
+            );
+          }
+        } else {
+          log.warn(
+            `[${repo.name}] queued agent_blocked entry ${entry.dispatchId} has no issueId on the row — finalizing without YAML stamp`,
+          );
+        }
+        await autoSync(entry.dispatchId, repo);
+        await updateFn(entry.dispatchId, {
+          status: "failed",
+          summary: entry.summary,
+          completedAt: terminatedAt,
+          pidTerminatedAt: terminatedAt,
+        });
+        unlinkSync(fullPath);
+        result.replayed.push(entry.dispatchId);
+        continue;
+      }
+
       // critical_failure: write the halt flag like the live handleStop
       // does. The flag is the operator's surface; the row goes
       // `failed` (not `critical_failure` — the DB schema collapses).
-      const terminatedAt = Date.now();
       if (entry.status === "critical_failure") {
         writeFlagFn(repo.localPath, {
           source: "agent",

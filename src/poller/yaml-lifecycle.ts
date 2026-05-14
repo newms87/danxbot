@@ -419,6 +419,27 @@ export function stampDispatchAndWrite(
  * existing pattern used by `clearDispatchAndWrite` and avoids spurious
  * mirror writes that would re-assert the same content hash.
  */
+/**
+ * Overwrite `status` on an existing local Issue and persist. Returns
+ * the updated Issue. Used by `dispatch()` to flip ToDo → In Progress
+ * BEFORE spawning an agent on a work dispatch (DX — auto-flip epic) so
+ * the YAML / dashboard / tracker reflect the assignment the moment the
+ * agent begins. Revert path uses the same helper to roll back to the
+ * prior status when spawnAgent throws before the agent reaches a
+ * terminal state.
+ *
+ * No-op when the value is already what was requested.
+ */
+export function stampStatusAndWrite(
+  repoLocalPath: string,
+  issue: Issue,
+  status: Issue["status"],
+): Promise<Issue> {
+  if (issue.status === status) return Promise.resolve(issue);
+  const updated: Issue = { ...issue, status };
+  return writeIssue(repoLocalPath, updated).then(() => updated);
+}
+
 export function stampAssignedAgentAndWrite(
   repoLocalPath: string,
   issue: Issue,

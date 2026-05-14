@@ -63,6 +63,7 @@ export const AGENT_COMPLETE_STATUSES = [
   "completed",
   "failed",
   "critical_failure",
+  "agent_blocked",
 ] as const;
 
 /**
@@ -116,6 +117,13 @@ export function isCompleteStatus(value: unknown): value is CompleteStatus {
  *     agent-facing response advertises `critical_failure` distinctly
  *     so the operator and the agent see the right signal at each
  *     layer.
+ *   - `agent_blocked` → `failed`. The self-block signal lives on the
+ *     candidate YAML (`status: "Blocked"` + `blocked: {reason: summary,
+ *     timestamp}`) — the dispatch row simply terminates as `failed`.
+ *     The worker stop handler stamps the YAML BEFORE finalizing the
+ *     row. Requires `issueId` on the dispatch row (the candidate to
+ *     stamp); a dispatch without `issueId` rejects this status with
+ *     400.
  *   - `api_error_recover` → `recovered`. DX-260 / Phase 2 of DX-246:
  *     the API-error recover handler ended this row terminal; a fresh
  *     row continues the chain via `POST /api/resume`.
@@ -233,8 +241,12 @@ export const TOOLS = [
       "Use status=\"critical_failure\" ONLY for non-card-specific environment failures " +
       "(MCP tools not loading, Bash tool unavailable, Claude auth missing) — the worker " +
       "will halt the poller and require human intervention before further dispatches. " +
-      "For card-specific blockers (missing info, unclear requirements), use status=\"failed\" " +
-      "and rely on the orchestrator to move the card to Needs Help.",
+      "Use status=\"agent_blocked\" when YOU (the agent) cannot proceed on the assigned " +
+      "card and a human must act — the worker stamps status: Blocked + blocked: " +
+      "{reason: summary, timestamp} on the candidate YAML and finalizes the dispatch " +
+      "as failed. Load the danxbot:issue-blocker skill BEFORE picking this status — " +
+      "the 8-item gate distinguishes a real human-only block from a punt. " +
+      "For card-specific fatal errors that do not need a Blocked stamp, use status=\"failed\".",
     inputSchema: {
       type: "object",
       properties: {
@@ -243,14 +255,17 @@ export const TOOLS = [
           enum: [...AGENT_COMPLETE_STATUSES],
           description:
             "completed = success, failed = card-specific fatal error, " +
-            "critical_failure = environment-level blocker affecting every dispatch",
+            "critical_failure = environment-level blocker affecting every dispatch, " +
+            "agent_blocked = self-block (stamps Blocked on the candidate YAML; requires issue_id on the dispatch row)",
         },
         summary: {
           type: "string",
           description:
             "A brief summary of what was accomplished or why the agent failed. " +
             "For critical_failure, describe the specific environment issue so the operator " +
-            "can fix it (e.g. 'MCP server failed to load Trello tools').",
+            "can fix it (e.g. 'MCP server failed to load Trello tools'). " +
+            "For agent_blocked, write the blocker reason as one sentence — the worker " +
+            "copies this verbatim into the YAML's blocked.reason field.",
         },
       },
       required: ["status", "summary"],

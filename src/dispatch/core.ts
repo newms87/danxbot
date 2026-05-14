@@ -35,6 +35,7 @@ import { join, resolve } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
+import type { Issue } from "../issue-tracker/interface.js";
 import {
   spawnAgent,
   buildCompletionInstruction,
@@ -77,6 +78,8 @@ import { reconcileIssue } from "../issue/reconcile.js";
 import {
   clearDispatchAndWrite,
   loadLocal,
+  loadLocalFromDisk,
+  stampStatusAndWrite,
 } from "../poller/yaml-lifecycle.js";
 
 const ttlTimerDeps: TtlTimerDeps = {
@@ -1231,6 +1234,41 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   const inputWithPersona =
     personaTask === input.task ? input : { ...input, task: personaTask };
 
+  // Auto-flip ToDo → In Progress BEFORE spawn (work dispatches only).
+  //
+  // Rationale: the dispatched agent should see the card already In
+  // Progress when it reads context (no race window where the agent
+  // looks at its own card and finds it still ToDo). The flip is
+  // skipped for prep-only dispatches (`dispatchKind === "prep"`) — the
+  // prep agent may emit a `blocked` / `conflict_on` / `abort` verdict,
+  // and we don't want the card sitting In Progress with no live agent
+  // after a non-`ok` verdict tears the dispatch down. Combined-mode
+  // dispatches AND separate-mode work follow-up (both `dispatchKind ===
+  // "work"`) flip here.
+  //
+  // Revert: if `spawnAgent` throws BEFORE the agent reaches a terminal
+  // state, we roll the YAML back to its prior status (typically ToDo)
+  // so the poller's next tick can re-pick. The revert is best-effort
+  // (logged on failure) — a stuck In Progress card is recoverable by
+  // operator action; throwing during revert would mask the original
+  // spawn failure.
+  let priorStatus: Issue["status"] | undefined;
+  if (input.issueId && input.dispatchKind === "work") {
+    const candidate = loadLocalFromDisk(
+      input.repo.localPath,
+      input.issueId,
+      input.repo.issuePrefix,
+    );
+    if (candidate && candidate.status === "ToDo") {
+      priorStatus = candidate.status;
+      await stampStatusAndWrite(
+        input.repo.localPath,
+        candidate,
+        "In Progress",
+      );
+    }
+  }
+
   // No allowlist: the workspace's `.mcp.json` (with the danxbot
   // infrastructure server merged in here) IS the agent's MCP surface.
   // `--strict-mcp-config` keeps the agent confined to those servers, and
@@ -1272,6 +1310,37 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // outer catch covers anything that throws BEFORE spawnForDispatch
     // runs — keeps the all-or-nothing staging contract intact.
     cleanupStagedFiles(stagedFilePaths);
+    // Revert the auto-flip on spawn failure so the candidate card
+    // returns to its prior status (typically ToDo) for the poller to
+    // re-pick next tick. Best-effort: a revert failure logs but does
+    // not mask the original spawn error.
+    if (priorStatus !== undefined && input.issueId) {
+      try {
+        const candidate = loadLocalFromDisk(
+          input.repo.localPath,
+          input.issueId,
+          input.repo.issuePrefix,
+        );
+        // Only revert if the candidate is STILL at the status we
+        // flipped it to. If some other writer (prep-verdict route,
+        // human dashboard edit, parallel poller tick) has since stamped
+        // Blocked / Done / Cancelled / etc., respect that — clobbering
+        // a Blocked card back to ToDo would re-dispatch a card the
+        // operator already triaged.
+        if (candidate && candidate.status === "In Progress") {
+          await stampStatusAndWrite(
+            input.repo.localPath,
+            candidate,
+            priorStatus,
+          );
+        }
+      } catch (revertErr) {
+        log.error(
+          `[Dispatch ${dispatchId}] failed to revert auto-flip on ${input.issueId} after spawn error`,
+          revertErr,
+        );
+      }
+    }
     throw err;
   }
 }

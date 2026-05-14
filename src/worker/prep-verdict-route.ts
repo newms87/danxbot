@@ -66,6 +66,7 @@ import {
   IssueParseError,
 } from "../issue-tracker/yaml.js";
 import { issuePath } from "../poller/yaml-lifecycle.js";
+import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import {
   setAgentBroken,
   type AgentBrokenState,
@@ -170,21 +171,13 @@ function applyBlockedVerdict(
   payload: Extract<PrepVerdictPayload, { verdict: "blocked" }>,
   nowIso: string,
 ): void {
-  const filePath = issuePath(repo.localPath, candidateId, "open");
-  if (!existsSync(filePath)) {
-    throw new Error(
-      `candidate YAML not found at ${filePath} — cannot stamp blocked`,
-    );
-  }
-  const issue = parseIssue(readFileSync(filePath, "utf-8"), {
+  stampIssueBlocked({
+    repoLocalPath: repo.localPath,
+    candidateId,
     expectedPrefix: repo.issuePrefix,
+    reason: payload.reason,
+    timestamp: nowIso,
   });
-  const next: Issue = {
-    ...issue,
-    status: "Blocked",
-    blocked: { reason: payload.reason, timestamp: nowIso },
-  };
-  writeFileSync(filePath, serializeIssue(next));
 }
 
 /**

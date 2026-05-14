@@ -27,7 +27,7 @@ describe("danxbot_complete tool schema", () => {
     expect(tool).toBeDefined();
   });
 
-  it("exposes completed, failed, and critical_failure in the status enum", () => {
+  it("exposes completed, failed, critical_failure, agent_blocked in the status enum", () => {
     const statusProp = (tool!.inputSchema as unknown as {
       properties: { status: { enum: string[] } };
     }).properties.status;
@@ -35,6 +35,7 @@ describe("danxbot_complete tool schema", () => {
       "completed",
       "failed",
       "critical_failure",
+      "agent_blocked",
     ]);
   });
 
@@ -43,8 +44,13 @@ describe("danxbot_complete tool schema", () => {
     expect(tool!.description).toMatch(/environment|env/i);
   });
 
-  it("description steers card-specific failures to Needs Help via status=failed", () => {
-    expect(tool!.description).toMatch(/Needs Help/);
+  it("description points agent_blocked at the issue-blocker skill gate", () => {
+    expect(tool!.description).toMatch(/agent_blocked/);
+    expect(tool!.description).toMatch(/issue-blocker/);
+  });
+
+  it("description distinguishes agent_blocked (stamps Blocked YAML) from failed", () => {
+    expect(tool!.description).toMatch(/Blocked/);
   });
 });
 
@@ -113,6 +119,7 @@ describe("isCompleteStatus", () => {
       "completed",
       "failed",
       "critical_failure",
+      "agent_blocked",
       "api_error_recover",
       "api_error_failed",
       "rate_limited",

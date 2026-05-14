@@ -602,6 +602,180 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
     },
   );
 
+  describe("auto-flip ToDo → In Progress before spawn", () => {
+    async function writeCandidate(
+      id: string,
+      status: "ToDo" | "In Progress" | "Blocked" = "ToDo",
+    ): Promise<void> {
+      const { createEmptyIssue, serializeIssue } = await import(
+        "../issue-tracker/yaml.js"
+      );
+      const yamlPath = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "issues",
+        "open",
+        `${id}.yml`,
+      );
+      writeFileSync(
+        yamlPath,
+        serializeIssue(
+          createEmptyIssue({
+            id,
+            status,
+            title: `${id} title`,
+            description: "fixture",
+          }),
+        ),
+      );
+    }
+
+    async function readCandidateStatus(id: string): Promise<string> {
+      const { parseIssue } = await import("../issue-tracker/yaml.js");
+      const yamlPath = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "issues",
+        "open",
+        `${id}.yml`,
+      );
+      return parseIssue(readFileSync(yamlPath, "utf-8"), {
+        expectedPrefix: issueRepo.issuePrefix,
+      }).status;
+    }
+
+    it("flips ToDo → In Progress when issueId set + dispatchKind=work", async () => {
+      await writeCandidate("ISS-100", "ToDo");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-prep ISS-100\n\n/danx-next ISS-100",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-100",
+        dispatchKind: "work",
+      });
+
+      expect(await readCandidateStatus("ISS-100")).toBe("In Progress");
+    });
+
+    it("skips flip when dispatchKind=prep (prep-only dispatch — verdict may stamp Blocked/conflict_on later)", async () => {
+      await writeCandidate("ISS-101", "ToDo");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-prep ISS-101",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-101",
+        dispatchKind: "prep",
+      });
+
+      expect(await readCandidateStatus("ISS-101")).toBe("ToDo");
+    });
+
+    it("skips flip when issueId is undefined (Slack / external dispatch)", async () => {
+      // No candidate YAML — verify dispatch does not throw on the
+      // missing-id branch and does not write any new YAML.
+      await dispatch({
+        repo: issueRepo,
+        task: "Slack-style dispatch",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        dispatchKind: "work",
+      });
+      expect(
+        existsSync(resolve(tmpRepoDir, ".danxbot", "issues", "open", "DX-1.yml")),
+      ).toBe(false);
+    });
+
+    it("no-op when candidate is already In Progress (idempotent)", async () => {
+      await writeCandidate("ISS-102", "In Progress");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-prep ISS-102\n\n/danx-next ISS-102",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-102",
+        dispatchKind: "work",
+      });
+
+      expect(await readCandidateStatus("ISS-102")).toBe("In Progress");
+    });
+
+    it("revert respects a concurrent Blocked stamp — does NOT clobber Blocked back to ToDo", async () => {
+      await writeCandidate("ISS-104", "ToDo");
+      // Simulate a concurrent writer (e.g., prep-verdict route, human
+      // dashboard edit) stamping Blocked between the auto-flip and the
+      // spawn-failure revert. We do this by making the spawnAgent
+      // throw, but FIRST we rewrite the YAML to Blocked from inside
+      // the spawn fake — the revert path will read the disk state
+      // back and must not overwrite Blocked.
+      mockSpawnAgent.mockImplementationOnce(async () => {
+        const { createEmptyIssue, serializeIssue } = await import(
+          "../issue-tracker/yaml.js"
+        );
+        const blocked = {
+          ...createEmptyIssue({
+            id: "ISS-104",
+            status: "Blocked",
+            title: "ISS-104 title",
+            description: "fixture",
+          }),
+          blocked: {
+            reason: "concurrent stamp by prep-verdict route",
+            timestamp: "2026-05-14T00:00:00.000Z",
+          },
+        };
+        writeFileSync(
+          resolve(tmpRepoDir, ".danxbot/issues/open/ISS-104.yml"),
+          serializeIssue(blocked),
+        );
+        throw new Error("spawn failed");
+      });
+
+      await expect(
+        dispatch({
+          repo: issueRepo,
+          task: "/danx-prep ISS-104\n\n/danx-next ISS-104",
+          workspace: "issue-worker",
+          overlay: {},
+          apiDispatchMeta: DEFAULT_DISPATCH_META,
+          issueId: "ISS-104",
+          dispatchKind: "work",
+        }),
+      ).rejects.toThrow(/spawn failed/);
+
+      // Card stayed Blocked — the revert did NOT clobber.
+      expect(await readCandidateStatus("ISS-104")).toBe("Blocked");
+    });
+
+    it("reverts flip to ToDo when spawnAgent throws", async () => {
+      await writeCandidate("ISS-103", "ToDo");
+      mockSpawnAgent.mockRejectedValueOnce(new Error("spawn failed"));
+
+      await expect(
+        dispatch({
+          repo: issueRepo,
+          task: "/danx-prep ISS-103\n\n/danx-next ISS-103",
+          workspace: "issue-worker",
+          overlay: {},
+          apiDispatchMeta: DEFAULT_DISPATCH_META,
+          issueId: "ISS-103",
+          dispatchKind: "work",
+        }),
+      ).rejects.toThrow(/spawn failed/);
+
+      // Candidate rolled back to ToDo so the poller can re-pick.
+      expect(await readCandidateStatus("ISS-103")).toBe("ToDo");
+    });
+  });
+
   it("rejects dispatch with WorkspaceGateError when overrides.issuePoller.enabled = false (parallel to slack-worker gate test)", async () => {
     // Symmetry with the slack-worker test at line ~342. The issue-worker
     // workspace declares `settings.issuePoller.enabled ≠ false` as a gate;

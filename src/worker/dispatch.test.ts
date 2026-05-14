@@ -236,6 +236,15 @@ vi.mock("./auto-sync.js", () => ({
     mockAutoSyncTrackedIssue(...args),
 }));
 
+// agent_blocked status (Phase A of dispatched-agent epic): handleStop
+// stamps Blocked on the candidate YAML BEFORE finalizing the dispatch
+// row. Mock the helper so we can assert call shape without touching the
+// real filesystem.
+const mockStampIssueBlocked = vi.fn();
+vi.mock("../issue/stamp-blocked.js", () => ({
+  stampIssueBlocked: (...args: unknown[]) => mockStampIssueBlocked(...args),
+}));
+
 import {
   handleLaunch,
   handleResume,
@@ -804,6 +813,119 @@ describe("handleStop", () => {
       "failed",
       "MCP server failed to load Trello tools",
     );
+  });
+
+  it("agent_blocked: stamps Blocked on candidate YAML, then job.stop(failed, summary)", async () => {
+    mockStampIssueBlocked.mockClear();
+    mockAutoSyncTrackedIssue.mockClear();
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-ab-1",
+      status: "running",
+      issueId: "DX-42",
+    });
+    const callOrder: string[] = [];
+    const mockStop = vi.fn().mockImplementation(async () => {
+      callOrder.push("stop");
+    });
+    mockStampIssueBlocked.mockImplementation(() => {
+      callOrder.push("stamp");
+    });
+    mockAutoSyncTrackedIssue.mockImplementation(async () => {
+      callOrder.push("autoSync");
+    });
+    mockGetActiveJob.mockReturnValue({
+      id: "job-ab-1",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "agent_blocked",
+      summary: "Rebase conflict in src/foo.ts:42 — cannot reconcile",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-ab-1", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(JSON.parse(stopRes._getBody())).toEqual({ status: "agent_blocked" });
+    expect(mockStampIssueBlocked).toHaveBeenCalledWith({
+      repoLocalPath: MOCK_REPO.localPath,
+      candidateId: "DX-42",
+      expectedPrefix: MOCK_REPO.issuePrefix,
+      reason: "Rebase conflict in src/foo.ts:42 — cannot reconcile",
+      timestamp: expect.stringMatching(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
+      ),
+    });
+    // YAML stamp → autoSync (tracker push) → job.stop. Ordering is
+    // load-bearing: the auto-sync must see the Blocked YAML so the
+    // tracker reflects Blocked immediately after the agent self-blocks.
+    expect(callOrder).toEqual(["stamp", "autoSync", "stop"]);
+    expect(mockStop).toHaveBeenCalledWith(
+      "failed",
+      "Rebase conflict in src/foo.ts:42 — cannot reconcile",
+    );
+  });
+
+  it("agent_blocked: returns 400 when the dispatch row has no issue_id", async () => {
+    mockStampIssueBlocked.mockClear();
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-ab-2",
+      status: "running",
+      issueId: null,
+    });
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    mockGetActiveJob.mockReturnValue({
+      id: "job-ab-2",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "agent_blocked",
+      summary: "self-block w/o card",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-ab-2", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(
+      /requires the dispatch row to carry issue_id/,
+    );
+    expect(mockStampIssueBlocked).not.toHaveBeenCalled();
+    expect(mockStop).not.toHaveBeenCalled();
+  });
+
+  it("agent_blocked: returns 400 when summary is missing", async () => {
+    mockStampIssueBlocked.mockClear();
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-ab-3",
+      status: "running",
+      issueId: "DX-42",
+    });
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    mockGetActiveJob.mockReturnValue({
+      id: "job-ab-3",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    });
+
+    const stopReq = createMockReqWithBody("POST", { status: "agent_blocked" });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-ab-3", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(400);
+    expect(JSON.parse(stopRes._getBody()).error).toMatch(
+      /Missing required field: summary/,
+    );
+    expect(mockStampIssueBlocked).not.toHaveBeenCalled();
+    expect(mockStop).not.toHaveBeenCalled();
   });
 
   it("returns 400 when status=critical_failure but summary is missing — operator needs actionable info", async () => {

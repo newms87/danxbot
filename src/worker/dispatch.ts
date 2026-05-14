@@ -38,6 +38,7 @@ import {
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
+import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
@@ -1082,6 +1083,58 @@ async function handleStopFromDb(
     return;
   }
 
+  if (status === "agent_blocked") {
+    // Self-block: agent decided card cannot make progress without a
+    // human. Stamp the candidate YAML (status: Blocked + blocked:
+    // {reason: summary, timestamp}) BEFORE finalizing the dispatch row,
+    // so the YAML mirror lands first and the operator sees the Blocked
+    // card immediately. Dispatch row terminates as `failed` — the
+    // self-block signal lives on the YAML, not the row status.
+    if (!summary) {
+      json(res, 400, {
+        error:
+          'Missing required field: summary (required when status="agent_blocked")',
+      });
+      return;
+    }
+    if (!dispatch.issueId) {
+      json(res, 400, {
+        error:
+          'status="agent_blocked" requires the dispatch row to carry issue_id (the candidate card) — got null',
+      });
+      return;
+    }
+    const nowIso = new Date().toISOString();
+    try {
+      stampIssueBlocked({
+        repoLocalPath: repo.localPath,
+        candidateId: dispatch.issueId,
+        expectedPrefix: repo.issuePrefix,
+        reason: summary,
+        timestamp: nowIso,
+      });
+    } catch (err) {
+      log.error(
+        `[Dispatch ${jobId}] stampIssueBlocked failed for ${dispatch.issueId}`,
+        err,
+      );
+      json(res, 500, {
+        error: `Failed to stamp Blocked on ${dispatch.issueId}: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+    await autoSyncTrackedIssue(jobId, repo);
+    const terminatedAt = Date.now();
+    await updateDispatch(jobId, {
+      status: mapCompleteToDispatchStatus(status),
+      summary,
+      completedAt: terminatedAt,
+      pidTerminatedAt: terminatedAt,
+    });
+    json(res, 200, { status });
+    return;
+  }
+
   // Non-critical terminal: sync the tracked YAML before marking the row
   // terminal, mirroring the in-memory path's ordering.
   await autoSyncTrackedIssue(jobId, repo);
@@ -1161,21 +1214,70 @@ export async function handleStop(
       return;
     }
 
-    // Phase 3 of tracker-agnostic-agents (Trello wsb4TVNT): auto-sync
-    // the dispatch's tracked issue YAML before tearing the agent down.
-    // The agent edits the local YAML directly with `Edit` / `Write`
-    // (DX-157 retired the legacy save MCP tool) and calls
-    // `danxbot_complete` to terminate; the auto-sync ensures the
-    // tracker reflects the final state immediately, without waiting on
-    // the poller's per-tick mirror.
+    if (status === "agent_blocked") {
+      // Self-block: same asymmetry as critical_failure. Response
+      // advertises "agent_blocked", but `job.stop("failed", ...)` ends
+      // the row as failed — the self-block signal lives on the
+      // candidate YAML (status: Blocked + blocked: {reason, timestamp}).
+      // Stamp the YAML BEFORE job.stop so the auto-sync inside job.stop
+      // pushes the Blocked record to the tracker.
+      if (!summary) {
+        json(res, 400, {
+          error:
+            'Missing required field: summary (required when status="agent_blocked")',
+        });
+        return;
+      }
+      const dispatchRow = await getDispatchById(jobId);
+      if (!dispatchRow?.issueId) {
+        json(res, 400, {
+          error:
+            'status="agent_blocked" requires the dispatch row to carry issue_id (the candidate card) — got null',
+        });
+        return;
+      }
+      const nowIso = new Date().toISOString();
+      try {
+        stampIssueBlocked({
+          repoLocalPath: repo.localPath,
+          candidateId: dispatchRow.issueId,
+          expectedPrefix: repo.issuePrefix,
+          reason: summary,
+          timestamp: nowIso,
+        });
+      } catch (err) {
+        log.error(
+          `[Dispatch ${jobId}] stampIssueBlocked failed for ${dispatchRow.issueId}`,
+          err,
+        );
+        json(res, 500, {
+          error: `Failed to stamp Blocked on ${dispatchRow.issueId}: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return;
+      }
+      await autoSyncTrackedIssue(jobId, repo);
+      await job.stop("failed", summary);
+      json(res, 200, { status });
+      return;
+    }
+
+    // Post-dispatch reconcile. The agent edits the local YAML directly
+    // with `Edit` / `Write` (DX-157 retired the legacy save MCP tool) and
+    // calls `danxbot_complete` to terminate; this reconcile is the
+    // business-logic convergence step — flips `dispatchableChanged` for
+    // the scheduler poke (so the picker re-fires after the dispatch
+    // ends), runs the parent-derive + file-move heals, and (when Trello
+    // is enabled) pushes the diff to the tracker.
     //
-    // Only fires for tracker-backed triggers (Trello today). Slack and
-    // API dispatches have no tracked issue and skip the sync. Validation
-    // failures are recorded against the dispatch row's `error` column
-    // by `syncTrackedIssueOnComplete` itself; we deliberately do NOT
-    // surface them to the stop handler's response — the agent is already
-    // done, so the failure is informational and must not block process
-    // termination (per AC #4 + the in-card gotchas).
+    // Fires for every dispatch carrying an `issueId`, regardless of
+    // trigger source (Trello, Slack, /api/launch, poller) or trelloSync
+    // setting. Trello is fully decoupled from this path — the Trello
+    // push is gated INSIDE reconcile (step 7 only). See `auto-sync.ts`
+    // module header for the decoupling invariant.
+    //
+    // Errors are logged inside `autoSyncTrackedIssue` and swallowed; the
+    // agent already passed `danxbot_complete`, so we must NEVER let a
+    // reconcile bug or tracker hiccup turn a terminal state into a stall.
     await autoSyncTrackedIssue(jobId, repo);
 
     await job.stop(status, summary);

@@ -106,6 +106,7 @@ import {
   pickFreeAgent,
 } from "./pick-agent.js";
 import { listDispatchesByIssueId } from "../dashboard/dispatches-db.js";
+import { listInProgressYamls } from "./local-issues.js";
 import {
   buildStartStamp,
 } from "./dispatch-liveness-yaml.js";
@@ -603,11 +604,43 @@ export async function tryMultiAgentDispatch(
     //     route lets the dispatch run past `verdict: "ok"` because
     //     `dispatchKind === "work"`, and the agent proceeds straight
     //     into the work workflow in the same session.
-    const task = isReconcileDispatch
+    // Enumerate in-progress sibling cards so the prep agent does NOT
+    // have to search the issues directory itself. The worker resolves
+    // the list once and ships it as a single line in the prompt body.
+    // Excludes the candidate (it's about to be flipped to In Progress
+    // by `dispatch()`'s auto-flip). Sliced at 20 to keep the prompt
+    // line bounded — pathological repos with 50+ concurrent dispatches
+    // would otherwise spam the prompt.
+    let inProgressSiblings: string[] = [];
+    try {
+      const siblings = await listInProgressYamls(
+        repo.localPath,
+        repo.issuePrefix,
+      );
+      inProgressSiblings = siblings
+        .map((s) => s.id)
+        .filter((id) => id !== stamped.id)
+        .slice(0, 20);
+    } catch (err) {
+      log.warn(
+        `[${repo.name}] failed to enumerate in-progress siblings for ${stamped.id} — proceeding with empty list`,
+        err,
+      );
+    }
+    const siblingsLine =
+      inProgressSiblings.length > 0
+        ? `In Progress cards: [${inProgressSiblings.join(", ")}]\n\n`
+        : "In Progress cards: []\n\n";
+
+    const taskBody = isReconcileDispatch
       ? buildReconcileTaskBody(agent.name, reconcileOwnedCards)
       : isPrepOnlyDispatch
         ? `/danx-prep ${stamped.id}`
         : `/danx-prep ${stamped.id}\n\n/danx-next ${stamped.id}`;
+    // Prepend the siblings line to non-reconcile dispatches. Reconcile
+    // builds its own task body and operates on owned cards only — no
+    // need to surface siblings there.
+    const task = isReconcileDispatch ? taskBody : siblingsLine + taskBody;
 
     try {
       await dispatchWithRecovery(
