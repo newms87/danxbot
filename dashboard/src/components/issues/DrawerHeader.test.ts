@@ -98,6 +98,12 @@ describe("DrawerHeader title editor", () => {
   it("clicking the title switches to an input prefilled with the current title", async () => {
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race under full-suite CPU contention — vi.waitFor
+    // polls until the input element is observable in the DOM. See DX-262
+    // RequiresHumanPanel.test.ts for the canonical mechanism description.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     const input = w.get('[data-test="drawer-title-input"]');
     expect((input.element as HTMLInputElement).value).toBe("Original Title");
     // Original h2 is gone.
@@ -110,67 +116,113 @@ describe("DrawerHeader title editor", () => {
 
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     const input = w.get('[data-test="drawer-title-input"]');
     await input.setValue("New Title");
     await input.trigger("keydown", { key: "Enter" });
-    await flushPromises();
 
-    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
-      title: "New Title",
+    // DX-299: post-Enter PATCH call-count race after the async save cascade.
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        title: "New Title",
+      });
     });
-    const events = w.emitted("update:issue");
-    expect(events).toBeTruthy();
-    expect(events![0][0]).toBe(patched);
-    // Exits edit mode after success.
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false);
+    // DX-299: the emit fires AFTER the awaited PATCH resolves, in the
+    // microtask after the call-count is observable; wrap in its own
+    // vi.waitFor to match the DX-262 canonical pattern (see
+    // RequiresHumanPanel.test.ts L147 — `expect(w.emitted(...))` inside
+    // a second vi.waitFor).
+    await vi.waitFor(() => {
+      const events = w.emitted("update:issue");
+      expect(events).toBeTruthy();
+      expect(events![0][0]).toBe(patched);
+    });
+    // DX-299: exit-edit-mode transition race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false),
+    );
   });
 
   it("Esc cancels: does not call patchIssue and reverts to the read state", async () => {
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     const input = w.get('[data-test="drawer-title-input"]');
     await input.setValue("Half-typed never sent");
     await input.trigger("keydown", { key: "Escape" });
-    await flushPromises();
 
+    // DX-299: exit-edit-mode transition race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false),
+    );
+    // DX-299: negative assertion — vi.waitFor can't gate "should never be
+    // called"; flushPromises drains the macrotask queue before the check.
+    await flushPromises();
     expect(patchMock).not.toHaveBeenCalled();
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false);
     expect(w.get('[data-test="drawer-title"]').text()).toBe("Original Title");
   });
 
   it("empty title is rejected client-side — error shown, stay in edit mode, no PATCH fired", async () => {
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     const input = w.get('[data-test="drawer-title-input"]');
     await input.setValue("   ");
     await input.trigger("keydown", { key: "Enter" });
-    await flushPromises();
 
+    // DX-299: client-side error-render state-transition race.
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-title-error"]').text()).toContain(
+        "Title cannot be empty",
+      );
+    });
+    // DX-299: negative — drain macrotasks before the not-called check.
+    await flushPromises();
     expect(patchMock).not.toHaveBeenCalled();
     expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true);
-    expect(w.get('[data-test="drawer-title-error"]').text()).toContain(
-      "Title cannot be empty",
-    );
   });
 
   it("no PATCH fires when the title is unchanged after Enter", async () => {
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     await w.get('[data-test="drawer-title-input"]')
       .trigger("keydown", { key: "Enter" });
+    // DX-299: exit-edit-mode transition race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false),
+    );
+    // DX-299: negative — drain macrotasks before the not-called check.
     await flushPromises();
     expect(patchMock).not.toHaveBeenCalled();
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false);
   });
 
   it("switching to a different issue mid-edit resets to read state", async () => {
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true);
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
 
     await w.setProps({ issue: makeDetail({ id: "DX-2", title: "Other" }) });
 
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false);
+    // DX-299: prop-change unmount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(false),
+    );
     expect(w.get('[data-test="drawer-title"]').text()).toBe("Other");
   });
 
@@ -179,22 +231,31 @@ describe("DrawerHeader title editor", () => {
     await w
       .get('[data-test="drawer-title"]')
       .trigger("keydown", { key: "Enter" });
-    expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true);
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
   });
 
   it("surfaces the server error on PATCH failure and stays in edit mode", async () => {
     patchMock.mockRejectedValue(new Error("conflict"));
     const w = mountHeader();
     await w.get('[data-test="drawer-title"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true),
+    );
     const input = w.get('[data-test="drawer-title-input"]');
     await input.setValue("Different");
     await input.trigger("keydown", { key: "Enter" });
-    await flushPromises();
 
+    // DX-299: server-error render state-transition race.
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-title-error"]').text()).toContain(
+        "conflict",
+      );
+    });
     expect(w.find('[data-test="drawer-title-input"]').exists()).toBe(true);
-    expect(w.get('[data-test="drawer-title-error"]').text()).toContain(
-      "conflict",
-    );
     expect(w.emitted("update:issue")).toBeUndefined();
   });
 });

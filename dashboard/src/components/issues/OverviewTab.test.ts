@@ -106,9 +106,15 @@ describe("OverviewTab description editor", () => {
   it("clicking Edit mounts the MarkdownEditor in edit mode pre-filled with the current description", async () => {
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");
+    // DX-299: v-if mount race under full-suite CPU contention — vi.waitFor
+    // polls until the editor is observable. See DX-262
+    // RequiresHumanPanel.test.ts for the canonical mechanism description.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(true),
+    );
     const editor = w.get('[data-test="overview-description-editor"]');
-    // `get` would have thrown if missing — capture the assertion as a
-    // sanity check via attributes() instead.
     expect(editor.attributes("data-readonly")).toBe("no");
     expect(w.find('[data-test="overview-save-description"]').exists()).toBe(
       true,
@@ -126,62 +132,90 @@ describe("OverviewTab description editor", () => {
 
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");
-    // Type into the stubbed editor.
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(true),
+    );
     await w
       .get('[data-test="overview-description-editor"]')
       .find("textarea")
       .setValue("Rewritten body");
     await w.get('[data-test="overview-save-description"]').trigger("click");
-    await flushPromises();
 
-    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
-      description: "Rewritten body",
+    // DX-299: post-click PATCH call-count race after the async save cascade.
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        description: "Rewritten body",
+      });
     });
-    const events = w.emitted("update:issue");
-    expect(events).toBeTruthy();
-    expect(events![0][0]).toBe(patched);
-    // Exits edit mode.
-    expect(w.find('[data-test="overview-description-editor"]').exists()).toBe(
-      false,
+    // DX-299: the emit fires AFTER the awaited PATCH resolves; wrap in
+    // its own vi.waitFor (DX-262 canonical pattern).
+    await vi.waitFor(() => {
+      const events = w.emitted("update:issue");
+      expect(events).toBeTruthy();
+      expect(events![0][0]).toBe(patched);
+    });
+    // DX-299: exit-edit-mode transition race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(false),
     );
   });
 
   it("Cancel exits edit mode without writing — no PATCH, original description retained", async () => {
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(true),
+    );
     await w
       .get('[data-test="overview-description-editor"]')
       .find("textarea")
       .setValue("Cancelled draft");
     await w.get('[data-test="overview-cancel-description"]').trigger("click");
-    await flushPromises();
 
-    expect(patchMock).not.toHaveBeenCalled();
-    expect(w.find('[data-test="overview-description-editor"]').exists()).toBe(
-      false,
+    // DX-299: exit-edit-mode transition race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(false),
     );
+    // DX-299: negative — drain macrotasks before the not-called check.
+    await flushPromises();
+    expect(patchMock).not.toHaveBeenCalled();
     expect(w.emitted("update:issue")).toBeUndefined();
-    // Read-mode editor is back with the original content.
     expect(w.get(".md-stub").attributes("data-readonly")).toBe("yes");
   });
 
   it("switching to a different issue mid-edit drops the edit state and clears the draft", async () => {
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(true),
+    );
     await w
       .get('[data-test="overview-description-editor"]')
       .find("textarea")
       .setValue("Draft text");
-    expect(w.find('[data-test="overview-description-editor"]').exists()).toBe(
-      true,
-    );
 
     await w.setProps({
       issue: makeDetail({ id: "DX-2", description: "Other body" }),
     });
 
-    expect(w.find('[data-test="overview-description-editor"]').exists()).toBe(
-      false,
+    // DX-299: prop-change unmount race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(false),
     );
     expect(w.find('[data-test="overview-edit-description"]').exists()).toBe(
       true,
@@ -193,18 +227,26 @@ describe("OverviewTab description editor", () => {
 
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");
+    // DX-299: v-if mount race.
+    await vi.waitFor(() =>
+      expect(
+        w.find('[data-test="overview-description-editor"]').exists(),
+      ).toBe(true),
+    );
     await w
       .get('[data-test="overview-description-editor"]')
       .find("textarea")
       .setValue("Whatever");
     await w.get('[data-test="overview-save-description"]').trigger("click");
-    await flushPromises();
 
+    // DX-299: server-error render state-transition race.
+    await vi.waitFor(() => {
+      expect(
+        w.get('[data-test="overview-description-error"]').text(),
+      ).toContain("write failed");
+    });
     expect(w.find('[data-test="overview-description-editor"]').exists()).toBe(
       true,
-    );
-    expect(w.get('[data-test="overview-description-error"]').text()).toContain(
-      "write failed",
     );
     expect(w.emitted("update:issue")).toBeUndefined();
   });
@@ -243,12 +285,18 @@ describe("OverviewTab — Dispatch gates section (DX-309)", () => {
       }),
     );
     await w.get('[data-test="clear-blocked"]').trigger("click");
-    await flushPromises();
-    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
-      blocked: null,
-      status: "ToDo",
+    // DX-299: PATCH call-count race after the async clear cascade.
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        blocked: null,
+        status: "ToDo",
+      });
     });
-    expect(w.emitted("update:issue")).toHaveLength(1);
+    // DX-299: emit lands AFTER the awaited PATCH resolves; wrap in its
+    // own vi.waitFor.
+    await vi.waitFor(() => {
+      expect(w.emitted("update:issue")).toHaveLength(1);
+    });
   });
 
   it("renders Waiting-on subsection with partner chips and resolved status", () => {
@@ -287,9 +335,11 @@ describe("OverviewTab — Dispatch gates section (DX-309)", () => {
     expect(section.text()).toContain("DX-9");
     expect(section.text()).toContain("scheduler.ts collision");
     await w.get('[data-test="clear-conflict-DX-9"]').trigger("click");
-    await flushPromises();
-    expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
-      conflict_on: [],
+    // DX-299: PATCH call-count race after the async clear-conflict cascade.
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        conflict_on: [],
+      });
     });
   });
 

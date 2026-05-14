@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { mount } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import IssueBoard from "./IssueBoard.vue";
 import type { IssueListItem, IssueStatus } from "../../types";
@@ -106,7 +106,13 @@ describe("IssueBoard — drag and drop", () => {
     await target.trigger("drop", { dataTransfer: makeDt() });
     await card.trigger("dragend");
 
-    expect(moveSpy).toHaveBeenCalledOnce();
+    // DX-299: under full-suite CPU contention the dragend → state-clear →
+    // emit("move") chain can split across multiple macrotasks; vi.waitFor
+    // polls until the spy call is observable. See DX-262
+    // RequiresHumanPanel.test.ts for the canonical mechanism description.
+    await vi.waitFor(() => {
+      expect(moveSpy).toHaveBeenCalledOnce();
+    });
     const [calledIssue, calledStatus] = moveSpy.mock.calls[0];
     expect(calledIssue.id).toBe("DX-1");
     expect(calledStatus).toBe("In Progress");
@@ -149,14 +155,18 @@ describe("IssueBoard — drag and drop", () => {
 
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
-    await flushPromises();
 
-    expect(card.classes()).toContain("is-dragging");
+    // DX-299: class-toggle after the dragstart cascade is reactivity-driven;
+    // vi.waitFor decouples the assertion from macrotask scheduling under
+    // CPU contention.
+    await vi.waitFor(() => {
+      expect(card.classes()).toContain("is-dragging");
+    });
 
     await card.trigger("dragend");
-    await flushPromises();
-
-    expect(card.classes()).not.toContain("is-dragging");
+    await vi.waitFor(() => {
+      expect(card.classes()).not.toContain("is-dragging");
+    });
     wrapper.unmount();
   });
 
@@ -169,12 +179,15 @@ describe("IssueBoard — drag and drop", () => {
 
     const target = wrapper.find('[data-test="column-in_progress"]');
     await target.trigger("dragover", { dataTransfer: makeDt() });
-    await flushPromises();
-    expect(target.classes()).toContain("drop-hover");
+    // DX-299: same class-toggle race as the is-dragging test above.
+    await vi.waitFor(() => {
+      expect(target.classes()).toContain("drop-hover");
+    });
 
     await card.trigger("dragend");
-    await flushPromises();
-    expect(target.classes()).not.toContain("drop-hover");
+    await vi.waitFor(() => {
+      expect(target.classes()).not.toContain("drop-hover");
+    });
     wrapper.unmount();
   });
 
@@ -191,7 +204,10 @@ describe("IssueBoard — drag and drop", () => {
     await target.trigger("drop", { dataTransfer: makeDt() });
     await card.trigger("dragend");
 
-    expect(moveSpy).toHaveBeenCalledOnce();
+    // DX-299: see drag-and-drop emit race comment above.
+    await vi.waitFor(() => {
+      expect(moveSpy).toHaveBeenCalledOnce();
+    });
     expect(moveSpy.mock.calls[0][1]).toBe("Done");
     wrapper.unmount();
   });
@@ -235,7 +251,10 @@ describe("IssueBoard — drag and drop", () => {
     await todoCol.trigger("drop", { dataTransfer: makeDt() });
     await blockedCard.trigger("dragend");
 
-    expect(moveSpy).toHaveBeenCalledOnce();
+    // DX-299: see drag-and-drop emit race comment above.
+    await vi.waitFor(() => {
+      expect(moveSpy).toHaveBeenCalledOnce();
+    });
     expect(moveSpy.mock.calls[0][0].id).toBe("DX-B");
     expect(moveSpy.mock.calls[0][1]).toBe("ToDo");
     wrapper.unmount();

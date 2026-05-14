@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { mount } from "@vue/test-utils";
 
 import { ref } from "vue";
 
@@ -44,9 +44,13 @@ describe("Login.vue", () => {
     await w.get('input[autocomplete="username"]').setValue("newms87");
     await w.get('input[autocomplete="current-password"]').setValue("hunter2");
     await w.get("form").trigger("submit.prevent");
-    await flushPromises();
 
-    expect(mockLogin).toHaveBeenCalledWith("newms87", "hunter2");
+    // DX-299: post-submit login-call-count race under full-suite CPU
+    // contention. See DX-262 RequiresHumanPanel.test.ts for the canonical
+    // mechanism description.
+    await vi.waitFor(() => {
+      expect(mockLogin).toHaveBeenCalledWith("newms87", "hunter2");
+    });
     expect(w.find('[data-test="login-error"]').exists()).toBe(false);
   });
 
@@ -59,10 +63,12 @@ describe("Login.vue", () => {
     await w.get('input[autocomplete="username"]').setValue("newms87");
     await w.get('input[autocomplete="current-password"]').setValue("wrong");
     await w.get("form").trigger("submit.prevent");
-    await flushPromises();
 
-    const err = w.get('[data-test="login-error"]');
-    expect(err.text()).toContain("Invalid username or password");
+    // DX-299: error-render state-transition race after the rejected promise.
+    await vi.waitFor(() => {
+      const err = w.get('[data-test="login-error"]');
+      expect(err.text()).toContain("Invalid username or password");
+    });
     // Password wiped so a retry doesn't submit the rejected value again.
     expect(
       (w.get('input[autocomplete="current-password"]').element as HTMLInputElement).value,
@@ -79,26 +85,29 @@ describe("Login.vue", () => {
     await w.get('input[autocomplete="username"]').setValue("newms87");
     await w.get('input[autocomplete="current-password"]').setValue("x");
     w.get("form").trigger("submit.prevent");
-    await flushPromises();
 
-    const btn = w.get("button[type='submit']");
-    expect(btn.attributes("disabled")).toBeDefined();
-    expect(btn.text()).toMatch(/signing in/i);
-
-    // Inputs lock too — a regression that removes :disabled on the inputs
-    // would let the operator submit a second time mid-flight.
-    expect(
-      w.get('input[autocomplete="username"]').attributes("disabled"),
-    ).toBeDefined();
-    expect(
-      w.get('input[autocomplete="current-password"]').attributes("disabled"),
-    ).toBeDefined();
+    // DX-299: disabled-state render race — submitting=true must flush
+    // before the assertion sees the disabled attribute. vi.waitFor polls
+    // until the state is observable in the DOM.
+    await vi.waitFor(() => {
+      const btn = w.get("button[type='submit']");
+      expect(btn.attributes("disabled")).toBeDefined();
+      expect(btn.text()).toMatch(/signing in/i);
+      expect(
+        w.get('input[autocomplete="username"]').attributes("disabled"),
+      ).toBeDefined();
+      expect(
+        w.get('input[autocomplete="current-password"]').attributes("disabled"),
+      ).toBeDefined();
+    });
 
     resolveLogin();
-    await flushPromises();
-    expect(
-      w.get("button[type='submit']").attributes("disabled"),
-    ).toBeUndefined();
+    // DX-299: re-enable transition race after the promise resolves.
+    await vi.waitFor(() => {
+      expect(
+        w.get("button[type='submit']").attributes("disabled"),
+      ).toBeUndefined();
+    });
   });
 
   it("falls back to a generic message for non-LoginError throws", async () => {
@@ -108,9 +117,13 @@ describe("Login.vue", () => {
     await w.get('input[autocomplete="username"]').setValue("x");
     await w.get('input[autocomplete="current-password"]').setValue("y");
     await w.get("form").trigger("submit.prevent");
-    await flushPromises();
 
-    expect(w.get('[data-test="login-error"]').text()).toContain("network down");
+    // DX-299: error-render state-transition race.
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="login-error"]').text()).toContain(
+        "network down",
+      );
+    });
   });
 
   it("renders an initError banner when useAuth exposes one", () => {

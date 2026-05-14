@@ -54,12 +54,13 @@ describe("SettingsPage", () => {
   it("opens the dialog when Reset is clicked", async () => {
     const w = mountPage({ attachTo: document.body });
     await w.get('[data-test="reset-data-open"]').trigger("click");
-    await flushPromises();
 
-    // DanxDialog renders inside a <dialog> element
-    const dialog = document.querySelector("dialog");
-    expect(dialog).not.toBeNull();
-    expect(document.body.textContent).toContain("Reset all data?");
+    // DX-299: dialog mount race under full-suite CPU contention. See
+    // DX-262 RequiresHumanPanel.test.ts for the canonical mechanism.
+    await vi.waitFor(() => {
+      expect(document.querySelector("dialog")).not.toBeNull();
+      expect(document.body.textContent).toContain("Reset all data?");
+    });
     w.unmount();
   });
 
@@ -72,21 +73,28 @@ describe("SettingsPage", () => {
 
     const w = mountPage({ attachTo: document.body });
     await w.get('[data-test="reset-data-open"]').trigger("click");
-    await flushPromises();
 
-    // Find the confirm button inside the dialog by its rendered label.
-    const confirmBtn = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("dialog button"),
-    ).find((b) => b.textContent?.includes("Reset everything"));
-    expect(confirmBtn).toBeTruthy();
-    confirmBtn!.click();
-    await flushPromises();
+    // DX-299: dialog mount race — wait until the confirm button is queryable.
+    const confirmBtn = await vi.waitFor(() => {
+      const btn = Array.from(
+        document.querySelectorAll<HTMLButtonElement>("dialog button"),
+      ).find((b) => b.textContent?.includes("Reset everything"));
+      expect(btn).toBeTruthy();
+      return btn!;
+    });
+    confirmBtn.click();
 
-    expect(mockResetAllData).toHaveBeenCalledOnce();
-    const success = w.find('[data-test="reset-data-success"]');
-    expect(success.exists()).toBe(true);
-    expect(success.text()).toContain("17 row(s) deleted");
-    expect(success.text()).toContain("dispatches: 10");
+    // DX-299: PATCH-call-count race after the async confirm cascade
+    // (resetAllData promise → state update → success render).
+    await vi.waitFor(() => {
+      expect(mockResetAllData).toHaveBeenCalledOnce();
+    });
+    await vi.waitFor(() => {
+      const success = w.find('[data-test="reset-data-success"]');
+      expect(success.exists()).toBe(true);
+      expect(success.text()).toContain("17 row(s) deleted");
+      expect(success.text()).toContain("dispatches: 10");
+    });
     w.unmount();
   });
 
@@ -95,18 +103,23 @@ describe("SettingsPage", () => {
 
     const w = mountPage({ attachTo: document.body });
     await w.get('[data-test="reset-data-open"]').trigger("click");
-    await flushPromises();
 
-    const confirmBtn = Array.from(
-      document.querySelectorAll<HTMLButtonElement>("dialog button"),
-    ).find((b) => b.textContent?.includes("Reset everything"));
-    confirmBtn!.click();
-    await flushPromises();
+    // DX-299: dialog mount race.
+    const confirmBtn = await vi.waitFor(() => {
+      const btn = Array.from(
+        document.querySelectorAll<HTMLButtonElement>("dialog button"),
+      ).find((b) => b.textContent?.includes("Reset everything"));
+      expect(btn).toBeTruthy();
+      return btn!;
+    });
+    confirmBtn.click();
 
-    const err = document.querySelector('[data-test="reset-data-error"]');
-    expect(err).toBeTruthy();
-    expect(err?.textContent).toContain("db down");
-    // Success panel is NOT shown
+    // DX-299: error-render state-transition race after the rejected promise.
+    await vi.waitFor(() => {
+      const err = document.querySelector('[data-test="reset-data-error"]');
+      expect(err).toBeTruthy();
+      expect(err?.textContent).toContain("db down");
+    });
     expect(w.find('[data-test="reset-data-success"]').exists()).toBe(false);
     w.unmount();
   });
@@ -187,8 +200,10 @@ describe("SettingsPage", () => {
       const panel = w.findComponent(TrelloConfigPanel);
       expect(panel.exists()).toBe(true);
       panel.vm.$emit("refresh", "danxbot");
-      await flushPromises();
-      expect(mockRefresh).toHaveBeenCalledOnce();
+      // DX-299: refresh-call-count race after the emit handler.
+      await vi.waitFor(() => {
+        expect(mockRefresh).toHaveBeenCalledOnce();
+      });
     });
 
     it("re-mounts the panel with the new repo's snapshot when the selection changes", async () => {
