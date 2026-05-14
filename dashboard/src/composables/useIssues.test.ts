@@ -215,6 +215,106 @@ describe("applyIssueEvent — reducer", () => {
     });
     expect(next).toBe(state);
   });
+
+  // DX-516 — the SPA-side projection deep-copies the triage block from
+  // the Issue snapshot so the IssueCard chip renders ICE total + most
+  // recent history timestamp without a per-row detail fetch, and so a
+  // downstream mutation can't leak into the SSE input.
+  it("round-trips the triage block on upsert (ice total + history)", () => {
+    const state = [makeIssue("DX-1")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: {
+        repoName: "danxbot",
+        id: "DX-1",
+        issue: makeIssueSnapshot("DX-1", {
+          triage: {
+            expires_at: "2026-06-01T00:00:00Z",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "high",
+            ice: { total: 80, i: 4, c: 5, e: 4 },
+            history: [
+              {
+                timestamp: "2026-05-13T10:00:00Z",
+                status: "Keep",
+                explain: "scored",
+                expires_at: "2026-06-01T00:00:00Z",
+                ice: { total: 80, i: 4, c: 5, e: 4 },
+              },
+            ],
+          },
+        }),
+      },
+    });
+    const t = next.find((i) => i.id === "DX-1")!.triage!;
+    expect(t.ice.total).toBe(80);
+    expect(t.history).toHaveLength(1);
+    expect(t.history[0].timestamp).toBe("2026-05-13T10:00:00Z");
+  });
+
+  it("round-trips the triage block when projecting a fresh id (append path)", () => {
+    const state: IssueListItem[] = [];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: {
+        repoName: "danxbot",
+        id: "DX-9",
+        issue: makeIssueSnapshot("DX-9", {
+          triage: {
+            expires_at: "",
+            reassess_hint: "",
+            last_status: "Keep",
+            last_explain: "",
+            ice: { total: 12, i: 3, c: 2, e: 2 },
+            history: [
+              {
+                timestamp: "2026-05-13T11:00:00Z",
+                status: "Keep",
+                explain: "",
+                expires_at: "",
+                ice: { total: 12, i: 3, c: 2, e: 2 },
+              },
+            ],
+          },
+        }),
+      },
+    });
+    const t = next.find((i) => i.id === "DX-9")!.triage!;
+    expect(t.ice.total).toBe(12);
+    expect(t.history[0].timestamp).toBe("2026-05-13T11:00:00Z");
+  });
+
+  it("deep-copies the triage block — mutating the result does not leak into the input", () => {
+    const issue = makeIssueSnapshot("DX-1", {
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "Keep",
+        last_explain: "",
+        ice: { total: 45, i: 3, c: 5, e: 3 },
+        history: [
+          {
+            timestamp: "2026-05-13T10:00:00Z",
+            status: "Keep",
+            explain: "x",
+            expires_at: "",
+            ice: { total: 45, i: 3, c: 5, e: 3 },
+          },
+        ],
+      },
+    });
+    const state = [makeIssue("DX-1")];
+    const next = applyIssueEvent(state, {
+      topic: "issue:updated",
+      data: { repoName: "danxbot", id: "DX-1", issue },
+    });
+    const t = next.find((i) => i.id === "DX-1")!.triage!;
+    t.ice.total = -1;
+    t.history[0].ice.total = -1;
+    expect(issue.triage.ice.total).toBe(45);
+    expect(issue.triage.history[0].ice.total).toBe(45);
+  });
 });
 
 // ─── Source-check guard ──────────────────────────────────────────────────────

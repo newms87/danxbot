@@ -1,9 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import IssueCard from "./IssueCard.vue";
 import type {
   IssueListChild,
   IssueListItem,
+  IssueTriage,
+  IssueTriageHistoryEntry,
   RequiresHuman,
 } from "../../types";
 
@@ -16,6 +18,50 @@ const stubs = {
   ACBar: true,
   ChildrenChecklist: true,
 };
+
+const NOW = Date.parse("2026-05-14T18:00:00Z");
+function isoMinutesAgo(min: number): string {
+  return new Date(NOW - min * 60_000).toISOString();
+}
+function isoDaysAgo(days: number): string {
+  return new Date(NOW - days * 86_400_000).toISOString();
+}
+function untriagedBlock(): IssueTriage {
+  return {
+    expires_at: "",
+    reassess_hint: "",
+    last_status: "",
+    last_explain: "",
+    ice: { total: 0, i: 0, c: 0, e: 0 },
+    history: [],
+  };
+}
+function triagedBlock(
+  total: number,
+  timestamp: string,
+  extra: Partial<IssueTriageHistoryEntry> = {},
+): IssueTriage {
+  const i = Math.min(5, Math.max(1, Math.round(Math.cbrt(total) || 1)));
+  const c = i;
+  const e = Math.max(1, Math.ceil(total / Math.max(1, i * c)));
+  return {
+    expires_at: new Date(NOW + 24 * 3_600_000).toISOString(),
+    reassess_hint: "",
+    last_status: "Keep",
+    last_explain: "ok",
+    ice: { total, i, c, e },
+    history: [
+      {
+        timestamp,
+        status: "Keep",
+        explain: "scored",
+        expires_at: new Date(NOW + 24 * 3_600_000).toISOString(),
+        ice: { total, i, c, e },
+        ...extra,
+      },
+    ],
+  };
+}
 
 const baseChild: IssueListChild = {
   id: "DX-2",
@@ -274,5 +320,70 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
     expect(w.find("[data-test='blocked-pill']").exists()).toBe(true);
     expect(w.find("[data-test='waiting-on-pill']").exists()).toBe(true);
     expect(w.find("[data-test='conflict-pill']").exists()).toBe(true);
+  });
+});
+
+// DX-516 — triage ICE chip + relative timestamp on the card.
+// The chip surfaces `triage.ice.total` with tier-driven color plus
+// `triaged Nm` text from the most-recent history entry's timestamp.
+// Untriaged cards render NOTHING — the chip is gated on
+// `triage.history.length > 0`.
+describe("IssueCard — triage chip (DX-516)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("renders NOTHING triage-related when the card is untriaged (history empty)", () => {
+    const w = mountCard(
+      makeListItem({ triage: untriagedBlock() }),
+    );
+    expect(w.find("[data-test='ice-badge']").exists()).toBe(false);
+    expect(w.find("[data-test='triage-ago']").exists()).toBe(false);
+  });
+
+  it("renders NOTHING when the triage block is absent from the payload", () => {
+    const w = mountCard(makeListItem({ triage: undefined }));
+    expect(w.find("[data-test='ice-badge']").exists()).toBe(false);
+    expect(w.find("[data-test='triage-ago']").exists()).toBe(false);
+  });
+
+  it("renders the high-tier (green) ICE pill + '5m' for a fresh triage scored 125", () => {
+    const w = mountCard(
+      makeListItem({ triage: triagedBlock(125, isoMinutesAgo(5)) }),
+    );
+    const badge = w.get("[data-test='ice-badge']");
+    expect(badge.text()).toBe("ICE 125");
+    expect(badge.classes()).toContain("ice-high");
+    expect(w.get("[data-test='triage-ago']").text()).toBe("triaged 5m");
+  });
+
+  it("renders the low-tier (gray) ICE pill + '3d' for a stale triage scored 4", () => {
+    const w = mountCard(
+      makeListItem({ triage: triagedBlock(4, isoDaysAgo(3)) }),
+    );
+    const badge = w.get("[data-test='ice-badge']");
+    expect(badge.text()).toBe("ICE 4");
+    expect(badge.classes()).toContain("ice-low");
+    expect(w.get("[data-test='triage-ago']").text()).toBe("triaged 3d");
+  });
+
+  it("renders the mid-tier (amber) ICE pill for totals in [20, 60)", () => {
+    const w = mountCard(
+      makeListItem({ triage: triagedBlock(36, isoMinutesAgo(10)) }),
+    );
+    const badge = w.get("[data-test='ice-badge']");
+    expect(badge.classes()).toContain("ice-mid");
+  });
+
+  it("shows 'triaged now' when the most recent history entry is < 1m old", () => {
+    const w = mountCard(
+      makeListItem({ triage: triagedBlock(60, isoMinutesAgo(0)) }),
+    );
+    expect(w.get("[data-test='triage-ago']").text()).toBe("triaged now");
   });
 });

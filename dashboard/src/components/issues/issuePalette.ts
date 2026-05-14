@@ -115,6 +115,36 @@ const TYPE_TO_ID: Record<IssueType, IssueTypeId> = {
   Chore: "chore",
 };
 
+/**
+ * Triage ICE-score tier (DX-516 — Phase 2 of DX-514). Three buckets:
+ *   - `high`: total >= 60   — green pill, "ship this next"
+ *   - `mid`:  20 <= total < 60 — amber pill, "consider soon"
+ *   - `low`:  total < 20    — gray pill, "low value or unscored"
+ *
+ * Boundaries follow the operator-facing card description: a card scored
+ * ICE=125 must be visibly distinct from a card scored ICE=4 so the ToDo
+ * backlog can be prioritized at a glance.
+ */
+export type IceTierId = "high" | "mid" | "low";
+
+export function iceTier(total: number): IceTierId {
+  if (total >= 60) return "high";
+  if (total >= 20) return "mid";
+  return "low";
+}
+
+interface IceTierMeta {
+  fg: string;
+  bg: string;
+  border: string;
+}
+
+export const ICE_TIER_META: Record<IceTierId, IceTierMeta> = {
+  high: { fg: "#6ee7b7", bg: "rgb(16 185 129 / 0.15)",  border: "rgb(16 185 129 / 0.35)" },
+  mid:  { fg: "#fcd34d", bg: "rgb(245 158 11 / 0.15)",  border: "rgb(245 158 11 / 0.35)" },
+  low:  { fg: "#94a3b8", bg: "rgb(100 116 139 / 0.18)", border: "rgb(100 116 139 / 0.35)" },
+};
+
 export function statusToColumnId(status: IssueStatus): ColumnId {
   return COLUMN_ACCENTS[status].id;
 }

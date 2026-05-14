@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { ageBuckets, relativeOld, relativeTime } from "./relativeTime";
+import {
+  ageBuckets,
+  compactAge,
+  relativeOld,
+  relativeTime,
+} from "./relativeTime";
 
 const NOW = 1_700_000_000_000;
 
@@ -66,6 +71,17 @@ describe("relativeOld", () => {
     expect(relativeOld(NOW - 5 * 60_000, NOW)).toBe("5m old");
     expect(relativeOld(NOW - 3 * 3_600_000, NOW)).toBe("3h old");
     expect(relativeOld(NOW - 2 * 86_400_000, NOW)).toBe("2d old");
+  });
+
+  it("renders 'now' for sub-minute diffs in compact form", () => {
+    expect(compactAge(NOW - 30_000, NOW)).toBe("now");
+    expect(compactAge(NOW, NOW)).toBe("now");
+  });
+
+  it("renders compactAge as 'Nm' / 'Nh' / 'Nd' (no suffix, no space)", () => {
+    expect(compactAge(NOW - 5 * 60_000, NOW)).toBe("5m");
+    expect(compactAge(NOW - 2 * 3_600_000, NOW)).toBe("2h");
+    expect(compactAge(NOW - 3 * 86_400_000, NOW)).toBe("3d");
   });
 
   it("never disagrees with relativeTime on the bucket count (shared math)", () => {

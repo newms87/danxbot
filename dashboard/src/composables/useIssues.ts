@@ -1,5 +1,6 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
+import { cloneTriage } from "@backend/issue-tracker/interface.js";
 import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
 import {
   createHydrationBuffer,
@@ -119,6 +120,7 @@ function mergeIntoListItem(
     waiting_on_reason: updated.waiting_on?.reason ?? null,
     waiting_on_by: updated.waiting_on?.by ?? [],
     assigned_agent: updated.assigned_agent,
+    triage: cloneTriage(updated.triage),
     updated_at: Date.now(),
   };
 }
@@ -164,6 +166,7 @@ function projectIssueToListItem(
     blocked: updated.blocked,
     conflict_on: updated.conflict_on,
     conflict_on_active_count: 0,
+    triage: cloneTriage(updated.triage),
   };
 }
 

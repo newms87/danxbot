@@ -194,6 +194,26 @@ export function isTriaged(t: IssueTriage): boolean {
 }
 
 /**
+ * Deep-copy an IssueTriage so downstream mutation cannot leak into the
+ * source block. Used by every projection that surfaces the triage record
+ * on a derived shape (dashboard's `IssueListItem` projection in
+ * `src/dashboard/issues-reader.ts`, SPA's SSE reducers in
+ * `dashboard/src/composables/useIssues.ts`). Centralized here so adding
+ * a new field to `IssueTriage` / `IssueTriageHistoryEntry` is a one-file
+ * edit instead of a three-file rename hunt.
+ */
+export function cloneTriage(t: IssueTriage): IssueTriage {
+  return {
+    expires_at: t.expires_at,
+    reassess_hint: t.reassess_hint,
+    last_status: t.last_status,
+    last_explain: t.last_explain,
+    ice: { ...t.ice },
+    history: t.history.map((h) => ({ ...h, ice: { ...h.ice } })),
+  };
+}
+
+/**
  * Active dispatch tracking — replaces the bare `dispatch_id: string|null`
  * field. Populated by the poller when it spawns a Claude Code process for
  * the card; cleared when the dispatch terminates. Phase 2 of the

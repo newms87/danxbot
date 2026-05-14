@@ -353,6 +353,14 @@ describe("listIssues", () => {
       blocked: null,
       conflict_on: [],
       conflict_on_active_count: 0,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
     });
   });
 
@@ -1292,6 +1300,92 @@ describe("listIssues", () => {
       expect(items[0].has_retro).toBe(true);
     },
   );
+});
+
+// DX-516 — triage block round-trips through the list-item projection so
+// the SPA's IssueCard chip can render the ICE total + most-recent triage
+// timestamp without a per-row detail fetch.
+describe("listIssues — triage block projection (DX-516)", () => {
+  it("passes the triage block through verbatim (untriaged shape)", async () => {
+    const repo = setupRepo();
+    writeIssue(repo, "open", emptyIssue({ id: "ISS-1" }), 1_000);
+    const items = await listIssues(repo);
+    expect(items[0].triage).toEqual({
+      expires_at: "",
+      reassess_hint: "",
+      last_status: "",
+      last_explain: "",
+      ice: { total: 0, i: 0, c: 0, e: 0 },
+      history: [],
+    });
+  });
+
+  it("projects the most-recent triage history entry on triaged cards", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        triage: {
+          expires_at: "2026-06-01T00:00:00Z",
+          reassess_hint: "re-check post-deploy",
+          last_status: "Keep",
+          last_explain: "high priority",
+          ice: { total: 125, i: 5, c: 5, e: 5 },
+          history: [
+            {
+              timestamp: "2026-05-13T10:00:00Z",
+              status: "Keep",
+              explain: "first pass",
+              expires_at: "2026-06-01T00:00:00Z",
+              ice: { total: 125, i: 5, c: 5, e: 5 },
+            },
+          ],
+        },
+      }),
+      1_000,
+    );
+    const items = await listIssues(repo);
+    const t = items[0].triage!;
+    expect(t.ice.total).toBe(125);
+    expect(t.history).toHaveLength(1);
+    expect(t.history[0].timestamp).toBe("2026-05-13T10:00:00Z");
+  });
+
+  it("deep-copies triage so a downstream mutation cannot leak into the next reader's view", async () => {
+    const repo = setupRepo();
+    writeIssue(
+      repo,
+      "open",
+      emptyIssue({
+        id: "ISS-1",
+        triage: {
+          expires_at: "",
+          reassess_hint: "",
+          last_status: "Keep",
+          last_explain: "",
+          ice: { total: 60, i: 4, c: 5, e: 3 },
+          history: [
+            {
+              timestamp: "2026-05-13T10:00:00Z",
+              status: "Keep",
+              explain: "x",
+              expires_at: "",
+              ice: { total: 60, i: 4, c: 5, e: 3 },
+            },
+          ],
+        },
+      }),
+      1_000,
+    );
+    const first = await listIssues(repo);
+    first[0].triage!.ice.total = -1;
+    first[0].triage!.history[0].ice.total = -1;
+    const second = await listIssues(repo);
+    expect(second[0].triage!.ice.total).toBe(60);
+    expect(second[0].triage!.history[0].ice.total).toBe(60);
+  });
 });
 
 describe("listIssues — position projection + sort tier (DX-264)", () => {

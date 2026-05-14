@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { projectChildStatus, CHILD_STATUS_META } from "./issuePalette";
+import {
+  projectChildStatus,
+  CHILD_STATUS_META,
+  ICE_TIER_META,
+  iceTier,
+} from "./issuePalette";
 
 describe("projectChildStatus", () => {
   it("Done → 'done'", () => {
@@ -46,5 +51,37 @@ describe("CHILD_STATUS_META", () => {
     expect(CHILD_STATUS_META.done).toBeDefined();
     expect(CHILD_STATUS_META.todo).toBeDefined();
     expect(CHILD_STATUS_META.blocked).toBeDefined();
+  });
+});
+
+// DX-516 — ICE tier classification for the IssueCard triage chip.
+// Three tiers (green ≥ 60, amber 20-59, gray < 20) so operators
+// triaging a backlog can prioritize by saturation at a glance.
+describe("iceTier", () => {
+  it("returns 'high' for totals at or above the 60 threshold", () => {
+    expect(iceTier(60)).toBe("high");
+    expect(iceTier(125)).toBe("high");
+  });
+
+  it("returns 'mid' for totals in [20, 60)", () => {
+    expect(iceTier(20)).toBe("mid");
+    expect(iceTier(59)).toBe("mid");
+  });
+
+  it("returns 'low' for totals below the 20 threshold", () => {
+    expect(iceTier(0)).toBe("low");
+    expect(iceTier(19)).toBe("low");
+    expect(iceTier(4)).toBe("low");
+  });
+});
+
+describe("ICE_TIER_META", () => {
+  it("has an entry per tier with fg / bg / border tokens", () => {
+    for (const tier of ["high", "mid", "low"] as const) {
+      const meta = ICE_TIER_META[tier];
+      expect(meta.fg).toMatch(/^#/);
+      expect(meta.bg.length).toBeGreaterThan(0);
+      expect(meta.border.length).toBeGreaterThan(0);
+    }
   });
 });

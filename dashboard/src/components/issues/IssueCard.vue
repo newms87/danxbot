@@ -6,8 +6,11 @@ import TypeBadge from "./TypeBadge.vue";
 import ChildrenChecklist from "./ChildrenChecklist.vue";
 import ACBar from "./ACBar.vue";
 import AgentBadge from "../AgentBadge.vue";
+import IceBadge from "./IceBadge.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
+import { useNowTick } from "../../composables/useNowTick";
+import { compactAge } from "../../utils/relativeTime";
 
 const props = withDefaults(
   defineProps<{
@@ -96,6 +99,27 @@ const showRequiresHumanChildrenChip = computed(
   () => isEpic.value && requiresHumanChildCount.value > 0,
 );
 
+// DX-516 — triage ICE chip + relative timestamp.
+// Gated entirely on the triage block's history length. Untriaged cards
+// (history empty or block absent on legacy fixtures) render nothing
+// triage-related — no placeholder, no zero pill — so a ToDo backlog
+// scanned by an operator stays visually clean.
+const triage = computed(() => props.issue.triage ?? null);
+const hasTriage = computed(
+  () => (triage.value?.history.length ?? 0) > 0,
+);
+const triagedTimestampMs = computed(() => {
+  const t = triage.value;
+  if (!t || t.history.length === 0) return 0;
+  return Date.parse(t.history[t.history.length - 1].timestamp);
+});
+const now = useNowTick();
+const triagedAgo = computed(() =>
+  hasTriage.value
+    ? `triaged ${compactAge(triagedTimestampMs.value, now.value)}`
+    : "",
+);
+
 function onParentClick(e: MouseEvent): void {
   e.stopPropagation();
   if (props.issue.parent_id) emit("parent-click", props.issue.parent_id);
@@ -176,6 +200,15 @@ function onParentClick(e: MouseEvent): void {
     </div>
 
     <div class="title">{{ issue.title }}</div>
+
+    <div
+      v-if="hasTriage"
+      class="triage-row"
+      data-test="triage-row"
+    >
+      <IceBadge :total="triage!.ice.total" />
+      <span class="triage-ago" data-test="triage-ago">{{ triagedAgo }}</span>
+    </div>
 
     <ChildrenChecklist
       v-if="childrenDetail.length > 0"
@@ -375,6 +408,17 @@ function onParentClick(e: MouseEvent): void {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.triage-row {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.triage-ago {
+  font-size: 10px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
 }
 .ac-wrap {
   margin-top: 8px;

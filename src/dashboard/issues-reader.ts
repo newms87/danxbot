@@ -3,10 +3,11 @@ import type {
   ConflictOnEntry,
   Issue,
   IssueStatus,
+  IssueTriage,
   IssueType,
   RequiresHuman,
 } from "../issue-tracker/interface.js";
-import { ISSUE_STATUSES } from "../issue-tracker/interface.js";
+import { ISSUE_STATUSES, cloneTriage } from "../issue-tracker/interface.js";
 import { sortInputsForStatus } from "../issue-tracker/sort.js";
 import { serializeIssue } from "../issue-tracker/yaml.js";
 import {
@@ -172,6 +173,16 @@ export interface IssueListItem {
    * partner is terminal (audit-only). Optional for fixture back-compat.
    */
   conflict_on_active_count?: number;
+  /**
+   * Triage block — `Issue.triage` passthrough (DX-516, Phase 2 of DX-514).
+   * Surfaced on the list item so `IssueCard.vue` can render the ICE chip
+   * + "triaged Nm" timestamp without a per-row detail fetch. Untriaged
+   * cards still emit the block (every field empty / zero, `history: []`)
+   * — the SPA gates the chip on `triage.history.length > 0`. Optional on
+   * the type so pre-DX-516 test fixtures (which omit the block) still
+   * type-check; the server ALWAYS emits.
+   */
+  triage?: IssueTriage;
 }
 
 /**
@@ -349,6 +360,7 @@ function toListItem(
       const r = effectiveConflictOn(issue, allOpen);
       return r.forward.length + r.reverse.length;
     })(),
+    triage: cloneTriage(issue.triage),
   };
 }
 

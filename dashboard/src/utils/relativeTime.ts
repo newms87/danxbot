@@ -56,3 +56,15 @@ export function relativeOld(ms: number, now: number = Date.now()): string {
   if (b.unit === "now") return "new";
   return `${b.count}${SHORT[b.unit]} old`;
 }
+
+/**
+ * Compact "Nm" / "Nh" / "Nd" / "now" — no suffix, no space. Drives the
+ * triage chip on `IssueCard.vue` where horizontal space is at a premium
+ * and the surrounding label ("triaged Nm") already supplies the
+ * "ago"-flavored context.
+ */
+export function compactAge(ms: number, now: number = Date.now()): string {
+  const b = ageBuckets(now - ms);
+  if (b.unit === "now") return "now";
+  return `${b.count}${SHORT[b.unit]}`;
+}
