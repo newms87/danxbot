@@ -83,6 +83,7 @@ import {
 } from "../poller/yaml-lifecycle.js";
 import { resolveEffortToFlags } from "../settings-file.js";
 import { resolveDispatchEffort } from "./resolve-dispatch-effort.js";
+import { syncRepoFiles } from "../inject/sync.js";
 
 const ttlTimerDeps: TtlTimerDeps = {
   isPidAlive,
@@ -1136,6 +1137,24 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     DANXBOT_DISPATCH_ID: dispatchId,
     ...input.overlay,
   };
+
+  // DX-105 Phase 2: re-sync the inject pipeline into the connected
+  // repo's `<repo>/.danxbot/workspaces/` tree BEFORE `resolveWorkspace`
+  // reads the workspace files. Guarantees every dispatch (poller,
+  // /api/launch, Slack) sees fresh workspace state even when the cron
+  // sync has not ticked since the last source edit. `writeIfChanged`
+  // keeps the no-op tick cheap; throws here are non-fatal — the worker
+  // sync log logs + the dispatch proceeds against the pre-existing
+  // workspace files. We never want a transient inject hiccup to wedge
+  // a dispatch the operator just triggered.
+  try {
+    syncRepoFiles(input.repo);
+  } catch (err) {
+    log.warn(
+      `[Dispatch ${dispatchId}] pre-spawn syncRepoFiles failed; proceeding with existing workspace state`,
+      err,
+    );
+  }
 
   const workspace = resolveWorkspace({
     repo: input.repo,

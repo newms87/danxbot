@@ -48,7 +48,7 @@ import { ensureWorkspaceGitignoreEntries } from "./gitignore-workspaces.js";
 import { injectDanxIssueMcp } from "./inject-root-mcp.js";
 import {
   copyComposeOverride,
-  copyFeaturesOnce,
+  copyFeatures,
   copyRepoDocs,
   renderPerRepoFilesIntoWorkspaces,
 } from "./per-repo-render.js";
@@ -145,7 +145,7 @@ export function syncRepoFiles(repo: RepoContext): void {
     cfg.name,
   );
   copyRepoDocs(danxbotConfigDir);
-  copyFeaturesOnce(danxbotConfigDir);
+  copyFeatures(danxbotConfigDir);
 }
 
 /**
