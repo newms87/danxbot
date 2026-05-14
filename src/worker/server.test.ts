@@ -50,6 +50,13 @@ vi.mock("./prep-verdict-route.js", () => ({
   handlePrepVerdict: (...args: unknown[]) => mockHandlePrepVerdict(...args),
 }));
 
+const mockHandleTemplateBuild = vi.fn();
+const mockHandleRecentBuilds = vi.fn();
+vi.mock("../template-build/handler.js", () => ({
+  handleTemplateBuild: (...args: unknown[]) => mockHandleTemplateBuild(...args),
+  handleRecentBuilds: (...args: unknown[]) => mockHandleRecentBuilds(...args),
+}));
+
 const mockSeedCooldown = vi.fn().mockResolvedValue(undefined);
 vi.mock("./restart.js", () => ({
   seedCooldownFromDb: (...args: unknown[]) => mockSeedCooldown(...args),
@@ -450,6 +457,50 @@ describe("worker server", () => {
       await requestHandler(req, res);
 
       expect(mockHandleStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /api/template-build", () => {
+    it("routes to handleTemplateBuild", async () => {
+      const { req, res } = createMockReqRes("POST", "/api/template-build");
+      await requestHandler(req, res);
+
+      expect(mockHandleTemplateBuild).toHaveBeenCalledTimes(1);
+      expect(mockHandleTemplateBuild.mock.calls[0][0]).toBe(req);
+      expect(mockHandleTemplateBuild.mock.calls[0][1]).toBe(res);
+    });
+
+    it("does NOT route GET to handleTemplateBuild", async () => {
+      const { req, res } = createMockReqRes("GET", "/api/template-build");
+      await requestHandler(req, res);
+
+      expect(mockHandleTemplateBuild).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
+    });
+  });
+
+  describe("GET /api/template-build/recent", () => {
+    it("routes to handleRecentBuilds", async () => {
+      const { req, res } = createMockReqRes(
+        "GET",
+        "/api/template-build/recent",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleRecentBuilds).toHaveBeenCalledTimes(1);
+      expect(mockHandleRecentBuilds.mock.calls[0][0]).toBe(req);
+      expect(mockHandleRecentBuilds.mock.calls[0][1]).toBe(res);
+    });
+
+    it("does NOT route POST to handleRecentBuilds", async () => {
+      const { req, res } = createMockReqRes(
+        "POST",
+        "/api/template-build/recent",
+      );
+      await requestHandler(req, res);
+
+      expect(mockHandleRecentBuilds).not.toHaveBeenCalled();
+      expect(res._getStatusCode()).toBe(404);
     });
   });
 

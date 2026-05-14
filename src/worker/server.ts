@@ -15,6 +15,10 @@
  * - POST /api/restage/:dispatchId — Phase 5c (gpt-manager ISS-102):
  *   regenerate staged files mid-dispatch when an external writer
  *   mutates a row materialized into the agent's workspace.
+ * - POST /api/template-build — DX-539 Phase 1 of Vue SPA build feature.
+ *   Synchronous build endpoint: accepts presigned S3 URLs for source +
+ *   dist, runs vite build inside a scratch dir, uploads dist.
+ * - GET /api/template-build/recent — last 100 build outcomes (debug).
  */
 
 import { createServer, type Server } from "http";
@@ -42,6 +46,10 @@ import { handlePrepVerdict } from "./prep-verdict-route.js";
 import { handleEvaluatorSummary } from "./evaluator-summary-route.js";
 import { handleReRunEvaluator } from "./re-run-evaluator-route.js";
 import { handleClearBroken } from "./clear-broken-route.js";
+import {
+  handleTemplateBuild,
+  handleRecentBuilds,
+} from "../template-build/handler.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -166,6 +174,16 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "POST" && url.pathname === "/api/clear-broken") {
       await handleClearBroken(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/template-build") {
+      await handleTemplateBuild(req, res);
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/template-build/recent") {
+      handleRecentBuilds(req, res);
       return;
     }
 
