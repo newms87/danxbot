@@ -260,3 +260,41 @@ describe("IssueBoard — drag and drop", () => {
     wrapper.unmount();
   });
 });
+
+// DX-522 — guard against the SPA accidentally re-sorting a column.
+// The backend's `sortIssuesForStatus` (priority DESC → ICE → id) is
+// the canonical order; the API ships the list in that order; the
+// board preserves it verbatim. A regression would re-introduce a
+// hidden `.sort()` over priority/updated_at/etc. inside the
+// grouped() computed or downstream — this test pins the contract.
+describe("IssueBoard — backend sort preserved verbatim (DX-522)", () => {
+  it("renders priority-5 card before priority-2 card when backend ships them in that order", () => {
+    const high = makeIssue("DX-HIGH", "ToDo", { priority: 5 });
+    const low = makeIssue("DX-LOW", "ToDo", { priority: 2 });
+    // Input order = backend order = priority DESC. The SPA must not
+    // flip these even though the per-card priority would invite it.
+    const { wrapper } = mountBoard([high, low]);
+
+    const todoCol = wrapper.find('[data-test="column-todo"]');
+    const cardIds = todoCol
+      .findAll('[draggable="true"]')
+      .map((c) => c.find('[data-test="card-id"]').text());
+    expect(cardIds).toEqual(["DX-HIGH", "DX-LOW"]);
+    wrapper.unmount();
+  });
+
+  it("renders priority-2 card before priority-5 card when backend ships THAT order (no client-side flip)", () => {
+    const low = makeIssue("DX-LOWFIRST", "ToDo", { priority: 2 });
+    const high = makeIssue("DX-HIGHSECOND", "ToDo", { priority: 5 });
+    // Input order is intentionally inverted vs the priority ranking
+    // — proves the SPA is not silently restoring "correct" order.
+    const { wrapper } = mountBoard([low, high]);
+
+    const todoCol = wrapper.find('[data-test="column-todo"]');
+    const cardIds = todoCol
+      .findAll('[draggable="true"]')
+      .map((c) => c.find('[data-test="card-id"]').text());
+    expect(cardIds).toEqual(["DX-LOWFIRST", "DX-HIGHSECOND"]);
+    wrapper.unmount();
+  });
+});

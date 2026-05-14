@@ -1,10 +1,32 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import type { Issue, IssueDetail } from "../../types";
+import { DanxPopover, DanxTooltip } from "@thehammer/danx-ui";
+import type { Issue, IssueDetail, IssueStatus } from "../../types";
 import { getIssueSubtree, patchIssue } from "../../api";
 import TypeBadge from "./TypeBadge.vue";
 import AgentBadge from "../AgentBadge.vue";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
+import PriorityIcon from "../PriorityIcon.vue";
+import {
+  priorityTier,
+  PRIORITY_TIERS,
+  type PriorityTier,
+} from "../../lib/priorityTier";
+
+// Listed in the canonical lifecycle order — Review and Blocked are
+// the two parking states, so a click-anywhere flow reads top-to-bottom
+// without surprise. Mirrors `IssueStatus` enum so a new status value
+// added to the backend lifecycle fails the type-check at this row
+// (the enum is closed; adding a row to the menu requires bumping the
+// list explicitly).
+const ALL_STATUSES: readonly IssueStatus[] = [
+  "Review",
+  "ToDo",
+  "In Progress",
+  "Blocked",
+  "Done",
+  "Cancelled",
+] as const;
 
 const props = withDefaults(
   defineProps<{
@@ -70,17 +92,6 @@ const draft = ref("");
 const saving = ref(false);
 const errorMsg = ref<string | null>(null);
 const inputEl = ref<HTMLInputElement | null>(null);
-
-// Closing the drawer or jumping to another issue must exit edit mode so
-// the next card opens in the read state.
-watch(
-  () => props.issue.id,
-  () => {
-    editing.value = false;
-    saving.value = false;
-    errorMsg.value = null;
-  },
-);
 
 async function startEdit(): Promise<void> {
   if (editing.value) return;
@@ -159,14 +170,111 @@ function clearCopyResetTimer(): void {
 
 onBeforeUnmount(clearCopyResetTimer);
 
+// DX-522 — inline status + priority editors. Both pills open a
+// DanxPopover panel of choices; selecting an option fires patchIssue
+// and emits update:issue so the parent reprojects without waiting
+// for the SSE round-trip (SSE re-affirms on arrival; identical
+// content keeps the update idempotent).
+//
+// Epic guard: when this card is an epic WITH phase children, the
+// status pill renders inert (no menu, no popover) and a DanxTooltip
+// surfaces why — operators trying to flip the epic status hit the
+// tooltip before they hit a dead pill click. Epics with empty
+// children stay editable as a recovery affordance for malformed
+// cards. The priority pill remains editable on every card kind
+// because the operator-tunable priority knob is meaningful on
+// epics too.
+const statusMenuOpen = ref(false);
+const priorityMenuOpen = ref(false);
+const statusSaving = ref(false);
+const prioritySaving = ref(false);
+const statusError = ref<string | null>(null);
+const priorityError = ref<string | null>(null);
+
+const statusInert = computed(
+  () => props.issue.type === "Epic" && props.issue.children.length > 0,
+);
+const currentPriorityTier = computed(() => priorityTier(props.issue.priority));
+// Safe lookup with a deterministic medium fallback. The lockstep guard
+// in `priority-tier.ts` makes the missing-key case impossible in
+// practice, but a typed find-or-fallback prevents a future drift from
+// crashing the template with `undefined.label`.
+const currentPriorityTierMeta = computed<PriorityTier>(() => {
+  const found = PRIORITY_TIERS.find((t) => t.key === currentPriorityTier.value);
+  return found ?? PRIORITY_TIERS[2];
+});
+
+// Single drawer-switch reset point — every "exit transient state on
+// issue switch" concern lives in one watcher so a future feature
+// addition only needs to touch one place. (Pre-DX-522 the title editor
+// and the copy button each had their own watcher; consolidating them
+// here closed a future-drift risk flagged by code-review.)
 watch(
   () => props.issue.id,
   () => {
+    // Title editor (DX-236)
+    editing.value = false;
+    saving.value = false;
+    errorMsg.value = null;
+    // Copy button (DX-519)
     clearCopyResetTimer();
     copyState.value = "idle";
     copyMessage.value = null;
+    // Status + priority menus (DX-522)
+    statusMenuOpen.value = false;
+    priorityMenuOpen.value = false;
+    statusSaving.value = false;
+    prioritySaving.value = false;
+    statusError.value = null;
+    priorityError.value = null;
   },
 );
+
+async function selectStatus(s: IssueStatus): Promise<void> {
+  if (statusSaving.value) return;
+  // No-op when picking the value we already have — saves a PATCH
+  // round-trip and keeps the tracker push log clean.
+  if (s === props.issue.status) {
+    statusMenuOpen.value = false;
+    return;
+  }
+  statusSaving.value = true;
+  statusError.value = null;
+  try {
+    const updated = await patchIssue(props.repo, props.issue.id, { status: s });
+    emit("update:issue", updated);
+    statusMenuOpen.value = false;
+  } catch (err) {
+    statusError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    statusSaving.value = false;
+  }
+}
+
+async function selectPriority(tier: PriorityTier): Promise<void> {
+  if (prioritySaving.value) return;
+  // Commit the tier midpoint via `defaultValue`. The numeric continuum
+  // stays meaningful for sort tiebreaks within a tier, but the menu's
+  // contract is "pick a tier, get the midpoint" — operators expect
+  // their click to land at a stable, reproducible value.
+  if (tier.key === currentPriorityTier.value) {
+    priorityMenuOpen.value = false;
+    return;
+  }
+  prioritySaving.value = true;
+  priorityError.value = null;
+  try {
+    const updated = await patchIssue(props.repo, props.issue.id, {
+      priority: tier.defaultValue,
+    });
+    emit("update:issue", updated);
+    priorityMenuOpen.value = false;
+  } catch (err) {
+    priorityError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    prioritySaving.value = false;
+  }
+}
 
 async function onCopy(): Promise<void> {
   if (copyState.value === "copying") return;
@@ -203,7 +311,109 @@ async function onCopy(): Promise<void> {
     <div class="meta-row">
       <span class="id">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" />
-      <span class="status-pill">{{ issue.status }}</span>
+      <!--
+        DX-522 — status editor. Epic-with-children → inert pill +
+        derivation tooltip; everything else → click-to-open menu.
+      -->
+      <DanxTooltip
+        v-if="statusInert"
+        tooltip="Epic status is computed from phase statuses — edit a child phase to change this."
+      >
+        <template #trigger>
+          <span
+            class="status-pill status-pill-inert"
+            data-test="drawer-status-pill-inert"
+          >{{ issue.status }}</span>
+        </template>
+      </DanxTooltip>
+      <DanxPopover
+        v-else
+        v-model="statusMenuOpen"
+        trigger="click"
+        placement="bottom"
+      >
+        <template #trigger>
+          <button
+            type="button"
+            class="status-pill status-pill-clickable"
+            :disabled="statusSaving"
+            :aria-label="`Status: ${issue.status} — click to change`"
+            data-test="drawer-status-pill"
+          >{{ issue.status }}</button>
+        </template>
+        <!--
+          Intentionally no `role="menu"` / `role="menuitem"` — the
+          panel is a vertical list of native `<button>`s without
+          arrow-key navigation. ARIA roles that advertise menu
+          semantics would mislead screen readers; native button
+          semantics (Tab to focus, Enter/Space to activate) are
+          accurate for the actual interaction model.
+        -->
+        <div class="inline-menu" data-test="drawer-status-menu">
+          <button
+            v-for="s in ALL_STATUSES"
+            :key="s"
+            type="button"
+            class="inline-menu-item"
+            :class="{ active: s === issue.status }"
+            :disabled="statusSaving"
+            :data-test="`drawer-status-option-${s.toLowerCase().replace(/\s+/g, '-')}`"
+            @click="selectStatus(s)"
+          >{{ s }}</button>
+          <div
+            v-if="statusError"
+            class="inline-menu-error"
+            data-test="drawer-status-error"
+          >{{ statusError }}</div>
+        </div>
+      </DanxPopover>
+      <!--
+        DX-522 — priority editor. Editable on every card kind, including
+        epics, because the operator-tunable priority knob is meaningful
+        on epics too. Pill body = icon + tier label; menu commits the
+        tier midpoint (`defaultValue`) so a click lands at a stable
+        reproducible value.
+      -->
+      <DanxPopover
+        v-model="priorityMenuOpen"
+        trigger="click"
+        placement="bottom"
+      >
+        <template #trigger>
+          <button
+            type="button"
+            class="priority-pill"
+            :disabled="prioritySaving"
+            :aria-label="`Priority: ${currentPriorityTierMeta.label} — click to change`"
+            data-test="drawer-priority-pill"
+          >
+            <PriorityIcon :priority="issue.priority" size="sm" />
+            <span class="priority-pill-label">{{ currentPriorityTierMeta.label }}</span>
+          </button>
+        </template>
+        <!-- Same native-button rationale as the status panel above. -->
+        <div class="inline-menu priority-menu" data-test="drawer-priority-menu">
+          <button
+            v-for="t in PRIORITY_TIERS"
+            :key="t.key"
+            type="button"
+            class="inline-menu-item priority-menu-item"
+            :class="{ active: t.key === currentPriorityTier }"
+            :disabled="prioritySaving"
+            :data-test="`drawer-priority-option-${t.key}`"
+            @click="selectPriority(t)"
+          >
+            <PriorityIcon :priority="t.defaultValue" size="sm" />
+            <span class="priority-menu-label">{{ t.label }}</span>
+            <span class="priority-menu-default">{{ t.defaultValue }}</span>
+          </button>
+          <div
+            v-if="priorityError"
+            class="inline-menu-error"
+            data-test="drawer-priority-error"
+          >{{ priorityError }}</div>
+        </div>
+      </DanxPopover>
       <span
         v-if="issue.waiting_on"
         class="blocked-badge"
@@ -351,6 +561,109 @@ async function onCopy(): Promise<void> {
   border-radius: 4px;
   background: rgb(51 65 85 / 0.5);
   text-transform: capitalize;
+}
+.status-pill-clickable {
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+.status-pill-clickable:hover:not(:disabled) {
+  background: rgb(51 65 85 / 0.8);
+  border-color: rgb(99 102 241 / 0.4);
+  color: #f1f5f9;
+}
+.status-pill-clickable:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.status-pill-inert {
+  cursor: help;
+}
+.priority-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #cbd5e1;
+  padding: 2px 8px 2px 6px;
+  border-radius: 4px;
+  background: rgb(51 65 85 / 0.5);
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+}
+.priority-pill:hover:not(:disabled) {
+  background: rgb(51 65 85 / 0.8);
+  border-color: rgb(99 102 241 / 0.4);
+  color: #f1f5f9;
+}
+.priority-pill:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.priority-pill-label {
+  line-height: 1;
+}
+.inline-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: #0f172a;
+  border: 1px solid #334155;
+  border-radius: 6px;
+  min-width: 140px;
+  box-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
+}
+.inline-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #cbd5e1;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+.inline-menu-item:hover:not(:disabled) {
+  background: rgb(99 102 241 / 0.18);
+  border-color: rgb(99 102 241 / 0.35);
+  color: #f1f5f9;
+}
+.inline-menu-item:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+.inline-menu-item.active {
+  background: rgb(99 102 241 / 0.12);
+  color: #a5b4fc;
+}
+.priority-menu-item {
+  justify-content: space-between;
+}
+.priority-menu-label {
+  flex: 1;
+  text-align: left;
+}
+.priority-menu-default {
+  font-size: 10px;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+.inline-menu-error {
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #fca5a5;
+  background: rgb(239 68 68 / 0.12);
+  border: 1px solid rgb(239 68 68 / 0.3);
 }
 .blocked-badge {
   font-size: 11px;

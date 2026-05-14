@@ -9,6 +9,7 @@ import AgentBadge from "../AgentBadge.vue";
 import IceBadge from "./IceBadge.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
+import PriorityIcon from "../PriorityIcon.vue";
 import { useNowTick } from "../../composables/useNowTick";
 import { compactAge } from "../../utils/relativeTime";
 
@@ -137,7 +138,7 @@ function onParentClick(e: MouseEvent): void {
     @dragend="props.dragHandlers?.onDragend($event)"
   >
     <div class="card-header">
-      <span class="id-chip">{{ issue.id }}</span>
+      <span class="id-chip" data-test="card-id">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" compact />
       <span
         v-if="props.showStatus"
@@ -195,6 +196,11 @@ function onParentClick(e: MouseEvent): void {
         class="row-agent"
         :repo="props.repo"
         :agent-name="issue.assigned_agent"
+        size="sm"
+      />
+      <PriorityIcon
+        class="priority-slot"
+        :priority="issue.priority"
         size="sm"
       />
     </div>
@@ -357,6 +363,16 @@ function onParentClick(e: MouseEvent): void {
   margin-left: 4px;
 }
 .row-agent.ml-auto {
+  margin-left: auto;
+}
+.priority-slot {
+  /*
+   * Sits at the right edge of the card-header row opposite the
+   * id-chip. When gates/agent already consume the first `margin-left:
+   * auto`, this second auto still picks up any residual whitespace
+   * after them — flexbox treats sibling autos additively, so the
+   * indicator hugs the right edge even when the row is mostly empty.
+   */
   margin-left: auto;
 }
 .gates-wrap {

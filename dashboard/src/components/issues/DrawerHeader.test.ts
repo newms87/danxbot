@@ -433,3 +433,232 @@ describe("DrawerHeader Copy button (DX-519)", () => {
     });
   });
 });
+
+// DX-522 — inline status + priority editors. Stubs DanxPopover and
+// DanxTooltip so the default-slot panel content is always queryable
+// without simulating the click → popover-open → wait-for-portal
+// cascade. The trigger slot's button is rendered normally so the
+// editor's own click handler still wires up.
+const DanxPopoverStub = defineComponent({
+  name: "DanxPopover",
+  props: {
+    modelValue: Boolean,
+    trigger: String,
+    placement: String,
+  },
+  emits: ["update:modelValue"],
+  setup: (_props, { slots }) => () => [
+    h("div", { class: "stub-popover-trigger" }, slots.trigger?.()),
+    h("div", { class: "stub-popover-panel" }, slots.default?.()),
+  ],
+});
+const DanxTooltipStub = defineComponent({
+  name: "DanxTooltip",
+  props: { tooltip: String },
+  setup: (props, { slots }) => () =>
+    h(
+      "div",
+      { class: "stub-tooltip", "data-tooltip": props.tooltip },
+      slots.trigger?.(),
+    ),
+});
+
+function mountHeaderWithMenuStubs(detail: IssueDetail = makeDetail()) {
+  return mount(DrawerHeader, {
+    props: {
+      issue: detail,
+      repo: "danxbot",
+      scopedEpicId: null,
+    },
+    global: {
+      stubs: {
+        AgentBadge: AgentBadgeStub,
+        IssueAgeBadge: IssueAgeBadgeStub,
+        TypeBadge: TypeBadgeStub,
+        DanxPopover: DanxPopoverStub,
+        DanxTooltip: DanxTooltipStub,
+      },
+    },
+  });
+}
+
+describe("DrawerHeader — status menu (DX-522)", () => {
+  beforeEach(() => {
+    patchMock.mockReset();
+  });
+
+  it("renders every IssueStatus value as a menu option on non-epic cards", () => {
+    const w = mountHeaderWithMenuStubs(makeDetail({ type: "Feature" }));
+    const menu = w.get('[data-test="drawer-status-menu"]');
+    const options = menu.findAll(
+      '[data-test^="drawer-status-option-"]',
+    );
+    const labels = options.map((o) => o.text());
+    expect(labels).toEqual([
+      "Review",
+      "ToDo",
+      "In Progress",
+      "Blocked",
+      "Done",
+      "Cancelled",
+    ]);
+  });
+
+  it("clicking a status option calls patchIssue with that status and emits update:issue", async () => {
+    const patched = makeDetail({ status: "Blocked" });
+    patchMock.mockResolvedValue(patched);
+
+    const w = mountHeaderWithMenuStubs(makeDetail({ status: "ToDo" }));
+    await w.get('[data-test="drawer-status-option-blocked"]').trigger("click");
+
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        status: "Blocked",
+      });
+    });
+    await vi.waitFor(() => {
+      const events = w.emitted("update:issue");
+      expect(events).toBeTruthy();
+      expect(events![0][0]).toBe(patched);
+    });
+  });
+
+  it("clicking the same status as current is a no-op (no PATCH fired)", async () => {
+    const w = mountHeaderWithMenuStubs(makeDetail({ status: "ToDo" }));
+    await w.get('[data-test="drawer-status-option-todo"]').trigger("click");
+    await flushPromises();
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("surfaces server error inline when patchIssue rejects", async () => {
+    patchMock.mockRejectedValue(new Error("write conflict"));
+    const w = mountHeaderWithMenuStubs(makeDetail({ status: "ToDo" }));
+    await w.get('[data-test="drawer-status-option-done"]').trigger("click");
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-status-error"]').text()).toContain(
+        "write conflict",
+      );
+    });
+  });
+});
+
+describe("DrawerHeader — epic guard (DX-522)", () => {
+  it("renders an INERT status pill + DanxTooltip when type=Epic AND children.length > 0", () => {
+    const w = mountHeaderWithMenuStubs(
+      makeDetail({ type: "Epic", children: ["DX-2", "DX-3"] }),
+    );
+    // Inert pill present, clickable pill + menu absent.
+    expect(w.find('[data-test="drawer-status-pill-inert"]').exists()).toBe(
+      true,
+    );
+    expect(w.find('[data-test="drawer-status-pill"]').exists()).toBe(false);
+    expect(w.find('[data-test="drawer-status-menu"]').exists()).toBe(false);
+    // Tooltip copy is verbatim from the AC.
+    const tooltip = w.get(".stub-tooltip");
+    expect(tooltip.attributes("data-tooltip")).toBe(
+      "Epic status is computed from phase statuses — edit a child phase to change this.",
+    );
+  });
+
+  it("renders the editable status menu on an Epic with empty children (recovery affordance)", () => {
+    const w = mountHeaderWithMenuStubs(
+      makeDetail({ type: "Epic", children: [] }),
+    );
+    expect(w.find('[data-test="drawer-status-pill-inert"]').exists()).toBe(
+      false,
+    );
+    expect(w.find('[data-test="drawer-status-pill"]').exists()).toBe(true);
+    expect(w.find('[data-test="drawer-status-menu"]').exists()).toBe(true);
+  });
+
+  it("keeps the priority pill editable on Epics with children", () => {
+    const w = mountHeaderWithMenuStubs(
+      makeDetail({ type: "Epic", children: ["DX-2"] }),
+    );
+    // Priority menu renders the six tier options regardless of epic status.
+    const options = w.findAll('[data-test^="drawer-priority-option-"]');
+    expect(options.map((o) => o.attributes("data-test"))).toEqual([
+      "drawer-priority-option-lowest",
+      "drawer-priority-option-low",
+      "drawer-priority-option-medium",
+      "drawer-priority-option-high",
+      "drawer-priority-option-very_high",
+      "drawer-priority-option-critical",
+    ]);
+  });
+});
+
+describe("DrawerHeader — priority menu (DX-522)", () => {
+  beforeEach(() => {
+    patchMock.mockReset();
+  });
+
+  it("renders six tier options low → high in the canonical order", () => {
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 3 }));
+    const options = w.findAll('[data-test^="drawer-priority-option-"]');
+    expect(options).toHaveLength(6);
+    expect(options[0].text()).toContain("Lowest");
+    expect(options[5].text()).toContain("Critical");
+  });
+
+  it("clicking the 'high' tier commits 3.5 (the tier midpoint) via patchIssue", async () => {
+    const patched = makeDetail({ priority: 3.5 });
+    patchMock.mockResolvedValue(patched);
+
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 2.5 }));
+    await w.get('[data-test="drawer-priority-option-high"]').trigger("click");
+
+    await vi.waitFor(() => {
+      expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
+        priority: 3.5,
+      });
+    });
+    await vi.waitFor(() => {
+      const events = w.emitted("update:issue");
+      expect(events).toBeTruthy();
+      expect(events![0][0]).toBe(patched);
+    });
+  });
+
+  it("clicking the current tier is a no-op (no PATCH fired)", async () => {
+    // priority 3.5 → high; clicking high again should not PATCH.
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 3.5 }));
+    await w.get('[data-test="drawer-priority-option-high"]').trigger("click");
+    await flushPromises();
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("trigger pill shows the current tier's label next to the icon", () => {
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 5.5 }));
+    const pill = w.get('[data-test="drawer-priority-pill"]');
+    expect(pill.text()).toContain("Critical");
+  });
+
+  // Accessibility — the pill's aria-label must reflect the CURRENT
+  // tier so a screen reader user announcing the pill hears the
+  // up-to-date priority value, not a stale one. Guards against a
+  // future refactor that hardcodes "Priority — click to change" and
+  // drops the tier label.
+  it("aria-label tracks the current tier label across prop updates", async () => {
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 0.5 }));
+    let pill = w.get('[data-test="drawer-priority-pill"]');
+    expect(pill.attributes("aria-label")).toContain("Lowest");
+
+    await w.setProps({ issue: makeDetail({ priority: 5.5 }) });
+    pill = w.get('[data-test="drawer-priority-pill"]');
+    expect(pill.attributes("aria-label")).toContain("Critical");
+  });
+
+  it("surfaces server error inline when patchIssue rejects", async () => {
+    patchMock.mockRejectedValue(new Error("Invalid priority"));
+    const w = mountHeaderWithMenuStubs(makeDetail({ priority: 2.5 }));
+    await w
+      .get('[data-test="drawer-priority-option-very_high"]')
+      .trigger("click");
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-priority-error"]').text()).toContain(
+        "Invalid priority",
+      );
+    });
+  });
+});

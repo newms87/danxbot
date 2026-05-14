@@ -387,3 +387,32 @@ describe("IssueCard — triage chip (DX-516)", () => {
     expect(w.get("[data-test='triage-ago']").text()).toBe("triaged now");
   });
 });
+
+// DX-522 — Priority icon on the card tile. The board's per-column
+// sort is already priority-DESC (DX-521 backend), so the icon's job
+// is glanceability — an operator scanning the column reads tier
+// rank without parsing the numeric value the YAML carries.
+describe("IssueCard — priority icon (DX-522)", () => {
+  it("renders the priority icon on every card", () => {
+    const w = mountCard(makeListItem({ priority: 3 }));
+    expect(w.find("[data-test='priority-icon']").exists()).toBe(true);
+  });
+
+  it("reflects the card's priority tier — priority 4.2 lands in very_high", () => {
+    const w = mountCard(makeListItem({ priority: 4.2 }));
+    const icon = w.get("[data-test='priority-icon']");
+    expect(icon.classes()).toContain("priority-very_high");
+  });
+
+  it("reflects the card's priority tier — priority 0.5 lands in lowest", () => {
+    const w = mountCard(makeListItem({ priority: 0.5 }));
+    const icon = w.get("[data-test='priority-icon']");
+    expect(icon.classes()).toContain("priority-lowest");
+  });
+
+  it("uses size=sm on the board tile (compact rendering)", () => {
+    const w = mountCard(makeListItem({ priority: 3 }));
+    const icon = w.get("[data-test='priority-icon']");
+    expect(icon.classes()).toContain("priority-size-sm");
+  });
+});
