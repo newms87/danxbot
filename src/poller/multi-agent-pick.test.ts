@@ -106,7 +106,6 @@ import {
   guardLiveDispatchForCard,
   runPostDispatchProgressCheck,
 } from "../dispatch/scheduler.js";
-import { _resetQuarantine } from "../dispatch/quarantine.js";
 import {
   clearDispatchAndWrite,
   loadLocalFromDisk,
@@ -249,10 +248,6 @@ beforeEach(() => {
   tmpRepo = mkdtempSync(join(tmpdir(), "multi-agent-pick-"));
   setAgentLocksQueryFn(async () => [] as never);
   vi.clearAllMocks();
-  // DX-221 — quarantine state is in-memory + module-scoped; reset
-  // between tests so a failed dispatch in one test does not skip the
-  // agent + card in the next.
-  _resetQuarantine();
 });
 
 afterEach(() => {
@@ -1012,15 +1007,20 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.task).toContain("DX-2");
   });
 
-  it("reconcile dispatch failure quarantines the agent but NOT the dispatch-target card (DX-501)", async () => {
+  it("reconcile dispatch failure does NOT throw inside onComplete (DX-501; cooldown retired DX-366)", async () => {
+    // Pre-DX-366 the picker stamped a failure cooldown on dispatch
+    // failure and had a DX-501 carve-out that skipped CARD cooldowns
+    // on reconcile failures. With the cooldown system retired, the
+    // carve-out is gone too — the only invariant left is "the failure
+    // path completes cleanly." The strike accumulator (DX-365) records
+    // the failure on the dispatch row; the picker drops the agent on
+    // the next tick when the strike count crosses the broken
+    // threshold.
     writeSettings({ dani: agentRecord("dani") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
       job: {} as never,
     });
-    const { isCardQuarantined, isAgentQuarantined } = await import(
-      "../dispatch/quarantine.js"
-    );
 
     const a = issue("DX-1", { assigned_agent: "dani" });
     const b = issue("DX-2", { assigned_agent: "dani" });
@@ -1033,38 +1033,13 @@ describe("tryMultiAgentDispatch", () => {
     });
 
     const onComplete = mockedDispatchWithRecovery.mock.calls[0][0].onComplete!;
-    await onComplete({
-      id: "did",
-      status: "failed",
-      summary: "reconcile blew up",
-    } as never);
-
-    expect(
-      isAgentQuarantined({
-        repoName: "danxbot",
-        agentName: "dani",
-        now: NOW.getTime(),
-      }),
-    ).toBe(true);
-    // Dispatch target was DX-1 (first by reconcile target rank — both ToDo,
-    // tie → input order). The card MUST NOT be quarantined: reconcile
-    // targets are arbitrary, and quarantining one of the duplicates
-    // would block the next reconcile retry from hanging the dispatch
-    // row on the same YAML.
-    expect(
-      isCardQuarantined({
-        repoName: "danxbot",
-        cardId: "DX-1",
-        now: NOW.getTime(),
-      }),
-    ).toBe(false);
-    expect(
-      isCardQuarantined({
-        repoName: "danxbot",
-        cardId: "DX-2",
-        now: NOW.getTime(),
-      }),
-    ).toBe(false);
+    await expect(
+      onComplete({
+        id: "did",
+        status: "failed",
+        summary: "reconcile blew up",
+      } as never),
+    ).resolves.toBeUndefined();
   });
 
   it("reconcile path does not corrupt remainingCards when target is not in dispatchable list (DX-501)", async () => {
@@ -1508,84 +1483,142 @@ describe("tryMultiAgentDispatch", () => {
   });
 
   /**
-   * DX-221 AC #2 — per-agent + per-card quarantine.
+   * DX-366 — failure cooldowns retired. Card-level fault handling is
+   * now solely the agent's responsibility (Blocked / waiting_on /
+   * requires_human in-session); agent-level fault handling is the
+   * strike accumulator (DX-365) → 3 consecutive failures →
+   * `agents.<name>.broken`. The picker's job is to dispatch and let
+   * the agent decide.
    */
-  describe("DX-221: quarantine gates", () => {
-    it("a quarantined agent is skipped — dispatch does NOT fire", async () => {
-      const { quarantineAgent } = await import("../dispatch/quarantine.js");
+  describe("DX-366: no picker-side cooldown after a failed dispatch", () => {
+    it("a fresh tick after a failed dispatch CAN immediately re-pick the same agent for a different card (no 60s pause)", async () => {
       writeSettings({ alice: agentRecord("alice") });
       mockedDispatchWithRecovery.mockResolvedValue({
         dispatchId: "did",
         job: {} as never,
       });
-      quarantineAgent({
-        repoName: "danxbot",
-        agentName: "alice",
-        reason: "test fixture",
-        durationMs: 60_000,
-        now: NOW.getTime(),
-      });
 
-      const result = await tryMultiAgentDispatch({
+      // Tick 1 — alice picks DX-1 and the dispatch fails.
+      const tick1 = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
         tracker: fakeTracker(),
         now: NOW,
       });
+      expect(tick1.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "failed",
+        summary: "transient claude-auth blip",
+        dispatchKind: "work",
+      } as never);
 
-      expect(result.dispatched).toBe(0);
-      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      // Tick 2 — same alice, fresh card DX-2, SAME instant. Pre-DX-366
+      // alice would be in a 60s cooldown; the cooldown is retired so
+      // she is immediately picker-eligible again.
+      const tick2 = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-2")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(tick2.dispatched).toBe(1);
+      // Two dispatches total — DX-1 (failed) + DX-2 (the immediate retry).
+      expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
+      expect(mockedDispatchWithRecovery.mock.calls[1][1].agentName).toBe(
+        "alice",
+      );
     });
 
-    it("a quarantined card is skipped — dispatch does NOT fire", async () => {
-      const { quarantineCard } = await import("../dispatch/quarantine.js");
+    it("a fresh tick after a dispatchWithRecovery THROW CAN immediately re-pick the same agent for a different card (no 60s pause)", async () => {
+      // Symmetric to the onComplete-failure path: dispatchWithRecovery
+      // throwing synchronously (spawn-fail, worktree validation throw)
+      // also pre-DX-366 stamped a 60s agent cooldown + a card cooldown.
+      // With the cooldown system retired, the catch-block recovery
+      // path leaves no picker-side state behind and the next tick is
+      // free to re-pick the same agent immediately.
       writeSettings({ alice: agentRecord("alice") });
-      mockedDispatchWithRecovery.mockResolvedValue({
-        dispatchId: "did",
+      mockedDispatchWithRecovery.mockRejectedValueOnce(
+        new Error("synthetic spawn-fail"),
+      );
+      mockedDispatchWithRecovery.mockResolvedValueOnce({
+        dispatchId: "did-2",
         job: {} as never,
       });
-      quarantineCard({
-        repoName: "danxbot",
-        cardId: "DX-1",
-        reason: "test fixture",
-        durationMs: 60_000,
-        now: NOW.getTime(),
-      });
 
-      const result = await tryMultiAgentDispatch({
+      // Tick 1 — alice picks DX-1; dispatchWithRecovery throws inside
+      // the catch block. Result: 0 dispatched (the throw aborted the
+      // call), no cooldown stamped.
+      const tick1 = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
         tracker: fakeTracker(),
         now: NOW,
       });
+      expect(tick1.dispatched).toBe(0);
 
-      expect(result.dispatched).toBe(0);
-      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      // Tick 2 — same alice, fresh DX-2, SAME instant. With cooldowns
+      // retired, alice is immediately picker-eligible again.
+      const tick2 = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-2")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(tick2.dispatched).toBe(1);
+      expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
+      expect(mockedDispatchWithRecovery.mock.calls[1][1].agentName).toBe(
+        "alice",
+      );
     });
 
-    it("an expired quarantine does NOT skip — picker proceeds normally", async () => {
-      const { quarantineAgent } = await import("../dispatch/quarantine.js");
-      writeSettings({ alice: agentRecord("alice") });
+    it("a fresh tick after a failed dispatch CAN immediately re-pick the same card with a different agent (no 5min pause)", async () => {
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
       mockedDispatchWithRecovery.mockResolvedValue({
         dispatchId: "did",
         job: {} as never,
       });
-      quarantineAgent({
-        repoName: "danxbot",
-        agentName: "alice",
-        reason: "ancient",
-        durationMs: 1_000,
-        now: NOW.getTime() - 60_000,
-      });
 
-      const result = await tryMultiAgentDispatch({
+      // Tick 1 — alice picks DX-1; the dispatch fails.
+      const tick1 = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [issue("DX-1")],
         tracker: fakeTracker(),
         now: NOW,
       });
+      expect(tick1.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      await dispatchInput.onComplete!({
+        id: "did-1",
+        status: "failed",
+        summary: "transient blip",
+        dispatchKind: "work",
+      } as never);
 
-      expect(result.dispatched).toBe(1);
+      // Tick 2 — alice is busy in the DB (the failed dispatch row may
+      // still be open from her POV mid-tear-down). Bob picks DX-1
+      // immediately; pre-DX-366 the card was in a 5min cooldown.
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM dispatches")) {
+          return [{ agent_name: "alice" }] as never;
+        }
+        return [] as never;
+      });
+      const tick2 = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(tick2.dispatched).toBe(1);
+      expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
+      expect(mockedDispatchWithRecovery.mock.calls[1][1].agentName).toBe(
+        "bob",
+      );
     });
   });
 
@@ -1885,16 +1918,12 @@ describe("tryMultiAgentDispatch", () => {
       expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
     });
 
-    it("legacy path: failed dispatch with NO prepVerdict (agent crashed before calling the verdict tool) → BOTH runPostDispatchProgressCheck AND quarantine accounting fire", async () => {
-      // The DX-296 onComplete branching adds an `isPrepAbort` short-
-      // circuit that skips quarantine accounting on `verdict=abort`.
-      // It MUST NOT also short-circuit the legacy "agent crashed
-      // mid-dispatch" path — those failures still need quarantine
-      // (card + agent) so the picker doesn't hot-loop. Verdict ===
-      // undefined is the discriminator.
-      const { isAgentQuarantined, isCardQuarantined } = await import(
-        "../dispatch/quarantine.js"
-      );
+    it("legacy path: failed dispatch with NO prepVerdict (agent crashed before calling the verdict tool) → runPostDispatchProgressCheck still fires", async () => {
+      // The card-progress check (CRITICAL_FAILURE halt safeguard) is the
+      // only post-dispatch hook left for non-prep failures after DX-366
+      // retired the failure-cooldown accounting. Verdict === undefined means
+      // the agent died before the verdict tool ran; the check MUST still
+      // fire so a card stuck in ToDo writes the halt flag.
       writeSettings({ alice: agentRecord("alice") });
       mockedDispatchWithRecovery.mockResolvedValue({
         dispatchId: "did",
@@ -1918,26 +1947,9 @@ describe("tryMultiAgentDispatch", () => {
       } as never);
 
       expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
-      expect(
-        isCardQuarantined({
-          repoName: "danxbot",
-          cardId: "DX-1",
-          now: NOW.getTime() + 1_000,
-        }),
-      ).toBe(true);
-      expect(
-        isAgentQuarantined({
-          repoName: "danxbot",
-          agentName: "alice",
-          now: NOW.getTime() + 1_000,
-        }),
-      ).toBe(true);
     });
 
-    it("verdict=abort: SKIPS runPostDispatchProgressCheck AND skips card quarantine (env failure on agent's worktree, NOT card failure — quarantining the card would punish a future healthy agent)", async () => {
-      const { isCardQuarantined, isAgentQuarantined } = await import(
-        "../dispatch/quarantine.js"
-      );
+    it("verdict=abort: SKIPS runPostDispatchProgressCheck (route already stamped agents.<name>.broken; card was never expected to progress)", async () => {
       writeSettings({ alice: agentRecord("alice") });
       mockedDispatchWithRecovery.mockResolvedValue({
         dispatchId: "did",
@@ -1965,23 +1977,6 @@ describe("tryMultiAgentDispatch", () => {
       } as never);
 
       expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
-      // Neither the card nor the agent should be quarantined by the
-      // failure-accounting branch — the route's broken stamp already
-      // gates the agent at picker time.
-      expect(
-        isCardQuarantined({
-          repoName: "danxbot",
-          cardId: "DX-1",
-          now: NOW.getTime() + 1_000,
-        }),
-      ).toBe(false);
-      expect(
-        isAgentQuarantined({
-          repoName: "danxbot",
-          agentName: "alice",
-          now: NOW.getTime() + 1_000,
-        }),
-      ).toBe(false);
     });
   });
 

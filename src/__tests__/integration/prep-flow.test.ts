@@ -132,7 +132,6 @@ vi.mock("../../logger.js", () => ({
 import { tryMultiAgentDispatch } from "../../poller/multi-agent-pick.js";
 import { dispatchWithRecovery } from "../../dispatch/recovery-mode.js";
 import { runPostDispatchProgressCheck } from "../../dispatch/scheduler.js";
-import { _resetQuarantine } from "../../dispatch/quarantine.js";
 import { handlePrepVerdict } from "../../worker/prep-verdict-route.js";
 import {
   callDanxbotPrepVerdict,
@@ -325,7 +324,6 @@ beforeEach(async () => {
   tmpRepo = mkdtempSync(join(tmpdir(), "prep-flow-"));
   setAgentLocksQueryFn(async () => [] as never);
   vi.clearAllMocks();
-  _resetQuarantine();
 
   // Boot a real loopback HTTP server hosting the prep-verdict route.
   // The fake agent (driven inside `dispatchWithRecovery`) POSTs the
@@ -613,7 +611,7 @@ describe("prep flow integration — picker → route → onComplete", () => {
     expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
   });
 
-  it("verdict abort: route stamps agents.<name>.broken in settings.json; picker SKIPS card-progress check + does NOT quarantine the card", async () => {
+  it("verdict abort: route stamps agents.<name>.broken in settings.json; picker SKIPS card-progress check", async () => {
     writeSettings("separate");
     writeIssue("DX-1");
 
@@ -655,17 +653,7 @@ describe("prep flow integration — picker → route → onComplete", () => {
     });
 
     // Picker did not run the card-progress check (would have written
-    // CRITICAL_FAILURE because the card is still in ToDo) AND did not
-    // quarantine the card (env failure was on the agent, not the card).
+    // CRITICAL_FAILURE because the card is still in ToDo).
     expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
-
-    const { isCardQuarantined } = await import("../../dispatch/quarantine.js");
-    expect(
-      isCardQuarantined({
-        repoName: "danxbot",
-        cardId: "DX-1",
-        now: Date.now(),
-      }),
-    ).toBe(false);
   });
 });

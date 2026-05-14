@@ -73,14 +73,6 @@ import {
   runPostDispatchProgressCheck,
   tryAcquireLock,
 } from "../dispatch/scheduler.js";
-import { escalateOnRepeatedFailures } from "../dispatch/failure-escalation.js";
-import {
-  clearQuarantineForSuccess,
-  isAgentQuarantined,
-  isCardQuarantined,
-  quarantineAgent,
-  quarantineCard,
-} from "../dispatch/quarantine.js";
 import { assignedCards, busyAgents } from "../agent/agent-locks.js";
 import { targetName } from "../config.js";
 import type { IssueTracker } from "../issue-tracker/interface.js";
@@ -326,9 +318,9 @@ export async function tryMultiAgentDispatch(
   // DX-360 — loop iterates agents (not cards). Each iteration may
   // dispatch an owned-card resume (card NOT in `remainingCards`) OR a
   // fresh ToDo pick (card from `remainingCards`). The loop exits when
-  // `pickFreeAgent` returns null (every eligible agent is busy /
-  // quarantined / skipped) OR when neither owned-card nor fresh ToDo
-  // is available for the next free agent.
+  // `pickFreeAgent` returns null (every eligible agent is busy / broken /
+  // tracker-skipped) OR when neither owned-card nor fresh ToDo is
+  // available for the next free agent.
   while (true) {
     const agent = pickFreeAgent({
       roster,
@@ -411,39 +403,6 @@ export async function tryMultiAgentDispatch(
       }
     }
     const isReconcileDispatch = reconcileOwnedCards.length > 0;
-
-    // AC #2 of DX-221 — per-agent + per-card quarantine cooldown.
-    // Replaces the deleted per-poller backoff window. A
-    // freshly-failed agent + a freshly-failed card each get a short
-    // cooldown so the picker does not hot-loop against an env-level
-    // blocker; cleared on a successful dispatch (clearQuarantineForSuccess
-    // in onComplete). See src/dispatch/quarantine.ts for the contract.
-    if (
-      isAgentQuarantined({
-        repoName: repo.name,
-        agentName: agent.name,
-        now: now.getTime(),
-      })
-    ) {
-      log.info(
-        `[${repo.name}] multi-agent pick: ${agent.name} is quarantined — skipping this tick`,
-      );
-      skipAgents.add(agent.name);
-      continue;
-    }
-    if (
-      isCardQuarantined({
-        repoName: repo.name,
-        cardId: card.id,
-        now: now.getTime(),
-      })
-    ) {
-      log.info(
-        `[${repo.name}] multi-agent pick: ${card.id} is quarantined — skipping`,
-      );
-      removeFromRemaining(card);
-      continue;
-    }
 
     log.info(
       `[${repo.name}] multi-agent pick: ${agent.name} → ${card.id} (${card.title})`,
@@ -825,70 +784,15 @@ export async function tryMultiAgentDispatch(
               });
             }
 
-            // AC #1 + AC #2 of DX-221 — per-card consecutive-failure
-            // tally + per-agent/per-card quarantine. Both replace
-            // protections that lived in the deleted poller-tick state
-            // (per-poller failure counter + per-poller backoff window).
-            //
-            // DX-296 — skip quarantine accounting on prep abort. The
-            // prep-verdict route already stamped `agents.<name>.broken`
-            // so the picker filters this agent out next tick; the card
-            // itself is innocent (the env was broken on the agent's
-            // worktree). Quarantining the card would punish a future
-            // healthy agent for an unrelated env failure.
-            const isPrepAbort = verdict?.verdict === "abort";
-            if (!isPrepAbort) {
-              if (job.status === "completed") {
-                clearQuarantineForSuccess({
-                  repoName: repo.name,
-                  agentName: agent.name,
-                  cardId: stamped.id,
-                });
-              } else if (job.status === "failed") {
-                quarantineAgent({
-                  repoName: repo.name,
-                  agentName: agent.name,
-                  reason: `dispatch ${job.id} failed on ${stamped.id}: ${job.summary || "(no summary)"}`,
-                });
-                // DX-501: skip card-quarantine on reconcile failure.
-                // The dispatch-target card (cards[0]) was an arbitrary
-                // pick from the duplicates list — the agent may have
-                // intended to release it. Quarantining it would block
-                // the next reconcile retry from even hanging the
-                // dispatch row on the same YAML. Agent quarantine
-                // alone (above) is the right cooldown — it prevents
-                // hot-loop on a genuinely broken agent without
-                // poisoning a card that another agent might handle
-                // fine on the next tick.
-                if (!isReconcileDispatch) {
-                  quarantineCard({
-                    repoName: repo.name,
-                    cardId: stamped.id,
-                    reason: `dispatch ${job.id} failed: ${job.summary || "(no summary)"}`,
-                  });
-                }
-                try {
-                  const fresh = loadLocalFromDisk(
-                    repo.localPath,
-                    stamped.id,
-                    repo.issuePrefix,
-                  );
-                  if (fresh) {
-                    await escalateOnRepeatedFailures({
-                      repoName: repo.name,
-                      repoLocalPath: repo.localPath,
-                      internalIssueId: stamped.id,
-                      card: fresh,
-                    });
-                  }
-                } catch (escErr) {
-                  log.error(
-                    `[${repo.name}] escalation check threw for ${stamped.id}`,
-                    escErr,
-                  );
-                }
-              }
-            }
+            // DX-366 — per-agent + per-card failure cooldowns and the
+            // per-card N-strike auto-Blocked path are RETIRED. Card-
+            // level fault handling is now solely the agent's
+            // responsibility (set Blocked / waiting_on / requires_human
+            // in-session) and agent-level fault handling lives on the
+            // strike accumulator (DX-365) which stamps
+            // `agents.<name>.broken` after 3 consecutive failures so
+            // the picker drops the agent from the pool. No picker-side
+            // accounting remains.
           },
         },
         { agentName: agent.name, manager },
@@ -899,26 +803,12 @@ export async function tryMultiAgentDispatch(
         `[${repo.name}] multi-agent dispatch failed for ${card.id} → ${agent.name}`,
         err,
       );
-      // AC #2 of DX-221 — dispatch threw before `onComplete` would
-      // ever fire (spawn-fail, worktree validation throw, etc.).
-      // Quarantine both sides so the next picker tick does not
-      // hot-loop against the same broken pairing.
-      const errMsg = err instanceof Error ? err.message : String(err);
-      quarantineAgent({
-        repoName: repo.name,
-        agentName: agent.name,
-        reason: `dispatch threw on ${card.id}: ${errMsg}`,
-      });
-      // DX-501: see DX-501 note in the onComplete failed-branch above —
-      // reconcile dispatches do not quarantine their arbitrary
-      // dispatch-target card.
-      if (!isReconcileDispatch) {
-        quarantineCard({
-          repoName: repo.name,
-          cardId: card.id,
-          reason: `dispatch threw: ${errMsg}`,
-        });
-      }
+      // DX-366 — picker-side failure cooldowns retired. The strike
+      // accumulator (DX-365) records the failure on the dispatch row;
+      // after 3 consecutive failures the agent gets
+      // `agents.<name>.broken` stamped and the picker drops them from
+      // the pool. No card-level cooldown stamp here — the next tick
+      // is free to re-pick the same card with the same agent.
       // Dispatch threw post-stamp → YAML carries a `dispatch:` block
       // pointing at a dispatchId that never made it into the DB. Without
       // clearing, every subsequent tick's `listDispatchableYamls` filter

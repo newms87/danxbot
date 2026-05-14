@@ -359,8 +359,8 @@ describe("dispatchWithRecovery", () => {
   });
 
   // ============================================================
-  // DX-359 — pre-sync WIP snapshot prevents agent quarantine after
-  // a prior dispatch died unclean leaving the worktree dirty.
+  // DX-359 — pre-sync WIP snapshot prevents the agent broken-stamp
+  // after a prior dispatch died unclean leaving the worktree dirty.
   // ============================================================
 
   describe("snapshotIfDirty (DX-359)", () => {

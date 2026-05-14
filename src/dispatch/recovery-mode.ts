@@ -20,8 +20,7 @@
  * this wrapper stamps `agents.<name>.broken` persistently so the picker
  * skips the agent until the operator clears the field, then throws a
  * plain `Error` so the multi-agent caller's existing try/catch fires its
- * dispatch-cleanup bookkeeping (clear YAML `dispatch{}`, quarantine,
- * release lock).
+ * dispatch-cleanup bookkeeping (clear YAML `dispatch{}`, release lock).
  */
 
 import { createLogger } from "../logger.js";
@@ -61,10 +60,11 @@ export async function dispatchWithRecovery(
   // the steady-state owner of commit-first WIP recovery, but it runs
   // INSIDE the dispatched agent's session — too late if `syncWorktree`'s
   // ff-only pull aborts on the dirty tree first. Worker-crash-mid-
-  // dispatch leaves WIP that, untouched, quarantines the agent on the
-  // next pick. One commit on the agent branch preserves the work AND
-  // unwedges sync; rebase replays the snapshot onto fresh origin/main.
-  // Same `broken`-stamping routing as a `syncWorktree` abort.
+  // dispatch leaves WIP that, untouched, aborts the next pick's
+  // ff-only pull and stamps `agents.<name>.broken`. One commit on the
+  // agent branch preserves the work AND unwedges sync; rebase replays
+  // the snapshot onto fresh origin/main. Same `broken`-stamping
+  // routing as a `syncWorktree` abort.
   const snapshot = await manager.snapshotIfDirty(input.repo, agentName);
   if (snapshot.kind === "abort") {
     await stampBrokenAndThrow(

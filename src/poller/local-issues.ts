@@ -187,8 +187,8 @@ export async function listOpenYamls(
 }
 
 /**
- * Return every In Progress issue. Used by the orphan-resume / stuck-card
- * recovery path. FIFO `mirror_updated_at` ordering — oldest first so the
+ * Return every In Progress issue. Used by the orphan-resume recovery
+ * path. FIFO `mirror_updated_at` ordering — oldest first so the
  * longest-running orphan is reconciled first.
  */
 export async function listInProgressYamls(

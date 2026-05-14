@@ -615,7 +615,7 @@ describe("WorktreeManager", () => {
 
   // ============================================================
   // snapshotIfDirty (DX-359) — commit WIP before sync to prevent
-  // ff-only pull abort + agents.<name>.broken quarantine when prior
+  // ff-only pull abort + agents.<name>.broken stamp when prior
   // dispatch died mid-write.
   // ============================================================
 

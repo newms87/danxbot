@@ -107,8 +107,8 @@ export async function runInboundFetch(
   // scheduler's `runPicker` callback) reads dispatchable cards from
   // the DB-backed listing in `local-issues.ts`. DX-218 retired the
   // per-tick orphan-push pass; outbound (YAML → tracker) pushes are
-  // now reconcile step 7's job. DX-290 retired the dispatch decision
-  // + stuck-card scan from `runSync` entirely.
+  // now reconcile step 7's job. DX-290 retired the legacy dispatch
+  // decision pass from `runSync` entirely.
   //
   // Cards on the Trello Action Items list surface with
   // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are

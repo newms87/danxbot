@@ -6,8 +6,8 @@
  * Two writers (git for the committed snapshot, inject for the per-tick
  * render) racing on one filesystem path = guaranteed dirty working tree.
  * A dirty tree breaks `syncWorktree`'s strict `git pull --ff-only`
- * (DX-293), which `dispatchWithRecovery` then escalates to
- * `agents.<name>.broken` quarantine. The fix is on the gitignore side:
+ * (DX-293), which `dispatchWithRecovery` then escalates to an
+ * `agents.<name>.broken` stamp. The fix is on the gitignore side:
  * stop tracking the files inject writes; let inject continue writing
  * them; let git stop seeing them as modified.
  *

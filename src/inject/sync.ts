@@ -124,10 +124,10 @@ export function syncRepoFiles(repo: RepoContext): void {
   ensureGitignoreEntry(repo.localPath, ".trello-retry/");
   // DX-340: gitignore danxbot-owned workspace files so the per-tick
   // inject re-render never dirties a tracked working tree (which would
-  // abort `syncWorktree`'s strict ff-only pull and quarantine the
-  // agent). Universal patterns + per-templated-workspace patterns;
-  // auto-grows when a new templated workspace is added under
-  // `src/inject/workspaces/`.
+  // abort `syncWorktree`'s strict ff-only pull and stamp the agent
+  // `agents.<name>.broken`). Universal patterns + per-templated-
+  // workspace patterns; auto-grows when a new templated workspace is
+  // added under `src/inject/workspaces/`.
   ensureWorkspaceGitignoreEntries(repo.localPath);
 
   // DX-201: ensure the connected repo's root `.mcp.json` advertises the

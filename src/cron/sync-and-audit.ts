@@ -75,14 +75,13 @@ const log = createLogger("cron");
  * Per-repo cron state.
  *
  * DX-290 slimmed this from the legacy seven-field shape to a
- * re-entrancy guard plus the timer handle. The legacy fields —
- * `teamRunning`, `failureTally`, `quarantineUntil`,
- * `priorTodoCardIds`, `trackedCardId`, `triageTracked` — all served
- * the single-fork `spawnClaude` dispatch path that DX-290 retired.
- * The multi-agent dispatch path (`src/poller/multi-agent-pick.ts`,
- * scheduled via `src/dispatch/scheduler.ts`) tracks per-dispatch
- * state inside `dispatch()` itself; the post-dispatch "card didn't
- * move" check lives in `runPostDispatchProgressCheck`.
+ * re-entrancy guard plus the timer handle. The legacy single-fork
+ * `spawnClaude` dispatch path's bookkeeping fields all moved
+ * elsewhere when DX-290 retired that path. The multi-agent dispatch
+ * path (`src/poller/multi-agent-pick.ts`, scheduled via
+ * `src/dispatch/scheduler.ts`) tracks per-dispatch state inside
+ * `dispatch()` itself; the post-dispatch "card didn't move" check
+ * lives in `runPostDispatchProgressCheck`.
  */
 interface RepoCronState {
   syncing: boolean;

@@ -338,8 +338,8 @@ export interface DispatchInput {
    *      exclusive. A caller that wants both a local callback AND an
    *      external PUT can set both fields.
    *
-   * Today's consumer: the poller, for card-progress checks, stuck-card
-   * recovery, and consecutive-failure backoff. HTTP handlers typically
+   * Today's consumer: the multi-agent picker, for card-progress checks
+   * + the `dispatch{}` block clear on the YAML. HTTP handlers typically
    * omit this and rely on the dispatch-row stop endpoint instead — but
    * that's a choice, not an exclusion.
    */

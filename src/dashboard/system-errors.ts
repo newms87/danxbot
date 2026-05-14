@@ -32,9 +32,7 @@ export type SystemErrorSource =
   | "prep-verdict-replay"
   | "orphan-reaper"
   | "legacy-cleanup"
-  | "audit-drift"
-  | "quarantine"
-  | "stuck-card";
+  | "audit-drift";
 
 /**
  * `"info"` is the audit-trail channel: routine, non-actionable events
