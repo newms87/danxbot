@@ -468,6 +468,19 @@ vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
   // DX-329 — cron now reads the agent roster for the orphan-IP heal.
   readAgents: vi.fn().mockReturnValue([]),
+  // DX-512 — per-repo render layer reads the effort ladder + assignment
+  // prompt to render `danx-effort-policy.md`. Stub with canonical-shape
+  // defaults so the render produces a non-throwing write.
+  getEffortLevels: vi.fn().mockReturnValue([
+    { name: "min", model: "claude-haiku-4-5", effort: "minimal" },
+    { name: "very_low", model: "claude-haiku-4-5", effort: "low" },
+    { name: "low", model: "claude-haiku-4-5", effort: "high" },
+    { name: "medium", model: "claude-sonnet-4-6", effort: "low" },
+    { name: "high", model: "claude-sonnet-4-6", effort: "medium" },
+    { name: "very_high", model: "claude-sonnet-4-6", effort: "high" },
+    { name: "max", model: "claude-opus-4-7", effort: "high" },
+  ]),
+  getEffortAssignmentPrompt: vi.fn().mockReturnValue("stub prompt"),
 }));
 
 vi.mock("../workspace/write-if-changed.js", () => ({
@@ -766,6 +779,7 @@ describe("poll", () => {
       `${workspaceClaudePrefix}rules/danx-repo-workflow.md`,
       `${workspaceClaudePrefix}rules/danx-tools.md`,
       `${workspaceClaudePrefix}rules/danx-issue-prefix.md`,
+      `${workspaceClaudePrefix}rules/danx-effort-policy.md`,
     ];
     for (const expected of expectedWorkspaceArtifacts) {
       expect(allTouched).toContain(expected);
@@ -1647,6 +1661,7 @@ language: node
       "danx-repo-workflow.md",
       "danx-tools.md",
       "danx-issue-prefix.md",
+      "danx-effort-policy.md",
     ];
 
     const sourceDirSuffixes = [demoSource];
