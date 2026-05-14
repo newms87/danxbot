@@ -56,15 +56,23 @@ export async function notifyError(
   options?: NotifyErrorOptions,
 ): Promise<void> {
   try {
-    const { apiKey, apiToken, todoListId, bugLabelId } = trello;
+    const { apiKey, apiToken, reviewListId, bugLabelId } = trello;
 
     if (!apiKey || !apiToken) {
       log.debug("Trello creds not configured, skipping error notification");
       return;
     }
 
-    const targetListId = options?.listId || todoListId;
+    // Default routing: Review (human triage). Callers override per-call —
+    // e.g. operational router errors pass listId: needsHelpListId.
+    const targetListId = options?.listId || reviewListId;
     const targetLabelId = options?.labelId || bugLabelId;
+
+    if (!targetListId) {
+      log.error("notifyError: targetListId is empty (reviewListId not configured) — skipping");
+      return;
+    }
+
     const cardName = buildCardName(errorType, errorMessage);
 
     // Fetch existing cards in target list to check for duplicates

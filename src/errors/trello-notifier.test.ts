@@ -68,6 +68,17 @@ describe("when Trello creds are not configured", () => {
 
     expect(mockFetch).not.toHaveBeenCalled();
   });
+
+  it("returns without calling fetch when reviewListId is empty and no override given", async () => {
+    await notifyError(
+      { ...MOCK_TRELLO_CONFIG, reviewListId: "" },
+      "Router Error",
+      "boom",
+      {},
+    );
+
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
 
 // ============================================================
@@ -75,7 +86,7 @@ describe("when Trello creds are not configured", () => {
 // ============================================================
 
 describe("duplicate detection", () => {
-  it("does not create a card when duplicate exists in ToDo", async () => {
+  it("does not create a card when duplicate exists in Review", async () => {
     const cardName = "[Danxbot > Error] Agent Timeout: timed out";
 
     // First fetch: list cards — returns a duplicate
@@ -91,6 +102,28 @@ describe("duplicate detection", () => {
     expect(mockFetch).toHaveBeenCalledWith(
       expect.stringContaining("/lists/"),
     );
+  });
+});
+
+// ============================================================
+// Default routing — Review list (DX-119)
+// ============================================================
+
+describe("default routing", () => {
+  it("routes auto-generated error cards to reviewListId when no override is given", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => [] });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: "new-card-id" }) });
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ id: "comment-id" }) });
+
+    await notifyError(MOCK_TRELLO_CONFIG, "Router Error", "boom", {});
+
+    const listCall = mockFetch.mock.calls[0][0] as string;
+    expect(listCall).toContain(`/lists/${MOCK_TRELLO_CONFIG.reviewListId}/cards`);
+
+    const createCall = mockFetch.mock.calls[1][0] as string;
+    const createParams = new URLSearchParams(createCall.split("?")[1]);
+    expect(createParams.get("idList")).toBe(MOCK_TRELLO_CONFIG.reviewListId);
+    expect(createParams.get("idList")).not.toBe(MOCK_TRELLO_CONFIG.todoListId);
   });
 });
 
@@ -143,7 +176,7 @@ describe("card creation", () => {
     expect(params.get("name")).toBe("[Danxbot > Error] Agent Timeout: Agent timed out after 300s");
     expect(params.get("pos")).toBe("top");
     expect(params.get("idLabels")).toBe("bug-label");
-    expect(params.get("idList")).toBe("todo-list");
+    expect(params.get("idList")).toBe("review-list");
   });
 
   it("includes context fields in card description", async () => {
@@ -272,8 +305,8 @@ describe("list and label overrides", () => {
     const params = new URLSearchParams(url.split("?")[1]);
 
     expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adaa");
-    // List should still be default todoListId
-    expect(params.get("idList")).toBe("todo-list");
+    // List should still be default reviewListId
+    expect(params.get("idList")).toBe("review-list");
   });
 
   it("creates card with both custom list and label when both provided", async () => {
@@ -296,7 +329,7 @@ describe("list and label overrides", () => {
     expect(params.get("idLabels")).toBe("698fc5b8847b787a3818adaa");
   });
 
-  it("checks for duplicates in the target list (not always todoListId)", async () => {
+  it("checks for duplicates in the target list (not always the default review list)", async () => {
     // Reset mocks to control the list cards fetch
     mockFetch.mockReset();
     mockFetch.mockResolvedValueOnce({
