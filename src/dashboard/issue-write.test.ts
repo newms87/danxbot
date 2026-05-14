@@ -36,7 +36,9 @@ vi.mock("./event-bus.js", () => ({
 
 import {
   applyIssuePatch,
+  createIssue,
   handlePatchIssue,
+  handlePostIssue,
   IssuePatchError,
   type IssuePatch,
 } from "./issue-write.js";
@@ -1094,5 +1096,501 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
         "alice",
       ),
     ).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// DX-350 — POST /api/issues (dashboard Create Card surface)
+// ─────────────────────────────────────────────────────────────────────────
+
+describe("createIssue — body validation", () => {
+  it("rejects non-object body with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, "nope"),
+    ).rejects.toMatchObject({ status: 400, body: { error: "Body must be a JSON object" } });
+  });
+
+  it("rejects array body with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, []),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects missing title with 400 naming the field", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        description: "x",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "title must be a non-empty string" },
+    });
+  });
+
+  it("rejects whitespace-only title with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "   ",
+        description: "x",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "title must be a non-empty string" },
+    });
+  });
+
+  it("rejects missing description with 400 naming the field", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "description must be a non-empty string" },
+    });
+  });
+
+  it("rejects whitespace-only description with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "\n\t  ",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "description must be a non-empty string" },
+    });
+  });
+
+  it("rejects status outside the create allowlist (In Progress) with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "x",
+        status: "In Progress",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "status must be one of [Review, ToDo]" },
+    });
+  });
+
+  it("rejects status outside the create allowlist (Done) with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "x",
+        status: "Done",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects status not in the enum at all with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "x",
+        status: "Bogus",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects type not in the enum with 400 naming the allowlist", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "x",
+        status: "Review",
+        type: "Story",
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "type must be one of [Epic, Bug, Feature, Chore]" },
+    });
+  });
+
+  it("rejects type that is not a string with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Test",
+        description: "x",
+        status: "Review",
+        type: 7,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("does NOT publish issue:updated when validation rejects", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "",
+        description: "x",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
+});
+
+describe("createIssue — happy path", () => {
+  it("allocates DX-1 in an empty repo, writes YAML, publishes SSE", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "First card",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    expect(issue.id).toBe("DX-1");
+    expect(issue.title).toBe("First card");
+    expect(issue.description).toBe("Body");
+    expect(issue.status).toBe("Review");
+    expect(issue.type).toBe("Feature");
+    // YAML landed in open/ at the expected path
+    const onDiskPath = issuePath(repoLocalPath, "DX-1", "open");
+    expect(existsSync(onDiskPath)).toBe(true);
+    const onDisk = parseYamlText(readFileSync(onDiskPath, "utf-8")) as {
+      id: string;
+      title: string;
+      status: string;
+    };
+    expect(onDisk.id).toBe("DX-1");
+    expect(onDisk.title).toBe("First card");
+    // SSE event with the post-create issue
+    expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
+    const call = mockEventBusPublish.mock.calls[0][0];
+    expect(call.topic).toBe("issue:updated");
+    expect(call.data.repoName).toBe("danxbot");
+    expect(call.data.id).toBe("DX-1");
+    expect(call.data.issue.title).toBe("First card");
+  });
+
+  it("monotonically increments id when prior cards exist", async () => {
+    writeFixture(makeIssue({ id: "DX-1" }), "open");
+    writeFixture(makeIssue({ id: "DX-5" }), "closed");
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Next",
+      description: "Body",
+      status: "ToDo",
+      type: "Bug",
+    });
+    expect(issue.id).toBe("DX-6");
+  });
+
+  it("creates open/ + closed/ dirs when missing", async () => {
+    // Fresh repo path has nothing under .danxbot/issues yet (writeConfig
+    // only seeds .danxbot/config/config.yml).
+    await createIssue("danxbot", repoLocalPath, {
+      title: "Test",
+      description: "Body",
+      status: "ToDo",
+      type: "Chore",
+    });
+    expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(true);
+  });
+
+  it("starts cards in Review when requested", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Triage me",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    expect(issue.status).toBe("Review");
+  });
+
+  it("starts cards in ToDo when requested", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Ready",
+      description: "Body",
+      status: "ToDo",
+      type: "Feature",
+    });
+    expect(issue.status).toBe("ToDo");
+  });
+
+  it("respects all four valid types", async () => {
+    const types = ["Bug", "Feature", "Epic", "Chore"] as const;
+    for (const t of types) {
+      const issue = await createIssue("danxbot", repoLocalPath, {
+        title: `Card ${t}`,
+        description: "Body",
+        status: "ToDo",
+        type: t,
+      });
+      expect(issue.type).toBe(t);
+    }
+  });
+
+  it("created card has empty ac[], empty children[], null waiting_on/blocked/requires_human", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Defaults",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    expect(issue.ac).toEqual([]);
+    expect(issue.children).toEqual([]);
+    expect(issue.waiting_on).toBeNull();
+    expect(issue.blocked).toBeNull();
+    expect(issue.requires_human).toBeNull();
+  });
+});
+
+describe("createIssue — concurrency + disk fault paths (review C1/T1/T2)", () => {
+  it("two concurrent creates allocate distinct ids (per-repo mutex)", async () => {
+    // Without the per-repo create mutex both `nextIssueId` reads see
+    // `max(N) = 0`, both writers race for DX-1, and the second rename
+    // clobbers the first card. The mutex serializes the read-then-write,
+    // so the two ids must be DX-1 and DX-2 with both YAMLs on disk.
+    const [a, b] = await Promise.all([
+      createIssue("danxbot", repoLocalPath, {
+        title: "First",
+        description: "Body",
+        status: "Review",
+        type: "Feature",
+      }),
+      createIssue("danxbot", repoLocalPath, {
+        title: "Second",
+        description: "Body",
+        status: "ToDo",
+        type: "Bug",
+      }),
+    ]);
+    const ids = new Set<string>([a.id, b.id]);
+    expect(ids.size).toBe(2);
+    expect(ids).toEqual(new Set<string>(["DX-1", "DX-2"]));
+    // Both YAML files exist on disk (no clobber)
+    expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(true);
+    expect(existsSync(issuePath(repoLocalPath, "DX-2", "open"))).toBe(true);
+  });
+
+  it("a prior create's rejection does NOT poison subsequent creates on the same repo", async () => {
+    // First create rejects (whitespace title); the per-repo mutex MUST
+    // swallow the rejection so the next queued create runs cleanly.
+    // Mirrors the M1 regression test for the PATCH mutex.
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "   ",
+        description: "y",
+        status: "Review",
+        type: "Feature",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Recovered",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    expect(issue.id).toBe("DX-1");
+  });
+
+  it("leaves no .tmp residue after a successful create", async () => {
+    await createIssue("danxbot", repoLocalPath, {
+      title: "Tidy",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    const openDir = resolve(repoLocalPath, ".danxbot/issues/open");
+    const files = readdirSync(openDir);
+    expect(files.filter((f: string) => f.endsWith(".tmp"))).toHaveLength(0);
+    expect(files).toContain("DX-1.yml");
+  });
+
+  it("does NOT publish issue:updated when the write fails after validation", async () => {
+    // Make the open/ dir read-only AFTER the create dirs are seeded so
+    // ensureIssuesDirs succeeds but writeFileSync throws.
+    const { chmodSync, mkdirSync } = await import("node:fs");
+    mkdirSync(resolve(repoLocalPath, ".danxbot/issues/open"), { recursive: true });
+    const openDir = resolve(repoLocalPath, ".danxbot/issues/open");
+    const originalMode = 0o755;
+    chmodSync(openDir, 0o555);
+    try {
+      await expect(
+        createIssue("danxbot", repoLocalPath, {
+          title: "Doomed",
+          description: "Body",
+          status: "Review",
+          type: "Feature",
+        }),
+      ).rejects.toMatchObject({ status: 500 });
+    } finally {
+      chmodSync(openDir, originalMode);
+    }
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+    // No .tmp residue
+    const files = readdirSync(openDir);
+    expect(files.filter((f: string) => f.endsWith(".tmp"))).toHaveLength(0);
+  });
+});
+
+describe("handlePostIssue — HTTP route", () => {
+  function makeDeps() {
+    return buildDeps({
+      repos: [
+        {
+          name: "danxbot",
+          url: "x",
+          localPath: repoLocalPath,
+          hostPath: repoLocalPath,
+          workerPort: 5562,
+        },
+      ],
+    });
+  }
+
+  it("401 without a user bearer", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "Review",
+      type: "Feature",
+    });
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("401 when the bearer is the dispatch token shape (not a user)", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "Review",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer test-token" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("400 when repo query is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "Review",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, null, makeDeps());
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("404 when the repo is not configured", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "Review",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "unknown-repo", makeDeps());
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("200 on success, returns the parsed issue", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "Test card",
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.issue.id).toBe("DX-1");
+    expect(body.issue.title).toBe("Test card");
+    expect(body.issue.status).toBe("Review");
+    expect(body.issue.type).toBe("Feature");
+  });
+
+  it("400 on a missing field", async () => {
+    const req = createMockReqWithBody("POST", {
+      description: "Body",
+      status: "Review",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/title/);
+  });
+
+  it("400 on invalid status (In Progress not allowed on create)", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "In Progress",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("400 on invalid type", async () => {
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "ToDo",
+      type: "NotAType",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("400 on invalid JSON body", async () => {
+    const http = await import("http");
+    const req = new http.IncomingMessage(null as never);
+    req.method = "POST";
+    req.headers = { authorization: "Bearer user-alice" };
+    process.nextTick(() => {
+      req.emit("data", Buffer.from("not-json{"));
+      req.emit("end");
+    });
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({ error: "Invalid JSON body" });
+  });
+
+  it("500 when createIssue throws a non-IssuePatchError (missing config)", async () => {
+    // Remove the config dir so loadIssuePrefix throws.
+    rmSync(resolve(repoLocalPath, ".danxbot/config"), {
+      recursive: true,
+      force: true,
+    });
+    const req = createMockReqWithBody("POST", {
+      title: "x",
+      description: "y",
+      status: "ToDo",
+      type: "Feature",
+    });
+    req.headers = { authorization: "Bearer user-alice" };
+    const res = createMockRes();
+    await handlePostIssue(req, res, "danxbot", makeDeps());
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody()).error).toMatch(/issue_prefix|config\.yml/);
   });
 });

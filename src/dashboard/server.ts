@@ -57,7 +57,7 @@ import {
   handleGetIssueHistory,
   handleListIssues,
 } from "./issues-routes.js";
-import { handlePatchIssue } from "./issue-write.js";
+import { handlePatchIssue, handlePostIssue } from "./issue-write.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleLogin,
@@ -376,6 +376,20 @@ async function route(
       req,
       res,
       decodeURIComponent(issuePatchMatch[1]),
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // POST /api/issues?repo=<name> — DX-350. Dashboard human-driven create
+  // surface (Create Card dialog). Same auth band as the PATCH counterpart
+  // (user bearer required) — handler runs `requireUser` itself ahead of
+  // the blanket gate.
+  if (method === "POST" && url.pathname === "/api/issues") {
+    await handlePostIssue(
+      req,
+      res,
       url.searchParams.get("repo"),
       dispatchDeps,
     );

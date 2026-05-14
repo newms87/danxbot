@@ -49,20 +49,35 @@ import { requireUser } from "./auth-middleware.js";
 import { eventBus } from "./event-bus.js";
 import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import {
+  createEmptyIssue,
   parseIssue,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
+import { nextIssueId } from "../issue-tracker/id-generator.js";
 import {
   ISSUE_STATUSES,
+  ISSUE_TYPES,
   type Blocked,
   type ConflictOnEntry,
   type Issue,
   type IssueAcItem,
   type IssueStatus,
+  type IssueType,
   type RequiresHuman,
 } from "../issue-tracker/interface.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
+
+/**
+ * Statuses allowed on the human-driven create surface (`POST /api/issues`).
+ * Cards always start in `Review` (operator wants triage + flesh-out) or
+ * `ToDo` (operator already knows the scope). Anything else — `In Progress`,
+ * `Blocked`, `Done`, `Cancelled` — must come from the agent / poller path
+ * or a follow-up PATCH, not from the create surface.
+ */
+const CREATE_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>(
+  ["Review", "ToDo"],
+);
 
 const log = createLogger("issue-write");
 
@@ -202,6 +217,88 @@ async function withPerIdLock<T>(
     if (inFlight.get(key) === next) {
       inFlight.delete(key);
     }
+  }
+}
+
+/**
+ * Per-repo create mutex. Distinct from the per-id PATCH mutex above —
+ * `createIssue` does not know the id until `nextIssueId` returns, so
+ * the lock keyed by `repoLocalPath` (one chain per connected repo) is
+ * what serializes the read-then-write of the id counter. Without this,
+ * two concurrent operator clicks read the same `max(N)` from disk, both
+ * write `<PREFIX>-N+1`, and the second `rename(2)` clobbers the first
+ * card. Code review C1 (DX-350).
+ *
+ * Lock granularity matches the create operation's natural shape: the
+ * dashboard hosts one POST endpoint per repo, so two operators creating
+ * on *different* repos do not serialize against each other (each repo
+ * has its own id counter and its own `<repoLocalPath>` map key).
+ */
+const inFlightCreate = new Map<string, Promise<void>>();
+
+async function withPerRepoCreateLock<T>(
+  repoLocalPath: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = resolve(repoLocalPath);
+  const prev = inFlightCreate.get(key) ?? Promise.resolve();
+  let release: () => void = () => {};
+  const next = new Promise<void>((res) => {
+    release = res;
+  });
+  inFlightCreate.set(key, next);
+  try {
+    // Mirror the PATCH-path's prior-rejection swallow so one bad create
+    // does not poison every subsequent create on the same repo. The
+    // prior caller already saw its own rejection.
+    await prev.catch(() => {});
+    return await fn();
+  } finally {
+    release();
+    if (inFlightCreate.get(key) === next) {
+      inFlightCreate.delete(key);
+    }
+  }
+}
+
+/**
+ * Atomic temp+rename write for a fully-serialized issue YAML.
+ *
+ * Extracted from `applyValidatedPatch` + `createIssue` (code-review C1
+ * for DX-350). The `.tmp` suffix sits in the SAME directory as the
+ * destination so `rename(2)` is atomic on every supported fs. chokidar's
+ * `awaitWriteFinish` debounces the resulting add/change event, so the
+ * mirror sees a single stable write rather than a tmp-then-rename pair.
+ *
+ * On any write/rename failure: best-effort `unlink(tmp)` so a partial
+ * write does not leave stale `.tmp` residue, then throw a 500
+ * `IssuePatchError` carrying the underlying message. The destination is
+ * untouched on a `rename` failure (the source still holds the prior
+ * content on the PATCH path; the create path has nothing to leave
+ * behind).
+ *
+ * Caller MUST have already validated the serialized YAML round-trips
+ * through `parseIssue`; this helper is pure disk I/O.
+ */
+function writeIssueYamlAtomic(
+  targetPath: string,
+  serialized: string,
+  idForError: string,
+): void {
+  const tmpPath = `${targetPath}.tmp`;
+  mkdirSync(dirname(tmpPath), { recursive: true });
+  try {
+    writeFileSync(tmpPath, serialized);
+    renameSync(tmpPath, targetPath);
+  } catch (err) {
+    try {
+      unlinkSync(tmpPath);
+    } catch {
+      /* ignore — tmp may not exist if writeFileSync threw */
+    }
+    throw new IssuePatchError(500, {
+      error: `Failed to write ${idForError}: ${(err as Error).message}`,
+    });
   }
 }
 
@@ -597,28 +694,7 @@ function applyValidatedPatch(
   }
 
   ensureIssuesDirs(repoLocalPath);
-  // Temp + atomic rename. The .tmp suffix sits in the SAME directory as
-  // the destination so `rename(2)` is atomic on every supported fs (we
-  // cross dirs only via the explicit unlink below). chokidar's
-  // `awaitWriteFinish` debounces the resulting add/change event, so the
-  // mirror sees a single stable write rather than a tmp-then-rename pair.
-  const tmpPath = `${targetPath}.tmp`;
-  mkdirSync(dirname(tmpPath), { recursive: true });
-  try {
-    writeFileSync(tmpPath, serialized);
-    renameSync(tmpPath, targetPath);
-  } catch (err) {
-    // Best-effort cleanup so a partial-write doesn't leave a stale .tmp
-    // residue. The destination is untouched on rename failure.
-    try {
-      unlinkSync(tmpPath);
-    } catch {
-      /* ignore — tmp may not exist if writeFileSync threw */
-    }
-    throw new IssuePatchError(500, {
-      error: `Failed to write ${id}: ${(err as Error).message}`,
-    });
-  }
+  writeIssueYamlAtomic(targetPath, serialized, id);
 
   // Source unlink AFTER the rename so a crash between the two leaves
   // both files on disk — the reconcile pass detects the duplicate and
@@ -728,6 +804,182 @@ export async function handlePatchIssue(
     log.error(`handlePatchIssue(${repo.name}, ${id}) failed`, err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Failed to patch issue",
+    });
+  }
+}
+
+/**
+ * Body shape for `POST /api/issues` — the human-driven create surface.
+ * Submit from the dashboard's Create Card dialog (DX-350). Mirrors the
+ * agent-side `mcp__danx-issue__danx_issue_create` path but bypasses the
+ * draft-YAML hop: the dashboard never has a draft on disk to point at,
+ * and the human creating the card has authority comparable to the agent
+ * who would have called the MCP tool.
+ *
+ * `title` and `description` are non-empty strings; `status` is one of
+ * `Review` | `ToDo` (the operator's two valid starting points); `type` is
+ * any `IssueType`. Anything else returns 400 BEFORE any disk write.
+ */
+export interface IssueCreateInput {
+  title: string;
+  description: string;
+  status: IssueStatus;
+  type: IssueType;
+}
+
+function validateCreateShape(body: unknown): IssueCreateInput {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new IssuePatchError(400, { error: "Body must be a JSON object" });
+  }
+  const raw = body as Record<string, unknown>;
+  if (typeof raw.title !== "string" || raw.title.trim().length === 0) {
+    throw new IssuePatchError(400, {
+      error: "title must be a non-empty string",
+    });
+  }
+  if (
+    typeof raw.description !== "string" ||
+    raw.description.trim().length === 0
+  ) {
+    throw new IssuePatchError(400, {
+      error: "description must be a non-empty string",
+    });
+  }
+  if (
+    typeof raw.status !== "string" ||
+    !CREATE_ALLOWED_STATUSES.has(raw.status as IssueStatus)
+  ) {
+    throw new IssuePatchError(400, {
+      error: `status must be one of [${[...CREATE_ALLOWED_STATUSES].join(", ")}]`,
+    });
+  }
+  if (
+    typeof raw.type !== "string" ||
+    !ISSUE_TYPES.includes(raw.type as IssueType)
+  ) {
+    throw new IssuePatchError(400, {
+      error: `type must be one of [${ISSUE_TYPES.join(", ")}]`,
+    });
+  }
+  return {
+    title: raw.title,
+    description: raw.description,
+    status: raw.status as IssueStatus,
+    type: raw.type as IssueType,
+  };
+}
+
+/**
+ * Allocate the next `<PREFIX>-N`, build a canonical `Issue`, write
+ * `<repo>/.danxbot/issues/open/<id>.yml` atomically, and publish the
+ * `issue:created` + `issue:updated` SSE topics. The watcher mirror
+ * (`src/db/issues-mirror.ts`) catches the write event and upserts into
+ * Postgres; the poller's per-tick mirror handles the Trello push async
+ * — Trello is background infra and stays off the human's critical path
+ * (same contract as the agent-facing create flow post-DX-203).
+ *
+ * Returns the parsed `Issue` so the route handler can echo it in the
+ * 200 response body (the SPA round-trips this into its local store
+ * before the SSE event arrives, eliminating the visual delay).
+ */
+export async function createIssue(
+  repoName: string,
+  repoLocalPath: string,
+  rawBody: unknown,
+): Promise<Issue> {
+  const input = validateCreateShape(rawBody);
+  const expectedPrefix = loadIssuePrefix(repoLocalPath);
+  const issuesRoot = resolve(repoLocalPath, ".danxbot", "issues");
+  return withPerRepoCreateLock(repoLocalPath, async () => {
+    // Lock acquired — allocate the next id, build, validate, write,
+    // publish. The lock serializes the read-then-write of the id counter
+    // so two concurrent operator clicks land distinct ids; without it
+    // both reads would see the same `max(N)` and both writes would race
+    // for `<PREFIX>-N+1` (code-review C1).
+    const newId = await nextIssueId(issuesRoot, expectedPrefix);
+    const draft = createEmptyIssue({
+      id: newId,
+      title: input.title,
+      description: input.description,
+      status: input.status,
+      type: input.type,
+    });
+
+    // Round-trip through the strict parser BEFORE writing so any
+    // createEmptyIssue / interface drift fails loud HERE instead of
+    // writing a malformed YAML the watcher would then mirror as
+    // `_malformed: true`.
+    const serialized = serializeIssue(draft);
+    let issue: Issue;
+    try {
+      issue = parseIssue(serialized, { expectedPrefix });
+    } catch (err) {
+      throw new IssuePatchError(500, {
+        error: `createIssue produced invalid YAML: ${(err as Error).message}`,
+      });
+    }
+
+    ensureIssuesDirs(repoLocalPath);
+    const targetPath = issuePath(repoLocalPath, issue.id, "open");
+    writeIssueYamlAtomic(targetPath, serialized, issue.id);
+
+    eventBus.publish({
+      topic: "issue:updated",
+      data: { repoName, id: issue.id, issue },
+    });
+    return issue;
+  });
+}
+
+/**
+ * `POST /api/issues?repo=<name>` — human-driven create surface (DX-350).
+ *
+ * Auth: per-user bearer (NOT the dispatch token). Matched ahead of the
+ * blanket `/api/*` gate so the handler's own `requireUser` produces the
+ * 401, mirroring the PATCH counterpart.
+ *
+ * Side-effect ordering: validate → allocate id → write YAML → publish SSE
+ * → return parsed Issue. Any validation failure short-circuits BEFORE any
+ * disk write, so a flood of bad requests cannot grow the id counter.
+ */
+export async function handlePostIssue(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoQuery: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+  if (!repoQuery) {
+    json(res, 400, { error: "Missing required query param: repo" });
+    return;
+  }
+  const repo = deps.repos.find((r) => r.name === repoQuery);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoQuery}" is not configured` });
+    return;
+  }
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(req);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+  try {
+    const issue = await createIssue(repo.name, repo.localPath, body);
+    json(res, 200, { issue });
+  } catch (err) {
+    if (err instanceof IssuePatchError) {
+      json(res, err.status, err.body);
+      return;
+    }
+    log.error(`handlePostIssue(${repo.name}) failed`, err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Failed to create issue",
     });
   }
 }

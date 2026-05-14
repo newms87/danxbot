@@ -4,6 +4,7 @@ import { useIssues } from "../../composables/useIssues";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
 import { nextPosition } from "../../composables/cardPosition";
 import { DanxDialog, DanxSplitPanel } from "@thehammer/danx-ui";
+import CreateCardButton from "./CreateCardButton.vue";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDetailView from "./IssueDetailView.vue";
@@ -231,6 +232,14 @@ function onJumpIssue(id: string): void {
   void openDrawer(id);
 }
 
+// DX-350 — `CreateCardButton` emits `created` after the operator submits
+// the dialog. Open the drawer for the new card so the operator watches
+// the flesh-out happen in real time (SSE arrives within ~30-60s; the
+// drawer's existing detail-poll handles the refresh).
+function onCreatedFromDialog(issueId: string): void {
+  void openDrawer(issueId);
+}
+
 function onParentClick(parentId: string): void {
   scopedEpicId.value = parentId;
 }
@@ -285,6 +294,12 @@ watch(
 
     <div v-if="!selectedRepo" class="placeholder">Select a repo to see issues</div>
     <template v-else>
+      <div class="header-row">
+        <CreateCardButton
+          :repo="selectedRepo"
+          @created="onCreatedFromDialog"
+        />
+      </div>
       <FilterToolbar
         :q="q"
         :types="types"
@@ -404,6 +419,11 @@ watch(
   flex-direction: column;
   height: 100%;
   min-height: 0;
+}
+.header-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
 .board-wrap {
   flex: 1 1 auto;

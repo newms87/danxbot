@@ -162,6 +162,74 @@ export async function patchIssue(
   return body.issue;
 }
 
+/**
+ * Statuses the human-driven create surface accepts (DX-350). A narrowed
+ * subset of `IssueStatus` — Review (operator wants triage + flesh-out)
+ * or ToDo (operator already knows the scope). Other statuses come from
+ * the agent path or follow-up PATCH, not from create.
+ */
+export type IssueCreateStatus = Extract<Issue["status"], "Review" | "ToDo">;
+
+/**
+ * Body shape for `createIssue` / `POST /api/issues`. DX-350. Mirrors the
+ * server-side `IssueCreateInput`. Status + type narrow to the canonical
+ * `Issue` shape so a future server-side allowlist bump propagates here
+ * without a second source-of-truth drift.
+ */
+export interface IssueCreateInput {
+  title: string;
+  description: string;
+  status: IssueCreateStatus;
+  type: Issue["type"];
+}
+
+/**
+ * POST /api/issues?repo=<name> — DX-350. Human-driven create surface for
+ * the Create Card dialog. Server allocates the next `<PREFIX>-N`, writes
+ * the YAML, publishes `issue:updated` SSE, and returns the parsed Issue.
+ *
+ * Errors surface as a `ToggleError` carrying the server's error string
+ * — typically 400 (missing field, wrong status, wrong type) or 401
+ * (auth expired).
+ */
+export async function createIssue(
+  repo: string,
+  input: IssueCreateInput,
+): Promise<Issue> {
+  const res = await fetchWithAuth(
+    `/api/issues?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const body = (await res.json()) as { issue: Issue };
+  return body.issue;
+}
+
+/**
+ * POST /api/flesh-out — DX-349. Fire-and-forget dispatch to flesh out a
+ * freshly-created stub card. The dashboard fires this after a successful
+ * `createIssue` so the agent rewrites the description, populates ac[],
+ * and (if status: Review) ICE-scores the card. Returns the worker's
+ * dispatch metadata. Callers ignore the response (the SSE-driven UI
+ * surfaces the card's growth over the next ~30-60s).
+ */
+export async function fleshOutIssue(
+  repo: string,
+  issueId: string,
+): Promise<{ jobId?: string }> {
+  const res = await fetchWithAuth("/api/flesh-out", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ repo, issue_id: issueId }),
+  });
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as { jobId?: string };
+}
+
 export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
   const res = await fetchWithAuth(`/api/agents/${encodeURIComponent(repo)}`);
   if (!res.ok) throw new Error(`fetchAgent failed: ${res.status}`);
