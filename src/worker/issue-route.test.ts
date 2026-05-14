@@ -708,3 +708,79 @@ describe("persistAfterSync — preserves dispatch + assigned_agent forever", () 
     expect(persisted.dispatch?.pid).toBe(7777);
   });
 });
+
+/**
+ * DX-342 — `runSync` skips the tracker push entirely when `deps.tracker
+ * === null` (YAML-only mode). The local YAML persist still fires; the
+ * `syncIssue` / `enqueueRetry` / `recordError` chain MUST NOT execute,
+ * since none of them are meaningful without a tracker.
+ */
+describe("runSync — YAML-only mode (deps.tracker === null, DX-342)", () => {
+  let tmpDir: string;
+  let repo: RepoContext;
+
+  beforeEach(() => {
+    vi.mocked(syncIssue).mockReset();
+    vi.mocked(enqueueRetry).mockReset();
+    tmpDir = mkdtempSync(join(tmpdir(), "danxbot-runsync-yaml-only-"));
+    ensureIssuesDirs(tmpDir);
+    repo = { localPath: tmpDir, issuePrefix: "ISS" } as RepoContext;
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("persists the local YAML then short-circuits — no syncIssue, no enqueueRetry, no recordError", async () => {
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const recordSystemError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-9001",
+      external_id: "",
+      status: "Done",
+    });
+
+    await runSync(
+      { tracker: null, recordError, recordSystemError },
+      "dispatch-yaml-only",
+      repo,
+      issue,
+    );
+
+    // Local persist landed in closed/ (Done is terminal).
+    const closedPath = issuePath(tmpDir, "ISS-9001", "closed");
+    expect(existsSync(closedPath)).toBe(true);
+    const persisted = parseIssue(readFileSync(closedPath, "utf-8"), {
+      expectedPrefix: "ISS",
+    });
+    expect(persisted.status).toBe("Done");
+
+    // Tracker push chain never fired.
+    expect(syncIssue).not.toHaveBeenCalled();
+    expect(enqueueRetry).not.toHaveBeenCalled();
+    expect(recordError).not.toHaveBeenCalled();
+    expect(recordSystemError).not.toHaveBeenCalled();
+  });
+
+  it("non-terminal status — YAML still lands in open/, still no tracker chain calls", async () => {
+    const recordError = vi.fn().mockResolvedValue(undefined);
+    const issue = makeIssue({
+      id: "ISS-9002",
+      external_id: "",
+      status: "ToDo",
+    });
+
+    await runSync(
+      { tracker: null, recordError },
+      "dispatch-yaml-only-2",
+      repo,
+      issue,
+    );
+
+    const openPath = issuePath(tmpDir, "ISS-9002", "open");
+    expect(existsSync(openPath)).toBe(true);
+    expect(syncIssue).not.toHaveBeenCalled();
+    expect(enqueueRetry).not.toHaveBeenCalled();
+    expect(recordError).not.toHaveBeenCalled();
+  });
+});

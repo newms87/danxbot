@@ -52,9 +52,11 @@ describe("createIssueTracker", () => {
     expect(tracker).toBeInstanceOf(TrelloTracker);
   });
 
-  it("throws when no tracker is configured", () => {
-    expect(() => createIssueTracker({ trello: null })).toThrow(
-      /no tracker available/,
-    );
+  // DX-342 — no tracker available is a valid YAML-only-mode boot, not
+  // an error. createIssueTracker returns null; callers (boot wiring,
+  // cron sweep, worker route, reconcile registry) branch on null and
+  // skip their tracker-touching paths.
+  it("returns null when no tracker is configured (YAML-only mode)", () => {
+    expect(createIssueTracker({ trello: null })).toBeNull();
   });
 });

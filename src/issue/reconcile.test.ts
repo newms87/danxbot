@@ -1605,3 +1605,62 @@ describe("reconcileIssue — triage-timer re-arm (Phase 4b.2 / DX-289)", () => {
     );
   });
 });
+
+// DX-342 — explicit assertion that the full reconcile pipeline runs in
+// YAML-only mode (no tracker registered for the repo). Every other test
+// in this file relies on the same implicit branch — none of them call
+// `setReconcileTrackerForRepo` either — but naming the contract here
+// keeps the no-tracker path observable in a single named test and
+// guards against a regression that would silently register a default
+// tracker at module-init.
+describe("reconcileIssue — YAML-only mode (no tracker registered, DX-342)", () => {
+  let ctx: ReturnType<typeof makeRepoCtx>;
+
+  beforeEach(() => {
+    ctx = makeRepoCtx();
+  });
+
+  afterEach(() => {
+    ctx.cleanup();
+  });
+
+  it("runs the full reconcile pass on a Done child (derive + file-move heal) with no tracker registered", async () => {
+    // Setup: parent + one Done child. Parent in open/ as ToDo, child in
+    // open/ as Done — reconcile must heal the file-move (Done →
+    // closed/) AND derive the parent's status (one child Done → still
+    // ToDo since the other-child-default is ToDo for the parent's own
+    // status). The whole pipeline must run despite the absence of any
+    // registered tracker for `ctx.repo.name`.
+    const parent = makeIssue("DX-4200", "ToDo");
+    const child = makeIssue("DX-4201", "Done");
+    (child as Issue).parent_id = "DX-4200";
+    (parent as Issue).children = ["DX-4201"];
+
+    writeYaml(ctx.openDir, "DX-4200", parent);
+    const childOpenPath = writeYaml(ctx.openDir, "DX-4201", child);
+
+    // Run reconcile on the child — expect derive to bubble up to the
+    // parent (no throw on missing tracker registry entry) AND the
+    // child's file to move open/ → closed/ via the heal step.
+    const result = await reconcileIssue(ctx.repo, "DX-4201", "watcher");
+
+    expect(result.errors).toEqual([]);
+    // File moved — open/ copy gone, closed/ copy now present.
+    expect(existsSync(childOpenPath)).toBe(false);
+    expect(existsSync(resolve(ctx.closedDir, "DX-4201.yml"))).toBe(true);
+  });
+
+  it("returns a normal result on a fresh ToDo with no tracker registered (step 7 push is a silent no-op)", async () => {
+    const issue = makeIssue("DX-4202");
+    writeYaml(ctx.openDir, "DX-4202", issue);
+
+    const result = await reconcileIssue(ctx.repo, "DX-4202", "watcher");
+
+    // No throw. No errors recorded. The lack of tracker registry entry
+    // makes step 7 a silent no-op via the `trackersByRepo.get` ?? skip
+    // path; the rest of the pipeline still produces a normal result.
+    expect(result.errors).toEqual([]);
+    expect(result.changed).toBe(false);
+    expect(result.fanout.parentId).toBeNull();
+  });
+});

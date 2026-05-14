@@ -84,7 +84,14 @@ const log = createLogger("worker-issue-route");
 
 /** Injected into both handlers; defaults built lazily via `getDeps`. */
 export interface IssueRouteDeps {
-  tracker: IssueTracker;
+  /**
+   * Per-repo tracker. `null` is YAML-only mode (DX-342): the worker
+   * has no Trello creds and no MemoryTracker. `handleIssueCreate`
+   * writes a local YAML with empty `external_id` (no tracker round-
+   * trip); `syncTrackedIssueOnComplete` persists locally and skips
+   * the tracker push.
+   */
+  tracker: IssueTracker | null;
   /**
    * Persist an async-sync error against the dispatch row. Default
    * implementation calls `updateDispatch({ error })` which the DB change
@@ -107,8 +114,15 @@ export interface IssueRouteDeps {
  * `DANXBOT_REPO_NAME` (see `src/repo-context.ts#loadRepoContext` —
  * always returns a single-element array). One process → one tracker
  * instance for its lifetime.
+ *
+ * `undefined` = never initialized; `null` = initialized to "no tracker"
+ * (DX-342 YAML-only mode); `IssueTracker` = initialized. The
+ * `=== undefined` check on first read is the cache-miss gate — we MUST
+ * NOT use `!cachedTracker` because `null` is falsy and would re-invoke
+ * `createIssueTracker` on every getDeps call, defeating the cache in
+ * YAML-only mode.
  */
-let cachedTracker: IssueTracker | null = null;
+let cachedTracker: IssueTracker | null | undefined = undefined;
 
 /** Per-issue mutex — serializes async sync calls on the same internal id. */
 const issueLocks = new Map<string, Promise<void>>();
@@ -332,7 +346,7 @@ const inFlight = new Set<Promise<void>>();
 
 function getDeps(repo: RepoContext, override?: IssueRouteDeps): IssueRouteDeps {
   if (override) return override;
-  if (!cachedTracker) cachedTracker = createIssueTracker(repo);
+  if (cachedTracker === undefined) cachedTracker = createIssueTracker(repo);
   return {
     tracker: cachedTracker,
     recordError: defaultRecordError,
@@ -391,7 +405,7 @@ async function defaultRecordError(
  * cross-test tracker/lock leakage.
  */
 export function _resetForTesting(): void {
-  cachedTracker = null;
+  cachedTracker = undefined;
   issueLocks.clear();
   inFlight.clear();
   lastSeenIssueState.clear();
@@ -482,6 +496,15 @@ export async function runSync(
   issue: Issue,
 ): Promise<void> {
   persistAfterSync(repo.localPath, issue);
+
+  // DX-342 — YAML-only mode: persist the local file only. There is no
+  // tracker to push the diff against, so `syncIssue` would have
+  // nothing to do. The local write above is already the source of
+  // truth; the chokidar mirror picks it up for the DB and the
+  // dashboard renders from there.
+  if (deps.tracker === null) {
+    return;
+  }
 
   try {
     const actionItemTitles = loadActionItemTitles(
@@ -767,14 +790,26 @@ export async function handleIssueCreate(
     external_id: string;
     ac: { check_item_id: string }[];
   };
-  try {
-    result = await deps.tracker.createCard(input);
-  } catch (err) {
-    json(res, 200, {
-      created: false,
-      errors: [err instanceof Error ? err.message : String(err)],
-    });
-    return;
+  if (deps.tracker === null) {
+    // DX-342 — YAML-only mode: no tracker to mint an external_id +
+    // check_item_ids. The card lives entirely on disk with empty
+    // tracker coordinates. A future config switch that wires a real
+    // tracker will pick these YAMLs up as orphans on the inbound
+    // fetch path and mint fresh ids then.
+    result = {
+      external_id: "",
+      ac: draft.ac.map(() => ({ check_item_id: "" })),
+    };
+  } else {
+    try {
+      result = await deps.tracker.createCard(input);
+    } catch (err) {
+      json(res, 200, {
+        created: false,
+        errors: [err instanceof Error ? err.message : String(err)],
+      });
+      return;
+    }
   }
 
   const partiallyStamped: Issue = {

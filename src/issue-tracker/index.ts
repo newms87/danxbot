@@ -47,18 +47,18 @@ export const MEMORY_TRACKER_ENV_VALUE = "memory";
  *
  * - `DANXBOT_TRACKER === MEMORY_TRACKER_ENV_VALUE` always wins (used by
  *   tests + dev loops to bypass the real tracker entirely).
- * - Otherwise, requires a TrelloConfig and returns TrelloTracker.
- * - Throws if neither path applies — failing loud beats a silent fallback
- *   that would surface only when an agent action hits the network.
+ * - Otherwise, returns TrelloTracker when TrelloConfig is provided.
+ * - Returns `null` when neither path applies — the worker boots in
+ *   YAML-only mode. Local-only state (chokidar mirror, reconcile derive,
+ *   audit pass, dispatch scheduler) all still run; tracker-touching
+ *   stages skip cleanly via callsite null-checks. See DX-341 epic.
  */
-export function createIssueTracker(ctx: { trello: TrelloConfig | null }): IssueTracker {
+export function createIssueTracker(ctx: { trello: TrelloConfig | null }): IssueTracker | null {
   if (process.env.DANXBOT_TRACKER === MEMORY_TRACKER_ENV_VALUE) {
     return new MemoryTracker();
   }
   if (ctx.trello) {
     return new TrelloTracker(ctx.trello);
   }
-  throw new Error(
-    "createIssueTracker: no tracker available — set DANXBOT_TRACKER=memory or provide a TrelloConfig",
-  );
+  return null;
 }

@@ -2833,4 +2833,55 @@ describe("poll — DX-290 zero-dispatch invariant", () => {
   });
 });
 
+/**
+ * DX-342 — YAML-only mode for the cron sweep. When `createIssueTracker`
+ * returns null:
+ *   - `healExternalIds` MUST NOT be called (no tracker to ask for
+ *     `isValidExternalId`).
+ *   - `runInboundFetch` MUST NOT be called (no `fetchOpenCards` round
+ *     trip — verified by spying on the inner `mockTracker.fetchOpenCards`).
+ *   - The null verdict caches in `noTrackerRepos` so a second `poll()`
+ *     tick re-uses the verdict without a second `createIssueTracker`
+ *     invocation.
+ *
+ * The local-only stages (reapOrphans, runInvariantHeal,
+ * runOrphanInProgressHeal, runAuditPass) still run via the existing
+ * call paths — those are tested in their own describe blocks and are
+ * not tracker-dependent.
+ */
+describe("poll — YAML-only mode (DX-342, createIssueTracker returns null)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    setupRepoConfigMocks();
+    mockHealExternalIds.mockReset();
+    mockHealExternalIds.mockReturnValue({ healed: [], errors: [] });
+  });
+
+  it("skips healExternalIds AND skips runInboundFetch when createIssueTracker returns null", async () => {
+    mockCreateIssueTracker.mockReturnValueOnce(null);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockHealExternalIds).not.toHaveBeenCalled();
+    // runInboundFetch's tracker round-trip is the inner `fetchOpenCards`
+    // call — spying on it covers the whole inbound path without needing
+    // a separate mock module for the helper itself.
+    expect(mockTracker.fetchOpenCards).not.toHaveBeenCalled();
+  });
+
+  it("caches the null verdict — second poll() does not re-invoke createIssueTracker", async () => {
+    mockCreateIssueTracker.mockReturnValue(null);
+
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockCreateIssueTracker).toHaveBeenCalledTimes(1);
+
+    await poll(MOCK_REPO_CONTEXT);
+    // The `noTrackerRepos` Set short-circuits getRepoTracker; second
+    // tick reads the cached verdict instead of allocating again.
+    expect(mockCreateIssueTracker).toHaveBeenCalledTimes(1);
+  });
+});
+
 

@@ -198,7 +198,15 @@ export function _resetSchedulerTrackers(): void {
  */
 export function bootScheduler(args: {
   repo: RepoContext;
-  tracker: IssueTracker;
+  /**
+   * Per-repo IssueTracker. `null` is the YAML-only mode (DX-342) — no
+   * Trello, no MemoryTracker. Boot still wires the dispatch picker +
+   * settings watcher + triage boot-scan (none of which touch the
+   * tracker); only the `runPostDispatchProgressCheck` Trello fetch +
+   * `tryAcquireLock` cross-environment dispatch lock are skipped at
+   * their own callsites.
+   */
+  tracker: IssueTracker | null;
   /**
    * Phase 4b.1 (DX-288). Optional picker callback registered for the
    * repo so `onReconcileResult` can fire the multi-agent dispatch loop
@@ -231,7 +239,13 @@ export function bootScheduler(args: {
       );
     }
   }
-  trackersByRepo.set(repo.name, tracker);
+  // DX-342 — only seed the per-repo registry when a tracker exists.
+  // The registry is read by `runPostDispatchProgressCheck` which
+  // already early-returns on missing entries; leaving the slot empty
+  // keeps that path tracker-free without a second null branch.
+  if (tracker !== null) {
+    trackersByRepo.set(repo.name, tracker);
+  }
   if (runPicker) {
     pickersByRepo.set(repo.name, runPicker);
   } else {
@@ -279,8 +293,14 @@ export function bootScheduler(args: {
     }
   }
 
+  const trackerLabel =
+    tracker === null
+      ? "YAML-only mode (no tracker)"
+      : tracker instanceof TrelloTracker
+        ? "TrelloTracker validated"
+        : "MemoryTracker";
   log.info(
-    `[${repo.name}] scheduler boot: ${tracker instanceof TrelloTracker ? "TrelloTracker validated" : "MemoryTracker"} and registered${runPicker ? " (picker wired)" : ""}${reconcile ? " (settings watch + triage boot-scan wired)" : ""}`,
+    `[${repo.name}] scheduler boot: ${trackerLabel}${tracker === null ? "" : " and registered"}${runPicker ? " (picker wired)" : ""}${reconcile ? " (settings watch + triage boot-scan wired)" : ""}`,
   );
 }
 

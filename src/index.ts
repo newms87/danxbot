@@ -465,7 +465,21 @@ async function startWorkerMode(): Promise<void> {
   // setTimeout timers so a worker restart resumes failed pushes on
   // schedule. Cheap: boot scan walks `<repo>/.danxbot/.trello-retry/`
   // once, typically empty.
+  //
+  // DX-342 — `createIssueTracker` returns `null` when neither
+  // DANXBOT_TRACKER=memory nor a TrelloConfig is available. That is the
+  // YAML-only mode: the worker boots, dispatches local YAML cards,
+  // mirrors to Postgres via chokidar, runs reconcile + audit — but
+  // every tracker-touching stage (reconcile step 7 push, cron inbound
+  // fetch, external-id heal, retry queue, legacy Trello cleanup) skips.
+  // The boot log line tells the operator we are in this mode so they
+  // are not surprised by missing tracker activity.
   const repoTracker = createIssueTracker(repo);
+  if (repoTracker === null) {
+    log.info(
+      `[${repo.name}] No tracker configured — running in YAML-only mode`,
+    );
+  }
   const retrySystemErrorHook = (message: string): void => {
     recordSystemError({
       source: "retry-queue",
@@ -474,7 +488,15 @@ async function startWorkerMode(): Promise<void> {
       message,
     });
   };
-  setReconcileTrackerForRepo(repo.name, repoTracker);
+  // Reconcile's per-repo tracker registry is the chokepoint step 7
+  // reads through `trackersByRepo.get(repo.name)`. Skipping the
+  // register call leaves the map empty for this repo → step 7's
+  // existing `if (tracker && ...)` gate silently no-ops the push for
+  // every reconcile pass. No additional null-handling code needed in
+  // reconcile.
+  if (repoTracker !== null) {
+    setReconcileTrackerForRepo(repo.name, repoTracker);
+  }
   setReconcileSystemErrorHookForRepo(repo.name, retrySystemErrorHook);
 
   // Phase 4 of Event-Driven Worker (DX-219) — boot the per-repo
@@ -564,31 +586,43 @@ async function startWorkerMode(): Promise<void> {
   // AFTER `bootScheduler` (so the tracker is fully registered) and
   // BEFORE `startPoller` (so the poller's first tick sees the
   // post-cleanup board state).
-  try {
-    await cleanupLegacyNeedsApproval({ repo, tracker: repoTracker });
-  } catch (err) {
-    log.error(`[${repo.name}] Legacy cleanup pass failed`, err);
-    recordSystemError({
-      source: "legacy-cleanup",
-      severity: "warn",
-      repo: repo.name,
-      message: `Legacy cleanup pass threw — next boot will retry`,
-      details: { error: err instanceof Error ? err.message : String(err) },
-    });
+  //
+  // DX-342 — YAML-only mode has no Trello board to clean. Skip
+  // entirely; the helper would no-op on `tracker instanceof
+  // TrelloTracker` anyway, but the explicit skip keeps the boot log
+  // free of "skipped: true" noise.
+  if (repoTracker !== null) {
+    try {
+      await cleanupLegacyNeedsApproval({ repo, tracker: repoTracker });
+    } catch (err) {
+      log.error(`[${repo.name}] Legacy cleanup pass failed`, err);
+      recordSystemError({
+        source: "legacy-cleanup",
+        severity: "warn",
+        repo: repo.name,
+        message: `Legacy cleanup pass threw — next boot will retry`,
+        details: { error: err instanceof Error ? err.message : String(err) },
+      });
+    }
   }
 
 
-  const reschedule = bootRescheduleRetryQueue({
-    repoLocalPath: repo.localPath,
-    repoName: repo.name,
-    issuePrefix: repo.issuePrefix,
-    tracker: repoTracker,
-    recordSystemError: retrySystemErrorHook,
-  });
-  if (reschedule.rearmed > 0 || reschedule.malformed > 0) {
-    log.info(
-      `[${repo.name}] Retry queue boot-rescheduled: ${reschedule.rearmed} armed, ${reschedule.malformed} malformed`,
-    );
+  // DX-342 — the retry queue exists to re-arm failed tracker pushes. No
+  // tracker means no pushes were ever attempted, so the queue dir is
+  // empty (or does not exist) and there is nothing to schedule. Skip.
+  if (repoTracker !== null) {
+    const reschedule = bootRescheduleRetryQueue({
+      repoLocalPath: repo.localPath,
+      repoName: repo.name,
+      issuePrefix: repo.issuePrefix,
+      tracker: repoTracker,
+      recordSystemError: retrySystemErrorHook,
+    });
+    if (reschedule.rearmed > 0 || reschedule.malformed > 0) {
+      log.info(
+        `[${repo.name}] Retry queue boot-rescheduled: ${reschedule.rearmed} armed, ${reschedule.malformed} malformed`,
+      );
+    }
   }
 
   // Start the worker HTTP server (dispatch API + health)

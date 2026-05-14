@@ -268,6 +268,20 @@ describe("bootScheduler (AC #3)", () => {
     bootScheduler({ repo, tracker: trackerB });
     expect(getSchedulerTracker(repo.name)).toBe(trackerB);
   });
+
+  // DX-342 — YAML-only mode: tracker is null. bootScheduler must NOT
+  // throw (no TrelloTracker credential validation to run) AND must NOT
+  // populate the per-repo registry. `getSchedulerTracker` returns
+  // undefined; downstream consumers (`runPostDispatchProgressCheck`)
+  // already early-return on missing entries.
+  it("DX-342: accepts tracker === null without throwing and leaves the registry empty", () => {
+    const repo = makeRepo({
+      trello: undefined as unknown as RepoContext["trello"],
+    });
+
+    expect(() => bootScheduler({ repo, tracker: null })).not.toThrow();
+    expect(getSchedulerTracker(repo.name)).toBeUndefined();
+  });
 });
 
 describe("guardLiveDispatchForCard (AC #2)", () => {

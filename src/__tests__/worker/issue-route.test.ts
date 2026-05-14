@@ -461,6 +461,80 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     expect(body.created).toBe(false);
     expect(body.errors[0]).toContain("503 from tracker");
   });
+
+  // DX-342 — YAML-only mode: `deps.tracker === null`. The handler must
+  // synthesize a result with empty external_id + empty check_item_ids,
+  // skip the tracker.createCard call entirely, and still stamp + write
+  // the YAML to disk. A parallel harness with a null-tracker deps shape
+  // verifies the end-to-end behaviour via fetch + filesystem assertion.
+  it("DX-342: deps.tracker === null synthesizes empty external_id + check_item_ids and never calls createCard", async () => {
+    // Build a parallel server bound to its own loopback port whose
+    // deps.tracker is null. Closes after the test.
+    const repoLocalPath = mkdtempSync(join(tmpdir(), "danxbot-issue-route-yaml-only-"));
+    ensureIssuesDirs(repoLocalPath);
+    const repo: RepoContext = { ...h.repo, localPath: repoLocalPath };
+    const nullDeps: IssueRouteDeps = {
+      tracker: null,
+      recordError: async () => undefined,
+      recordSystemError: () => undefined,
+    };
+    const server = createServer(async (req, res) => {
+      const m = (req.url ?? "/").match(/^\/api\/issue-create\/([^/?]+)/);
+      if (req.method === "POST" && m) {
+        await handleIssueCreate(req, res, m[1] ?? "", repo, nullDeps);
+        return;
+      }
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "not found" }));
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const { port } = server.address() as AddressInfo;
+    const url = `http://127.0.0.1:${port}`;
+
+    try {
+      const draft: Issue = {
+        ...createEmptyIssue({
+          id: "",
+          external_id: "",
+          title: "yaml-only create",
+        }),
+        tracker: "memory",
+        ac: [
+          { check_item_id: "", title: "AC one", checked: false },
+          { check_item_id: "", title: "AC two", checked: false },
+        ],
+      };
+      writeFileSync(
+        issuePath(repoLocalPath, "yaml-only-create", "open"),
+        serializeIssue(draft),
+      );
+
+      const res = await fetch(`${url}/api/issue-create/dispatch-yaml-only`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "yaml-only-create" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(true);
+      expect(body.id).toBe("ISS-1");
+      expect(body.external_id).toBe("");
+
+      // YAML on disk carries the synthesized empty coordinates.
+      const stamped = readFileSync(
+        issuePath(repoLocalPath, "ISS-1", "open"),
+        "utf-8",
+      );
+      expect(stamped).toContain("id: ISS-1");
+      expect(stamped).toMatch(/external_id:\s*""\s*$/m);
+      // Each AC item has an empty check_item_id stub.
+      const checkIdLines = stamped.match(/check_item_id:\s*""\s*$/gm) ?? [];
+      expect(checkIdLines.length).toBe(2);
+    } finally {
+      await new Promise<void>((r) => server.close(() => r()));
+      rmSync(repoLocalPath, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("runSync (local-first persist)", () => {

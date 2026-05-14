@@ -143,10 +143,24 @@ function getState(repoName: string): RepoCronState {
  */
 const trackerByRepo = new Map<string, IssueTracker>();
 
-function getRepoTracker(repo: RepoContext): IssueTracker {
+/**
+ * DX-342 — repos with no tracker (no `DANXBOT_TRACKER=memory`, no
+ * Trello creds) hit this branch on every tick. Caching the "no
+ * tracker" verdict separately from the populated map saves a
+ * `createIssueTracker` allocation per tick.
+ */
+const noTrackerRepos = new Set<string>();
+
+function getRepoTracker(repo: RepoContext): IssueTracker | null {
+  if (noTrackerRepos.has(repo.name)) return null;
   let tracker = trackerByRepo.get(repo.name);
   if (!tracker) {
-    tracker = createIssueTracker(repo);
+    const fresh = createIssueTracker(repo);
+    if (fresh === null) {
+      noTrackerRepos.add(repo.name);
+      return null;
+    }
+    tracker = fresh;
     trackerByRepo.set(repo.name, tracker);
   }
   return tracker;
@@ -247,6 +261,12 @@ async function _sync(repo: RepoContext): Promise<void> {
     // heal below has a tracker to ask `isValidExternalId` against —
     // every later helper reuses this instance, so `MemoryTracker`
     // state survives the tick and tests can assert on a single mock.
+    //
+    // DX-342 — `null` in YAML-only mode. The tracker-touching cron
+    // stages (external-id heal, inbound fetch) skip; everything else
+    // (process-table reaper, invariant heal, orphan IP heal, audit
+    // reconcile) runs unconditionally — those paths read YAML + DB
+    // only.
     const tracker = getRepoTracker(repo);
 
     // DX-150: per-tick `external_id` format heal pass. Walks open/
@@ -260,20 +280,27 @@ async function _sync(repo: RepoContext): Promise<void> {
     // all by removing the foreign id from disk. Runs BEFORE every
     // tracker call (no `tracker.getCard` / `getComments` against the
     // bad id ever fires).
-    const externalIdHeal = healExternalIds(
-      repo.localPath,
-      tracker,
-      repo.issuePrefix,
-    );
-    for (const h of externalIdHeal.healed) {
-      log.info(
-        `[${repo.name}] Healed external_id mismatch on ${h.id}: ${h.oldExternalId} → "" (tracker.isValidExternalId rejected)`,
+    //
+    // DX-342 — skipped in YAML-only mode. The heal pass needs an
+    // active tracker to ask `isValidExternalId` against; without one,
+    // there is no "foreign-tracker id" to detect (every id was
+    // minted by the SAME absent tracker).
+    if (tracker !== null) {
+      const externalIdHeal = healExternalIds(
+        repo.localPath,
+        tracker,
+        repo.issuePrefix,
       );
-    }
-    for (const e of externalIdHeal.errors) {
-      log.warn(
-        `[${repo.name}] external_id heal skipped malformed YAML at ${e.path}: ${e.message}`,
-      );
+      for (const h of externalIdHeal.healed) {
+        log.info(
+          `[${repo.name}] Healed external_id mismatch on ${h.id}: ${h.oldExternalId} → "" (tracker.isValidExternalId rejected)`,
+        );
+      }
+      for (const e of externalIdHeal.errors) {
+        log.warn(
+          `[${repo.name}] external_id heal skipped malformed YAML at ${e.path}: ${e.message}`,
+        );
+      }
     }
 
     // Phase 3 (DX-142) — process-table orphan scan. The DB-driven
@@ -308,7 +335,13 @@ async function _sync(repo: RepoContext): Promise<void> {
     // `reconcileIssue(card, "hydrate")` per write — the multi-agent
     // dispatch path observes the new card on its next reconcile
     // poke.
-    await runInboundFetch(repo, tracker);
+    //
+    // DX-342 — skipped in YAML-only mode. The inbound fetch's whole
+    // purpose is to mirror tracker state into local YAML; with no
+    // tracker, there is nothing to fetch.
+    if (tracker !== null) {
+      await runInboundFetch(repo, tracker);
+    }
 
     // DX-286 — per-tick orphan invariant scan. Walks every open
     // YAML and clears any card violating
@@ -557,6 +590,7 @@ export function _resetForTesting(): void {
   }
   repoState.clear();
   trackerByRepo.clear();
+  noTrackerRepos.clear();
 }
 
 // Auto-start when run as the direct entrypoint.

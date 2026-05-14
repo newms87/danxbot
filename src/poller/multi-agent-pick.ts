@@ -162,8 +162,14 @@ export interface MultiAgentPickInput {
    * coordinate (DB-backed `busyAgents` is per-environment). On dispatch
    * completion, `dispatch()` releases the lock via the new
    * `lockRelease` field. DX-241.
+   *
+   * `null` in YAML-only mode (DX-342) — no tracker, no cross-environment
+   * lock to acquire. Locally-only cards already skip the lock path via
+   * `hasTrackerCoordinate(card) === false`, so a YAML-only repo (where
+   * EVERY card has empty `external_id`) sees the same skip path. The
+   * picker still dispatches; only the cross-env coordinate is gone.
    */
-  tracker: IssueTracker;
+  tracker: IssueTracker | null;
   now: Date;
 }
 
@@ -514,7 +520,12 @@ export async function tryMultiAgentDispatch(
     // pushed) have no shared coordinate to lock against. The skip is
     // structurally safe: a card without an external_id can only be
     // polled by THIS worker.
-    if (hasTrackerCoordinate(card)) {
+    // DX-342 — also short-circuit the lock acquire path when running
+    // in YAML-only mode (no tracker). A YAML-only repo has no shared
+    // cross-environment coordinate, so the tracker-comment lock is a
+    // no-op by design. Same structural safety as the no-external_id
+    // skip: the card is only visible to THIS worker.
+    if (hasTrackerCoordinate(card) && tracker !== null) {
       const lockInfo = buildLockHolderInfo({
         targetName,
         repoPath: repo.localPath,
@@ -681,9 +692,15 @@ export async function tryMultiAgentDispatch(
           // DX-241: dispatch() releases the tracker lock in its
           // onComplete chain (success + failure). Skipped for
           // locally-only cards (no external_id, no shared coordinate).
-          lockRelease: hasTrackerCoordinate(stamped)
-            ? { tracker, externalId: stamped.external_id }
-            : undefined,
+          //
+          // DX-342 — also skipped when the worker is running in
+          // YAML-only mode (`tracker === null`). A card may carry a
+          // stale `external_id` from a prior tracker window; without
+          // a live tracker there is no comment-lock to release.
+          lockRelease:
+            hasTrackerCoordinate(stamped) && tracker !== null
+              ? { tracker, externalId: stamped.external_id }
+              : undefined,
           pairedWriteYaml: {
             // DX-284: cleanup paths re-read the YAML from DISK, not
             // the DB-backed `loadLocal`. `writeIssue`'s mirror ack
@@ -793,6 +810,7 @@ export async function tryMultiAgentDispatch(
             // semantics.
             if (
               hasTrackerCoordinate(stamped) &&
+              tracker !== null &&
               !skipCardProgressForPrep &&
               !isReconcileDispatch &&
               job.status !== "throttled"

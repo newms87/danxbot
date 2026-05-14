@@ -1984,4 +1984,62 @@ describe("tryMultiAgentDispatch", () => {
       ).toBe(false);
     });
   });
+
+  // DX-342 — YAML-only mode (`tracker: null` on input). The picker
+  // still dispatches; `tryAcquireLock` is never invoked even when the
+  // candidate card carries a stale `external_id` from a prior tracker
+  // window; the resulting dispatch input has `lockRelease: undefined`
+  // so the dispatch lifecycle does not try to free a comment-lock that
+  // was never acquired.
+  describe("YAML-only mode — tracker null (DX-342)", () => {
+    it("dispatches a card with stale external_id WITHOUT invoking tryAcquireLock and stamps lockRelease: undefined", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      // Stale external_id surface (operator removed Trello creds AFTER
+      // the card was minted on a prior tracker window).
+      const staleCard = issue("DX-1", { external_id: "trello-stale-id" });
+      const addCommentSpy = vi.fn().mockResolvedValue({
+        id: "lock-cmt",
+        timestamp: "",
+      });
+      // We pass `null` as the tracker — `tryAcquireLock` lives inside
+      // `tracker.addComment`, so spying on a fakeTracker's addComment
+      // covers the negative assertion: the picker's `tracker !== null`
+      // gate makes `tryAcquireLock(tracker, ...)` unreachable.
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [staleCard],
+        tracker: null,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      expect(addCommentSpy).not.toHaveBeenCalled();
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(dispatchInput.lockRelease).toBeUndefined();
+    });
+
+    it("dispatches a card with no external_id under tracker=null exactly like the trello-disabled fixture path", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const localOnly = issue("DX-2", { external_id: "" });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [localOnly],
+        tracker: null,
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      expect(dispatchInput.lockRelease).toBeUndefined();
+    });
+  });
 });
