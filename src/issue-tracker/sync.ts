@@ -169,7 +169,84 @@ export function loadActionItemTitles(
   return out;
 }
 
-export async function syncIssue(
+/**
+ * Per-(tracker, card) FIFO serialization for concurrent `syncIssue`
+ * callers (DX-505). The body's `getComments → check marker → addComment`
+ * sequence is a classic read-then-write window: two concurrent runs
+ * against the same card both read an empty comment list, neither sees a
+ * retro marker, both POST → two `## Retro` comments on the tracker.
+ *
+ * Three production callers each have their own per-card lock — none
+ * shared across the trio:
+ *   1. `pushTrelloDiff` (reconcile step 7) — `pushSlots` in
+ *      `src/issue/reconcile/trello.ts`.
+ *   2. `attemptPush` (retry-queue timer) — no mutex.
+ *   3. `runSync` (worker/issue-route.ts) — `chainOnIssueLock`.
+ * Any pair across (1)/(2)/(3) can fire `syncIssue` in parallel for the
+ * same card. Embedding the mutex inside `syncIssue` itself catches every
+ * caller without requiring each of the three sites to share a primitive.
+ *
+ * Key shape: `external_id` for tracker-allocated cards, NUL-prefixed
+ * `id` for orphans (where `external_id === ""` — the orphan-recovery
+ * branch in Step 0 calls `tracker.createCard`; concurrent orphan saves
+ * for the same local id would otherwise create duplicate tracker cards).
+ *
+ * Tracker scope: a `WeakMap` keyed by the `IssueTracker` instance so
+ * different trackers never share the lock. The inner `Map` GC-collects
+ * once the tracker is dropped, no leak.
+ */
+const syncIssueSlots = new WeakMap<IssueTracker, Map<string, Promise<unknown>>>();
+
+function syncIssueSlotKey(local: Issue): string {
+  return local.external_id !== "" ? local.external_id : `\x00${local.id}`;
+}
+
+/** Visible for tests — observe whether a slot is currently active. */
+export function _hasSyncIssueSlot(
+  tracker: IssueTracker,
+  local: Issue,
+): boolean {
+  return syncIssueSlots.get(tracker)?.has(syncIssueSlotKey(local)) ?? false;
+}
+
+/** Visible for tests — drain the slot map between cases. */
+export function _resetSyncIssueSlots(tracker?: IssueTracker): void {
+  if (tracker) {
+    syncIssueSlots.delete(tracker);
+    return;
+  }
+  // No tracker arg → there's no enumeration of WeakMap entries; tests
+  // calling without an arg just discard their tracker reference and
+  // GC takes the inner Map. No-op fallback documented for clarity.
+}
+
+export function syncIssue(
+  tracker: IssueTracker,
+  local: Issue,
+  options: { actionItemTitles?: ActionItemTitleResolver } = {},
+): Promise<{ updatedLocal: Issue; remoteWriteCount: number }> {
+  let trackerSlots = syncIssueSlots.get(tracker);
+  if (!trackerSlots) {
+    trackerSlots = new Map();
+    syncIssueSlots.set(tracker, trackerSlots);
+  }
+  const slots = trackerSlots;
+  const key = syncIssueSlotKey(local);
+  const prev = slots.get(key) ?? Promise.resolve();
+  const run = () => doSyncIssue(tracker, local, options);
+  // `prev.then(run, run)` runs `run` regardless of whether the prior
+  // body resolved or rejected — a poisoned slot does not block the
+  // chain. Mirrors `withMutex` in `src/issue/reconcile.ts`.
+  const next = prev.then(run, run);
+  const tail: Promise<unknown> = next.catch(() => undefined);
+  slots.set(key, tail);
+  void tail.then(() => {
+    if (slots.get(key) === tail) slots.delete(key);
+  });
+  return next;
+}
+
+async function doSyncIssue(
   tracker: IssueTracker,
   local: Issue,
   options: { actionItemTitles?: ActionItemTitleResolver } = {},

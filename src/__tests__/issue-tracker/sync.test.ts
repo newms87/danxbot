@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { FakeTracker } from "../helpers/FakeTracker.js";
 import {
+  _hasSyncIssueSlot,
   isRetroNonEmpty,
   renderRetroComment,
   syncIssue,
@@ -1338,5 +1339,229 @@ describe("syncIssue", () => {
     const second = await syncIssue(tracker, reworded);
 
     expect(second.remoteWriteCount).toBe(0);
+  });
+});
+
+// DX-505 — duplicate retro from CONCURRENT syncIssue calls.
+//
+// DX-503 fixed the *sequential* stale-local case (the bot-mirror inbound
+// filter blinded the renderer to its own prior POST). The remaining race
+// is structural: two `syncIssue` calls for the same card, in flight at
+// the same time, each pass the `getComments → no marker → addComment`
+// path before either's POST has landed. Both POST → two retros.
+//
+// In production, three callers run `syncIssue` against the same card
+// without a shared mutex:
+//   1. `pushTrelloDiff` (reconcile step 7) — serialized via `pushSlots`.
+//   2. `attemptPush` (retry-queue timer) — NOT serialized via pushSlots.
+//   3. `runSync` (worker/issue-route.ts) — serialized via chainOnIssueLock.
+// (1) and (2) and (3) each have their own per-card lock; none are shared.
+// Any pair across those buckets can run `syncIssue` concurrently.
+//
+// Fix surface: per-(tracker, card) mutex inside `syncIssue` itself so the
+// `getComments → POST retro` sub-sequence is atomic regardless of caller.
+describe("syncIssue — concurrent-call retro race (DX-505)", () => {
+  it("DX-505: two concurrent syncIssue calls on the same Done card POST exactly one retro", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "g", bad: "b", action_item_ids: [], commits: [] },
+    };
+
+    // Two reconcile/retry callers fire in parallel — the FIFO ordering
+    // is what the mutex enforces; the assertion is "exactly one retro on
+    // the tracker after both settle".
+    await Promise.all([syncIssue(tracker, local), syncIssue(tracker, local)]);
+
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(
+      retros,
+      "concurrent syncIssue calls must serialize retro POST — two POSTs would land if the read-then-write window were not mutex-protected",
+    ).toHaveLength(1);
+
+    // And every addComment that DID fire targeted exactly one retro.
+    const addRetro = tracker
+      .getRequestLog()
+      .filter(
+        (l) =>
+          l.method === "addComment" &&
+          typeof l.details?.text === "string" &&
+          (l.details.text as string).includes(RETRO_COMMENT_MARKER),
+      );
+    expect(addRetro).toHaveLength(1);
+  });
+
+  it("DX-505: three concurrent syncIssue calls — still exactly one retro POST", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "g", bad: "b", action_item_ids: [], commits: [] },
+    };
+
+    await Promise.all([
+      syncIssue(tracker, local),
+      syncIssue(tracker, local),
+      syncIssue(tracker, local),
+    ]);
+
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+  });
+
+  it("DX-505: concurrent calls on DIFFERENT cards still run in parallel — mutex is per-card not global", async () => {
+    const tracker = new FakeTracker();
+    const a = await tracker.createCard({ ...defaultCreate(), id: "ISS-A" });
+    const b = await tracker.createCard({ ...defaultCreate(), id: "ISS-B" });
+
+    const localA: Issue = {
+      ...(await tracker.getCard(a.external_id)),
+      status: "Done",
+      retro: { good: "ga", bad: "ba", action_item_ids: [], commits: [] },
+    };
+    const localB: Issue = {
+      ...(await tracker.getCard(b.external_id)),
+      status: "Done",
+      retro: { good: "gb", bad: "bb", action_item_ids: [], commits: [] },
+    };
+
+    await Promise.all([syncIssue(tracker, localA), syncIssue(tracker, localB)]);
+
+    const retrosA = (await tracker.getComments(a.external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    const retrosB = (await tracker.getComments(b.external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retrosA).toHaveLength(1);
+    expect(retrosB).toHaveLength(1);
+    // The retro bodies differ because each card has its own retro
+    // content — proving the mutex did not collapse the two writes.
+    expect(retrosA[0].text).toContain("**What went well:** ga");
+    expect(retrosB[0].text).toContain("**What went well:** gb");
+  });
+
+  it("DX-505: slot serializes in FIFO submission order — call A's writes land before call B's", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+
+    // A: rename to "title-A".  B: rename to "title-B" (submitted second).
+    // FIFO order means the FINAL tracker title is "title-B" AND the
+    // updateCard log entries land in [A, B] order.
+    const localA: Issue = { ...fresh, title: "title-A" };
+    const localB: Issue = { ...fresh, title: "title-B" };
+    tracker.clearRequestLog();
+
+    await Promise.all([syncIssue(tracker, localA), syncIssue(tracker, localB)]);
+
+    const updateTitles = tracker
+      .getRequestLog()
+      .filter((l) => l.method === "updateCard")
+      .map((l) => l.details?.patch as { title?: string } | undefined)
+      .map((p) => p?.title)
+      .filter((t): t is string => typeof t === "string");
+    expect(updateTitles).toEqual(["title-A", "title-B"]);
+    expect((await tracker.getCard(external_id)).title).toBe("title-B");
+  });
+
+  it("DX-505: poisoned slot does not block subsequent calls — `prev.then(run, run)` recovery contract", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const fresh = await tracker.getCard(external_id);
+
+    // First call's getCard (or any awaited write) rejects → slot's
+    // tail captures the rejection. Second call submitted while the
+    // slot is non-empty MUST still run + resolve.
+    tracker.failNextWrite(new Error("simulated-tracker-failure"));
+
+    const callA: Issue = {
+      ...fresh,
+      status: "Done",
+      retro: { good: "ga", bad: "ba", action_item_ids: [], commits: [] },
+    };
+    const callB: Issue = {
+      ...fresh,
+      status: "Done",
+      retro: { good: "gb", bad: "bb", action_item_ids: [], commits: [] },
+    };
+
+    const [resA, resB] = await Promise.allSettled([
+      syncIssue(tracker, callA),
+      syncIssue(tracker, callB),
+    ]);
+
+    // A rejected (its first write tripped the failure injection).
+    expect(resA.status).toBe("rejected");
+    // B resolved — chain recovery worked.
+    expect(resB.status).toBe("fulfilled");
+
+    // And B's retro landed.
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+    expect(retros[0].text).toContain("**What went well:** gb");
+  });
+
+  it("DX-505: slot cleanup — map entry deleted after settle (no leak across many cards)", async () => {
+    const tracker = new FakeTracker();
+    const ids = ["ISS-A", "ISS-B", "ISS-C", "ISS-D", "ISS-E"];
+    const externals: Record<string, string> = {};
+    for (const id of ids) {
+      const { external_id } = await tracker.createCard({
+        ...defaultCreate(),
+        id,
+      });
+      externals[id] = external_id;
+    }
+
+    for (const id of ids) {
+      const local = await tracker.getCard(externals[id]);
+      await syncIssue(tracker, local);
+    }
+
+    // Every settled call must have removed its slot entry. Use one
+    // representative local to assert via the test seam.
+    for (const id of ids) {
+      const local = await tracker.getCard(externals[id]);
+      expect(_hasSyncIssueSlot(tracker, local)).toBe(false);
+    }
+  });
+
+  it("DX-505: serialized calls converge — second call sees first's POST and no-ops (existing DX-503 invariant preserved)", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "Done",
+      retro: { good: "g", bad: "b", action_item_ids: [], commits: [] },
+    };
+
+    // Sequential — same final shape as concurrent: one retro, one POST.
+    const r1 = await syncIssue(tracker, local);
+    tracker.clearRequestLog();
+    const r2 = await syncIssue(tracker, local);
+
+    const retros = (await tracker.getComments(external_id)).filter((c) =>
+      c.text.includes(RETRO_COMMENT_MARKER),
+    );
+    expect(retros).toHaveLength(1);
+    expect(r1.remoteWriteCount).toBeGreaterThan(0);
+    expect(
+      tracker.getRequestLog().filter((l) => l.method === "addComment"),
+      "second sequential call must not re-POST the retro (DX-503 invariant)",
+    ).toEqual([]);
+    expect(r2.remoteWriteCount).toBe(0);
   });
 });
