@@ -90,7 +90,13 @@ export function createAnthropicClient(
   if (preferOauth) {
     const token = loadOauthAccessToken(deps);
     if (token) {
+      // `apiKey: null` is load-bearing — without it the SDK reads
+      // `process.env.ANTHROPIC_API_KEY` and sends BOTH `X-Api-Key` and
+      // `Authorization: Bearer`; the server rejects on the stale key.
+      // See SDK constructor in `@anthropic-ai/sdk/client.js` —
+      // `apiKey = readEnv("ANTHROPIC_API_KEY") ?? null` (env-fallback).
       return new Anthropic({
+        apiKey: null,
         authToken: token,
         defaultHeaders: { "anthropic-beta": OAUTH_BETA_HEADER },
       });

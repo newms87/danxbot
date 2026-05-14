@@ -159,6 +159,36 @@ describe("createAnthropicClient", () => {
     expect(client.authToken).toBe("sk-ant-oat01-prefer");
   });
 
+  it("OAuth-mode client does NOT inherit process.env.ANTHROPIC_API_KEY (sends Bearer only, not X-Api-Key)", () => {
+    // Regression: the Anthropic SDK constructor reads ANTHROPIC_API_KEY
+    // from process.env when `apiKey` is omitted. If both authToken AND
+    // a stale apiKey are populated the SDK sends BOTH headers; the
+    // server picks the bad x-api-key and 401s. The factory MUST pass
+    // `apiKey: null` explicitly on the OAuth branch so the env-fallback
+    // never fires. Reproduced 401 in prod against a stale .env key
+    // (DX-313, post-DX-334).
+    const prevApiKey = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-api03-stale-env";
+    try {
+      const deps = buildDeps({
+        readEnv: (k) =>
+          k === "CLAUDE_AUTH_MODE"
+            ? "subscription"
+            : k === "ANTHROPIC_API_KEY"
+              ? process.env.ANTHROPIC_API_KEY
+              : undefined,
+        fileExists: () => true,
+        readFile: () => credentialsBody("sk-ant-oat01-prefer"),
+      });
+      const client = createAnthropicClient("sk-ant-api03-stale-arg", deps);
+      expect(client.authToken).toBe("sk-ant-oat01-prefer");
+      expect(client.apiKey).toBeNull();
+    } finally {
+      if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevApiKey;
+    }
+  });
+
   it("propagates expired-token AnthropicAuthError when CLAUDE_AUTH_MODE=subscription", () => {
     const deps = buildDeps({
       readEnv: (k) => (k === "CLAUDE_AUTH_MODE" ? "subscription" : undefined),
