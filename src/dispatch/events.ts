@@ -36,12 +36,32 @@ export interface DispatchEventMap {
 
 class DispatchEventBus {
   private emitter = new EventEmitter();
+  /**
+   * `on()` wraps every caller-supplied listener in a try/catch closure
+   * so a bad subscriber cannot wedge the emitter. `off()` therefore
+   * needs the wrapper, not the original, to remove the registration.
+   * The inner map stores wrappers per original listener as an ARRAY —
+   * `EventEmitter` allows the same function to be registered N times
+   * and requires N `off()` calls to drain; we mirror that semantic so
+   * `off()` peels one registration per call. Without this `off()` was
+   * a silent no-op and the evaluator-dispatcher's shutdown handle
+   * leaked a listener — DX-367.
+   */
+  private wrappers = new Map<
+    string,
+    // Heterogeneous per-topic listener storage — the EventEmitter
+    // itself is loosely typed so we mirror that here. The on/off public
+    // methods enforce the strong topic ↔ event shape at the type
+    // boundary; the internal Map just stores opaque function refs.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    Map<(...args: any[]) => any, Array<(...args: any[]) => void>>
+  >();
 
   on<T extends DispatchEventTopic>(
     topic: T,
     listener: (event: DispatchEventMap[T]) => void | Promise<void>,
   ): void {
-    this.emitter.on(topic, (event: DispatchEventMap[T]) => {
+    const wrapper = (event: DispatchEventMap[T]) => {
       try {
         const result = listener(event);
         if (result instanceof Promise) {
@@ -52,14 +72,37 @@ class DispatchEventBus {
       } catch (err) {
         log.error(`[${topic}] sync listener threw`, err);
       }
-    });
+    };
+    let topicMap = this.wrappers.get(topic);
+    if (!topicMap) {
+      topicMap = new Map();
+      this.wrappers.set(topic, topicMap);
+    }
+    const existing = topicMap.get(listener);
+    if (existing) {
+      existing.push(wrapper);
+    } else {
+      topicMap.set(listener, [wrapper]);
+    }
+    this.emitter.on(topic, wrapper);
   }
 
   off<T extends DispatchEventTopic>(
     topic: T,
     listener: (event: DispatchEventMap[T]) => void | Promise<void>,
   ): void {
-    this.emitter.off(topic, listener);
+    const topicMap = this.wrappers.get(topic);
+    if (!topicMap) return;
+    const stack = topicMap.get(listener);
+    if (!stack || stack.length === 0) return;
+    // Pop the most-recently-registered wrapper — Node's
+    // EventEmitter.off removes the LAST matching listener (LIFO), so
+    // we drain the same direction to keep observable behavior in step.
+    const wrapper = stack.pop()!;
+    this.emitter.off(topic, wrapper);
+    if (stack.length === 0) {
+      topicMap.delete(listener);
+    }
   }
 
   emit<T extends DispatchEventTopic>(
@@ -72,6 +115,7 @@ class DispatchEventBus {
   /** Test-only — drops every subscriber. */
   removeAllListeners(): void {
     this.emitter.removeAllListeners();
+    this.wrappers.clear();
   }
 
   listenerCount(topic: DispatchEventTopic): number {

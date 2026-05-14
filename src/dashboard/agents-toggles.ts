@@ -242,6 +242,79 @@ export async function handleClearAgentCriticalFailure(
 }
 
 /**
+ * POST /api/agents/:repo/re-run-evaluator — DX-367 (Phase 4b of
+ * DX-363). User-bearer auth required.
+ *
+ * Thin proxy to the worker's `/api/re-run-evaluator` route. The
+ * actual mutation + `broken-transition` emit lives on the worker
+ * because the event bus is in-process and the evaluator-dispatcher
+ * subscriber lives in the worker process; emitting from the
+ * dashboard would never reach the worker in a multi-process
+ * deployment (compose ships dashboard + per-repo worker as separate
+ * containers).
+ *
+ * Body forwarded verbatim: `{name: "<agent-name>"}`. The worker
+ * handles the validation + side-effects (missing/healthy/already-
+ * running checks return 400/404 with the same shape the SPA
+ * displays).
+ */
+export async function handleReRunEvaluator(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+
+  // Read + re-serialize the body so `proxyToWorkerWithFallback` can
+  // forward it as a string (req has already been consumed at this
+  // point by upstream auth wrappers in some test fixtures). Also
+  // lets us reject a malformed body with 400 BEFORE round-tripping
+  // to the worker.
+  let bodyStr: string;
+  try {
+    const parsed = await parseBody(req);
+    bodyStr = JSON.stringify(parsed);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  await proxyToWorkerWithFallback(
+    req,
+    res,
+    {
+      repoName: repo.name,
+      primaryHost: deps.resolveHost(repo.name),
+      port: repo.workerPort,
+      path: "/api/re-run-evaluator",
+      method: "POST",
+    },
+    bodyStr,
+  );
+  // The proxy wrote the response (worker body verbatim); recorded
+  // user attribution is the audit log via the worker's mutator
+  // ("worker" writtenBy — we trade fine-grained "dashboard:<user>"
+  // attribution for the simpler proxy chain since the worker doesn't
+  // have a per-user identity to use). The auth-checked dashboard
+  // bearer satisfies the access gate; the worker is on danxbot-net
+  // only, not publicly reachable.
+  log.info(
+    `handleReRunEvaluator(${repoName}): proxied for user=${auth.user.username}`,
+  );
+}
+
+/**
  * Reject any value containing characters that would corrupt a `.env`
  * file or smuggle additional assignments through the writer. Trello
  * API keys + tokens are alphanumeric in practice (Trello issues hex

@@ -146,6 +146,24 @@ export interface McpFactoryOptions {
       database?: string;
     };
   };
+  /**
+   * DX-367 — `danxbot_set_evaluator_summary` callback URL. When
+   * present, the danxbot MCP server gets the URL via
+   * `DANXBOT_EVALUATOR_SUMMARY_URL` env and the advertise-filter
+   * exposes the tool. Absent — the default — the tool is filtered
+   * out of `tools/list` and a `callTool` invocation throws fail-loud.
+   *
+   * UNLIKE the other URL groups, this is NOT auto-injected by
+   * `dispatch()` for every dispatch. Only the evaluator-dispatcher
+   * (`src/agent/evaluator-dispatcher.ts`) sets it — through the
+   * `dispatch(input)` overlay — so a non-evaluator dispatch never
+   * sees the tool. Bound to the dispatch id: the worker route does a
+   * reverse lookup on
+   * `settings.agents.*.broken.evaluator_dispatch_id === dispatchId`
+   * to find the target agent (so the tool doesn't carry the agent
+   * name in its args).
+   */
+  evaluatorSummaryUrl?: string;
 }
 
 export interface McpServerEntry {

@@ -77,4 +77,64 @@ describe("dispatchEvents", () => {
     dispatchEvents.removeAllListeners();
     expect(dispatchEvents.listenerCount("broken-transition")).toBe(0);
   });
+
+  // DX-367 — `on()` wraps every caller-supplied listener so a bad
+  // subscriber cannot wedge the bus, which means `off()` cannot
+  // remove the listener directly (the EventEmitter holds the wrapper,
+  // not the original). The wrapper-lookup machinery in events.ts is
+  // pinned here so a regression that breaks `off()` lands fast.
+  it("off() unsubscribes a registered listener — subsequent emit does not call it", () => {
+    const fn = vi.fn();
+    dispatchEvents.on("broken-transition", fn);
+    dispatchEvents.off("broken-transition", fn);
+    dispatchEvents.emit("broken-transition", {
+      repoName: "r",
+      agentName: "a",
+    });
+    expect(fn).not.toHaveBeenCalled();
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(0);
+  });
+
+  it("off() on a never-registered listener is a silent no-op", () => {
+    const never = vi.fn();
+    expect(() =>
+      dispatchEvents.off("broken-transition", never),
+    ).not.toThrow();
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(0);
+  });
+
+  it("off() leaves sibling listeners attached when one of many unsubscribes", () => {
+    const keep = vi.fn();
+    const drop = vi.fn();
+    dispatchEvents.on("broken-transition", keep);
+    dispatchEvents.on("broken-transition", drop);
+    dispatchEvents.off("broken-transition", drop);
+    dispatchEvents.emit("broken-transition", {
+      repoName: "r",
+      agentName: "a",
+    });
+    expect(keep).toHaveBeenCalledTimes(1);
+    expect(drop).not.toHaveBeenCalled();
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(1);
+  });
+
+  it("on() N times + off() N times drains a duplicate registration cleanly", () => {
+    // EventEmitter semantics: same function registered N times needs
+    // N off() calls. The wrappers Map stores a stack of wrappers per
+    // original listener so each off() peels exactly one registration.
+    const fn = vi.fn();
+    dispatchEvents.on("broken-transition", fn);
+    dispatchEvents.on("broken-transition", fn);
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(2);
+    dispatchEvents.off("broken-transition", fn);
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(1);
+    dispatchEvents.emit("broken-transition", {
+      repoName: "r",
+      agentName: "a",
+    });
+    // One wrapper still attached → fn called once on emit.
+    expect(fn).toHaveBeenCalledTimes(1);
+    dispatchEvents.off("broken-transition", fn);
+    expect(dispatchEvents.listenerCount("broken-transition")).toBe(0);
+  });
 });

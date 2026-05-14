@@ -37,6 +37,8 @@ import { handleIssueCreate } from "./issue-route.js";
 import { handleRestart } from "./restart-route.js";
 import { handleRestage } from "./restage-route.js";
 import { handlePrepVerdict } from "./prep-verdict-route.js";
+import { handleEvaluatorSummary } from "./evaluator-summary-route.js";
+import { handleReRunEvaluator } from "./re-run-evaluator-route.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -133,6 +135,24 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
     const prepVerdictMatch = url.pathname.match(/^\/api\/prep-verdict\/(.+)$/);
     if (method === "POST" && prepVerdictMatch) {
       await handlePrepVerdict(req, res, prepVerdictMatch[1], repo);
+      return;
+    }
+
+    const evaluatorSummaryMatch = url.pathname.match(
+      /^\/api\/evaluator-summary\/(.+)$/,
+    );
+    if (method === "POST" && evaluatorSummaryMatch) {
+      await handleEvaluatorSummary(
+        req,
+        res,
+        evaluatorSummaryMatch[1],
+        repo,
+      );
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/re-run-evaluator") {
+      await handleReRunEvaluator(req, res, repo);
       return;
     }
 

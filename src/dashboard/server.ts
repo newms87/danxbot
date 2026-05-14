@@ -45,6 +45,7 @@ import {
   handleGetRoster,
   handlePatchToggle,
   handlePatchTrelloCredentials,
+  handleReRunEvaluator,
 } from "./agents-toggles.js";
 import { handlePutIssuePrefix } from "./agents-prefix.js";
 import {
@@ -286,6 +287,23 @@ async function route(
       req,
       res,
       decodeURIComponent(agentTrelloCredentialsMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // POST /api/agents/:repo/re-run-evaluator — DX-367 (Phase 4b of
+  // DX-363). User-bearer auth required. Resets the named agent's
+  // broken.evaluator_status to "pending" + emits a fresh
+  // broken-transition so the worker re-dispatches the evaluator.
+  const agentReRunEvaluatorMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/re-run-evaluator$/,
+  );
+  if (method === "POST" && agentReRunEvaluatorMatch) {
+    await handleReRunEvaluator(
+      req,
+      res,
+      decodeURIComponent(agentReRunEvaluatorMatch[1]),
       dispatchDeps,
     );
     return true;

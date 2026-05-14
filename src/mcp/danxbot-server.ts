@@ -230,6 +230,23 @@ export interface DanxbotToolUrls {
    * (still rejects blank-string ids).
    */
   issuePrefix?: string;
+  /**
+   * DX-367 — `danxbot_set_evaluator_summary` endpoint. Exposed only
+   * when present (advertise filter); the URL is the worker route
+   * `http://localhost:<workerPort>/api/evaluator-summary/<dispatchId>`.
+   *
+   * Auto-injected by `dispatch()` ONLY for system-evaluator dispatches
+   * (the evaluator-dispatcher passes it in the overlay alongside the
+   * struck agent's name in the prompt body). Other dispatches do NOT
+   * see this tool — the dispatcher is the only caller that wires it.
+   *
+   * The worker route locates the target agent by reverse-lookup on
+   * `settings.agents.*.broken.evaluator_dispatch_id === dispatchId`,
+   * so the MCP tool does not need to carry the target agent name in
+   * its arguments — the dispatcher already wrote that binding into
+   * settings.json when it stamped `evaluator_status: "running"`.
+   */
+  evaluatorSummary?: string;
 }
 
 export const TOOLS = [
@@ -392,6 +409,43 @@ export const TOOLS = [
         },
       },
       required: ["verdict", "reason"],
+    },
+  },
+  {
+    name: "danxbot_set_evaluator_summary",
+    description:
+      "Write the root-cause summary for a 3-strike broken agent (DX-367 — Phase 4 " +
+      "of DX-363). ONLY the system-evaluator dispatch sees this tool — its dispatch " +
+      "id is the binding to the target agent (the dispatcher wrote " +
+      "`agent.broken.evaluator_dispatch_id = <this dispatch id>` when stamping " +
+      "evaluator_status: 'running'). Call exactly once at the END of the dispatch, " +
+      "immediately before danxbot_complete. The worker route writes " +
+      "agent.broken.reason = reason + agent.broken.suggested_steps = suggested_steps " +
+      "(default `[]` when omitted) + agent.broken.evaluator_status = 'completed', " +
+      "and the dashboard banner renders the markdown. A dispatch that " +
+      "exits without calling this tool is treated as evaluator failure — the " +
+      "dispatcher's onComplete handler flips evaluator_status to 'failed' and the " +
+      "default reason from Phase 2 stays put.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        reason: {
+          type: "string",
+          description:
+            "Markdown body the dashboard banner renders. Structure: ## Root cause(s) " +
+            "(1–3 bullets), ## Per-strike detail (one bullet per strike), ## " +
+            "Recommended human action (one paragraph).",
+        },
+        suggested_steps: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Ordered list of concrete operator actions. Empty array is allowed " +
+            "when the root cause has no clear operator action; the banner falls " +
+            "back to displaying just the reason markdown.",
+        },
+      },
+      required: ["reason"],
     },
   },
   {
@@ -661,6 +715,44 @@ async function callDanxbotRestartWorker(
   return postWorkerRoute(urls.restartWorker, body, "danxbot_restart_worker");
 }
 
+async function callDanxbotSetEvaluatorSummary(
+  args: Record<string, unknown>,
+  urls: DanxbotToolUrls,
+): Promise<string> {
+  if (!urls.evaluatorSummary) {
+    throw new Error(
+      "danxbot_set_evaluator_summary called without DANXBOT_EVALUATOR_SUMMARY_URL configured " +
+        "(no worker endpoint available — this tool is only injected for system-evaluator dispatches)",
+    );
+  }
+  const reason = requireNonBlankString(
+    "danxbot_set_evaluator_summary",
+    "reason",
+    args.reason,
+  );
+  let suggestedSteps: string[] = [];
+  if (args.suggested_steps !== undefined) {
+    if (!Array.isArray(args.suggested_steps)) {
+      throw new Error(
+        "danxbot_set_evaluator_summary: suggested_steps must be an array of strings",
+      );
+    }
+    for (const step of args.suggested_steps) {
+      if (typeof step !== "string") {
+        throw new Error(
+          "danxbot_set_evaluator_summary: every entry in suggested_steps must be a string",
+        );
+      }
+    }
+    suggestedSteps = args.suggested_steps as string[];
+  }
+  return postWorkerRoute(
+    urls.evaluatorSummary,
+    { reason, suggested_steps: suggestedSteps },
+    "danxbot_set_evaluator_summary",
+  );
+}
+
 async function callDanxIssueCreate(
   args: Record<string, unknown>,
   urls: DanxbotToolUrls,
@@ -717,6 +809,11 @@ export async function callTool(
     case "danxbot_restart_worker":
       return callDanxbotRestartWorker(
         requireObjectArgs("danxbot_restart_worker", args),
+        urls,
+      );
+    case "danxbot_set_evaluator_summary":
+      return callDanxbotSetEvaluatorSummary(
+        requireObjectArgs("danxbot_set_evaluator_summary", args),
         urls,
       );
     case "danxbot_prep_verdict": {
@@ -788,6 +885,9 @@ export function buildActiveTools(urls: DanxbotToolUrls) {
     if (t.name === "danx_issue_create") return !!urls.issueCreate;
     if (t.name === "danxbot_restart_worker") return !!urls.restartWorker;
     if (t.name === "danxbot_prep_verdict") return !!urls.prepVerdict;
+    if (t.name === "danxbot_set_evaluator_summary") {
+      return !!urls.evaluatorSummary;
+    }
     return true;
   });
 }
@@ -888,6 +988,7 @@ if (import.meta.url === entryUrl) {
     restartWorker: process.env.DANXBOT_RESTART_WORKER_URL,
     prepVerdict: process.env.DANXBOT_PREP_VERDICT_URL,
     issuePrefix: process.env.DANX_ISSUE_PREFIX,
+    evaluatorSummary: process.env.DANXBOT_EVALUATOR_SUMMARY_URL,
     ...(fallback ? { fallback } : {}),
   };
   main(urls);

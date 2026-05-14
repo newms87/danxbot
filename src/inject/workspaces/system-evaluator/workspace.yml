@@ -1,0 +1,9 @@
+name: system-evaluator
+description: System-evaluator dispatch — root-cause summary on 3-strike broken transition (DX-367)
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []
+staging-paths: []

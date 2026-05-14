@@ -61,6 +61,7 @@ import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
 import { replayPrepVerdictQueue } from "./worker/replay-prep-verdict-queue.js";
 import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
+import { startEvaluatorDispatcher } from "./agent/evaluator-dispatcher.js";
 import {
   preflightSystemdRun,
   SystemdPreflightError,
@@ -628,6 +629,16 @@ async function startWorkerMode(): Promise<void> {
 
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);
+
+  // DX-367 (Phase 4 of DX-363) — subscribe to broken-transition events
+  // so the system-evaluator dispatch fires when an agent crosses
+  // STRIKES_MAX. Per-worker scope (the dispatcher filters events on
+  // `repoName === repo.name`); the EventEmitter is process-global but
+  // a multi-repo test fixture would otherwise dispatch evaluators
+  // against the wrong repo's settings file. Unsubscribe is a no-op for
+  // SIGTERM (process exit takes the listener down); kept for the
+  // shutdown contract symmetry with the other boot subscriptions.
+  startEvaluatorDispatcher({ repo });
 
   // Start Slack listener for this repo (if configured)
   if (repo.slack.enabled) {

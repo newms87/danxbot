@@ -469,6 +469,19 @@ export interface DispatchInput {
    * non-prep dispatch.
    */
   dispatchKind?: DispatchKind;
+  /**
+   * DX-367 — opt-in `danxbot_set_evaluator_summary` MCP tool URL.
+   * Threaded into the danxbot infrastructure MCP server's env so the
+   * advertise-filter exposes the tool ONLY for this dispatch. The
+   * `evaluator-dispatcher` is the only caller that sets this. Other
+   * dispatch paths (poller, slack, external `/api/launch`) leave it
+   * undefined and the tool stays hidden.
+   *
+   * Bound to the dispatch id: the worker route at the other end of
+   * the URL locates the target agent via a reverse lookup on
+   * `settings.agents.*.broken.evaluator_dispatch_id === <dispatchId>`.
+   */
+  evaluatorSummaryUrl?: string;
 }
 
 export interface DispatchResult {
@@ -1195,6 +1208,12 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // test fixtures don't have to grow the field.
     ...(input.repo.issuePrefix
       ? { issuePrefix: input.repo.issuePrefix }
+      : {}),
+    // DX-367 — opt-in evaluator summary URL. The evaluator-dispatcher
+    // is the only caller that sets this; non-evaluator dispatches
+    // leave it undefined and the tool stays hidden.
+    ...(input.evaluatorSummaryUrl
+      ? { evaluatorSummaryUrl: input.evaluatorSummaryUrl }
       : {}),
     fallback,
   });

@@ -1,0 +1,18 @@
+{
+  "env": {
+    "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}"
+  },
+  "extraKnownMarketplaces": {
+    "newms-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "newms87/claude-plugins"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "base@newms-plugins": true,
+    "danxbot@newms-plugins": true
+  }
+}

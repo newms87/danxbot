@@ -85,6 +85,15 @@ const DANXBOT_ENTRY: McpServerEntry = {
     if (opts.issuePrefix) {
       env.DANX_ISSUE_PREFIX = opts.issuePrefix;
     }
+    // DX-367 — evaluator-summary URL injection. Only the
+    // evaluator-dispatcher passes this in; the dispatch core does NOT
+    // auto-inject it (unlike the other URL groups). The MCP server
+    // reads `DANXBOT_EVALUATOR_SUMMARY_URL` at boot and the
+    // advertise-filter exposes `danxbot_set_evaluator_summary` only
+    // when the env var is set.
+    if (opts.evaluatorSummaryUrl) {
+      env.DANXBOT_EVALUATOR_SUMMARY_URL = opts.evaluatorSummaryUrl;
+    }
     // DX-242: pass the fallback context so the MCP server can finalize
     // a dispatch when the stop URL is unreachable. The MCP server reads
     // each var independently (`readFallbackDbConfig` + raw env reads in

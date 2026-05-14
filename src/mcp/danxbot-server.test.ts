@@ -12,6 +12,8 @@ const STOP_URL = "http://localhost:5562/api/stop/job-xyz";
 const SLACK_REPLY_URL = "http://localhost:5562/api/slack/reply/job-xyz";
 const SLACK_UPDATE_URL = "http://localhost:5562/api/slack/update/job-xyz";
 const RESTART_URL = "http://localhost:5562/api/restart/job-xyz";
+const EVALUATOR_SUMMARY_URL =
+  "http://localhost:5562/api/evaluator-summary/job-xyz";
 
 function urls(over: Partial<DanxbotToolUrls> = {}): DanxbotToolUrls {
   return {
@@ -660,6 +662,29 @@ describe("buildActiveTools — advertise-filter", () => {
     expect(names).toEqual(["danxbot_complete"]);
   });
 
+  it("advertises danxbot_set_evaluator_summary iff evaluatorSummary URL is set (DX-367)", () => {
+    // Tool MUST NOT appear for any dispatch the evaluator-dispatcher
+    // did not auto-inject — a non-evaluator agent that saw the tool
+    // could call it and stamp a fake root-cause summary on a struck
+    // agent. The advertise-filter is the sole enforcement seam.
+    expect(
+      buildActiveTools({ stop: STOP_URL }).map((t) => t.name),
+    ).not.toContain("danxbot_set_evaluator_summary");
+    expect(
+      buildActiveTools({
+        stop: STOP_URL,
+        evaluatorSummary: EVALUATOR_SUMMARY_URL,
+      }).map((t) => t.name),
+    ).toContain("danxbot_set_evaluator_summary");
+    // Empty-string env failure mode — same `!!` guard as the slack /
+    // restart / prep-verdict tools.
+    expect(
+      buildActiveTools({ stop: STOP_URL, evaluatorSummary: "" }).map(
+        (t) => t.name,
+      ),
+    ).not.toContain("danxbot_set_evaluator_summary");
+  });
+
   it("advertises danxbot_prep_verdict iff prepVerdict URL is set (DX-294)", () => {
     // Same advertise-filter contract as the slack / restart tools — the
     // tool MUST NOT appear in tools/list for a dispatch whose dispatch
@@ -833,6 +858,150 @@ describe("callTool — danxbot_prep_verdict (DX-294)", () => {
         ),
       ).rejects.toThrow(/<PREFIX>-N shape/);
       expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("danxbot_set_evaluator_summary tool schema (DX-367)", () => {
+  const tool = TOOLS.find((t) => t.name === "danxbot_set_evaluator_summary");
+
+  it("is registered in TOOLS", () => {
+    expect(tool).toBeDefined();
+  });
+
+  it("requires reason; suggested_steps optional array of strings", () => {
+    const schema = tool!.inputSchema as unknown as {
+      properties: {
+        reason: { type: string };
+        suggested_steps: { type: string; items: { type: string } };
+      };
+      required: string[];
+    };
+    expect(schema.properties.reason.type).toBe("string");
+    expect(schema.properties.suggested_steps.type).toBe("array");
+    expect(schema.properties.suggested_steps.items.type).toBe("string");
+    expect(schema.required).toEqual(["reason"]);
+  });
+
+  it("description tells the agent the call is the binding to the struck agent (via dispatch_id)", () => {
+    expect(tool!.description).toMatch(/dispatch id/i);
+    expect(tool!.description).toMatch(/evaluator_dispatch_id/);
+  });
+});
+
+describe("callTool — danxbot_set_evaluator_summary (DX-367)", () => {
+  it("rejects calls when the URL is absent — fail-loud, no silent route", async () => {
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "x" },
+        { stop: STOP_URL },
+      ),
+    ).rejects.toThrow(/DANXBOT_EVALUATOR_SUMMARY_URL|evaluator/i);
+  });
+
+  it("rejects empty / non-string reason", async () => {
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        {},
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      ),
+    ).rejects.toThrow(/reason/i);
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "" },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      ),
+    ).rejects.toThrow(/reason/i);
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: 42 },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      ),
+    ).rejects.toThrow(/reason/i);
+  });
+
+  it("rejects non-array / non-string-entry suggested_steps", async () => {
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "ok", suggested_steps: "not an array" },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      ),
+    ).rejects.toThrow(/suggested_steps/);
+    await expect(
+      callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "ok", suggested_steps: ["a", 42] },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      ),
+    ).rejects.toThrow(/suggested_steps/);
+  });
+
+  it("POSTs to the evaluator-summary URL on happy path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        '{"status":"applied","agent":"alice","repo":"danxbot"}',
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const out = await callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "## Root cause\nx", suggested_steps: ["s1", "s2"] },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      );
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe(EVALUATOR_SUMMARY_URL);
+      expect((init as RequestInit).method).toBe("POST");
+      expect(JSON.parse((init as RequestInit).body as string)).toEqual({
+        reason: "## Root cause\nx",
+        suggested_steps: ["s1", "s2"],
+      });
+      expect(out).toMatch(/applied/);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("defaults suggested_steps to [] when omitted from args", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"status":"applied"}', { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await callTool(
+        "danxbot_set_evaluator_summary",
+        { reason: "x" },
+        { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+      );
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      expect(body.suggested_steps).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("surfaces non-2xx responses from the route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('{"error":"stale binding"}', { status: 404 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      await expect(
+        callTool(
+          "danxbot_set_evaluator_summary",
+          { reason: "x" },
+          { stop: STOP_URL, evaluatorSummary: EVALUATOR_SUMMARY_URL },
+        ),
+      ).rejects.toThrow(/HTTP 404/);
     } finally {
       vi.unstubAllGlobals();
     }
