@@ -1635,6 +1635,122 @@ describe("WorktreeManager", () => {
     });
   });
 
+  describe("provisionLaravelStorageDirs (DX-500)", () => {
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+
+    const laravelDirs = [
+      "storage/framework/cache/data",
+      "storage/framework/sessions",
+      "storage/framework/testing",
+      "storage/framework/views",
+      "storage/logs",
+      "bootstrap/cache",
+    ];
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-laravel-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(worktreeRoot, { recursive: true });
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("pre-creates Laravel storage dirs when worktree has artisan", async () => {
+      writeFileSync(join(worktreeRoot, "artisan"), "#!/usr/bin/env php\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      for (const rel of laravelDirs) {
+        const abs = join(worktreeRoot, rel);
+        expect(existsSync(abs)).toBe(true);
+        expect(lstatSync(abs).isDirectory()).toBe(true);
+      }
+    });
+
+    it("is a no-op when worktree has no artisan (non-Laravel repo)", async () => {
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      for (const rel of laravelDirs) {
+        expect(existsSync(join(worktreeRoot, rel))).toBe(false);
+      }
+    });
+
+    it("is idempotent — second call leaves dirs intact (same inode)", async () => {
+      writeFileSync(join(worktreeRoot, "artisan"), "#!/usr/bin/env php\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const probe = join(worktreeRoot, "storage/framework/testing");
+      const inodeBefore = lstatSync(probe).ino;
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(lstatSync(probe).ino).toBe(inodeBefore);
+    });
+
+    it("preserves pre-existing dir contents (no clobber on second run)", async () => {
+      writeFileSync(join(worktreeRoot, "artisan"), "#!/usr/bin/env php\n");
+      mkdirSync(join(worktreeRoot, "storage/logs"), { recursive: true });
+      const sentinel = join(worktreeRoot, "storage/logs/laravel.log");
+      writeFileSync(sentinel, "sail-wrote-this\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(existsSync(sentinel)).toBe(true);
+    });
+
+    it("swallows mkdir failure on one dir, still creates the others", async () => {
+      writeFileSync(join(worktreeRoot, "artisan"), "#!/usr/bin/env php\n");
+      // Force ENOTDIR on storage/logs by planting a regular file at
+      // `storage` so the recursive mkdir of `storage/logs` fails.
+      mkdirSync(join(worktreeRoot, "storage/framework/cache/data"), {
+        recursive: true,
+      });
+      // Replace `storage/logs`'s parent dir for a single dir to be a
+      // file blocker: put a file at storage/framework/views to fail
+      // its own mkdir, but leave bootstrap/cache reachable.
+      writeFileSync(
+        join(worktreeRoot, "storage/framework/views"),
+        "blocker\n",
+      );
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      // Unaffected dirs still landed.
+      expect(existsSync(join(worktreeRoot, "bootstrap/cache"))).toBe(true);
+      expect(
+        existsSync(join(worktreeRoot, "storage/framework/sessions")),
+      ).toBe(true);
+    });
+
+    it("fires from syncWorktree path (wired into provisionWorktreeArtifacts umbrella)", async () => {
+      // syncWorktree's noop branch (ahead=0, behind=0) still calls
+      // provisionWorktreeArtifacts. Confirms the one-line registration
+      // holds for sync callers, not only ensureProvisioned.
+      writeFileSync(join(worktreeRoot, "artisan"), "#!/usr/bin/env php\n");
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "rev-list --left-right --count",
+            response: { stdout: "0\t0\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      const result = await wm.syncWorktree(ctx, "alice");
+      expect(result.kind).toBe("noop");
+      expect(
+        existsSync(join(worktreeRoot, "storage/framework/testing")),
+      ).toBe(true);
+      expect(existsSync(join(worktreeRoot, "bootstrap/cache"))).toBe(true);
+    });
+  });
+
   describe("hostPath != localPath (DX-230 portability)", () => {
     const splitCtx = makeRepoContext({
       localPath: "/container/path",

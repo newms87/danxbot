@@ -55,6 +55,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { promisify } from "node:util";
 import { join, sep } from "node:path";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -735,6 +736,7 @@ function worktreeListIncludes(stdout: string, path: string): boolean {
  *   - root `.env` symlink (DX-244)
  *   - `.danxbot/issues` symlink (DX-309)
  *   - `.danxbot/workspaces/<name>/` real-dir copies (DX-309)
+ *   - Laravel storage dirs (DX-500)
  */
 function provisionWorktreeArtifacts(
   repoRoot: string,
@@ -745,6 +747,60 @@ function provisionWorktreeArtifacts(
   provisionEnvFile(repoRoot, worktreePath);
   provisionIssuesSymlink(repoRoot, worktreePath);
   provisionWorktreeWorkspaces(repoRoot, worktreePath);
+  provisionLaravelStorageDirs(repoRoot, worktreePath);
+}
+
+/**
+ * DX-500: pre-create Laravel `storage/` + `bootstrap/cache` subdirs in
+ * the worktree so sibling containers (sail, postgres, octane) the
+ * dispatched agent spawns through `/var/run/docker.sock` can't write
+ * `root:root` files there.
+ *
+ * Mechanism: sail's entrypoint runs as root and `mkdir -p`s the runtime
+ * dirs before dropping privs. Bind-mounted host paths inherit whoever
+ * created the dir first — pre-creating them as the host UID makes
+ * sail's mkdir a no-op and preserves host ownership. Vapor's
+ * `RecursiveDirectoryIterator` halts on the unreadable root-owned
+ * `storage/framework/testing/` otherwise.
+ *
+ * Detect Laravel via `artisan` (cheap + reliable). Non-Laravel repos:
+ * silent skip. Idempotent — `mkdirSync({recursive: true})` is a no-op
+ * on existing dirs.
+ */
+function provisionLaravelStorageDirs(
+  repoRoot: string,
+  worktreePath: string,
+): void {
+  if (!existsSync(join(worktreePath, "artisan"))) return;
+  const dirs = [
+    "storage/framework/cache/data",
+    "storage/framework/sessions",
+    "storage/framework/testing",
+    "storage/framework/views",
+    "storage/logs",
+    "bootstrap/cache",
+  ];
+  for (const rel of dirs) {
+    const abs = join(worktreePath, rel);
+    // Skip when the dir already exists: don't `chmod` it. A pre-existing
+    // host-uid dir already wins the bind-mount ownership race (the
+    // mechanism this function is here to enforce); a pre-existing root-
+    // owned dir can't be chmod'd by the host UID anyway. Either way,
+    // touch nothing.
+    if (existsSync(abs)) continue;
+    try {
+      mkdirSync(abs, { recursive: true });
+      // Explicit chmod — `mkdirSync({mode})` is subject to the process
+      // umask (default 0o022 strips group-write → 0o755). Group-write
+      // is required so sail's www-data user (host docker group) can
+      // write inside these dirs at sibling-container runtime.
+      chmodSync(abs, 0o775);
+    } catch (err) {
+      log.warn(
+        `provisionLaravelStorageDirs: failed to provision ${abs}: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
 }
 
 /**
