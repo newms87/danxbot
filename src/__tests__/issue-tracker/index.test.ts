@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import {
   createIssueTracker,
+  formatTrackerBootLog,
   TrelloTracker,
   _resetForTesting,
 } from "../../issue-tracker/index.js";
@@ -124,5 +125,20 @@ describe("createIssueTracker", () => {
     _resetForTesting();
     createIssueTracker({ trello: null });
     expect(warn).toHaveBeenCalledTimes(2);
+  });
+});
+
+// DX-346 — pins boot log format.
+describe("formatTrackerBootLog", () => {
+  it("returns the trello-shape line with board id when a TrelloConfig is active", () => {
+    expect(formatTrackerBootLog("danxbot", TRELLO)).toBe(
+      "[danxbot] Tracker: trello (board b)",
+    );
+  });
+
+  it("returns the YAML-only-mode line when no tracker is configured", () => {
+    expect(formatTrackerBootLog("danxbot", null)).toBe(
+      "[danxbot] Tracker: none — YAML-only mode",
+    );
   });
 });

@@ -20,7 +20,7 @@ import {
 } from "./issue/reconcile.js";
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
 import { setCircuitLogger } from "./issue-tracker/circuit-breaker.js";
-import { createIssueTracker } from "./issue-tracker/index.js";
+import { createIssueTracker, formatTrackerBootLog } from "./issue-tracker/index.js";
 import {
   bootRehydrate,
   bootScheduler,
@@ -472,15 +472,12 @@ async function startWorkerMode(): Promise<void> {
   // dispatches local YAML cards, mirrors to Postgres via chokidar,
   // runs reconcile + audit — but every tracker-touching stage
   // (reconcile step 7 push, cron inbound fetch, external-id heal,
-  // retry queue, legacy Trello cleanup) skips. The boot log line
-  // tells the operator we are in this mode so they are not surprised
-  // by missing tracker activity.
+  // retry queue, legacy Trello cleanup) skips.
+  //
+  // DX-346 — one log line per repo at boot reports the active tracker
+  // mode so the operator confirms wiring at a glance.
   const repoTracker = createIssueTracker(repo);
-  if (repoTracker === null) {
-    log.info(
-      `[${repo.name}] No tracker configured — running in YAML-only mode`,
-    );
-  }
+  log.info(formatTrackerBootLog(repo.name, repoTracker !== null ? repo.trello : null));
   const retrySystemErrorHook = (message: string): void => {
     recordSystemError({
       source: "retry-queue",

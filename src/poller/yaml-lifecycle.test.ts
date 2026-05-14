@@ -149,7 +149,7 @@ describe("yaml-lifecycle", () => {
   describe("hydrateFromRemote", () => {
     it("calls tracker.getCard + tracker.getComments and writes valid YAML with stamped dispatch_id", async () => {
       const tracker = new FakeTracker();
-      // Seed a memory card carrying an internal id (the memory tracker
+      // Seed a card carrying an internal id (the FakeTracker
       // round-trips it; getCard returns it as `Issue.id` so hydrate
       // doesn't have to allocate a new ISS-N).
       const { external_id } = await tracker.createCard(
@@ -179,7 +179,7 @@ describe("yaml-lifecycle", () => {
 
     it("allocates a new ISS-N when the remote card has no id (legacy / human-created)", async () => {
       const tracker = new FakeTracker();
-      // Memory tracker preserves whatever id we seed — empty here means
+      // FakeTracker preserves whatever id we seed — empty here means
       // the equivalent of "remote card created without a `#ISS-N: ` prefix".
       const { external_id } = await tracker.createCard(
         defaultCreate({ id: "" }),

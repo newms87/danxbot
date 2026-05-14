@@ -666,7 +666,7 @@ describe("validateIssue", () => {
     }
   });
 
-  it("accepts empty external_id (memory tracker / pre-create draft)", () => {
+  it("accepts empty external_id (pre-create draft / YAML-only mode)", () => {
     const result = validateIssue(valid({ external_id: "" }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(true);
   });

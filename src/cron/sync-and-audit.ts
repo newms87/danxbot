@@ -129,13 +129,14 @@ function getState(repoName: string): RepoCronState {
 /**
  * Cache of one IssueTracker per repo, populated lazily by `getRepoTracker`.
  *
- * The cache is essential for in-memory tracker stubs used by tests:
- * a fresh tracker per tick would lose every card it ever stored,
- * breaking any scenario that drives a full ToDo → In Progress → Done
- * lifecycle through repeated `poll()` calls. With caching, the
- * in-memory card sequence survives the entire run. `TrelloTracker`
- * also benefits — `checklistIdCache` and `triagedLabelIdCache`
- * survive across ticks instead of cold-starting every minute.
+ * The cache is essential for the test-only tracker stub (see
+ * `src/__tests__/helpers/` for the in-memory implementation) used by
+ * suites that drive a full ToDo → In Progress → Done lifecycle
+ * through repeated `poll()` calls: a fresh tracker per tick would
+ * lose every card it ever stored. With caching, the stored card
+ * sequence survives the entire run. `TrelloTracker` also benefits —
+ * `checklistIdCache` and `triagedLabelIdCache` survive across ticks
+ * instead of cold-starting every minute.
  *
  * **Lifecycle invariant:** the cache lives until process restart. The
  * worker never rotates `RepoContext` at runtime — credential changes
@@ -262,8 +263,8 @@ async function _sync(repo: RepoContext): Promise<void> {
     syncRepoFiles(repo);
 
     // ONE tracker per repo, reused across every tick (see
-    // `getRepoTracker`). Cached state (in-memory tracker stub cards
-    // for tests, Trello checklist + label id caches for production)
+    // `getRepoTracker`). Cached state (test-only stub cards for
+    // tests, Trello checklist + label id caches for production)
     // survives the tick so tests can assert on a single mock.
     //
     // DX-342 — `null` in YAML-only mode. `runInboundFetch` is the

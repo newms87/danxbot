@@ -1,6 +1,8 @@
 # Danxbot
 
-An autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to any repo, processes Trello cards, and optionally answers questions via Slack.
+An autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to any repo, processes local issue cards stored as YAML, optionally mirrors them to Trello, and optionally answers questions via Slack.
+
+Issue cards live at `<repo>/.danxbot/issues/{open,closed}/<id>.yml` and are the single source of truth. Trello is a one-way mirror for human visibility (opt in per repo with `DANX_TRELLO_ENABLED=true`); Slack is independently opt-in. The dispatch lifecycle (YAML → DB mirror → reconcile → picker → agent run → terminal save) runs regardless of which surfaces are enabled.
 
 ## How It Works
 
@@ -14,7 +16,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 2. The **Router** (a fast Haiku call) triages the message: sends an instant reply and decides whether the full agent is needed
 3. If needed, `dispatch()` spawns a Claude Code CLI subprocess; the dispatched agent explores the connected repo and writes its final reply back to the Slack thread via the `danxbot_slack_reply` MCP tool
 4. A **Dashboard** on port 5555 shows live event tracking and analytics
-5. A **Poller** watches a Trello board and autonomously processes cards (works without Slack)
+5. A **Poller** watches `<repo>/.danxbot/issues/open/*.yml` and autonomously dispatches each ToDo card to a Claude Code agent (works without Slack, and without Trello — Trello, when enabled, is a one-way mirror for human visibility)
 
 ## Quick Start
 
@@ -22,7 +24,7 @@ Slack message → Router (Haiku, ~300ms) → quick response to Slack
 git clone <this-repo> danxbot && cd danxbot && ./install.sh
 ```
 
-The interactive setup wizard guides you through credentials, Trello board setup, repo connection, and generates all config files. No manual `.env` editing needed.
+The interactive setup wizard guides you through credentials, Trello board setup, repo connection, and generates all config files. No manual `.env` editing needed. The Trello mirror and Slack listener are independently opt-in per repo via `DANX_TRELLO_ENABLED=true` and Slack credentials in `<repo>/.danxbot/.env`.
 
 ## Architecture
 
@@ -44,7 +46,7 @@ The interactive setup wizard guides you through credentials, Trello board setup,
 - Claude Code CLI (`npm i -g @anthropic-ai/claude-code`)
 - An Anthropic API key
 - A GitHub personal access token
-- A Trello account
+- A Trello account (used for the optional Trello mirror surface)
 
 ## Development
 

@@ -71,3 +71,23 @@ export function createIssueTracker(ctx: { trello: TrelloConfig | null }): IssueT
 export function _resetForTesting(): void {
   warnedLegacyMemoryEnv = false;
 }
+
+/**
+ * DX-346 — operator-facing boot log line per repo. Format matches the
+ * AC verbatim so multi-repo deployments can confirm the active tracker
+ * mode at a glance from worker logs. Pure helper so tests pin the
+ * string shape without spinning up the worker boot stack.
+ *
+ * Takes the `TrelloConfig | null` directly so the helper cannot be
+ * called with a mismatched (null tracker + non-empty boardId) combo
+ * — the boardId lives on the same object that signals mode.
+ */
+export function formatTrackerBootLog(
+  repoName: string,
+  trello: TrelloConfig | null,
+): string {
+  if (trello !== null) {
+    return `[${repoName}] Tracker: trello (board ${trello.boardId})`;
+  }
+  return `[${repoName}] Tracker: none — YAML-only mode`;
+}
