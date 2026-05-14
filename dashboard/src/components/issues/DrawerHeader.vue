@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type { Issue, IssueDetail } from "../../types";
-import { patchIssue } from "../../api";
+import { getIssueSubtree, patchIssue } from "../../api";
 import TypeBadge from "./TypeBadge.vue";
 import AgentBadge from "../AgentBadge.vue";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
@@ -140,6 +140,62 @@ function onTitleKeydown(e: KeyboardEvent): void {
     void startEdit();
   }
 }
+
+// DX-519 — Copy button. Fetches the subtree (root + every descendant
+// in `children[]` recursively), writes the resulting `IssueCopyPayload`
+// JSON to the clipboard via `navigator.clipboard.writeText`, surfaces a
+// transient inline status. The Paste affordance on the Issues page
+// consumes the same JSON via `POST /api/issues/import`.
+const copyState = ref<"idle" | "copying" | "copied" | "error">("idle");
+const copyMessage = ref<string | null>(null);
+let copyResetTimer: number | null = null;
+
+function clearCopyResetTimer(): void {
+  if (copyResetTimer !== null) {
+    window.clearTimeout(copyResetTimer);
+    copyResetTimer = null;
+  }
+}
+
+onBeforeUnmount(clearCopyResetTimer);
+
+watch(
+  () => props.issue.id,
+  () => {
+    clearCopyResetTimer();
+    copyState.value = "idle";
+    copyMessage.value = null;
+  },
+);
+
+async function onCopy(): Promise<void> {
+  if (copyState.value === "copying") return;
+  clearCopyResetTimer();
+  copyState.value = "copying";
+  copyMessage.value = null;
+  try {
+    const payload = await getIssueSubtree(props.repo, props.issue.id);
+    const text = JSON.stringify(payload);
+    if (!navigator.clipboard?.writeText) {
+      throw new Error(
+        "Clipboard API not available — open the dashboard over HTTPS or localhost",
+      );
+    }
+    await navigator.clipboard.writeText(text);
+    const n = payload.issues.length;
+    copyState.value = "copied";
+    copyMessage.value = `Copied ${n} ${n === 1 ? "card" : "cards"}`;
+  } catch (err) {
+    copyState.value = "error";
+    copyMessage.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    copyResetTimer = window.setTimeout(() => {
+      copyState.value = "idle";
+      copyMessage.value = null;
+      copyResetTimer = null;
+    }, 2500);
+  }
+}
 </script>
 
 <template>
@@ -160,6 +216,20 @@ function onTitleKeydown(e: KeyboardEvent): void {
         />
       </span>
       <button
+        type="button"
+        class="copy-btn"
+        data-test="drawer-copy"
+        :disabled="copyState === 'copying'"
+        :title="copyMessage ?? 'Copy this card and all descendants to clipboard'"
+        :aria-label="copyMessage ?? 'Copy this card and all descendants'"
+        @click="onCopy"
+      >
+        <span v-if="copyState === 'copying'">…</span>
+        <span v-else-if="copyState === 'copied'" data-test="drawer-copy-success">✓</span>
+        <span v-else-if="copyState === 'error'" data-test="drawer-copy-error">!</span>
+        <span v-else>⧉</span>
+      </button>
+      <button
         v-if="props.showClose"
         type="button"
         class="close"
@@ -167,6 +237,13 @@ function onTitleKeydown(e: KeyboardEvent): void {
         @click="emit('close')"
       >×</button>
     </div>
+    <div
+      v-if="copyMessage && copyState !== 'copying'"
+      class="copy-toast"
+      :class="{ 'copy-toast-error': copyState === 'error' }"
+      data-test="drawer-copy-toast"
+      role="status"
+    >{{ copyMessage }}</div>
     <template v-if="editing">
       <input
         ref="inputEl"
@@ -303,6 +380,45 @@ function onTitleKeydown(e: KeyboardEvent): void {
   line-height: 1;
   padding: 0 4px;
   font-family: inherit;
+}
+.copy-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  min-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.copy-btn:hover:not(:disabled) {
+  color: #cbd5e1;
+  background: rgb(51 65 85 / 0.4);
+  border-color: rgb(99 102 241 / 0.3);
+}
+.copy-btn:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}
+.copy-toast {
+  font-size: 11px;
+  font-weight: 500;
+  color: #86efac;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgb(34 197 94 / 0.12);
+  border: 1px solid rgb(34 197 94 / 0.3);
+  align-self: flex-start;
+}
+.copy-toast.copy-toast-error {
+  color: #fca5a5;
+  background: rgb(239 68 68 / 0.12);
+  border-color: rgb(239 68 68 / 0.35);
 }
 .title {
   margin: 0;

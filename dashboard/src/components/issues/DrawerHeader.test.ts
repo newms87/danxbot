@@ -6,10 +6,25 @@ import type { IssueDetail } from "../../types";
 
 vi.mock("../../api", () => ({
   patchIssue: vi.fn(),
+  getIssueSubtree: vi.fn(),
 }));
 
-import { patchIssue } from "../../api";
+import { getIssueSubtree, patchIssue } from "../../api";
 const patchMock = vi.mocked(patchIssue);
+const subtreeMock = vi.mocked(getIssueSubtree);
+
+// Replace navigator.clipboard so Copy tests can intercept writeText. The
+// happy-dom build doesn't ship a real clipboard implementation, and the
+// component refuses to copy when `navigator.clipboard?.writeText` is
+// undefined.
+function installClipboardStub(): { writeText: ReturnType<typeof vi.fn> } {
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  return { writeText };
+}
 
 const AgentBadgeStub = defineComponent({
   name: "AgentBadge",
@@ -330,5 +345,91 @@ describe("DrawerHeader requires_human rollup (DX-267)", () => {
     expect(
       w.get('[data-test="drawer-rh-children-line"]').text(),
     ).toContain("2 phases need human action");
+  });
+});
+
+describe("DrawerHeader Copy button (DX-519)", () => {
+  beforeEach(() => {
+    subtreeMock.mockReset();
+  });
+
+  function samplePayload(n: number) {
+    return {
+      schema_version: 8 as const,
+      issues: Array.from({ length: n }).map((_, i) => ({
+        ...makeDetail({ id: `DX-${100 + i}` }),
+        // IssueCopyPayload.issues is Issue[], drop the IssueDetail-only
+        // fields the API never returns from /subtree.
+      })),
+    };
+  }
+
+  it("fetches the subtree, writes the JSON to clipboard, surfaces a 'Copied N cards' toast", async () => {
+    const payload = samplePayload(3);
+    subtreeMock.mockResolvedValue(payload as never);
+    const clip = installClipboardStub();
+
+    const w = mountHeader();
+    await w.get('[data-test="drawer-copy"]').trigger("click");
+
+    await vi.waitFor(() => {
+      expect(subtreeMock).toHaveBeenCalledWith("danxbot", "DX-1");
+    });
+    await vi.waitFor(() => {
+      expect(clip.writeText).toHaveBeenCalledTimes(1);
+    });
+    const writtenText = clip.writeText.mock.calls[0][0] as string;
+    const parsed = JSON.parse(writtenText);
+    expect(parsed.schema_version).toBe(8);
+    expect(parsed.issues).toHaveLength(3);
+
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-copy-toast"]').text()).toContain(
+        "Copied 3 cards",
+      );
+    });
+  });
+
+  it("singular-pluralizes the toast for a single-card payload", async () => {
+    const payload = samplePayload(1);
+    subtreeMock.mockResolvedValue(payload as never);
+    installClipboardStub();
+
+    const w = mountHeader();
+    await w.get('[data-test="drawer-copy"]').trigger("click");
+    await vi.waitFor(() => {
+      expect(w.get('[data-test="drawer-copy-toast"]').text()).toContain(
+        "Copied 1 card",
+      );
+    });
+  });
+
+  it("surfaces an error toast when the subtree fetch fails", async () => {
+    subtreeMock.mockRejectedValue(new Error("Issue \"DX-1\" not found"));
+    installClipboardStub();
+
+    const w = mountHeader();
+    await w.get('[data-test="drawer-copy"]').trigger("click");
+    await vi.waitFor(() => {
+      const toast = w.get('[data-test="drawer-copy-toast"]');
+      expect(toast.text()).toContain("not found");
+      expect(toast.classes()).toContain("copy-toast-error");
+    });
+  });
+
+  it("surfaces an error toast when navigator.clipboard is unavailable", async () => {
+    subtreeMock.mockResolvedValue(samplePayload(1) as never);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: undefined,
+    });
+
+    const w = mountHeader();
+    await w.get('[data-test="drawer-copy"]').trigger("click");
+    await vi.waitFor(() => {
+      const toast = w.get('[data-test="drawer-copy-toast"]');
+      expect(toast.text()).toContain("Clipboard API not available");
+      expect(toast.classes()).toContain("copy-toast-error");
+    });
   });
 });

@@ -64,6 +64,10 @@ import {
   handleListIssues,
 } from "./issues-routes.js";
 import { handlePatchIssue, handlePostIssue } from "./issue-write.js";
+import {
+  handleGetIssueSubtree,
+  handleImportIssues,
+} from "./issue-import.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleLogin,
@@ -458,6 +462,47 @@ async function route(
     await handlePostIssue(
       req,
       res,
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // POST /api/issues/import?repo=<name> — DX-519. Dashboard paste handler.
+  // Accepts an `IssueCopyPayload` (root issue + every descendant),
+  // allocates fresh `<PREFIX>-N` ids against the target repo's id space,
+  // rewrites every internal reference to point at the new ids, and
+  // atomically writes every YAML or none. Same user-bearer auth band as
+  // the create / patch counterparts — handler's own `requireUser` produces
+  // the 401. Path matched ahead of POST /api/issues so the more specific
+  // suffix wins; matched ahead of the blanket gate so the handler controls
+  // the 401 response.
+  if (method === "POST" && url.pathname === "/api/issues/import") {
+    await handleImportIssues(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // GET /api/issues/:id/subtree?repo=<name> — DX-519. Dashboard Copy
+  // handler. Walks `children[]` from the root id, strips repo-specific
+  // bits, and returns an `IssueCopyPayload` the SPA writes to the
+  // clipboard. Matched ahead of the blanket /api/* gate so the handler's
+  // own `requireUser` produces the 401; matched ahead of the generic
+  // `GET /api/issues/:id` route (in the authed-routes section below)
+  // because the more-specific `/subtree` suffix would otherwise be
+  // unreachable.
+  const issueSubtreeMatch = url.pathname.match(
+    /^\/api\/issues\/([^/]+)\/subtree$/,
+  );
+  if (method === "GET" && issueSubtreeMatch) {
+    await handleGetIssueSubtree(
+      req,
+      res,
+      decodeURIComponent(issueSubtreeMatch[1]),
       url.searchParams.get("repo"),
       dispatchDeps,
     );

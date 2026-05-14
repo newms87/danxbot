@@ -11,6 +11,7 @@ import type {
   EffortLevelName,
   Feature,
   Issue,
+  IssueCopyPayload,
   IssueDetail,
   IssueListItem,
   IssuePatch,
@@ -209,6 +210,60 @@ export async function createIssue(
   if (!res.ok) throw toggleError(res.status, await readJsonError(res));
   const body = (await res.json()) as { issue: Issue };
   return body.issue;
+}
+
+/**
+ * GET /api/issues/:id/subtree?repo=<name> — DX-519. Reads the root issue
+ * plus every descendant in `children[]` recursively, strips repo-specific
+ * bits (external_id, tracker, dispatch, triage, history, assigned_agent,
+ * position, comment ids, ac check_item_ids), and returns the resulting
+ * `IssueCopyPayload`. The Copy button in the drawer writes the JSON
+ * response to the clipboard via `navigator.clipboard.writeText`.
+ *
+ * Errors surface as a `ToggleError`. 404 when the root id is missing or
+ * a descendant is missing (incoherent subtree).
+ */
+export async function getIssueSubtree(
+  repo: string,
+  id: string,
+): Promise<IssueCopyPayload> {
+  const params = new URLSearchParams({ repo });
+  const res = await fetchWithAuth(
+    `/api/issues/${encodeURIComponent(id)}/subtree?${params.toString()}`,
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as IssueCopyPayload;
+}
+
+/**
+ * POST /api/issues/import?repo=<name> — DX-519. Paste handler. The
+ * server allocates fresh `<PREFIX>-N` ids for every issue in the
+ * payload, rewrites every internal reference (`parent_id`, `children[]`,
+ * `waiting_on.by[]`, `conflict_on[].id`, `retro.action_item_ids[]`) to
+ * point at the new ids, and atomically writes every YAML or none.
+ *
+ * Returns `{topId, issues}` so the caller can open the drawer on the
+ * new top-level card without waiting for the SSE round-trip.
+ *
+ * Errors surface as a `ToggleError`. 400 on payload shape failures
+ * (missing schema_version, empty issues[], bad id shape) or
+ * round-trip validation failure (e.g. invalid status enum after
+ * rewrite); 401 on auth; 404 on unknown repo.
+ */
+export async function importIssues(
+  repo: string,
+  payload: IssueCopyPayload,
+): Promise<{ topId: string; issues: Issue[] }> {
+  const res = await fetchWithAuth(
+    `/api/issues/import?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as { topId: string; issues: Issue[] };
 }
 
 /**

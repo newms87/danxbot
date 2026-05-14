@@ -236,7 +236,7 @@ async function withPerIdLock<T>(
  */
 const inFlightCreate = new Map<string, Promise<void>>();
 
-async function withPerRepoCreateLock<T>(
+export async function withPerRepoCreateLock<T>(
   repoLocalPath: string,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -280,7 +280,7 @@ async function withPerRepoCreateLock<T>(
  * Caller MUST have already validated the serialized YAML round-trips
  * through `parseIssue`; this helper is pure disk I/O.
  */
-function writeIssueYamlAtomic(
+export function writeIssueYamlAtomic(
   targetPath: string,
   serialized: string,
   idForError: string,

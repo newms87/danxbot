@@ -449,6 +449,35 @@ export interface ConflictOnEntry {
   reason: string;
 }
 
+/**
+ * Repo-agnostic clipboard payload produced by the dashboard's Copy
+ * affordance (DX-519). Carries one root issue plus every descendant in
+ * its `children[]` hierarchy, fully stripped of repo-specific bits
+ * (`external_id`, `tracker`, `dispatch`, `triage`, `history`,
+ * `assigned_agent`, `position`). Issue ids inside the payload are the
+ * SOURCE repo's ids — the paste-side import handler allocates fresh
+ * ids against the TARGET repo's `<PREFIX>-N` sequence and rewrites
+ * every internal `parent_id` / `children[]` / `waiting_on.by[]` /
+ * `conflict_on[].id` reference to point at the new ids. References
+ * outside the payload (e.g. `retro.action_item_ids[]` pointing at a
+ * card the operator did not copy) are kept verbatim and render as
+ * `<PREFIX-N>: unknown` in the dashboard until the operator
+ * re-creates them.
+ *
+ * `schema_version` matches the current writer literal so a stale
+ * payload pasted into a newer dashboard surfaces the same forward-
+ * compat warn-then-accept path the YAML parser uses (`yaml.ts`
+ * `KNOWN_SCHEMA_MAX`). A payload from a future dashboard pasted into
+ * an older one is rejected fail-loud at parse — the import handler
+ * round-trips every entry through `parseIssue` so unknown future
+ * fields drop silently AND incompatibly-shaped fields surface as a
+ * 400.
+ */
+export interface IssueCopyPayload {
+  schema_version: 8;
+  issues: Issue[];
+}
+
 export interface Issue {
   schema_version: 8;
   tracker: string;

@@ -102,6 +102,7 @@ export type {
   IssueType,
   IssueAcItem,
   IssueComment,
+  IssueCopyPayload,
   IssueRetro,
   IssueHistoryEntry,
   IssueHistoryEvent,
