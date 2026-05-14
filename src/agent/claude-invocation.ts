@@ -58,12 +58,68 @@ export interface BuildClaudeInvocationOptions {
    */
   model?: string;
   /**
+   * DX-513 — opaque per-model effort knob. When the selected `model` is a
+   * thinking-capable family (sonnet, opus), the value is forwarded as
+   * `--effort <value>` to claude. For haiku models the flag is omitted
+   * (no thinking budget exists). Values outside claude's accepted set
+   * (`low|medium|high|xhigh|max`) are silently dropped — the operator's
+   * default ladder uses `"minimal"` on the haiku rows which falls into
+   * exactly that drop branch (haiku's `model.startsWith("claude-haiku")`
+   * gate would skip the flag anyway, but the validation gate covers a
+   * future operator who pastes `"minimal"` onto a sonnet row).
+   */
+  effort?: string;
+  /**
    * Claude session UUID to resume via `--resume <id>`. When set, claude loads
    * the prior session's history and appends new turns to the same JSONL file.
    * The dispatch tag is still prepended to the firstMessage, so SessionLogWatcher
    * finds this spawn's slice of the shared JSONL by scanning for the new tag.
    */
   resumeSessionId?: string;
+}
+
+/**
+ * DX-513 — claude CLI's `--effort` flag accepts exactly these values
+ * (per `claude --help`). Any other knob value (e.g. the default
+ * ladder's `"minimal"` haiku effort, or an operator typo) is dropped
+ * at flag-emission time rather than passed verbatim — passing an
+ * unknown value would fail loud inside claude's argv parser and abort
+ * the spawn.
+ */
+const KNOWN_CLAUDE_EFFORT_VALUES: ReadonlySet<string> = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+/**
+ * DX-513 — decide whether a `--effort` flag should be emitted for the
+ * resolved `{model, effort}` pair.
+ *
+ * Two gates, both must clear:
+ *   1. Model is thinking-capable. Haiku models have no thinking
+ *      budget; the flag is meaningless and CLI parsing rejects it
+ *      depending on the model selection. Skip silently.
+ *   2. Effort value is in claude's accepted set. Operator-supplied
+ *      values that fall outside the set (the ladder's `"minimal"`,
+ *      operator typos, future CLI extensions we haven't caught up
+ *      to) are dropped silently — the spawn proceeds without the
+ *      flag, claude uses its own default for the model.
+ *
+ * Exported for unit-test transparency. Production callers consume the
+ * flag emission via `buildClaudeInvocation` directly; this helper is
+ * not on a hot path.
+ */
+export function effortFlagFor(
+  model: string | undefined,
+  effort: string | undefined,
+): string[] {
+  if (!model || !effort) return [];
+  if (model.startsWith("claude-haiku")) return [];
+  if (!KNOWN_CLAUDE_EFFORT_VALUES.has(effort)) return [];
+  return ["--effort", effort];
 }
 
 /**
@@ -167,6 +223,8 @@ export function buildClaudeInvocation(
   if (options.model) {
     flags.push("--model", options.model);
   }
+
+  flags.push(...effortFlagFor(options.model, options.effort));
 
   if (options.mcpConfigPath) {
     flags.push("--mcp-config", options.mcpConfigPath);

@@ -800,6 +800,189 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
     });
   });
 
+  describe("effort fallback chain (DX-513)", () => {
+    // End-to-end pin of the Phase 5 contract: `dispatch()` resolves
+    // (card `effort_level` → agent default → built-in `"medium"`) into
+    // the operator's effortLevels ladder, then threads `{model, effort}`
+    // onto `spawnAgent` options. The argv assertion happens at the
+    // mocked-spawn boundary so this test costs zero Claude tokens (it
+    // replaces the AC's "system-test addendum" — `make test-system-dispatch`
+    // would actually hit Claude, defeating the "free-tier" intent).
+    async function writeCandidateWithEffort(
+      id: string,
+      effort_level: "min" | "very_low" | "low" | "medium" | "high" | "very_high" | "max" | null,
+    ): Promise<void> {
+      const { createEmptyIssue, serializeIssue } = await import(
+        "../issue-tracker/yaml.js"
+      );
+      const yamlPath = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "issues",
+        "open",
+        `${id}.yml`,
+      );
+      writeFileSync(
+        yamlPath,
+        serializeIssue(
+          createEmptyIssue({
+            id,
+            status: "ToDo",
+            title: `${id} title`,
+            description: "fixture",
+            effort_level,
+          }),
+        ),
+      );
+    }
+
+    it("card with `effort_level: 'very_low'` resolves to claude-haiku model + skips --effort flag (haiku has no thinking budget)", async () => {
+      // The "system test addendum" from the AC. Default DX-509 ladder:
+      // `very_low` → `{model: "claude-haiku-4-5", effort: "low"}`. Haiku
+      // models silently skip the `--effort` flag (see effortFlagFor +
+      // claude-invocation.test.ts), so the spawnAgent options carry the
+      // haiku model AND `effort: "low"` (the launcher's claude-invocation
+      // gate is what drops the flag, not dispatch core).
+      await writeCandidateWithEffort("ISS-200", "very_low");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-prep ISS-200\n\n/danx-next ISS-200",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-200",
+        dispatchKind: "work",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-haiku-4-5");
+      expect(opts.effort).toBe("low");
+    });
+
+    it("card with `effort_level: 'high'` resolves to claude-sonnet + 'medium' knob", async () => {
+      // Default ladder row: `high` → `{model: "claude-sonnet-4-6", effort: "medium"}`.
+      await writeCandidateWithEffort("ISS-201", "high");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-next ISS-201",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-201",
+        dispatchKind: "work",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-sonnet-4-6");
+      expect(opts.effort).toBe("medium");
+    });
+
+    it("card with `effort_level: 'max'` resolves to claude-opus + 'high' knob", async () => {
+      await writeCandidateWithEffort("ISS-202", "max");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-next ISS-202",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-202",
+        dispatchKind: "work",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-opus-4-7");
+      expect(opts.effort).toBe("high");
+    });
+
+    it("card with `effort_level: null` falls back to built-in `medium` (no agent, no card override)", async () => {
+      // No agent persona supplied; card's effort_level is null. Built-in
+      // default fires: `medium` → `{model: "claude-sonnet-4-6", effort: "low"}`.
+      await writeCandidateWithEffort("ISS-203", null);
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-next ISS-203",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-203",
+        dispatchKind: "work",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-sonnet-4-6");
+      expect(opts.effort).toBe("low");
+    });
+
+    it("no-card dispatch (Slack / external launch) falls back to built-in `medium`", async () => {
+      // `issueId` undefined → the candidate read is skipped entirely.
+      // No agent persona supplied → step 2 also skipped. Built-in
+      // default fires.
+      await dispatch({
+        repo: issueRepo,
+        task: "Slack-style dispatch",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-sonnet-4-6");
+      expect(opts.effort).toBe("low");
+    });
+
+    it("prep dispatch (dispatchKind: 'prep') still resolves effort from the card — auto-flip and effort resolution are independent gates", async () => {
+      // Pin that the candidate-YAML read used by the effort resolver
+      // is decoupled from the `dispatchKind === "work"` gate on the
+      // auto-flip. A prep-only dispatch on a card with `effort_level:
+      // "max"` should still spawn an opus + high pair (the prep agent
+      // itself benefits from the operator-configured ladder).
+      await writeCandidateWithEffort("ISS-205", "max");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-prep ISS-205",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-205",
+        dispatchKind: "prep",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-opus-4-7");
+      expect(opts.effort).toBe("high");
+      // The auto-flip is independently gated — see "skips flip when
+      // dispatchKind=prep" higher up in this file for that contract.
+    });
+
+    it("explicit caller `model` and `effort` win over the resolver (DispatchInput precedence contract)", async () => {
+      // Tests / future per-dispatch pins must be able to override the
+      // resolved values. The docstrings on `DispatchInput.model` /
+      // `effort` promise this — pin it.
+      await writeCandidateWithEffort("ISS-204", "very_low");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "/danx-next ISS-204",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-204",
+        dispatchKind: "work",
+        model: "claude-opus-4-7",
+        effort: "high",
+      });
+
+      const opts = mockSpawnAgent.mock.calls[0][0];
+      expect(opts.model).toBe("claude-opus-4-7");
+      expect(opts.effort).toBe("high");
+    });
+  });
+
   it("rejects dispatch with WorkspaceGateError when overrides.issuePoller.enabled = false (parallel to slack-worker gate test)", async () => {
     // Symmetry with the slack-worker test at line ~342. The issue-worker
     // workspace declares `settings.issuePoller.enabled ≠ false` as a gate;

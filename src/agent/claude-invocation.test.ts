@@ -3,6 +3,7 @@ import { readFileSync, rmSync, existsSync } from "node:fs";
 import {
   buildClaudeInvocation,
   bashSingleQuote,
+  effortFlagFor,
   INLINE_PROMPT_THRESHOLD,
 } from "./claude-invocation.js";
 import { DISPATCH_TAG_PREFIX } from "./session-log-watcher.js";
@@ -374,6 +375,103 @@ describe("buildClaudeInvocation — shared for docker + host runtimes", () => {
     expect(b.promptDir).toBeNull();
     expect(a.firstMessage).toBe(b.firstMessage);
     expect(a.flags).toEqual(b.flags);
+  });
+});
+
+describe("buildClaudeInvocation — --effort flag (DX-513)", () => {
+  it("emits --model + --effort for a sonnet model + accepted knob", () => {
+    // The launcher's contract: sonnet/opus families pass their effort
+    // knob directly to claude's `--effort` flag. The flag's accepted
+    // values are `low|medium|high|xhigh|max` (per `claude --help`).
+    const inv = build({ model: "claude-sonnet-4-6", effort: "medium" });
+    const modelIdx = inv.flags.indexOf("--model");
+    expect(modelIdx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[modelIdx + 1]).toBe("claude-sonnet-4-6");
+
+    const effortIdx = inv.flags.indexOf("--effort");
+    expect(effortIdx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[effortIdx + 1]).toBe("medium");
+  });
+
+  it("emits --model but SKIPS --effort for haiku models (no thinking budget)", () => {
+    // Haiku has no thinking budget. The DX-509 default ladder uses
+    // `effort: "minimal"` on the haiku rows precisely because the
+    // value never reaches claude — the launcher's haiku-skip gate
+    // drops the flag before emission. Pin both halves: the flag stays
+    // absent AND the model still routes through.
+    const inv = build({ model: "claude-haiku-4-5", effort: "medium" });
+    expect(inv.flags).toContain("--model");
+    const modelIdx = inv.flags.indexOf("--model");
+    expect(inv.flags[modelIdx + 1]).toBe("claude-haiku-4-5");
+    expect(inv.flags).not.toContain("--effort");
+  });
+
+  it("emits --model but SKIPS --effort when the knob is unknown (e.g. operator typo, default ladder's 'minimal')", () => {
+    // A sonnet/opus row whose operator-configured `effort` value is
+    // not in the claude CLI's accepted set must not pass it through
+    // — that would fail loud inside argv parsing and abort the spawn.
+    // Drop silently; claude uses its own default for the model.
+    const inv = build({ model: "claude-sonnet-4-6", effort: "minimal" });
+    expect(inv.flags).toContain("--model");
+    expect(inv.flags).not.toContain("--effort");
+  });
+
+  it("emits --effort for opus models (thinking-capable, same as sonnet)", () => {
+    const inv = build({ model: "claude-opus-4-7", effort: "high" });
+    const effortIdx = inv.flags.indexOf("--effort");
+    expect(effortIdx).toBeGreaterThanOrEqual(0);
+    expect(inv.flags[effortIdx + 1]).toBe("high");
+  });
+
+  it("omits --effort when the effort field is undefined (no caller value)", () => {
+    const inv = build({ model: "claude-sonnet-4-6", effort: undefined });
+    expect(inv.flags).not.toContain("--effort");
+  });
+
+  it("omits --effort when the model is undefined (defensive — no model to scope the flag to)", () => {
+    // If a caller threads `effort` but not `model`, the flag has
+    // nowhere to route. Drop silently rather than risk emitting an
+    // `--effort` flag against claude's default model resolution.
+    const inv = build({ model: undefined, effort: "medium" });
+    expect(inv.flags).not.toContain("--effort");
+  });
+
+  it("flag order: --model comes before --effort, both before --mcp-config", () => {
+    // The flag block is order-stable for strace + log-grep readability.
+    // Locking the relative order pins anyone reordering the emitter.
+    const inv = build({
+      model: "claude-sonnet-4-6",
+      effort: "medium",
+      mcpConfigPath: "/tmp/mcp/settings.json",
+    });
+    const modelIdx = inv.flags.indexOf("--model");
+    const effortIdx = inv.flags.indexOf("--effort");
+    const mcpIdx = inv.flags.indexOf("--mcp-config");
+    expect(modelIdx).toBeGreaterThanOrEqual(0);
+    expect(effortIdx).toBeGreaterThan(modelIdx);
+    expect(mcpIdx).toBeGreaterThan(effortIdx);
+  });
+});
+
+describe("effortFlagFor — gates the --effort emission directly", () => {
+  // Direct unit on the helper so a future caller (e.g. system-test
+  // argv assertion) can re-use the contract without going through
+  // `buildClaudeInvocation`.
+  it.each([
+    ["sonnet + accepted", "claude-sonnet-4-6", "medium", ["--effort", "medium"]],
+    ["sonnet + low", "claude-sonnet-4-6", "low", ["--effort", "low"]],
+    ["sonnet + xhigh", "claude-sonnet-4-6", "xhigh", ["--effort", "xhigh"]],
+    ["sonnet + max", "claude-sonnet-4-6", "max", ["--effort", "max"]],
+    ["opus + high", "claude-opus-4-7", "high", ["--effort", "high"]],
+    ["haiku + medium → skipped", "claude-haiku-4-5", "medium", []],
+    ["haiku + minimal → skipped", "claude-haiku-4-5", "minimal", []],
+    ["sonnet + minimal → unknown knob skipped", "claude-sonnet-4-6", "minimal", []],
+    ["sonnet + unknown gibberish → skipped", "claude-sonnet-4-6", "frobnicate", []],
+    ["model undefined → skipped", undefined, "medium", []],
+    ["effort undefined → skipped", "claude-sonnet-4-6", undefined, []],
+    ["both undefined → skipped", undefined, undefined, []],
+  ])("%s", (_label, model, effort, expected) => {
+    expect(effortFlagFor(model, effort)).toEqual(expected);
   });
 });
 

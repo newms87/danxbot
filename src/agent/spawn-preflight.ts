@@ -167,6 +167,7 @@ export async function runSpawnPreflight(
     agents: options.agents,
     topLevelAgent: options.topLevelAgent,
     model: options.model,
+    effort: options.effort,
     resumeSessionId: options.resumeSessionId,
   });
   const { flags, firstMessage, promptDir } = invocation;

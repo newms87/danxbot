@@ -81,6 +81,8 @@ import {
   loadLocalFromDisk,
   stampStatusAndWrite,
 } from "../poller/yaml-lifecycle.js";
+import { resolveEffortToFlags } from "../settings-file.js";
+import { resolveDispatchEffort } from "./resolve-dispatch-effort.js";
 
 const ttlTimerDeps: TtlTimerDeps = {
   isPidAlive,
@@ -303,8 +305,22 @@ export interface DispatchInput {
    * basis (e.g. conflict-check pins Sonnet so verdicts get reasoning
    * quality regardless of the host's default). Omit to let claude
    * resolve its own default.
+   *
+   * DX-513 — when omitted, `dispatch()` resolves a default via the
+   * effort-level fallback chain (card → agent → built-in) and the
+   * operator's effortLevels ladder. Explicit caller value still wins
+   * — set this to override the resolver for tests / future per-
+   * dispatch pins.
    */
   model?: string;
+  /**
+   * DX-513 — opaque per-model effort knob (companion to `model`). Same
+   * precedence as `model`: explicit caller wins; otherwise resolved by
+   * the effort fallback chain. The launcher emits `--effort <value>`
+   * for thinking-capable models (sonnet, opus) and silently skips it
+   * for haiku. See `resolveDispatchEffort` + `resolveEffortToFlags`.
+   */
+  effort?: string;
   /**
    * Open an interactive Windows Terminal tab alongside the headless claude.
    * Defaults to `config.isHost`. Callers rarely override — only scenarios
@@ -738,6 +754,7 @@ async function runResolved(
         settingsPath: resolved.settingsPath,
         topLevelAgent: resolved.topLevelAgent,
         model: input.model,
+        effort: input.effort,
         statusUrl: input.statusUrl,
         apiToken: input.apiToken,
         maxRuntimeMs: input.maxRuntimeMs,
@@ -1292,22 +1309,54 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // (logged on failure) — a stuck In Progress card is recoverable by
   // operator action; throwing during revert would mask the original
   // spawn failure.
+  //
+  // DX-513 — also reuse the candidate read to pull `effort_level` for
+  // the effort fallback chain below. One disk read covers both
+  // concerns regardless of `dispatchKind` — prep/triage dispatches
+  // with `issueId` get effort resolution from the card just like work
+  // dispatches; only the auto-flip itself is gated on
+  // `dispatchKind === "work"`.
   let priorStatus: Issue["status"] | undefined;
-  if (input.issueId && input.dispatchKind === "work") {
+  let candidateEffortLevel: Issue["effort_level"] | undefined;
+  if (input.issueId) {
     const candidate = loadLocalFromDisk(
       input.repo.localPath,
       input.issueId,
       input.repo.issuePrefix,
     );
-    if (candidate && candidate.status === "ToDo") {
-      priorStatus = candidate.status;
-      await stampStatusAndWrite(
-        input.repo.localPath,
-        candidate,
-        "In Progress",
-      );
+    if (candidate) {
+      candidateEffortLevel = candidate.effort_level;
+      if (input.dispatchKind === "work" && candidate.status === "ToDo") {
+        priorStatus = candidate.status;
+        await stampStatusAndWrite(
+          input.repo.localPath,
+          candidate,
+          "In Progress",
+        );
+      }
     }
   }
+
+  // DX-513 — resolve the effort fallback chain and the `{model, effort}`
+  // pair the launcher forwards as `--model` + `--effort` claude CLI
+  // flags. Three-step chain: card override → agent default → built-in
+  // (`"medium"`). The explicit `input.model` / `input.effort` caller
+  // values still win (tests, future per-dispatch pins), matching the
+  // contract on the `DispatchInput.model` / `effort` doc blocks.
+  const resolvedEffortName = resolveDispatchEffort({
+    cardEffortLevel: candidateEffortLevel,
+    agentName: input.agent?.name ?? null,
+    repoLocalPath: input.repo.localPath,
+  });
+  const resolvedFlags = resolveEffortToFlags(
+    input.repo.localPath,
+    resolvedEffortName,
+  );
+  const inputWithEffort: DispatchInput = {
+    ...inputWithPersona,
+    model: input.model ?? resolvedFlags.model,
+    effort: input.effort ?? resolvedFlags.effort,
+  };
 
   // No allowlist: the workspace's `.mcp.json` (with the danxbot
   // infrastructure server merged in here) IS the agent's MCP surface.
@@ -1317,7 +1366,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // listed anywhere.
   try {
     return await runResolved(
-      inputWithPersona,
+      inputWithEffort,
       dispatchId,
       {
         mcpServers,

@@ -319,6 +319,16 @@ export interface SpawnAgentOptions {
    * built-in default).
    */
   model?: string;
+  /**
+   * DX-513 — opaque per-model effort knob. Threaded through to
+   * `buildClaudeInvocation`, which emits `--effort <value>` for thinking-
+   * capable models (sonnet, opus) and silently skips it for haiku. The
+   * dispatch boundary owns "which level" via `resolveDispatchEffort` +
+   * `resolveEffortToFlags`; the launcher owns "which CLI flag" via this
+   * pass-through. Unknown values drop silently at flag-emission time —
+   * see `effortFlagFor` in `claude-invocation.ts`.
+   */
+  effort?: string;
   /** Status URL for heartbeat/putStatus (stored on AgentJob for startHeartbeat) */
   statusUrl?: string;
   /** API token for heartbeat and event forwarding */
