@@ -83,6 +83,7 @@ vi.mock("./repo-env-writer.js", () => ({
 }));
 
 import {
+  handleClearAgentBroken,
   handleClearAgentCriticalFailure,
   handleGetRoster,
   handlePatchToggle,
@@ -897,6 +898,87 @@ describe("handleReRunEvaluator (DX-367 — dashboard proxy)", () => {
     // Body parsed as `{}` → the proxy IS called with `{}` (worker
     // returns the 400 for missing name). That's the correct behavior
     // for our thin proxy — body validation lives on the worker.
+    expect(mockProxyToWorkerWithFallback).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ============================================================
+// POST /api/agents/:repo/unblock — DX-369 (Phase 6 of DX-363)
+// Dashboard handler is a thin proxy to the worker's /api/clear-broken
+// (the strike counter + broken record live in settings.json which the
+// worker owns via mutateAgents's per-file lock).
+// ============================================================
+
+describe("handleClearAgentBroken (DX-369 — dashboard proxy)", () => {
+  const DEFAULT_TOKEN = "user-newms87";
+
+  function authReq(
+    body: Record<string, unknown>,
+    token = DEFAULT_TOKEN,
+  ): IncomingMessage {
+    const req = createMockReqWithBody("POST", body);
+    (req.headers as Record<string, string>)["authorization"] =
+      `Bearer ${token}`;
+    return req;
+  }
+
+  it("401 without a user bearer", async () => {
+    const req = createMockReqWithBody("POST", { name: "alice" });
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "danxbot", deps());
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
+  });
+
+  it("401 with the dispatch token (user bearer required, not the bot↔repo token)", async () => {
+    const req = authReq({ name: "alice" }, "test-dispatch-token");
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "danxbot", deps());
+    expect(res._getStatusCode()).toBe(401);
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
+  });
+
+  it("404 for an unknown repo (before forwarding)", async () => {
+    const req = authReq({ name: "alice" });
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "no-such-repo", deps());
+    expect(res._getStatusCode()).toBe(404);
+    expect(mockProxyToWorkerWithFallback).not.toHaveBeenCalled();
+  });
+
+  it("forwards a valid request to the worker's /api/clear-broken with the body verbatim", async () => {
+    const req = authReq({ name: "alice" });
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "danxbot", deps());
+
+    expect(mockProxyToWorkerWithFallback).toHaveBeenCalledTimes(1);
+    const [, , upstream, body] =
+      mockProxyToWorkerWithFallback.mock.calls[0];
+    expect(upstream).toEqual({
+      repoName: "danxbot",
+      primaryHost: "127.0.0.1",
+      port: 5562,
+      path: "/api/clear-broken",
+      method: "POST",
+    });
+    expect(JSON.parse(body as string)).toEqual({ name: "alice" });
+  });
+
+  it("does NOT touch writeSettings — write surface is the worker's mutateAgents lock", async () => {
+    const req = authReq({ name: "alice" });
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "danxbot", deps());
+    expect(mockWriteSettings).not.toHaveBeenCalled();
+  });
+
+  it("body parsed as `{}` when undefined → proxy IS called with `{}` (worker enforces the 400 for missing name)", async () => {
+    // Parity with the `handleReRunEvaluator` invalid-body case. Body
+    // validation lives on the worker — the proxy stays thin.
+    const req = createMockReqWithBody("POST", undefined);
+    (req.headers as Record<string, string>)["authorization"] =
+      `Bearer ${DEFAULT_TOKEN}`;
+    const res = createMockRes();
+    await handleClearAgentBroken(req, res, "danxbot", deps());
     expect(mockProxyToWorkerWithFallback).toHaveBeenCalledTimes(1);
   });
 });

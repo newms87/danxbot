@@ -366,6 +366,68 @@ export async function clearAgentBroken(
 }
 
 /**
+ * DX-369 (Phase 6 of DX-363) — POST /api/agents/:repo/unblock.
+ * Operator-driven "Unblock + reset strikes" action surfaced on the
+ * persistent broken-agents banner. Proxies to the worker's
+ * `/api/clear-broken` (which clears `agent.broken = null`, zeros
+ * `agent.strikes.count`, preserves `strikes.history` as audit). The
+ * `agents-watcher` chokidar feed picks up the settings.json change
+ * and fans out `agent:updated` on the SSE bus so the banner row
+ * disappears in every connected tab.
+ *
+ * On error the server's `error` string surfaces via `ToggleError` so
+ * the banner can render the message inline.
+ */
+export async function postAgentUnblock(
+  repo: string,
+  name: string,
+): Promise<{
+  status: "cleared";
+  repo: string;
+  agent: string;
+  cleared_strikes: { count: number; history: unknown[] } | null;
+}> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/unblock`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
+ * DX-369 — POST /api/agents/:repo/re-run-evaluator. Operator-driven
+ * "Re-run evaluator" action on the broken-agents banner. Forwards to
+ * the worker's `/api/re-run-evaluator` (DX-367), which flips
+ * `broken.evaluator_status` back to `"pending"` and emits a fresh
+ * `broken-transition` event so the system-evaluator dispatcher
+ * re-spawns.
+ */
+export async function postAgentReRunEvaluator(
+  repo: string,
+  name: string,
+): Promise<{
+  status: "queued";
+  repo: string;
+  agent: string;
+}> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/re-run-evaluator`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return res.json();
+}
+
+/**
  * POST /api/agents/:name/avatar?repo=<name> — raw binary upload. The
  * server validates MIME (png/jpeg/webp) and size (≤1 MB). Returns the
  * refreshed agent record carrying the new `avatar_path`.

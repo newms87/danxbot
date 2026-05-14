@@ -315,6 +315,69 @@ export async function handleReRunEvaluator(
 }
 
 /**
+ * POST /api/agents/:repo/unblock — DX-369 (Phase 6 of DX-363). User-bearer
+ * auth required.
+ *
+ * Thin proxy to the worker's `POST /api/clear-broken` (the broken stamp
+ * and the strike counter live in `<repo>/.danxbot/settings.json`, which
+ * the worker owns via `mutateAgents`'s per-file lock). The chokidar
+ * settings.json watcher running in the dashboard process detects the
+ * write and re-publishes the affected repo's snapshot on the
+ * `agent:updated` SSE topic, so every connected dashboard tab sees the
+ * banner row disappear without a manual refresh.
+ *
+ * Body forwarded verbatim: `{name: "<agent-name>"}`. Validation lives on
+ * the worker — the proxy only enforces auth + the repo allowlist; the
+ * worker maps missing/healthy/already-cleared to 400/404 with the same
+ * shape the SPA renders.
+ */
+export async function handleClearAgentBroken(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoName: string,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+
+  const repo = deps.repos.find((r) => r.name === repoName);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+
+  // Re-serialize the body for `proxyToWorkerWithFallback` — same shape
+  // as `handleReRunEvaluator`. Worker enforces `{name: "<agent>"}`.
+  let bodyStr: string;
+  try {
+    const parsed = await parseBody(req);
+    bodyStr = JSON.stringify(parsed);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  await proxyToWorkerWithFallback(
+    req,
+    res,
+    {
+      repoName: repo.name,
+      primaryHost: deps.resolveHost(repo.name),
+      port: repo.workerPort,
+      path: "/api/clear-broken",
+      method: "POST",
+    },
+    bodyStr,
+  );
+  log.info(
+    `handleClearAgentBroken(${repoName}): proxied for user=${auth.user.username}`,
+  );
+}
+
+/**
  * Reject any value containing characters that would corrupt a `.env`
  * file or smuggle additional assignments through the writer. Trello
  * API keys + tokens are alphanumeric in practice (Trello issues hex

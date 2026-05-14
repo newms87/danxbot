@@ -5,6 +5,7 @@ import DispatchList from "./components/DispatchList.vue";
 import DispatchFilters from "./components/DispatchFilters.vue";
 import DispatchDetail from "./components/DispatchDetail.vue";
 import SystemErrorsBanner from "./components/SystemErrorsBanner.vue";
+import BrokenAgentsBanner from "./components/BrokenAgentsBanner.vue";
 import AgentsPage from "./components/agents/AgentsPage.vue";
 import IssuesPage from "./components/issues/IssuesPage.vue";
 import SettingsPage from "./components/SettingsPage.vue";
@@ -156,6 +157,16 @@ function onOpenAgent(): void {
         :errors="systemErrors"
         @dismiss="dismissSystemError"
       />
+
+      <!--
+        DX-369 (Phase 6 of DX-363) — persistent red banner. Always
+        mounted below the header so the banner stays visible across
+        every dashboard page. NOT dismissible — auto-clears when the
+        composable's broken-agent list goes empty (silence is the
+        green state). Clicking "View agent" jumps to the Agents tab
+        so the operator can see full dispatch history.
+      -->
+      <BrokenAgentsBanner @open-agent="onOpenAgent" />
 
       <template v-if="activeTab === 'dispatches'">
         <DispatchFilters

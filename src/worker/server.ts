@@ -39,6 +39,7 @@ import { handleRestage } from "./restage-route.js";
 import { handlePrepVerdict } from "./prep-verdict-route.js";
 import { handleEvaluatorSummary } from "./evaluator-summary-route.js";
 import { handleReRunEvaluator } from "./re-run-evaluator-route.js";
+import { handleClearBroken } from "./clear-broken-route.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -153,6 +154,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "POST" && url.pathname === "/api/re-run-evaluator") {
       await handleReRunEvaluator(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/clear-broken") {
+      await handleClearBroken(req, res, repo);
       return;
     }
 

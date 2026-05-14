@@ -6,6 +6,7 @@ import { listActiveJobs } from "./dispatch/core.js";
 import { unwatchAllSettingsFiles } from "./dispatch/scheduler.js";
 import { unwatchAllRepoEnvFiles } from "./dashboard/repo-env-writer.js";
 import { stopAllIssuesWatchers } from "./dashboard/issues-watcher.js";
+import { stopAllAgentsWatchers } from "./dashboard/agents-watcher.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 
@@ -67,6 +68,11 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // No-op in worker mode (the registry is empty when only the worker is
   // running — only `startDashboard` adds entries).
   await stopAllIssuesWatchers();
+
+  // DX-369 (Phase 6 of DX-363) — drain the dashboard's per-repo
+  // agents-watcher chokidar instances on `<repo>/.danxbot/settings.json`.
+  // Same dashboard-mode-only ownership as the issues watcher above.
+  await stopAllAgentsWatchers();
 
   // Close database connection pools
   await closePool();

@@ -23,6 +23,7 @@ import {
 import { handleStream } from "./stream-routes.js";
 import { startDbChangeDetector } from "./dispatch-stream.js";
 import { startIssuesWatcher } from "./issues-watcher.js";
+import { startAgentsWatcher } from "./agents-watcher.js";
 import { eventBus } from "./event-bus.js";
 import {
   handleLaunchProxy,
@@ -41,6 +42,7 @@ import {
 } from "./playwright-proxy.js";
 import { handleGetAgent, handleListAgents } from "./agents-list.js";
 import {
+  handleClearAgentBroken,
   handleClearAgentCriticalFailure,
   handleGetRoster,
   handlePatchToggle,
@@ -304,6 +306,24 @@ async function route(
       req,
       res,
       decodeURIComponent(agentReRunEvaluatorMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // POST /api/agents/:repo/unblock — DX-369 (Phase 6 of DX-363).
+  // User-bearer auth required. Clears `agent.broken = null` and zeroes
+  // `agent.strikes.count` (history preserved as audit). Proxies to the
+  // worker's `/api/clear-broken` so the write happens under the same
+  // per-file lock as the picker's settings reads.
+  const agentUnblockMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/unblock$/,
+  );
+  if (method === "POST" && agentUnblockMatch) {
+    await handleClearAgentBroken(
+      req,
+      res,
+      decodeURIComponent(agentUnblockMatch[1]),
       dispatchDeps,
     );
     return true;
@@ -714,6 +734,17 @@ export async function startDashboard(): Promise<void> {
   // no longer polls every 30s. The shutdown handler (`src/shutdown.ts`)
   // drains active watchers via `stopAllIssuesWatchers()` on SIGTERM.
   await startIssuesWatcher(repos, eventBus);
+
+  // DX-369 (Phase 6 of DX-363) — per-repo chokidar watcher on
+  // `.danxbot/settings.json`. Fans out worker-side `agent.broken` /
+  // `agent.strikes` mutations (strike accumulator, evaluator dispatcher,
+  // worker's clear-broken + re-run-evaluator routes) onto the
+  // `agent:updated` SSE topic so the persistent broken-agents banner
+  // appears / clears live across every connected dashboard tab without
+  // waiting for the next REST hydrate. Dashboard mutations call
+  // `publishAgentSnapshot` directly; this watcher covers everything
+  // outside the dashboard process.
+  await startAgentsWatcher(repos, { resolveHost });
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
