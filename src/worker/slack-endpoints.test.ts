@@ -55,9 +55,16 @@ vi.mock("../logger.js", () => ({
 // dispatch.ts transitively imports agent/launcher which reaches into the
 // settings-file + critical-failure modules. Mock both so module load
 // doesn't touch the real filesystem or fail on missing env vars.
-vi.mock("../settings-file.js", () => ({
-  isFeatureEnabled: vi.fn().mockReturnValue(true),
-}));
+vi.mock("../settings-file.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../settings-file.js")>(
+      "../settings-file.js",
+    );
+  return {
+    ...actual,
+    isFeatureEnabled: vi.fn().mockReturnValue(true),
+  };
+});
 vi.mock("../critical-failure.js", () => ({
   writeFlag: vi.fn(),
   readFlag: vi.fn().mockReturnValue(null),

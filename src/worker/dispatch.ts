@@ -42,6 +42,7 @@ import {
   type CompleteStatus,
 } from "../mcp/danxbot-server.js";
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
+import { applyStrike } from "../dashboard/dispatch-tracker.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
@@ -1269,8 +1270,9 @@ async function handleStopFromDb(
     // critical_failure while the DB row is finalized as `failed` (the
     // halt signal lives in the flag file, not the dispatch status).
     const terminatedAt = Date.now();
+    const mappedStatus = mapCompleteToDispatchStatus(status);
     await updateDispatch(jobId, {
-      status: mapCompleteToDispatchStatus(status),
+      status: mappedStatus,
       summary,
       completedAt: terminatedAt,
       // Stamp pid_terminated_at so the row carries a proper end-of-life
@@ -1278,6 +1280,20 @@ async function handleStopFromDb(
       // canonical moment the dispatched PID stopped owning the row
       // (DX-140 — completes the lifecycle started by `pairedWriteHostPid`).
       pidTerminatedAt: terminatedAt,
+    });
+    // DX-365 — strike on the mapped DispatchStatus (critical_failure
+    // collapses to `failed`, which is strike-eligible). Slack /
+    // ideator / external-launch dispatches carry `agent_name === null`
+    // and the helper short-circuits.
+    await applyStrike({
+      status: mappedStatus,
+      repoLocalPath: repo.localPath,
+      repoName: repo.name,
+      agentName: dispatch.agentName,
+      dispatchId: jobId,
+      issueId: dispatch.issueId,
+      rawError: summary ?? null,
+      timestampIso: new Date(terminatedAt).toISOString(),
     });
     json(res, 200, { status });
     return;
@@ -1325,11 +1341,24 @@ async function handleStopFromDb(
     }
     await autoSyncTrackedIssue(jobId, repo);
     const terminatedAt = Date.now();
+    const mappedStatus = mapCompleteToDispatchStatus(status);
     await updateDispatch(jobId, {
-      status: mapCompleteToDispatchStatus(status),
+      status: mappedStatus,
       summary,
       completedAt: terminatedAt,
       pidTerminatedAt: terminatedAt,
+    });
+    // DX-365 — strike on the mapped DispatchStatus (agent_blocked
+    // collapses to `failed`, strike-eligible per the schema enum).
+    await applyStrike({
+      status: mappedStatus,
+      repoLocalPath: repo.localPath,
+      repoName: repo.name,
+      agentName: dispatch.agentName,
+      dispatchId: jobId,
+      issueId: dispatch.issueId,
+      rawError: summary ?? null,
+      timestampIso: new Date(terminatedAt).toISOString(),
     });
     json(res, 200, { status });
     return;
@@ -1339,12 +1368,25 @@ async function handleStopFromDb(
   // terminal, mirroring the in-memory path's ordering.
   await autoSyncTrackedIssue(jobId, repo);
   const terminatedAt = Date.now();
+  const mappedStatus = mapCompleteToDispatchStatus(status);
   await updateDispatch(jobId, {
-    status: mapCompleteToDispatchStatus(status),
+    status: mappedStatus,
     summary,
     completedAt: terminatedAt,
     // Same DX-140 lifecycle stamp as the critical_failure branch above.
     pidTerminatedAt: terminatedAt,
+  });
+  // DX-365 — strike on completed/failed/recovered/throttled per
+  // contract. `applyStrike` short-circuits non-strike statuses.
+  await applyStrike({
+    status: mappedStatus,
+    repoLocalPath: repo.localPath,
+    repoName: repo.name,
+    agentName: dispatch.agentName,
+    dispatchId: jobId,
+    issueId: dispatch.issueId,
+    rawError: summary ?? null,
+    timestampIso: new Date(terminatedAt).toISOString(),
   });
   json(res, 200, { status });
 }

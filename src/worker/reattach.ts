@@ -72,9 +72,10 @@ import { attachMonitoringStack } from "../agent/attach-monitoring-stack.js";
 import { StallDetector, type StallSnapshot } from "../agent/stall-detector.js";
 import type { AgentJob, SpawnAgentOptions } from "../agent/agent-types.js";
 import type { AgentLogEntry } from "../types.js";
-import type {
-  DispatchTracker,
-  FinalizeTokens,
+import {
+  applyStrike,
+  type DispatchTracker,
+  type FinalizeTokens,
 } from "../dashboard/dispatch-tracker.js";
 import type { Dispatch, DispatchStatus } from "../dashboard/dispatches.js";
 import type { SessionLogWatcher } from "../agent/session-log-watcher.js";
@@ -448,6 +449,15 @@ export function buildToolCounterSubscriber(initial: {
 export function buildReattachTracker(
   row: Dispatch,
   getCounters: () => { toolCallCount: number; subagentCount: number },
+  /**
+   * DX-365 — repo `localPath` so the strike accumulator can read +
+   * mutate `<repo>/.danxbot/settings.json`. Optional for
+   * back-compat with existing tests that build the tracker without a
+   * `RepoContext` — when null, `applyStrike` short-circuits before
+   * touching disk so the reattach tracker still works in fixtures
+   * without a settings file.
+   */
+  repoLocalPath: string | null = null,
 ): DispatchTracker {
   return {
     async finalize(
@@ -481,6 +491,20 @@ export function buildReattachTracker(
           toolCallCount,
           subagentCount,
           nudgeCount: fields.nudgeCount ?? row.nudgeCount,
+        });
+        // DX-365 — strike accumulator. Skipped when `repoLocalPath`
+        // is null (test harness without a settings file), the row
+        // carries no `agent_name` (Slack / ideator / external), or
+        // the status is non-strike (`completed` / `cancelled`).
+        await applyStrike({
+          status,
+          repoLocalPath,
+          repoName: row.repoName,
+          agentName: row.agentName,
+          dispatchId: row.id,
+          issueId: row.issueId,
+          rawError: fields.error ?? null,
+          timestampIso: new Date(completedAt).toISOString(),
         });
         // Mirror `startDispatchTracking`'s SSE publish so reattached
         // terminal states reach the dashboard immediately. Without
@@ -556,7 +580,11 @@ async function reattachAlive(
     toolCallCount: row.toolCallCount,
     subagentCount: row.subagentCount,
   });
-  const tracker = buildReattachTracker(row, counters.getCounts);
+  const tracker = buildReattachTracker(
+    row,
+    counters.getCounts,
+    opts.repo?.localPath ?? null,
+  );
 
   const options = buildSpawnOptionsForReattach(
     row,

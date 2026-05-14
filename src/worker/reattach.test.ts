@@ -70,6 +70,23 @@ vi.mock("../dashboard/event-bus.js", () => ({
   eventBus: { publish: vi.fn(), subscribe: vi.fn(() => () => {}) },
 }));
 
+// DX-365: applyStrike fires from buildReattachTracker.finalize after
+// updateDispatch. Mock the helper so reattach tests can assert call
+// shape (esp. the new `repoLocalPath` 3rd arg flows through to the
+// helper) without touching settings.json or the strike module's
+// internal mutateAgents lock.
+const mockApplyStrike = vi.fn().mockResolvedValue(undefined);
+vi.mock("../dashboard/dispatch-tracker.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../dashboard/dispatch-tracker.js")>(
+      "../dashboard/dispatch-tracker.js",
+    );
+  return {
+    ...actual,
+    applyStrike: (...args: unknown[]) => mockApplyStrike(...args),
+  };
+});
+
 // Logger noop — keeps test output clean.
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
@@ -691,6 +708,65 @@ describe("buildReattachTracker — finalize / SSE / nudges", () => {
       "tracker-nudge",
       { nudgeCount: 2 },
     ]);
+  });
+
+  // DX-365 — strike call site on the reattach finalize path. The 3rd
+  // arg `repoLocalPath` (added in DX-365) flows into `applyStrike` so
+  // the strike helper has the path it needs for `mutateAgents`. When
+  // the arg is null (default — back-compat with pre-DX-365 callers),
+  // applyStrike is still called and the helper's internal guard
+  // short-circuits — verified in dispatch-tracker.applystrike.test.ts.
+  it("DX-365: finalize fires applyStrike with repoLocalPath threaded through the 3rd arg", async () => {
+    mockApplyStrike.mockClear();
+    const row = makeRow({
+      id: "tracker-strike",
+      agentName: "alice",
+      issueId: "DX-100",
+    });
+    const tracker = buildReattachTracker(
+      row,
+      () => ({
+        toolCallCount: row.toolCallCount,
+        subagentCount: row.subagentCount,
+      }),
+      "/tmp/repo-localpath",
+    );
+
+    await tracker.finalize("failed", {
+      summary: "boom",
+      error: "boom-error",
+      tokens: { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+
+    expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+    expect(mockApplyStrike.mock.calls[0][0]).toMatchObject({
+      status: "failed",
+      repoLocalPath: "/tmp/repo-localpath",
+      repoName: row.repoName,
+      agentName: "alice",
+      dispatchId: "tracker-strike",
+      issueId: "DX-100",
+      rawError: "boom-error",
+    });
+  });
+
+  it("DX-365: finalize fires applyStrike with repoLocalPath=null when the back-compat default is used", async () => {
+    mockApplyStrike.mockClear();
+    const row = makeRow({
+      id: "tracker-noisle",
+      agentName: "alice",
+      issueId: "DX-100",
+    });
+    const tracker = buildReattachTracker(row, () => ({
+      toolCallCount: row.toolCallCount,
+      subagentCount: row.subagentCount,
+    }));
+    await tracker.finalize("failed", {
+      summary: "boom",
+      tokens: { tokensIn: 1, tokensOut: 1, cacheRead: 0, cacheWrite: 0 },
+    });
+    expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+    expect(mockApplyStrike.mock.calls[0][0].repoLocalPath).toBeNull();
   });
 
   it("counter advancement flows end-to-end: subscriber bumps → getCounters() → tracker.finalize persists the bumped value", async () => {

@@ -170,9 +170,16 @@ vi.mock("../logger.js", () => ({
 }));
 
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
-vi.mock("../settings-file.js", () => ({
-  isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
-}));
+vi.mock("../settings-file.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../settings-file.js")>(
+      "../settings-file.js",
+    );
+  return {
+    ...actual,
+    isFeatureEnabled: (...args: unknown[]) => mockIsFeatureEnabled(...args),
+  };
+});
 
 const mockGetActiveJob = vi.fn();
 const mockListActiveJobs = vi.fn(() => [] as unknown[]);
@@ -244,6 +251,22 @@ const mockStampIssueBlocked = vi.fn();
 vi.mock("../issue/stamp-blocked.js", () => ({
   stampIssueBlocked: (...args: unknown[]) => mockStampIssueBlocked(...args),
 }));
+
+// DX-365: handleStopFromDb fires `applyStrike` after each updateDispatch
+// branch (critical_failure → mapped failed, agent_blocked → mapped failed,
+// normal terminal). Mock the helper to assert call args without touching
+// settings.json or the strike module's internal mutateAgents lock.
+const mockApplyStrike = vi.fn().mockResolvedValue(undefined);
+vi.mock("../dashboard/dispatch-tracker.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../dashboard/dispatch-tracker.js")>(
+      "../dashboard/dispatch-tracker.js",
+    );
+  return {
+    ...actual,
+    applyStrike: (...args: unknown[]) => mockApplyStrike(...args),
+  };
+});
 
 import {
   handleLaunch,
@@ -1151,6 +1174,174 @@ describe("handleStop", () => {
       expect(stopRes._getStatusCode()).toBe(400);
       expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
       expect(mockUpdateDispatch).not.toHaveBeenCalled();
+    });
+
+    // DX-365: applyStrike fires after each updateDispatch branch in
+    // handleStopFromDb. The strike call sites are:
+    //   - critical_failure → mapped to `failed` (strike-eligible)
+    //   - agent_blocked   → mapped to `failed` (strike-eligible)
+    //   - normal terminal → status as supplied (strike-eligible iff
+    //     failed/recovered/throttled; completed/cancelled skip via
+    //     applyStrike's internal guard)
+    // Tests assert applyStrike is invoked with the row's agent_name +
+    // issueId + the mapped DispatchStatus + the repo localPath. The
+    // helper's own skip-condition tree is covered by
+    // dispatch-tracker.applystrike.test.ts; here we verify the worker
+    // route hands it the right args.
+    describe("DX-365: applyStrike call sites", () => {
+      beforeEach(() => {
+        mockApplyStrike.mockClear();
+        mockApplyStrike.mockResolvedValue(undefined);
+      });
+
+      it("normal failed terminal → applyStrike fires with agent_name + issueId + mapped status", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "ghost-strike",
+          status: "running",
+          agentName: "alice",
+          issueId: "DX-100",
+        });
+        const stopReq = createMockReqWithBody("POST", {
+          status: "failed",
+          summary: "boom",
+        });
+        await handleStop(
+          stopReq,
+          createMockRes(),
+          "ghost-strike",
+          MOCK_REPO,
+        );
+        expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+        const args = mockApplyStrike.mock.calls[0][0];
+        expect(args).toMatchObject({
+          status: "failed",
+          repoLocalPath: MOCK_REPO.localPath,
+          repoName: MOCK_REPO.name,
+          agentName: "alice",
+          dispatchId: "ghost-strike",
+          issueId: "DX-100",
+          rawError: "boom",
+        });
+        expect(typeof args.timestampIso).toBe("string");
+      });
+
+      it("normal completed terminal → applyStrike fires (helper skips internally on non-strike status)", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "ghost-ok",
+          status: "running",
+          agentName: "alice",
+          issueId: "DX-100",
+        });
+        const stopReq = createMockReqWithBody("POST", {
+          status: "completed",
+          summary: "ok",
+        });
+        await handleStop(stopReq, createMockRes(), "ghost-ok", MOCK_REPO);
+        // applyStrike is called regardless of status — the helper owns
+        // the eligibility decision so the call sites stay uniform.
+        // Internal skip is covered by the wrapper's own test file.
+        expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+        expect(mockApplyStrike.mock.calls[0][0].status).toBe("completed");
+      });
+
+      it("critical_failure → applyStrike fires with mapped status `failed`", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "ghost-crit",
+          status: "running",
+          agentName: "alice",
+          issueId: "DX-100",
+        });
+        const stopReq = createMockReqWithBody("POST", {
+          status: "critical_failure",
+          summary: "MCP gone",
+        });
+        await handleStop(stopReq, createMockRes(), "ghost-crit", MOCK_REPO);
+        expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+        // critical_failure agent-side maps to `failed` row status — the
+        // strike helper sees the mapped value, not the agent's original
+        // signal, so the strike contract follows the row.
+        expect(mockApplyStrike.mock.calls[0][0]).toMatchObject({
+          status: "failed",
+          dispatchId: "ghost-crit",
+          rawError: "MCP gone",
+        });
+      });
+
+      it("agent_blocked → applyStrike fires with mapped status `failed`", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "ghost-blocked",
+          status: "running",
+          agentName: "alice",
+          issueId: "DX-100",
+        });
+        mockStampIssueBlocked.mockReturnValue(undefined);
+        const stopReq = createMockReqWithBody("POST", {
+          status: "agent_blocked",
+          summary: "spec ambiguous",
+        });
+        await handleStop(
+          stopReq,
+          createMockRes(),
+          "ghost-blocked",
+          MOCK_REPO,
+        );
+        expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+        expect(mockApplyStrike.mock.calls[0][0]).toMatchObject({
+          status: "failed",
+          dispatchId: "ghost-blocked",
+          issueId: "DX-100",
+          rawError: "spec ambiguous",
+        });
+      });
+
+      it("non-agent dispatch (agent_name=null on row) — applyStrike still called; helper short-circuits internally", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "ghost-noagent",
+          status: "running",
+          agentName: null,
+          issueId: null,
+        });
+        const stopReq = createMockReqWithBody("POST", {
+          status: "failed",
+          summary: "boom",
+        });
+        await handleStop(
+          stopReq,
+          createMockRes(),
+          "ghost-noagent",
+          MOCK_REPO,
+        );
+        expect(mockApplyStrike).toHaveBeenCalledTimes(1);
+        const args = mockApplyStrike.mock.calls[0][0];
+        expect(args.agentName).toBeNull();
+        expect(args.issueId).toBeNull();
+      });
+
+      it("idempotent already-terminal row → applyStrike NOT called (no double-strike on duplicate signal)", async () => {
+        mockGetActiveJob.mockReturnValue(undefined);
+        mockGetDispatchById.mockResolvedValue({
+          id: "already-failed",
+          status: "failed",
+          agentName: "alice",
+          issueId: "DX-100",
+        });
+        const stopReq = createMockReqWithBody("POST", {
+          status: "failed",
+          summary: "racy duplicate",
+        });
+        await handleStop(
+          stopReq,
+          createMockRes(),
+          "already-failed",
+          MOCK_REPO,
+        );
+        expect(mockApplyStrike).not.toHaveBeenCalled();
+      });
     });
 
     it("queued (non-terminal, not running) row finalizes the same as running", async () => {

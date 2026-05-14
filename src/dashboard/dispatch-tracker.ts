@@ -1,6 +1,10 @@
 import type { SessionLogWatcher } from "../agent/session-log-watcher.js";
 import { createLogger } from "../logger.js";
 import {
+  isStrikeEligible,
+  recordStrike,
+} from "../agent/strikes.js";
+import {
   insertDispatch,
   updateDispatch,
 } from "./dispatches-db.js";
@@ -11,6 +15,72 @@ import {
   type RuntimeMode,
 } from "./dispatches.js";
 import { eventBus } from "./event-bus.js";
+
+/**
+ * DX-365 — `error` slice cap for `agent.strikes.history[].raw_error`.
+ * Keeps the strike entry small so the on-disk JSONB stays bounded
+ * while still carrying enough signal for the Phase 4 evaluator to
+ * triage. ~200 chars per `agent-types.ts#AgentStrikeEntry`.
+ */
+const STRIKE_RAW_ERROR_MAX = 200;
+
+/**
+ * DX-365 — shared strike-recording wrapper. Used by both the live-
+ * spawn `DispatchTracker.finalize` here AND the reattach tracker in
+ * `worker/reattach.ts#buildReattachTracker.finalize` so the strike
+ * decision tree (eligibility + caller guards + error swallow) lives
+ * in ONE place.
+ *
+ * Skip conditions (every one returns `null` without invoking
+ * `recordStrike`):
+ *   - `repoLocalPath` unset (test fixture / ad-hoc spawn).
+ *   - `agentName === null` (Slack / ideator / external launch).
+ *   - `issueId === null` (defensive — agent-bound dispatches always
+ *     carry one, but a future opt-out path would surface here).
+ *   - Status not in `STRIKE_ELIGIBLE` (`completed` / `cancelled`).
+ *
+ * Errors thrown by `recordStrike` are caught + logged. The dispatch
+ * row finalize already committed by the time this helper runs, so a
+ * strike write failure does NOT roll back the terminal status.
+ */
+export interface ApplyStrikeArgs {
+  status: DispatchStatus;
+  repoLocalPath: string | null;
+  repoName: string;
+  agentName: string | null;
+  dispatchId: string;
+  issueId: string | null;
+  rawError: string | null;
+  timestampIso: string;
+}
+
+export async function applyStrike(args: ApplyStrikeArgs): Promise<void> {
+  if (!args.repoLocalPath) return;
+  if (!args.agentName) return;
+  if (!args.issueId) return;
+  if (!isStrikeEligible(args.status)) return;
+  try {
+    await recordStrike(
+      {
+        dispatchId: args.dispatchId,
+        issueId: args.issueId,
+        terminalStatus: args.status,
+        rawError: (args.rawError ?? "").slice(0, STRIKE_RAW_ERROR_MAX),
+        timestamp: args.timestampIso,
+      },
+      {
+        localPath: args.repoLocalPath,
+        repoName: args.repoName,
+        agentName: args.agentName,
+      },
+    );
+  } catch (err) {
+    log.error(
+      `[Dispatch ${args.dispatchId}] strike record failed for agent="${args.agentName}"`,
+      err,
+    );
+  }
+}
 
 const log = createLogger("dispatch-tracker");
 
@@ -119,6 +189,15 @@ export interface StartDispatchTrackingArgs {
    * angle.
    */
   parentRecoverId?: string | null;
+  /**
+   * DX-365 — repo `localPath` (`<repo>/.danxbot` parent). Required for
+   * the strike accumulator's `mutateAgents` call; threaded through
+   * `attachMonitoringStack` from `SpawnAgentOptions.repoLocalPath`.
+   * When unset, strike recording is SKIPPED for this dispatch — fresh
+   * tests + ad-hoc spawns that never set up a settings file would
+   * otherwise throw on `recordStrike` even when no agent is bound.
+   */
+  repoLocalPath?: string | null;
 }
 
 /**
@@ -269,6 +348,24 @@ export async function startDispatchTracking(
           toolCallCount,
           subagentCount,
           nudgeCount: fields.nudgeCount ?? 0,
+        });
+        // DX-365 — strike accumulator. Runs immediately after the row
+        // terminal write so the count reflects the same DispatchStatus
+        // that just landed in the DB. Skipped for non-agent dispatches
+        // (`agent_name === null`) and non-strike statuses (`completed`
+        // / `cancelled`). Per-call try/catch keeps the SSE publish
+        // (operator visibility) on the happy path even if the strike
+        // write fails — a missed strike is recoverable; a missed SSE
+        // event silently freezes the dashboard.
+        await applyStrike({
+          status,
+          repoLocalPath: args.repoLocalPath ?? null,
+          repoName: args.repoName,
+          agentName: args.agentName ?? null,
+          dispatchId: args.jobId,
+          issueId: args.issueId ?? null,
+          rawError: fields.error ?? null,
+          timestampIso: new Date(completedAt).toISOString(),
         });
         // Notify SSE clients immediately so they see the terminal state
         // without waiting for the next DB change-detector poll cycle.

@@ -83,14 +83,26 @@ const mockSyncSettingsFileOnBoot = vi.fn().mockResolvedValue(undefined);
 const mockWatchSettingsFile = vi.fn().mockReturnValue({
   unwatch: vi.fn().mockResolvedValue(undefined),
 });
-vi.mock("./settings-file.js", () => ({
-  syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
-  watchSettingsFile: mockWatchSettingsFile,
-  settingsFilePath: vi.fn((p: string) => `${p}/.danxbot/settings.json`),
-  settingsLockPath: vi.fn((p: string) => `${p}/.danxbot/.settings.lock`),
-  // DX-329 — boot path now reads the agent roster for the orphan-IP heal.
-  readAgents: vi.fn().mockReturnValue([]),
-}));
+vi.mock("./settings-file.js", async () => {
+  // Spread the real module so DX-365 strike helpers (which import
+  // AGENT_STRIKE_TERMINAL_STATUSES + STRIKES_MAX + STRIKES_HISTORY_CAP
+  // at module init) resolve all named exports. The test only overrides
+  // the boot-flow surfaces below; everything else routes to the real
+  // implementation.
+  const actual =
+    await vi.importActual<typeof import("./settings-file.js")>(
+      "./settings-file.js",
+    );
+  return {
+    ...actual,
+    syncSettingsFileOnBoot: mockSyncSettingsFileOnBoot,
+    watchSettingsFile: mockWatchSettingsFile,
+    settingsFilePath: vi.fn((p: string) => `${p}/.danxbot/settings.json`),
+    settingsLockPath: vi.fn((p: string) => `${p}/.danxbot/.settings.lock`),
+    // DX-329 — boot path now reads the agent roster for the orphan-IP heal.
+    readAgents: vi.fn().mockReturnValue([]),
+  };
+});
 
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
   repoName: "mock",

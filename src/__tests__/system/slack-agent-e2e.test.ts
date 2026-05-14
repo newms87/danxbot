@@ -107,9 +107,16 @@ vi.mock("../../slack/user-cache.js", () => ({
 
 // Settings file — feature toggle. Tests override per-scenario.
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
-vi.mock("../../settings-file.js", () => ({
-  isFeatureEnabled: (...a: unknown[]) => mockIsFeatureEnabled(...a),
-}));
+vi.mock("../../settings-file.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../../settings-file.js")>(
+      "../../settings-file.js",
+    );
+  return {
+    ...actual,
+    isFeatureEnabled: (...a: unknown[]) => mockIsFeatureEnabled(...a),
+  };
+});
 
 // Critical-failure flag — present on disk halts the poller. Tests don't
 // exercise it; stub everything to absent.

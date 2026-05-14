@@ -250,6 +250,14 @@ export interface SpawnAgentOptions {
   /** Repo name — used to resolve cwd to repos/<name> */
   repoName: string;
   /**
+   * DX-365 — repo `localPath` (`<repo>/.danxbot` parent). Forwarded to
+   * `startDispatchTracking` so the strike accumulator can `mutateAgents`
+   * the repo's `settings.json` from inside `DispatchTracker.finalize`.
+   * Optional for back-compat with tests + ad-hoc spawns that don't bind
+   * to a real repo on disk; when unset, strike recording is skipped.
+   */
+  repoLocalPath?: string;
+  /**
    * Spawned agent's working directory — the resolved
    * `<repo>/.danxbot/workspaces/<name>/` workspace dir from
    * `resolveWorkspace`. Required: every dispatch goes through the

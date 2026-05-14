@@ -708,6 +708,10 @@ async function runResolved(
         prompt,
         title: input.title,
         repoName: input.repo.name,
+        // DX-365 — strike accumulator's `mutateAgents` needs this to
+        // mutate `<repo>/.danxbot/settings.json` from inside the
+        // dispatch tracker's `finalize` callback.
+        repoLocalPath: input.repo.localPath,
         cwd: resolved.cwd,
         timeoutMs: input.timeoutMs ?? config.dispatch.agentTimeoutMs,
         env,

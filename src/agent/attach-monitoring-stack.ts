@@ -256,6 +256,7 @@ export async function attachMonitoringStack(
     dispatchTracker = await startDispatchTracking({
       jobId,
       repoName: options.repoName,
+      repoLocalPath: options.repoLocalPath ?? null,
       trigger: options.dispatch,
       runtimeMode: config.isHost ? "host" : "docker",
       danxbotCommit: getDanxbotCommit(),

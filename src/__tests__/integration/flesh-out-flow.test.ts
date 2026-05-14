@@ -55,9 +55,16 @@ vi.mock("../../dispatch/core.js", async () => {
 // that I/O in a free test, and the route's 503 branch is already
 // covered by the unit suite. Force-enable here so the happy paths
 // hit the dispatch call.
-vi.mock("../../settings-file.js", () => ({
-  isFeatureEnabled: () => true,
-}));
+vi.mock("../../settings-file.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("../../settings-file.js")>(
+      "../../settings-file.js",
+    );
+  return {
+    ...actual,
+    isFeatureEnabled: () => true,
+  };
+});
 
 vi.mock("../../logger.js", () => ({
   createLogger: () => ({
