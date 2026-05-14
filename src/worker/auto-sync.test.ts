@@ -7,8 +7,13 @@ import {
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
+import { onDispatchTerminated } from "../dispatch/scheduler.js";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
+
+vi.mock("../dispatch/scheduler.js", () => ({
+  onDispatchTerminated: vi.fn(),
+}));
 
 /**
  * Post-dispatch reconcile — fires for every dispatch carrying an
@@ -60,6 +65,7 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
 
   beforeEach(() => {
     localPath = setupRepo();
+    vi.mocked(onDispatchTerminated).mockReset();
   });
 
   afterEach(() => {
@@ -177,5 +183,104 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
     ).resolves.toBeUndefined();
 
     expect(reconcile).not.toHaveBeenCalled();
+  });
+
+  describe("picker poke (onDispatchTerminated finally block)", () => {
+    // The `finally` clause in autoSyncTrackedIssue MUST poke the picker
+    // every dispatch, regardless of whether reconcile fired or threw.
+    // For self-Blocked / self-Done completions, reconcile's
+    // `dispatchableChanged` flag stays false→false, so the picker would
+    // never re-fire without this explicit kick. See `auto-sync.ts`
+    // module header + `scheduler.ts#onDispatchTerminated` for the
+    // contract these tests pin.
+
+    it("pokes the picker once after a successful reconcile", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+      expect(onDispatchTerminated).toHaveBeenCalledWith(repo.name);
+    });
+
+    it("pokes the picker even when getDispatch returns null (no reconcile fired)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const getDispatch = vi.fn().mockResolvedValue(null);
+      const reconcile = vi.fn();
+
+      await autoSyncTrackedIssue("missing-id", repo, { getDispatch, reconcile });
+
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+      expect(onDispatchTerminated).toHaveBeenCalledWith(repo.name);
+    });
+
+    it("pokes the picker even when issueId is null (no reconcile fired)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: null });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn();
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(reconcile).not.toHaveBeenCalled();
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+      expect(onDispatchTerminated).toHaveBeenCalledWith(repo.name);
+    });
+
+    it("pokes the picker even when reconcile throws", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockRejectedValue(new Error("DB down"));
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+      expect(onDispatchTerminated).toHaveBeenCalledWith(repo.name);
+    });
+
+    it("pokes the picker even when getDispatch throws", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const getDispatch = vi.fn().mockRejectedValue(new Error("DB down"));
+      const reconcile = vi.fn();
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+      expect(onDispatchTerminated).toHaveBeenCalledWith(repo.name);
+    });
+
+    it("pokes the picker AFTER reconcile (finally-block ordering — reconcile's own dispatchableChanged poke must land before the unconditional kick to avoid scheduler races)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+
+      await autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile });
+
+      const reconcileOrder = reconcile.mock.invocationCallOrder[0];
+      const pokeOrder = vi.mocked(onDispatchTerminated).mock.invocationCallOrder[0];
+      expect(reconcileOrder).toBeLessThan(pokeOrder);
+    });
+
+    it("swallows errors thrown by onDispatchTerminated itself (autoSync still resolves cleanly)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow();
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(onDispatchTerminated).mockImplementation(() => {
+        throw new Error("scheduler down");
+      });
+
+      await expect(
+        autoSyncTrackedIssue("dispatch-123", repo, { getDispatch, reconcile }),
+      ).resolves.toBeUndefined();
+
+      expect(onDispatchTerminated).toHaveBeenCalledOnce();
+    });
   });
 });
