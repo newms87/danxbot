@@ -25,7 +25,7 @@
  */
 
 import { createLogger } from "../logger.js";
-import { setAgentBroken } from "../settings-file.js";
+import { defaultBrokenEvaluator, setAgentBroken } from "../settings-file.js";
 import type { DispatchInput, DispatchResult } from "./core.js";
 import type { WorktreeManager } from "../agent/worktree-manager.js";
 
@@ -109,6 +109,8 @@ async function stampBrokenAndThrow(
       reason,
       suggested_steps: details ? [details] : [],
       set_at: new Date().toISOString(),
+      // DX-364 — sync-recovery stamps outside the evaluator workflow.
+      ...defaultBrokenEvaluator(),
     },
     "worker",
   );

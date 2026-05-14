@@ -36,6 +36,7 @@ function buildAgent(over: Partial<AgentRosterEntry> = {}): AgentRosterEntry {
     schedule: VALID_SCHEDULE,
     enabled: true,
     broken: null,
+    strikes: { count: 0, history: [] },
     created_at: "2026-05-08T12:00:00Z",
     updated_at: "2026-05-08T12:00:00Z",
     ...over,
@@ -81,6 +82,8 @@ describe("AgentCard — DX-298 broken banner", () => {
         "Resolve markers + push",
       ],
       set_at: "2026-05-12T07:30:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
     const w = mountCard(buildAgent({ broken }));
     // `.get` throws if the element is missing — its presence IS the
@@ -111,6 +114,8 @@ describe("AgentCard — DX-298 broken banner", () => {
       reason: "anything",
       suggested_steps: [],
       set_at: "2026-05-12T07:30:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
     const w = mountCard(buildAgent({ broken }));
     const label = w.get('[data-test="agent-broken-set-at-alice"]').text();
@@ -123,6 +128,8 @@ describe("AgentCard — DX-298 broken banner", () => {
       reason: "anything",
       suggested_steps: [],
       set_at: "2026-05-12T07:30:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
     const w = mountCard(buildAgent({ broken }));
     expect(w.find('[data-test="agent-broken-steps-alice"]').exists()).toBe(
@@ -136,6 +143,8 @@ describe("AgentCard — DX-298 broken banner", () => {
         reason: "stale lockfile",
         suggested_steps: [],
         set_at: "2026-05-12T07:30:00Z",
+        evaluator_status: "completed" as const,
+        evaluator_dispatch_id: null,
       },
     });
     const w = mountCard(agent);
@@ -155,6 +164,8 @@ describe("AgentCard — DX-298 broken banner", () => {
       reason: "anything",
       suggested_steps: [],
       set_at: "not-a-date",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
     const w = mountCard(buildAgent({ broken }));
     expect(w.get('[data-test="agent-broken-set-at-alice"]').text()).toBe(

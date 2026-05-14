@@ -68,6 +68,7 @@ import {
 import { issuePath } from "../poller/yaml-lifecycle.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import {
+  defaultBrokenEvaluator,
   setAgentBroken,
   type AgentBrokenState,
 } from "../settings-file.js";
@@ -197,6 +198,10 @@ async function applyAbortVerdict(
     reason: payload.reason,
     suggested_steps: payload.broken_details.suggested_steps,
     set_at: nowIso,
+    // DX-364 — prep-verdict abort does NOT run an evaluator; banner
+    // renders a static state. Phase 4 of DX-363 is the only writer
+    // that stamps `"pending"` instead.
+    ...defaultBrokenEvaluator(),
   };
   await setBroken(repoLocalPath, agentName, broken, "worker");
   return broken;

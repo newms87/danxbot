@@ -648,6 +648,8 @@ describe("handlePrepVerdict — abort verdict", () => {
         reason: "Bash returning ENOENT",
         suggested_steps: ["ssh to host", "fix PATH"],
         set_at: new Date(fixedNow).toISOString(),
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
       },
       "worker",
     );

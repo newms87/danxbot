@@ -198,22 +198,133 @@ export interface AgentSchedule {
 }
 
 /**
- * DX-292 — per-agent broken state. Stamped onto an `AgentRecord` when a
- * `danx-prep` dispatch ends with verdict `abort` (the agent's worktree
- * is in a bad state that cannot recover without destroying work, see
- * DX-291). Cleared (set to `null`) when the human marks the agent
- * resolved from the dashboard. The poller's pick gate filters any
- * agent with `broken !== null` out of the eligible pool — see
- * `src/poller/pick-agent.ts#pickFreeAgent`.
+ * DX-364 — outcome the strike-tally classifier records for each strike.
+ * Phase 1 ships the type alias; Phase 2 wires the picker / post-dispatch
+ * tally to actually map terminal dispatch states onto these values.
+ *
+ *  - `"failed"` — agent ended with `danxbot_complete({status:"failed"})`.
+ *  - `"recovered"` — Anthropic stream-idle synthetic recover landed the
+ *    dispatch on `status: "recovered"` (DX-260 chain).
+ *  - `"throttled"` — rate-limit throttle killed the dispatch (DX-322).
+ */
+export type AgentStrikeTerminalStatus = "failed" | "recovered" | "throttled";
+
+/**
+ * DX-364 — one strike entry kept on `agents.<name>.strikes.history[]`.
+ * Bounded list (last `STRIKES_HISTORY_CAP` entries — older entries
+ * pruned). `raw_error` slices the last ~200 chars of the `dispatches.error`
+ * column so the evaluator (Phase 4) has enough signal to triage without
+ * the operator opening the dashboard.
+ */
+export interface AgentStrikeEntry {
+  dispatch_id: string;
+  issue_id: string;
+  terminal_status: AgentStrikeTerminalStatus;
+  timestamp: string;
+  /** Up to ~200 chars from `dispatches.error`; empty string allowed. */
+  raw_error: string;
+}
+
+/**
+ * DX-364 — durable strike counter + history kept on every agent record.
+ * `count` is the source of truth the picker consults (`>= STRIKES_MAX`
+ * trips the broken stamp in Phase 2). `history` is the append-only
+ * audit trail (capped at `STRIKES_HISTORY_CAP`) consumed by the
+ * evaluator agent (Phase 4) and the banner UI (Phase 6).
+ *
+ * Fresh agents + legacy records (pre-DX-364) back-fill to
+ * `{count: 0, history: []}` on first read. Strike-incrementing logic is
+ * out of scope for Phase 1 — only the schema + loader land here.
+ */
+export interface AgentStrikes {
+  count: number;
+  history: AgentStrikeEntry[];
+}
+
+/**
+ * DX-364 — evaluator workflow state for a populated `broken` record.
+ * The Phase 6 banner reads this to decide whether to render the
+ * `[Re-run evaluator]` button. Phase 4 (evaluator dispatch) is the only
+ * code path that flips the value through `pending` → `running` →
+ * `completed` / `failed`. Legacy `broken` records (DX-292) back-fill
+ * to `"completed"` on first read so the banner shows a static state
+ * instead of a stuck "running" spinner.
+ */
+export type AgentEvaluatorStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed";
+
+/** Strike count that trips the broken stamp (Phase 2). */
+export const STRIKES_MAX = 3;
+
+/** Max entries kept on `strikes.history[]`; older entries pruned (Phase 2). */
+export const STRIKES_HISTORY_CAP = 3;
+
+/** Closed enum of values `validateStrikes` accepts for terminal_status. */
+export const AGENT_STRIKE_TERMINAL_STATUSES: readonly AgentStrikeTerminalStatus[] = [
+  "failed",
+  "recovered",
+  "throttled",
+] as const;
+
+/** Closed enum of values `validateBrokenInput` accepts for evaluator_status. */
+export const AGENT_EVALUATOR_STATUSES: readonly AgentEvaluatorStatus[] = [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+] as const;
+
+/**
+ * Fresh-agent default for `AgentRecord.strikes`. Used by the read-side
+ * back-fill (legacy records missing the field) and the write-side
+ * stamp (`handlePostAgent` building a new record).
+ */
+export function defaultStrikes(): AgentStrikes {
+  return { count: 0, history: [] };
+}
+
+/**
+ * DX-364 — default `{evaluator_status, evaluator_dispatch_id}` pair
+ * for every call site that stamps a fresh `AgentBrokenState` outside
+ * the Phase 4 evaluator workflow (prep-verdict route, queued-verdict
+ * replay, sync-recovery abort). All three writers SHARE this default;
+ * Phase 4 will introduce a separate evaluator-dispatching writer that
+ * stamps `"pending"` instead. Extracted as a helper so a future field
+ * add to the evaluator block lands in ONE place.
+ */
+export function defaultBrokenEvaluator(): Pick<
+  AgentBrokenState,
+  "evaluator_status" | "evaluator_dispatch_id"
+> {
+  return { evaluator_status: "completed", evaluator_dispatch_id: null };
+}
+
+/**
+ * DX-292 + DX-364 — per-agent broken state. Stamped onto an `AgentRecord`
+ * when a `danx-prep` dispatch ends with verdict `abort` (DX-291) OR
+ * once Phase 2 lands the 3-strike auto-stamp. Cleared (set to `null`)
+ * when the operator marks the agent resolved from the dashboard. The
+ * poller's pick gate filters any agent with `broken !== null` out of
+ * the eligible pool — see `src/poller/pick-agent.ts#pickFreeAgent`.
  *
  *  - `reason` — operator-facing headline; non-empty.
  *  - `suggested_steps` — ordered list of recovery actions (may be empty).
  *  - `set_at` — ISO 8601 stamp recorded when the state landed.
+ *  - `evaluator_status` — DX-364. Workflow state the Phase 6 banner
+ *    reads to render the [Re-run evaluator] button. Legacy records
+ *    (DX-292 prep-verdict stamps) back-fill to `"completed"`.
+ *  - `evaluator_dispatch_id` — DX-364. UUID of the most recent evaluator
+ *    dispatch; `null` when none has run. Legacy records back-fill to `null`.
  */
 export interface AgentBrokenState {
   reason: string;
   suggested_steps: string[];
   set_at: string;
+  evaluator_status: AgentEvaluatorStatus;
+  evaluator_dispatch_id: string | null;
 }
 
 export interface AgentRecord {
@@ -229,6 +340,14 @@ export interface AgentRecord {
    * any agent with `broken !== null` until the operator clears it.
    */
   broken: AgentBrokenState | null;
+  /**
+   * DX-364 — durable strike counter + history. Defaults to
+   * `{count: 0, history: []}` for fresh agents; legacy records that
+   * pre-date the field back-fill to the same default on first read.
+   * Phase 2 wires the increment hook + 3-strike auto-stamp; this
+   * Phase 1 ships the field so Phase 2 has somewhere to write.
+   */
+  strikes: AgentStrikes;
   created_at: string;
   updated_at: string;
 }
@@ -481,16 +600,23 @@ function normalizeCapabilities(raw: unknown): AgentCapability[] {
  *   - `reason` non-empty string
  *   - `suggested_steps` array of strings (empty allowed)
  *   - `set_at` non-empty string
- * Malformed input degrades to `null` (with a log) — matches the fail-
- * soft pattern of every other reader on this hot path. The write-side
- * helper (`setAgentBroken`) is the fail-loud surface for malformed
- * input.
+ *   - `evaluator_status` — DX-364. One of `AGENT_EVALUATOR_STATUSES`.
+ *     Missing / unknown → back-fill to `"completed"` (legacy DX-292
+ *     records have no evaluator hook; the Phase 6 banner renders a
+ *     static state for them).
+ *   - `evaluator_dispatch_id` — DX-364. `string | null`. Missing /
+ *     empty / non-string → back-fill to `null`.
+ *
+ * Malformed required fields degrade to `null` (with a log) — matches
+ * the fail-soft pattern of every other reader on this hot path. The
+ * write-side helper (`setAgentBroken` → `validateBrokenInput`) is the
+ * fail-loud surface for malformed input.
  */
 function normalizeBroken(raw: unknown): AgentBrokenState | null {
   if (raw === null || raw === undefined) return null;
   if (typeof raw !== "object") {
     log.warn(
-      `agent.broken dropped — expected {reason, suggested_steps, set_at} | null, got ${typeof raw}`,
+      `agent.broken dropped — expected {reason, suggested_steps, set_at, ...} | null, got ${typeof raw}`,
     );
     return null;
   }
@@ -510,7 +636,152 @@ function normalizeBroken(raw: unknown): AgentBrokenState | null {
   const steps = r.suggested_steps.filter(
     (s): s is string => typeof s === "string",
   );
-  return { reason: r.reason, suggested_steps: steps, set_at: r.set_at };
+
+  // DX-364 — back-fill evaluator fields. Legacy DX-292 records have
+  // neither; new Phase 4 records carry both.
+  let evaluatorStatus: AgentEvaluatorStatus = "completed";
+  if (typeof r.evaluator_status === "string") {
+    if ((AGENT_EVALUATOR_STATUSES as readonly string[]).includes(r.evaluator_status)) {
+      evaluatorStatus = r.evaluator_status as AgentEvaluatorStatus;
+    } else {
+      log.warn(
+        `agent.broken.evaluator_status="${r.evaluator_status}" not in {${AGENT_EVALUATOR_STATUSES.join("|")}} — back-filling "completed"`,
+      );
+    }
+  }
+  let evaluatorDispatchId: string | null = null;
+  if (typeof r.evaluator_dispatch_id === "string" && r.evaluator_dispatch_id.length > 0) {
+    evaluatorDispatchId = r.evaluator_dispatch_id;
+  }
+
+  return {
+    reason: r.reason,
+    suggested_steps: steps,
+    set_at: r.set_at,
+    evaluator_status: evaluatorStatus,
+    evaluator_dispatch_id: evaluatorDispatchId,
+  };
+}
+
+/**
+ * DX-364 — fail-loud loader for an `AgentStrikes` block. Throws
+ * `TypeError` with a precise message on any malformed input. Mirror of
+ * `validateBrokenInput` for the strikes side: write paths call this
+ * directly (so 3-strike increments + dashboard mutations fail
+ * immediately on bad data), and the read-path normalizer wraps it in
+ * try/catch so the worker keeps booting against a corrupt file.
+ *
+ * Missing / `null` / `undefined` input is treated as "legacy record" —
+ * returns `defaultStrikes()` instead of throwing — because pre-DX-364
+ * agent records on disk have no `strikes` field at all and that is the
+ * one-time back-fill window the entire epic is designed around. Once
+ * Phase 2 starts incrementing strikes, every write goes through the
+ * fail-loud surface and back-fill never re-fires for a given record.
+ */
+export function validateStrikes(raw: unknown): AgentStrikes {
+  if (raw === null || raw === undefined) return defaultStrikes();
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TypeError(
+      `agent.strikes must be {count, history[]} | null — got ${
+        Array.isArray(raw) ? "array" : typeof raw
+      }`,
+    );
+  }
+  const r = raw as Record<string, unknown>;
+  const count = r.count;
+  if (
+    typeof count !== "number" ||
+    !Number.isInteger(count) ||
+    count < 0 ||
+    count > STRIKES_MAX
+  ) {
+    throw new TypeError(
+      `agent.strikes.count must be an integer in [0, ${STRIKES_MAX}] — got ${
+        typeof count === "number" ? count : typeof count
+      }`,
+    );
+  }
+  if (!Array.isArray(r.history)) {
+    throw new TypeError(
+      "agent.strikes.history must be an array of strike entries",
+    );
+  }
+  if (r.history.length > STRIKES_HISTORY_CAP) {
+    throw new TypeError(
+      `agent.strikes.history capped at ${STRIKES_HISTORY_CAP} entries — got ${r.history.length}`,
+    );
+  }
+  const history: AgentStrikeEntry[] = r.history.map((entry, i) =>
+    validateStrikeEntry(entry, i),
+  );
+  return { count, history };
+}
+
+function validateStrikeEntry(raw: unknown, idx: number): AgentStrikeEntry {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TypeError(`agent.strikes.history[${idx}] must be an object`);
+  }
+  const r = raw as Record<string, unknown>;
+  if (typeof r.dispatch_id !== "string" || r.dispatch_id.length === 0) {
+    throw new TypeError(
+      `agent.strikes.history[${idx}].dispatch_id must be a non-empty string`,
+    );
+  }
+  if (typeof r.issue_id !== "string" || r.issue_id.length === 0) {
+    throw new TypeError(
+      `agent.strikes.history[${idx}].issue_id must be a non-empty string`,
+    );
+  }
+  if (
+    typeof r.terminal_status !== "string" ||
+    !(AGENT_STRIKE_TERMINAL_STATUSES as readonly string[]).includes(r.terminal_status)
+  ) {
+    throw new TypeError(
+      `agent.strikes.history[${idx}].terminal_status must be one of {${AGENT_STRIKE_TERMINAL_STATUSES.join("|")}}`,
+    );
+  }
+  if (typeof r.timestamp !== "string" || r.timestamp.length === 0) {
+    throw new TypeError(
+      `agent.strikes.history[${idx}].timestamp must be a non-empty ISO 8601 string`,
+    );
+  }
+  if (typeof r.raw_error !== "string") {
+    throw new TypeError(
+      `agent.strikes.history[${idx}].raw_error must be a string (empty allowed)`,
+    );
+  }
+  return {
+    dispatch_id: r.dispatch_id,
+    issue_id: r.issue_id,
+    terminal_status: r.terminal_status as AgentStrikeTerminalStatus,
+    timestamp: r.timestamp,
+    raw_error: r.raw_error,
+  };
+}
+
+/**
+ * Read-path wrapper around `validateStrikes`. Hot-path readers
+ * (`readSettings`, the dashboard's `GET /api/agents` snapshot) MUST
+ * NOT throw on a corrupt settings file — `readSettings`'s top-level
+ * contract is "never throws". Catch + log.error + degrade to default
+ * so the worker keeps booting; operators see the bug fast in logs.
+ *
+ * Asymmetric with `normalizeBroken`: that normalizer drops to `null`
+ * (the field is independently nullable on the type), while this one
+ * degrades to `defaultStrikes()` (the field is REQUIRED on
+ * `AgentRecord`, so `null` is not a legal value to return). Do NOT
+ * "harmonize" the two — the divergence is intentional.
+ */
+function normalizeStrikes(raw: unknown): AgentStrikes {
+  try {
+    return validateStrikes(raw);
+  } catch (err) {
+    log.error(
+      "agent.strikes malformed on disk — degrading to {count: 0, history: []}. Reason:",
+      err,
+    );
+    return defaultStrikes();
+  }
 }
 
 function normalizeOneAgent(raw: unknown): AgentRecord | null {
@@ -539,6 +810,7 @@ function normalizeOneAgent(raw: unknown): AgentRecord | null {
     schedule,
     enabled: r.enabled,
     broken: normalizeBroken(r.broken),
+    strikes: normalizeStrikes(r.strikes),
     created_at: r.created_at,
     updated_at: r.updated_at,
   };
@@ -1093,6 +1365,27 @@ function validateBrokenInput(
     if (typeof step !== "string") {
       throw new TypeError(
         "setAgentBroken: every entry in broken.suggested_steps must be a string",
+      );
+    }
+  }
+  // DX-364 — evaluator fields. Write callers MUST supply both; the
+  // read-side back-fill is the one-time legacy migration and not a
+  // license to omit on write.
+  if (
+    typeof broken.evaluator_status !== "string" ||
+    !(AGENT_EVALUATOR_STATUSES as readonly string[]).includes(broken.evaluator_status)
+  ) {
+    throw new TypeError(
+      `setAgentBroken: broken.evaluator_status must be one of {${AGENT_EVALUATOR_STATUSES.join("|")}}`,
+    );
+  }
+  if (broken.evaluator_dispatch_id !== null) {
+    if (
+      typeof broken.evaluator_dispatch_id !== "string" ||
+      broken.evaluator_dispatch_id.length === 0
+    ) {
+      throw new TypeError(
+        "setAgentBroken: broken.evaluator_dispatch_id must be null or a non-empty string",
       );
     }
   }

@@ -288,6 +288,11 @@ describe("prep-verdict round-trip — MCP client → worker route", () => {
       expect.objectContaining({
         reason: "Bash returning ENOENT",
         suggested_steps: ["ssh", "fix PATH"],
+        // DX-364 — pin the evaluator block end-to-end through the
+        // HTTP boundary so a future Phase 4 writer can't accidentally
+        // ship `"pending"` from the abort path.
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
       }),
       "worker",
     );

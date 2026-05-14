@@ -23,6 +23,7 @@ import {
   AGENT_NAME_SHAPE,
   AGENTS_MAX,
   DASHBOARD_PREFIX,
+  defaultStrikes,
   mutateAgents,
   type AgentRecord,
   type AgentRecordWithName,
@@ -126,6 +127,9 @@ export async function handlePostAgent(
     schedule: f.schedule,
     enabled: f.enabled,
     broken: null,
+    // DX-364 — fresh agents start at zero strikes; Phase 2 of DX-363
+    // wires the increment hook.
+    strikes: defaultStrikes(),
     created_at: now,
     updated_at: now,
   };

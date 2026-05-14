@@ -322,6 +322,10 @@ describe("handlePostAgent", () => {
       capabilities: ["issue-worker", "slack"],
       // DX-292 — every newly-created agent starts healthy.
       broken: null,
+      // DX-364 — fresh agents seed `defaultStrikes()` so the picker's
+      // strike check + Phase 2 increment hook have a known starting
+      // point.
+      strikes: { count: 0, history: [] },
     });
   });
 

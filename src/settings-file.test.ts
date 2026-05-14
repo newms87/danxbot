@@ -29,10 +29,13 @@ import {
   settingsFilePath,
   settingsLockPath,
   syncSettingsFileOnBoot,
+  validateStrikes,
   watchSettingsFile,
   writeSettings,
   type AgentBrokenState,
   type AgentRecord,
+  type AgentStrikeEntry,
+  type AgentStrikes,
   type Settings,
 } from "./settings-file.js";
 
@@ -1072,6 +1075,7 @@ describe("settings-file", () => {
         },
         enabled: true,
         broken: null,
+        strikes: { count: 0, history: [] },
         created_at: "2026-05-08T12:00:00Z",
         updated_at: "2026-05-08T12:00:00Z",
         ...over,
@@ -1643,6 +1647,7 @@ describe("settings-file", () => {
         },
         enabled: true,
         broken: null,
+        strikes: { count: 0, history: [] },
         created_at: "2026-05-08T12:00:00Z",
         updated_at: "2026-05-08T12:00:00Z",
         ...over,
@@ -1658,6 +1663,8 @@ describe("settings-file", () => {
           "git fetch origin",
         ],
         set_at: "2026-05-12T03:00:00Z",
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
       };
     }
 
@@ -1758,7 +1765,13 @@ describe("settings-file", () => {
         setAgentBroken(
           localPath,
           "alice",
-          { reason: "", suggested_steps: [], set_at: "2026-05-12T00:00:00Z" },
+          {
+            reason: "",
+            suggested_steps: [],
+            set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "completed",
+            evaluator_dispatch_id: null,
+          },
           "dashboard:test",
         ),
       ).rejects.toThrow(TypeError);
@@ -1768,7 +1781,12 @@ describe("settings-file", () => {
         setAgentBroken(
           localPath,
           "alice",
-          { reason: "x", suggested_steps: [] } as never,
+          {
+            reason: "x",
+            suggested_steps: [],
+            evaluator_status: "completed",
+            evaluator_dispatch_id: null,
+          } as never,
           "dashboard:test",
         ),
       ).rejects.toThrow(TypeError);
@@ -1782,6 +1800,8 @@ describe("settings-file", () => {
             reason: "x",
             suggested_steps: "step" as never,
             set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "completed",
+            evaluator_dispatch_id: null,
           },
           "dashboard:test",
         ),
@@ -1796,6 +1816,8 @@ describe("settings-file", () => {
             reason: "x",
             suggested_steps: ["ok", 42 as never],
             set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "completed",
+            evaluator_dispatch_id: null,
           },
           "dashboard:test",
         ),
@@ -1888,6 +1910,423 @@ describe("settings-file", () => {
   });
 
   // ============================================================
+  // DX-364 — Phase 1 of the Strict 3-Strike Broken epic (DX-363).
+  //
+  // Adds two persistent fields to every `AgentRecord`:
+  //
+  //   - `strikes: {count, history[]}` — durable strike counter the
+  //     picker reads to decide eligibility once the 3-strike policy
+  //     lands in Phase 2. `count` is the source of truth; `history`
+  //     is the audit trail (last 3 strikes, append-only).
+  //   - `broken` gains `evaluator_status` + `evaluator_dispatch_id`
+  //     so the Phase 6 banner can render the "[Re-run evaluator]"
+  //     button. Legacy `broken: {reason, suggested_steps, set_at}`
+  //     records (set under DX-292) back-fill to
+  //     `evaluator_status: "completed"` + `evaluator_dispatch_id: null`
+  //     on first read.
+  //
+  // Loader contract: `validateStrikes` is FAIL-LOUD (throws on
+  // malformed input). The hot-path `readSettings` wraps the call in
+  // `try/catch` + `log.error` so a corrupt file does not take down
+  // the worker, but the named loader still throws — bugs surface fast
+  // when callers exercise it directly. Mirror of the existing
+  // `validateBrokenInput` / `normalizeBroken` split.
+  // ============================================================
+
+  describe("DX-364: agent.strikes field + expanded broken evaluator", () => {
+    function validAgent(over?: Partial<AgentRecord>): AgentRecord {
+      return {
+        type: "agent",
+        bio: "Default test bio.",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          always_on: false,
+          mon: ["09:00-17:00"],
+          tue: [],
+          wed: [],
+          thu: [],
+          fri: [],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        broken: null,
+        strikes: { count: 0, history: [] },
+        created_at: "2026-05-08T12:00:00Z",
+        updated_at: "2026-05-08T12:00:00Z",
+        ...over,
+      };
+    }
+
+    function strikeEntry(over?: Partial<AgentStrikeEntry>): AgentStrikeEntry {
+      return {
+        dispatch_id: "11111111-2222-3333-4444-555555555555",
+        issue_id: "DX-1",
+        terminal_status: "failed",
+        timestamp: "2026-05-12T03:00:00Z",
+        raw_error: "synthetic test failure",
+        ...over,
+      };
+    }
+
+    // ---- strikes back-fill on read ----
+
+    it("agent records read from a file with no strikes field default to {count: 0, history: []}", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.strikes).toEqual({ count: 0, history: [] });
+    });
+
+    it("round-trips a strikes block with non-empty history through writeSettings + readSettings", async () => {
+      const strikes: AgentStrikes = {
+        count: 2,
+        history: [strikeEntry({ issue_id: "DX-10" }), strikeEntry({ issue_id: "DX-11" })],
+      };
+      await writeSettings(localPath, {
+        agents: { alice: validAgent({ strikes }) },
+        writtenBy: "dashboard:test",
+      });
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.strikes).toEqual(strikes);
+    });
+
+    // ---- validateStrikes — fail-loud loader (AC #3) ----
+
+    it("validateStrikes throws on non-object input (fail-loud loader)", () => {
+      expect(() => validateStrikes("abc" as never)).toThrow(TypeError);
+      expect(() => validateStrikes(42 as never)).toThrow(TypeError);
+      expect(() => validateStrikes([] as never)).toThrow(TypeError);
+    });
+
+    it("validateStrikes throws when count is not an integer in [0, 3]", () => {
+      expect(() => validateStrikes({ count: -1, history: [] })).toThrow(TypeError);
+      expect(() => validateStrikes({ count: 4, history: [] })).toThrow(TypeError);
+      expect(() => validateStrikes({ count: 1.5, history: [] })).toThrow(TypeError);
+      expect(() => validateStrikes({ count: "1" as never, history: [] })).toThrow(TypeError);
+    });
+
+    it("validateStrikes throws when history is not an array", () => {
+      expect(() => validateStrikes({ count: 0, history: "nope" as never })).toThrow(TypeError);
+      expect(() => validateStrikes({ count: 0, history: {} as never })).toThrow(TypeError);
+    });
+
+    it("validateStrikes throws when history exceeds the 3-entry cap", () => {
+      const entries = [strikeEntry(), strikeEntry(), strikeEntry(), strikeEntry()];
+      expect(() => validateStrikes({ count: 3, history: entries })).toThrow(TypeError);
+    });
+
+    it("validateStrikes throws when a history entry is missing required fields", () => {
+      // missing dispatch_id
+      expect(() =>
+        validateStrikes({
+          count: 1,
+          history: [{ issue_id: "DX-1", terminal_status: "failed", timestamp: "2026-05-12T00:00:00Z", raw_error: "" }],
+        }),
+      ).toThrow(TypeError);
+      // unknown terminal_status
+      expect(() =>
+        validateStrikes({
+          count: 1,
+          history: [strikeEntry({ terminal_status: "weird" as never })],
+        }),
+      ).toThrow(TypeError);
+    });
+
+    it("validateStrikes accepts the default + a populated value (round-trip identity)", () => {
+      const def = { count: 0, history: [] } as const;
+      expect(validateStrikes(def)).toEqual(def);
+      const populated: AgentStrikes = {
+        count: 1,
+        history: [strikeEntry()],
+      };
+      expect(validateStrikes(populated)).toEqual(populated);
+    });
+
+    it("validateStrikes(null) and validateStrikes(undefined) return defaultStrikes() (legacy back-fill window)", () => {
+      // Direct invocation of the documented one-time back-fill branch.
+      // Read-side already exercises this transitively via the missing-
+      // strikes-on-disk test; this assertion pins the branch directly
+      // so a Phase 2 caller (`recordStrike(read)`) on a legacy record
+      // does not throw before the increment.
+      expect(validateStrikes(null)).toEqual({ count: 0, history: [] });
+      expect(validateStrikes(undefined)).toEqual({ count: 0, history: [] });
+    });
+
+    it("malformed strikes on disk normalizes to default on read (fail-soft) without dropping the whole agent", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              strikes: { count: 99, history: [] },
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      // Whole agent record kept; strikes degraded to the default.
+      expect(Object.keys(s.agents ?? {})).toEqual(["alice"]);
+      expect(s.agents?.alice.strikes).toEqual({ count: 0, history: [] });
+    });
+
+    // ---- broken evaluator back-fill (AC #2 — legacy back-fill on first read) ----
+
+    it("legacy broken {reason, suggested_steps, set_at} back-fills evaluator_status='completed' + evaluator_dispatch_id=null on read", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              broken: {
+                reason: "Worktree rebase aborted.",
+                suggested_steps: ["ssh worker", "git rebase --continue"],
+                set_at: "2026-05-12T03:00:00Z",
+              },
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toEqual({
+        reason: "Worktree rebase aborted.",
+        suggested_steps: ["ssh worker", "git rebase --continue"],
+        set_at: "2026-05-12T03:00:00Z",
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
+      });
+    });
+
+    it("preserves explicit evaluator_status + evaluator_dispatch_id when present on disk", () => {
+      writeFileSync(
+        settingsFilePath(localPath),
+        JSON.stringify({
+          overrides: {},
+          agents: {
+            alice: {
+              type: "agent",
+              bio: "x",
+              capabilities: ["issue-worker"],
+              schedule: {
+                tz: "America/Chicago",
+                always_on: false,
+                mon: [],
+                tue: [],
+                wed: [],
+                thu: [],
+                fri: [],
+                sat: [],
+                sun: [],
+              },
+              enabled: true,
+              broken: {
+                reason: "Triggered by 3rd strike.",
+                suggested_steps: [],
+                set_at: "2026-05-12T03:00:00Z",
+                evaluator_status: "running",
+                evaluator_dispatch_id: "abcd-efgh-1234-5678",
+              },
+              created_at: "2026-05-08T12:00:00Z",
+              updated_at: "2026-05-08T12:00:00Z",
+            },
+          },
+        }),
+      );
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken?.evaluator_status).toBe("running");
+      expect(s.agents?.alice.broken?.evaluator_dispatch_id).toBe(
+        "abcd-efgh-1234-5678",
+      );
+    });
+
+    // ---- broken validateBrokenInput rejects malformed evaluator fields ----
+
+    it("setAgentBroken rejects an unknown evaluator_status fail-loud", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: [],
+            set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "weird" as never,
+            evaluator_dispatch_id: null,
+          },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+    });
+
+    it("setAgentBroken rejects a broken payload with evaluator_status field entirely missing", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      // Legacy DX-292-shaped payload (no evaluator block) hitting the
+      // write surface — `validateBrokenInput` MUST reject so a Phase
+      // 2/4 caller passing a stale shape gets a usable error instead
+      // of a record with `evaluator_status: undefined` on disk.
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: [],
+            set_at: "2026-05-12T00:00:00Z",
+          } as never,
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+    });
+
+    it("setAgentBroken rejects a non-null evaluator_dispatch_id that is not a non-empty string", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: [],
+            set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "pending",
+            evaluator_dispatch_id: "" as never,
+          },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+      await expect(
+        setAgentBroken(
+          localPath,
+          "alice",
+          {
+            reason: "x",
+            suggested_steps: [],
+            set_at: "2026-05-12T00:00:00Z",
+            evaluator_status: "pending",
+            evaluator_dispatch_id: 42 as never,
+          },
+          "dashboard:test",
+        ),
+      ).rejects.toThrow(TypeError);
+    });
+
+    it("setAgentBroken round-trips a populated broken record with evaluator fields", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent() },
+        writtenBy: "dashboard:test",
+      });
+      const populated = {
+        reason: "Triggered by 3rd strike.",
+        suggested_steps: [],
+        set_at: "2026-05-12T03:00:00Z",
+        evaluator_status: "pending" as const,
+        evaluator_dispatch_id: null,
+      };
+      await setAgentBroken(localPath, "alice", populated, "dashboard:test");
+      const s = readSettings(localPath);
+      expect(s.agents?.alice.broken).toEqual(populated);
+    });
+
+    // ---- AC #4: dashboard agents endpoint surfaces the new fields ----
+    //
+    // The dashboard's `GET /api/agents` and `GET /api/agents/:repo` both
+    // build their response off `readSettings`, so the type-level changes
+    // here automatically surface the new fields in the JSON payload. The
+    // assertion below pins that contract — anyone refactoring the
+    // snapshot builder must keep the new fields present on every agent
+    // entry the API returns.
+
+    it("readSettings (the snapshot source for /api/agents) surfaces strikes + evaluator fields on every agent entry", async () => {
+      await writeSettings(localPath, {
+        agents: { alice: validAgent({ strikes: { count: 1, history: [strikeEntry()] } }) },
+        writtenBy: "dashboard:test",
+      });
+      const s = readSettings(localPath);
+      const alice = s.agents?.alice;
+      expect(alice).toBeDefined();
+      expect(alice?.strikes).toEqual({
+        count: 1,
+        history: [strikeEntry()],
+      });
+      // broken still null but the type carries the new evaluator fields;
+      // an explicit non-null round-trip is covered above.
+      expect(alice?.broken).toBeNull();
+    });
+  });
+
+  // ============================================================
   // mutateAgents — DX-160 Phase 2
   //
   // Atomic per-agent mutator. Acquires the per-file lock before reading
@@ -1914,6 +2353,7 @@ describe("settings-file", () => {
         },
         enabled: true,
         broken: null,
+        strikes: { count: 0, history: [] },
         created_at: "2026-05-08T12:00:00Z",
         updated_at: "2026-05-08T12:00:00Z",
         ...over,

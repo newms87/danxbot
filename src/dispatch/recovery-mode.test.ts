@@ -465,6 +465,10 @@ describe("dispatchWithRecovery", () => {
       expect(settings.agents.alice.broken).toMatchObject({
         reason: "snapshotIfDirty aborted: worktree HEAD not on agent branch",
         suggested_steps: ["expected branch alice, got bob"],
+        // DX-364 — sync-recovery abort uses `defaultBrokenEvaluator()`;
+        // pin the stamped evaluator block so the contract can't drift.
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
       });
     });
 

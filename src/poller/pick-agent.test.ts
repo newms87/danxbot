@@ -34,6 +34,7 @@ function agent(
     schedule: alwaysOpenSchedule(),
     enabled: true,
     broken: null,
+    strikes: { count: 0, history: [] },
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -152,6 +153,8 @@ describe("pickFreeAgent", () => {
       reason: "Worktree rebase aborted on conflict.",
       suggested_steps: ["cd <worktree>", "git rebase --abort"],
       set_at: "2026-05-12T03:00:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
 
     it("skips an agent whose broken !== null", () => {

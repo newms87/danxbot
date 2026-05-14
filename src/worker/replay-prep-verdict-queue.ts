@@ -55,7 +55,7 @@ import {
   mapTerminalVerdictToDispatchStatus,
   type PrepVerdictPayload,
 } from "../mcp/danxbot-prep-verdict.js";
-import { setAgentBroken } from "../settings-file.js";
+import { defaultBrokenEvaluator, setAgentBroken } from "../settings-file.js";
 import {
   parseIssue,
   serializeIssue,
@@ -222,6 +222,8 @@ async function applyQueuedVerdict(
       suggested_steps:
         payload.broken_details?.suggested_steps ?? [],
       set_at: new Date().toISOString(),
+      // DX-364 — replay path mirrors `applyAbortVerdict`.
+      ...defaultBrokenEvaluator(),
     },
     "worker",
   );

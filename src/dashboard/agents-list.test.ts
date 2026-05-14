@@ -200,7 +200,10 @@ describe("handleListAgents", () => {
   // settings schema; the dashboard banner depends on the field flowing
   // through the GET response untouched. This pins the contract: the
   // snapshot serializer must not strip or reshape `broken`.
-  it("preserves the agents.<name>.broken field intact in the snapshot response (DX-298 dashboard read path)", async () => {
+  it("preserves the agents.<name>.broken + strikes fields intact in the snapshot response (DX-298 + DX-364 dashboard read path)", async () => {
+    // DX-364 — broken now carries evaluator_status + evaluator_dispatch_id;
+    // every agent carries `strikes`. Pin both so the snapshot serializer
+    // doesn't strip the new fields.
     const brokenRec = {
       reason: "Rebase conflict couldn't be auto-resolved on origin/main",
       suggested_steps: [
@@ -208,7 +211,11 @@ describe("handleListAgents", () => {
         "Resolve manually then push",
       ],
       set_at: "2026-05-12T07:00:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
     };
+    const aliceStrikes = { count: 1, history: [] };
+    const bobStrikes = { count: 0, history: [] };
     mockReadSettings.mockImplementation((path: string) =>
       path === "/repos/danxbot"
         ? {
@@ -225,6 +232,7 @@ describe("handleListAgents", () => {
                 },
                 enabled: true,
                 broken: brokenRec,
+                strikes: aliceStrikes,
                 created_at: "2026-05-08T12:00:00Z",
                 updated_at: "2026-05-12T07:00:00Z",
               },
@@ -239,6 +247,7 @@ describe("handleListAgents", () => {
                 },
                 enabled: true,
                 broken: null,
+                strikes: bobStrikes,
                 created_at: "2026-05-08T12:00:00Z",
                 updated_at: "2026-05-08T12:00:00Z",
               },
@@ -254,6 +263,8 @@ describe("handleListAgents", () => {
     const body = JSON.parse(res._getBody());
     expect(body[0].settings.agents.alice.broken).toEqual(brokenRec);
     expect(body[0].settings.agents.bob.broken).toBeNull();
+    expect(body[0].settings.agents.alice.strikes).toEqual(aliceStrikes);
+    expect(body[0].settings.agents.bob.strikes).toEqual(bobStrikes);
   });
 
   it("renders snapshots with issuePrefix=null when loadIssuePrefix throws (config missing/corrupt)", async () => {
