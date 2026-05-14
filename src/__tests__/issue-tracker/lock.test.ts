@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import {
   LOCK_TTL_MS,
   parseLockComment,

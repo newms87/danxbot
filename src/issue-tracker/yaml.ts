@@ -494,8 +494,8 @@ export interface ParseIssueOptions {
  * Parse YAML text into an Issue, throwing IssueParseError with a useful
  * message on either malformed YAML or schema violations.
  *
- * In schema v3, `external_id` is always allowed to be empty (memory tracker
- * issues + drafts pre-create have no tracker mapping yet), so there is no
+ * In schema v3, `external_id` is always allowed to be empty (YAML-only
+ * mode + drafts pre-create have no tracker mapping yet), so there is no
  * separate "draft" parse mode — the v1 `parseDraftIssue` is gone. The
  * primary id (`id`) is the strict required-non-empty field. v3 adds the
  * `children: string[]` field for two-way epic ↔ phase linkage.
@@ -607,8 +607,8 @@ type ValidateResult =
  *
  * Schema v3 contract:
  *  - `id` is required, non-empty, must match `ISS-<positive-integer>`.
- *  - `external_id` is required as a field but may be empty (memory tracker
- *    issues + drafts pre-tracker-create have no external mapping yet).
+ *  - `external_id` is required as a field but may be empty (YAML-only
+ *    mode + drafts pre-tracker-create have no external mapping yet).
  *  - `children` is required, must be an array of `ISS-N` strings (may be
  *    empty). Available on every card type. On Epic = ordered phase cards;
  *    on non-epic = ordered sub-cards. Reverse linkage to `parent_id`.

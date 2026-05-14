@@ -1,3 +1,19 @@
+/**
+ * DX-343 — TEST-ONLY stub. Phase 4 (DX-345) replaces this with a
+ * dedicated `FakeTracker` under a test-support directory and deletes
+ * this file entirely. Production code MUST NOT import from this
+ * module — the `__test__-` filename prefix is the contract enforced
+ * by the AC #3 grep (`MemoryTracker\b` must have zero hits in
+ * production code).
+ *
+ * The class is preserved verbatim from the retired `memory.ts` so the
+ * existing test fixtures (yaml-lifecycle, heal-external-id, scheduler,
+ * lock, sync, retry-queue, worker/issue-route, integration suites)
+ * keep working between Phase 2 (this card) and Phase 4 without an
+ * inline mass-rewrite. The `createIssueTracker` production branch
+ * that read `DANXBOT_TRACKER === "memory"` is gone — this stub is
+ * reachable only via direct test imports.
+ */
 import {
   isTriaged,
   type CreateCardInput,
@@ -15,12 +31,12 @@ import {
 } from "./interface.js";
 
 /**
- * Prefix for `MemoryTracker`-minted external_ids. Both the mint
- * (`createCard`) and the format validator (`isValidExternalId`) MUST go
- * through this constant so a regression that drifts one without the other
- * is impossible — drift would make every freshly-minted card
- * self-heal-and-blank on the very next poll tick. Keep the name + shape
- * stable; the heal pass relies on this being a one-place edit.
+ * Prefix for stub-minted external_ids. Both the mint (`createCard`)
+ * and the format validator (`isValidExternalId`) MUST go through this
+ * constant so a regression that drifts one without the other is
+ * impossible — drift would make every freshly-minted card
+ * self-heal-and-blank on the very next poll tick. Keep the name +
+ * shape stable; the heal pass relies on this being a one-place edit.
  */
 const MEMORY_EXTERNAL_ID_PREFIX = "mem-";
 const MEMORY_EXTERNAL_ID_REGEX = new RegExp(

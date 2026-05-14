@@ -70,7 +70,7 @@ import {
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
-import { MemoryTracker } from "../issue-tracker/memory.js";
+import { MemoryTracker } from "../issue-tracker/__test__-memory.js";
 
 function makeTrelloConfig(): import("../types.js").TrelloConfig {
   return {

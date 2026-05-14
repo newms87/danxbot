@@ -42,7 +42,7 @@
  *
  * Concurrency: a process-scoped `Map<id, Promise<void>>` serializes async
  * sync work per issue (keyed by internal id, NOT external_id, because
- * external_id is empty for memory-tracker issues + drafts pre-create).
+ * external_id is empty for YAML-only-mode issues + drafts pre-create).
  * Worker mode = single Node process per repo, so an in-memory Map is
  * sufficient. No filesystem locks. A separate `Set<Promise<void>>` tracks
  * in-flight tasks for the test-only drain helper — keeps drain semantics
@@ -86,7 +86,7 @@ const log = createLogger("worker-issue-route");
 export interface IssueRouteDeps {
   /**
    * Per-repo tracker. `null` is YAML-only mode (DX-342): the worker
-   * has no Trello creds and no MemoryTracker. `handleIssueCreate`
+   * has no Trello creds and no fallback tracker. `handleIssueCreate`
    * writes a local YAML with empty `external_id` (no tracker round-
    * trip); `syncTrackedIssueOnComplete` persists locally and skips
    * the tracker push.

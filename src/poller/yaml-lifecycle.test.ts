@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { MemoryTracker } from "../issue-tracker/memory.js";
+import { MemoryTracker } from "../issue-tracker/__test__-memory.js";
 import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import {
   clearDispatchAndWrite,

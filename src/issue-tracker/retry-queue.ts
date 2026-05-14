@@ -62,7 +62,7 @@
  * Out of scope (Phase 3 spec):
  *   - Webhook-based Trello inbound (separate effort).
  *   - Retries against trackers without transient-error semantics
- *     (`MemoryTracker` never throws → queue stays empty for tests).
+ *     (test stubs that never throw → queue stays empty for tests).
  */
 
 import { randomUUID } from "node:crypto";

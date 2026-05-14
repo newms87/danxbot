@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { healExternalIds, HEAL_COMMENT_HEADER } from "./heal-external-id.js";
 import { pushTrelloDiff } from "../issue/reconcile/trello.js";
-import { MemoryTracker } from "../issue-tracker/memory.js";
+import { MemoryTracker } from "../issue-tracker/__test__-memory.js";
 import { TrelloTracker } from "../issue-tracker/trello.js";
 import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import type {

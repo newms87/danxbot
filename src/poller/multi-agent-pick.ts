@@ -124,10 +124,11 @@ const log = createLogger("multi-agent-pick");
 /**
  * DX-241: predicate for "this card lives on a shared tracker, so a
  * sibling worker could be polling it." The tracker dispatch lock skips
- * locally-only cards (memory-tracker fixtures, pre-create drafts that
- * never pushed), and the dispatch's `lockRelease` field skips them too.
- * One predicate keeps both call sites in sync — adding `external_id`
- * normalization (whitespace, future shapes) is a one-line change.
+ * locally-only cards (test fixtures with no `external_id`, pre-create
+ * drafts that never pushed), and the dispatch's `lockRelease` field
+ * skips them too. One predicate keeps both call sites in sync —
+ * adding `external_id` normalization (whitespace, future shapes) is a
+ * one-line change.
  */
 function hasTrackerCoordinate(card: { external_id: string }): boolean {
   return card.external_id.trim() !== "";
@@ -516,10 +517,10 @@ export async function tryMultiAgentDispatch(
     // `dispatch()`'s onComplete chain (`input.lockRelease` below).
     //
     // Skipped when `hasTrackerCoordinate(card)` is false — locally-only
-    // cards (memory-tracker fixtures, pre-create drafts that never
-    // pushed) have no shared coordinate to lock against. The skip is
-    // structurally safe: a card without an external_id can only be
-    // polled by THIS worker.
+    // cards (test fixtures with no `external_id`, pre-create drafts
+    // that never pushed) have no shared coordinate to lock against.
+    // The skip is structurally safe: a card without an external_id can
+    // only be polled by THIS worker.
     // DX-342 — also short-circuit the lock acquire path when running
     // in YAML-only mode (no tracker). A YAML-only repo has no shared
     // cross-environment coordinate, so the tracker-comment lock is a

@@ -7,10 +7,10 @@
  * lifecycle (ToDo → In Progress → Done OR ToDo → In Progress → Blocked)
  * works against a tracker-agnostic backend. A strict reading would
  * require a Layer 3 system test driven by `make test-system` against a
- * Docker worker booted with `DANXBOT_TRACKER=memory` — but the poller's
- * `fetchTodoCards` still reads Trello directly today (Phase 5 refactor),
- * so the Layer 3 harness can't drive a MemoryTracker through the poller
- * yet. The integration test here covers the agent-side guarantee Phase
+ * Docker worker wired to the in-process tracker stub — but the
+ * poller's `fetchTodoCards` still reads Trello directly today (Phase 5
+ * refactor), so the Layer 3 harness can't drive the stub through the
+ * poller yet. The integration test here covers the agent-side guarantee Phase
  * 4 actually delivers: given a pre-hydrated YAML and a /api/launch
  * dispatch, the agent moves the card to its terminal state by editing
  * the YAML in place; the chokidar watcher mirrors every change to
@@ -135,7 +135,7 @@ vi.mock("../../repo-context.js", () => ({
 // MemoryTracker drives the YAML save path. The test seeds it manually
 // per-scenario via `setIssueTracker(seedIssue)` so the per-issue
 // external_id matches what the YAML on disk says.
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import type { Issue } from "../../issue-tracker/interface.js";
 const issueTrackerMock = vi.hoisted(() => ({
   tracker: null as MemoryTracker | null,

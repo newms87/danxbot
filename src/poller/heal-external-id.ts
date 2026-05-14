@@ -29,14 +29,14 @@
  *
  * Why this exists (DX-150 / Trello-decouple Phase 9):
  *
- * `MemoryTracker.createCard` mints `mem-${nextExternalId++}` for every
- * card created during a memory-tracker window (typically a fresh repo
- * before the operator wires up Trello). When the operator later switches
- * the repo's tracker to Trello (config edit), those `mem-N` ids become
- * permanently invalid against the new tracker — every Trello call against
- * them returns 400. DX-149 (Phase 8) prevented those 400s from crashing
- * the worker; this phase prevents the 400s from happening at all by
- * removing the foreign-tracker ids from disk.
+ * Older test stubs minted `mem-${nextExternalId++}` for every card
+ * created during a no-Trello window (e.g. a fresh repo before the
+ * operator wires up Trello). When the operator later switches the
+ * repo's tracker to Trello (config edit), those `mem-N` ids become
+ * permanently invalid against the new tracker — every Trello call
+ * against them returns 400. DX-149 (Phase 8) prevented those 400s from
+ * crashing the worker; this phase prevents the 400s from happening at
+ * all by removing the foreign-tracker ids from disk.
  *
  * Tracker-method (vs static regex map): the tracker already abstracts the
  * "what's my id format" concept. A static `EXTERNAL_ID_PATTERNS` map

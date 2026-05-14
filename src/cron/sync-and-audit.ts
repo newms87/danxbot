@@ -14,8 +14,8 @@
  *      so changes inside `.danxbot/config/` propagate to dispatched
  *      agents without a restart.
  *   2. `healExternalIds` — pre-tracker-call format heal so a stale
- *      `mem-N` id from a `MemoryTracker` window can't crash the
- *      tracker call below.
+ *      `mem-N`-shaped id (left over from a prior in-memory test
+ *      window) can't crash the tracker call below.
  *   3. `reapOrphans` — process-table orphan scan; SIGTERMs dispatched
  *      claude processes the DB lost track of.
  *   4. `runInvariantHeal` — clears the `dispatch` slot on cards whose
@@ -123,13 +123,13 @@ function getState(repoName: string): RepoCronState {
 /**
  * Cache of one IssueTracker per repo, populated lazily by `getRepoTracker`.
  *
- * The cache is essential for `MemoryTracker` (`DANXBOT_TRACKER=memory`):
- * a fresh tracker per tick would lose every card it ever stored, breaking
- * any Layer 3 scenario that drives a full ToDo → In Progress → Done
- * lifecycle through repeated `poll()` calls. With caching, the in-memory
- * card sequence survives the entire run. `TrelloTracker` also benefits —
- * `checklistIdCache` and `triagedLabelIdCache` survive across ticks
- * instead of cold-starting every minute.
+ * The cache is essential for in-memory tracker stubs used by tests:
+ * a fresh tracker per tick would lose every card it ever stored,
+ * breaking any scenario that drives a full ToDo → In Progress → Done
+ * lifecycle through repeated `poll()` calls. With caching, the
+ * in-memory card sequence survives the entire run. `TrelloTracker`
+ * also benefits — `checklistIdCache` and `triagedLabelIdCache`
+ * survive across ticks instead of cold-starting every minute.
  *
  * **Lifecycle invariant:** the cache lives until process restart. The
  * worker never rotates `RepoContext` at runtime — credential changes
@@ -144,10 +144,9 @@ function getState(repoName: string): RepoCronState {
 const trackerByRepo = new Map<string, IssueTracker>();
 
 /**
- * DX-342 — repos with no tracker (no `DANXBOT_TRACKER=memory`, no
- * Trello creds) hit this branch on every tick. Caching the "no
- * tracker" verdict separately from the populated map saves a
- * `createIssueTracker` allocation per tick.
+ * DX-342 — repos with no tracker (no Trello creds) hit this branch on
+ * every tick. Caching the "no tracker" verdict separately from the
+ * populated map saves a `createIssueTracker` allocation per tick.
  */
 const noTrackerRepos = new Set<string>();
 
@@ -237,11 +236,11 @@ async function _sync(repo: RepoContext): Promise<void> {
   // `tracker.fetchOpenCards` itself) historically threw straight
   // past `_sync` and out through `poll()`'s `finally`, killing the
   // whole worker process. Production hit this when a local YAML
-  // carried a stale `external_id` (e.g. `mem-2` from an earlier
-  // `MemoryTracker` run) and the repo later switched to Trello —
-  // `tryAcquireLock` → `tracker.getComments` returned 400 and the
-  // entire worker died: Slack listener, dispatch API, dashboard SSE,
-  // all gone.
+  // carried a stale `external_id` (e.g. `mem-2` left over from an
+  // earlier in-memory test window) and the repo later switched to
+  // Trello — `tryAcquireLock` → `tracker.getComments` returned 400
+  // and the entire worker died: Slack listener, dispatch API,
+  // dashboard SSE, all gone.
   //
   // The wrap is intentionally one block, not per-call. Per-call
   // try/catches multiply boilerplate and don't cover future tracker
@@ -259,8 +258,9 @@ async function _sync(repo: RepoContext): Promise<void> {
     // ONE tracker per repo, reused across every tick (see
     // `getRepoTracker`). Resolved early so the external-id format
     // heal below has a tracker to ask `isValidExternalId` against —
-    // every later helper reuses this instance, so `MemoryTracker`
-    // state survives the tick and tests can assert on a single mock.
+    // every later helper reuses this instance, so any in-memory
+    // tracker stub state survives the tick and tests can assert on a
+    // single mock.
     //
     // DX-342 — `null` in YAML-only mode. The tracker-touching cron
     // stages (external-id heal, inbound fetch) skip; everything else
@@ -271,8 +271,8 @@ async function _sync(repo: RepoContext): Promise<void> {
 
     // DX-150: per-tick `external_id` format heal pass. Walks open/
     // AND closed/, blanks any external_id whose format the active
-    // tracker doesn't recognize (e.g. `mem-N` minted by a
-    // `MemoryTracker` window before a Trello-config landed). The
+    // tracker doesn't recognize (e.g. a `mem-N`-shaped id left over
+    // from a no-Trello window before a Trello-config landed). The
     // blanked YAML re-enters the reconcile-driven push path (DX-218
     // step 7) on its next chokidar event and gets a fresh
     // tracker-native id. Pairs with DX-149 — DX-149 stopped the 400

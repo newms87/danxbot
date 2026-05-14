@@ -8,13 +8,13 @@
  *    dispatch prompts) refers to issues by `id` only — agents do not know
  *    that external trackers exist.
  *  - `external_id`: tracker-native id (e.g. Trello card id). Empty when the
- *    issue has not been pushed to any external tracker (memory tracker,
+ *    issue has not been pushed to any external tracker (YAML-only mode,
  *    pre-create draft). Only the sync layer and tracker implementations
  *    consume `external_id`; never expose it to agents.
  *
- * Tracker implementations (TrelloTracker, MemoryTracker) translate the YAML
- * schema's status / type values to backend-native concepts (list IDs, label
- * IDs) internally. No tracker-native concepts leak through this interface.
+ * Tracker implementations translate the YAML schema's status / type values
+ * to backend-native concepts (list IDs, label IDs) internally. No
+ * tracker-native concepts leak through this interface.
  *
  * The IssueTracker methods continue to take `externalId` as their lookup key
  * because that IS the tracker's native concept. Higher layers map `id ↔
@@ -134,8 +134,8 @@ export interface IssueTriage {
 
 /**
  * Single source of truth for "has this card been triaged?" — used by every
- * tracker implementation (`MemoryTracker`, `TrelloTracker`) and the outbound
- * sync layer (`syncIssue`) to derive the `triaged` managed-label boolean.
+ * tracker implementation and the outbound sync layer (`syncIssue`) to
+ * derive the `triaged` managed-label boolean.
  *
  * A card counts as triaged when EITHER:
  *  - `last_status` is non-empty (the triage agent recorded its most recent
@@ -400,7 +400,7 @@ export interface Issue {
   id: string;
   /**
    * Tracker-native id (e.g. Trello card id). Empty string when not synced
-   * to any external tracker (memory tracker, pre-create draft, or a local
+   * to any external tracker (YAML-only mode, pre-create draft, or a local
    * issue that will never push). Only the sync layer + tracker
    * implementations consume this — never expose it to agents.
    */
@@ -691,8 +691,9 @@ export interface IssueTracker {
    * Cheap, synchronous shape check: does `id` look like an id this tracker
    * could plausibly own? Used by the per-tick `healExternalIds` pass
    * (DX-150) to detect YAMLs whose `external_id` was minted by a different
-   * tracker (e.g. `mem-2` from a `MemoryTracker` window before the repo's
-   * Trello config landed). Tracker owns its id format → tracker validates.
+   * tracker (e.g. a `mem-N`-shaped id left over from a prior in-memory
+   * window before the repo's Trello config landed). Tracker owns its id
+   * format → tracker validates.
    *
    * Implementations MUST NOT make a network call here — this runs against
    * every YAML on every tick and a remote round-trip per id would be

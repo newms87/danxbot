@@ -466,14 +466,14 @@ async function startWorkerMode(): Promise<void> {
   // schedule. Cheap: boot scan walks `<repo>/.danxbot/.trello-retry/`
   // once, typically empty.
   //
-  // DX-342 — `createIssueTracker` returns `null` when neither
-  // DANXBOT_TRACKER=memory nor a TrelloConfig is available. That is the
-  // YAML-only mode: the worker boots, dispatches local YAML cards,
-  // mirrors to Postgres via chokidar, runs reconcile + audit — but
-  // every tracker-touching stage (reconcile step 7 push, cron inbound
-  // fetch, external-id heal, retry queue, legacy Trello cleanup) skips.
-  // The boot log line tells the operator we are in this mode so they
-  // are not surprised by missing tracker activity.
+  // DX-342 — `createIssueTracker` returns `null` when no TrelloConfig
+  // is available. That is the YAML-only mode: the worker boots,
+  // dispatches local YAML cards, mirrors to Postgres via chokidar,
+  // runs reconcile + audit — but every tracker-touching stage
+  // (reconcile step 7 push, cron inbound fetch, external-id heal,
+  // retry queue, legacy Trello cleanup) skips. The boot log line
+  // tells the operator we are in this mode so they are not surprised
+  // by missing tracker activity.
   const repoTracker = createIssueTracker(repo);
   if (repoTracker === null) {
     log.info(
@@ -504,8 +504,9 @@ async function startWorkerMode(): Promise<void> {
   // BEFORE any dispatch fires (AC #3) and registers the tracker so
   // the post-dispatch progress check (AC #4) can resolve it without
   // threading the tracker through every dispatch's onComplete callback.
-  // MemoryTracker skips the credential check (constructs without
-  // creds) but is still registered for the post-dispatch path.
+  // Non-Trello tracker shapes (test stubs) skip the credential check
+  // (construct without creds) but are still registered for the
+  // post-dispatch path.
   //
   // Phase 4b.1 (DX-288) wires the `runPicker` callback so reconcile's
   // dispatchableChanged poke fires the multi-agent picker without

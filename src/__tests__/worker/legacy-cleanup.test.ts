@@ -25,7 +25,7 @@ import {
 } from "vitest";
 import { cleanupLegacyNeedsApproval } from "../../worker/legacy-cleanup.js";
 import { TrelloTracker } from "../../issue-tracker/trello.js";
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import { _resetForTesting as resetCircuit } from "../../issue-tracker/circuit-breaker.js";
 import {
   _clearSystemErrors,

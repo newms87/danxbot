@@ -25,8 +25,9 @@ const AC_CHECKLIST_NAME = "Acceptance Criteria";
  * Trello card ids are 24-char lowercase hex MongoDB ObjectIds. The format
  * is documented at https://developer.atlassian.com/cloud/trello/rest/ and
  * stable since Trello's inception. Used by `isValidExternalId` so the
- * per-tick heal pass can detect a `MemoryTracker`-minted `mem-N` (or any
- * other foreign-tracker id) lurking in a YAML after a tracker swap.
+ * per-tick heal pass can detect any foreign-tracker id (e.g. a `mem-N`
+ * left over from an in-memory test window) lurking in a YAML after a
+ * tracker swap.
  */
 const TRELLO_EXTERNAL_ID_REGEX = /^[0-9a-f]{24}$/;
 
@@ -502,7 +503,7 @@ export class TrelloTracker implements IssueTracker {
   // board artifacts (specifically the retired `Needs Approval` list +
   // label from DX-231). They are NOT part of the abstract
   // {@link IssueTracker} interface — every method here is a Trello-
-  // specific REST call with no MemoryTracker analog. Consumers
+  // specific REST call with no analog on other backends. Consumers
   // (`src/worker/legacy-cleanup.ts`) type-narrow the tracker via
   // `instanceof TrelloTracker` before invoking, and skip cleanup
   // entirely on non-Trello backends.

@@ -1,6 +1,5 @@
 import type { TrelloConfig } from "../types.js";
 import type { IssueTracker } from "./interface.js";
-import { MemoryTracker } from "./memory.js";
 import { TrelloTracker } from "./trello.js";
 
 export type {
@@ -31,34 +30,44 @@ export {
 export type { ParseIssueOptions } from "./yaml.js";
 export { maxIssueNumber, nextIssueId } from "./id-generator.js";
 export { syncIssue } from "./sync.js";
-export { MemoryTracker } from "./memory.js";
-export type { RequestLogEntry } from "./memory.js";
 export { TrelloTracker } from "./trello.js";
 
-/**
- * Value of `DANXBOT_TRACKER` that switches `createIssueTracker` to the
- * in-memory implementation. Exposed as a constant so tests reference the
- * same source of truth as the production code path.
- */
-export const MEMORY_TRACKER_ENV_VALUE = "memory";
+let warnedLegacyMemoryEnv = false;
 
 /**
  * Build the active IssueTracker for a worker.
  *
- * - `DANXBOT_TRACKER === MEMORY_TRACKER_ENV_VALUE` always wins (used by
- *   tests + dev loops to bypass the real tracker entirely).
- * - Otherwise, returns TrelloTracker when TrelloConfig is provided.
- * - Returns `null` when neither path applies — the worker boots in
- *   YAML-only mode. Local-only state (chokidar mirror, reconcile derive,
- *   audit pass, dispatch scheduler) all still run; tracker-touching
- *   stages skip cleanly via callsite null-checks. See DX-341 epic.
+ * - Returns a `TrelloTracker` when a `TrelloConfig` is provided.
+ * - Returns `null` when no Trello config is provided — the worker
+ *   boots in YAML-only mode (DX-342). Local-only state (chokidar
+ *   mirror, reconcile derive, audit pass, dispatch scheduler) all
+ *   still run; tracker-touching stages skip cleanly via callsite
+ *   null-checks.
+ *
+ * DX-343 retired the `DANXBOT_TRACKER=memory` test-only branch. If
+ * the legacy env var is still set in an operator's `.env` we ignore
+ * it and emit a one-shot deprecation warn so the operator notices and
+ * removes it. The var has no other supported value.
  */
 export function createIssueTracker(ctx: { trello: TrelloConfig | null }): IssueTracker | null {
-  if (process.env.DANXBOT_TRACKER === MEMORY_TRACKER_ENV_VALUE) {
-    return new MemoryTracker();
+  if (process.env.DANXBOT_TRACKER === "memory" && !warnedLegacyMemoryEnv) {
+    warnedLegacyMemoryEnv = true;
+    console.warn(
+      "DANXBOT_TRACKER=memory is retired (DX-343); ignoring. Remove the env var from your .env to silence this warning.",
+    );
   }
   if (ctx.trello) {
     return new TrelloTracker(ctx.trello);
   }
   return null;
+}
+
+/**
+ * Test-only — reset the one-shot DX-343 deprecation warn latch so
+ * suites that exercise the legacy-env branch can assert the warn
+ * fires fresh. Production code never calls this. Naming matches the
+ * existing reset hooks in `circuit-breaker.ts` + `settings-file.ts`.
+ */
+export function _resetForTesting(): void {
+  warnedLegacyMemoryEnv = false;
 }

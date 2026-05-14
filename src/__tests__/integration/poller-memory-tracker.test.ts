@@ -21,15 +21,15 @@
  * this test fails loud.
  *
  * Layer choice: a Layer 2 integration test (no real claude, no Docker)
- * is "equivalent" per the AC. Booting a Docker worker with
- * `DANXBOT_TRACKER=memory` and exposing the MemoryTracker request log
- * over HTTP would add substantial infrastructure for a marginal
- * verification gain. The cache invariant + the request log property
- * are both observable from this in-process harness.
+ * is "equivalent" per the AC. Booting a Docker worker against the
+ * test-only tracker stub and exposing its request log over HTTP would
+ * add substantial infrastructure for a marginal verification gain.
+ * The cache invariant + the request log property are both observable
+ * from this in-process harness.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import type {
   CreateCardInput,
   Issue,

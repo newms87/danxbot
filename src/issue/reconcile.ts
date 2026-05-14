@@ -148,8 +148,8 @@ function mutexKey(repoName: string, id: string): string {
  * future multi-repo dashboards.
  *
  * Tests register their own tracker via `setReconcileTrackerForRepo`
- * (typically a `MemoryTracker`). When no tracker is registered for a
- * given repo, step 7 silently skips — fail-safe for tests that exercise
+ * (typically the test stub). When no tracker is registered for a given
+ * repo, step 7 silently skips — fail-safe for tests that exercise
  * derived-state mutation but don't care about the outbound tracker push.
  */
 const trackersByRepo = new Map<string, IssueTracker>();

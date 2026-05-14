@@ -895,22 +895,21 @@ test_yaml_memory() {
   #     `src/poller/inject/workspaces/issue-worker/.mcp.json`
   #   - Phase 5: routing every poller hot-path tracker call (fetchOpenCards,
   #     moveToStatus, addComment, getCard, getComments) through the
-  #     IssueTracker abstraction so a future Layer 3 harness booted with
-  #     `DANXBOT_TRACKER=memory` would drive the entire lifecycle through
-  #     MemoryTracker without any direct Trello HTTP traffic.
+  #     IssueTracker abstraction so an in-memory tracker stub can drive
+  #     the entire lifecycle through tests without any direct Trello
+  #     HTTP traffic.
   #
-  # The "MemoryTracker request log shows the expected fetchOpenCards/
-  # moveToStatus/addComment sequence" half of the AC is verified
-  # deterministically at Layer 2 by
+  # The "request log shows the expected fetchOpenCards / moveToStatus /
+  # addComment sequence" half of the AC is verified deterministically at
+  # Layer 2 by
   # `src/__tests__/integration/poller-memory-tracker.test.ts` (no Docker,
-  # no real claude — drives `poll()` against a real MemoryTracker and
+  # no real claude — drives `poll()` against the test-only stub and
   # asserts on `getRequestLog()`). The Layer 3 harness here is the
   # JSONL/structural half: a real claude run from a real worker writes
   # ZERO `mcp__trello__*` entries to the session JSONL.
   #
-  # Cost: 1 cheap dispatch (~$0.05). Worker need NOT be in DANXBOT_TRACKER
-  # =memory mode — the assertion is structural (workspace MCP shape), not
-  # dependent on the tracker backend.
+  # Cost: 1 cheap dispatch (~$0.05). The assertion is structural
+  # (workspace MCP shape), not dependent on the tracker backend.
 
   # Trigger a minimal dispatch in the issue-worker workspace. The task
   # is intentionally trivial — the agent is allowed to do anything; we

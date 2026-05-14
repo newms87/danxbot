@@ -336,7 +336,7 @@ export async function hydrateFromRemote(
   // `src/cron/sync-and-audit.ts#bulkSyncMissingYamls` skips cards that already
   // have a local YAML via `findByExternalId`, so this function only
   // ever runs against a tracker-born card with no prior local state.
-  // Tracker implementations (`MemoryTracker`, `TrelloTracker`) always
+  // Tracker implementations (TrelloTracker + the test stub) always
   // return `history: []` on `getCard` — history is local-only audit.
   // That's why no idempotency guard is needed here: the candidate's
   // history is always empty, and re-hydration of an existing card

@@ -66,8 +66,8 @@ export interface CleanupLegacyNeedsApprovalResult {
   /** True when the legacy label was found AND successfully deleted this run. */
   labelDeleted: boolean;
   /**
-   * True when the active tracker is not a {@link TrelloTracker} (e.g. the
-   * `DANXBOT_TRACKER=memory` test/dev path). Cleanup is Trello-specific —
+   * True when the active tracker is not a {@link TrelloTracker} (e.g.
+   * a non-Trello backend used by tests). Cleanup is Trello-specific —
    * non-Trello backends have no equivalent artifacts to remove.
    */
   skipped: boolean;
@@ -94,9 +94,10 @@ export async function cleanupLegacyNeedsApproval(
   };
 
   if (!(tracker instanceof TrelloTracker)) {
-    // MemoryTracker (test / dev) has no Trello board to clean. Returning
-    // early here — rather than at the orchestrator entry — keeps the
-    // skip path observable in tests via `result.skipped`.
+    // Non-Trello backends (test stubs / YAML-only mode) have no
+    // Trello board to clean. Returning early here — rather than at
+    // the orchestrator entry — keeps the skip path observable in
+    // tests via `result.skipped`.
     result.skipped = true;
     return result;
   }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import {
   isRetroNonEmpty,
   renderRetroComment,

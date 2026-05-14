@@ -49,7 +49,7 @@ import {
   syncTrackedIssueOnComplete,
   type IssueRouteDeps,
 } from "../../worker/issue-route.js";
-import { MemoryTracker } from "../../issue-tracker/memory.js";
+import { MemoryTracker } from "../../issue-tracker/__test__-memory.js";
 import {
   ensureIssuesDirs,
   issuePath,

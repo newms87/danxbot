@@ -187,9 +187,9 @@ export function _resetSchedulerTrackers(): void {
  *
  * Called from worker boot (`src/index.ts`) BEFORE the poller starts.
  * Throws synchronously on a missing-creds TrelloTracker so the worker
- * fails to start instead of running with broken dispatch-followup. A
- * MemoryTracker (DANXBOT_TRACKER=memory) constructs without creds and
- * passes the check.
+ * fails to start instead of running with broken dispatch-followup.
+ * Non-Trello tracker shapes (test stubs) construct without creds and
+ * pass the check.
  *
  * Idempotent — re-registering on a hot reload replaces the prior
  * tracker reference cleanly.
@@ -200,11 +200,10 @@ export function bootScheduler(args: {
   repo: RepoContext;
   /**
    * Per-repo IssueTracker. `null` is the YAML-only mode (DX-342) — no
-   * Trello, no MemoryTracker. Boot still wires the dispatch picker +
-   * settings watcher + triage boot-scan (none of which touch the
-   * tracker); only the `runPostDispatchProgressCheck` Trello fetch +
-   * `tryAcquireLock` cross-environment dispatch lock are skipped at
-   * their own callsites.
+   * tracker at all. Boot still wires the dispatch picker + settings
+   * watcher + triage boot-scan (none of which touch the tracker); only
+   * the `runPostDispatchProgressCheck` Trello fetch + `tryAcquireLock`
+   * cross-environment dispatch lock are skipped at their own callsites.
    */
   tracker: IssueTracker | null;
   /**
@@ -298,7 +297,7 @@ export function bootScheduler(args: {
       ? "YAML-only mode (no tracker)"
       : tracker instanceof TrelloTracker
         ? "TrelloTracker validated"
-        : "MemoryTracker";
+        : "non-Trello tracker (test stub)";
   log.info(
     `[${repo.name}] scheduler boot: ${trackerLabel}${tracker === null ? "" : " and registered"}${runPicker ? " (picker wired)" : ""}${reconcile ? " (settings watch + triage boot-scan wired)" : ""}`,
   );

@@ -420,7 +420,7 @@ describe("worker mode startup flow", { timeout: 15_000 }, () => {
     // instance — assert via call shape (the tracker shape is
     // tracker-implementation-specific so we only pin the repo
     // argument). The default mock resolves with skipped:true
-    // because no DANXBOT_TRACKER=memory env is set here AND no
+    // because no Trello creds are present here AND no
     // TrelloTracker is constructed; the helper itself decides
     // skip behavior, the wiring just hands off the args.
     expect(mockCleanupLegacyNeedsApproval).toHaveBeenCalledWith(

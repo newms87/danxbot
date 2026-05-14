@@ -1752,7 +1752,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("calls releaseLock on the supplied tracker when the dispatch onComplete fires", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/memory.js");
+    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
@@ -1832,7 +1832,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("releases the tracker lock on the spawn-failure path (no terminal job ever ran)", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/memory.js");
+    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
@@ -1905,7 +1905,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
     // EC2) polling the same card could grab it during the recovery
     // window. The respawnInProgress gate fixes that — release fires
     // ONLY on the FINAL terminal state, not on each per-respawn close.
-    const { MemoryTracker } = await import("../issue-tracker/memory.js");
+    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
     const { tryAcquireLock, parseLockComment } = await import(
       "../issue-tracker/lock.js"
     );
@@ -2004,7 +2004,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
     // The release path is fire-and-forget. Even when tracker.editComment
     // rejects (network outage, auth failure), the dispatch completes
     // and the next caller's onComplete still runs.
-    const { MemoryTracker } = await import("../issue-tracker/memory.js");
+    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
     const { tryAcquireLock } = await import("../issue-tracker/lock.js");
 
     const tracker = new MemoryTracker();
@@ -2079,7 +2079,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
   });
 
   it("dispatch with no lockRelease leaves tracker comments unchanged at terminal state", async () => {
-    const { MemoryTracker } = await import("../issue-tracker/memory.js");
+    const { MemoryTracker } = await import("../issue-tracker/__test__-memory.js");
     const tracker = new MemoryTracker();
 
     let capturedOnComplete:
