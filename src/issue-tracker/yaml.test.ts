@@ -845,3 +845,86 @@ describe("DX-511 — effort_level field (v8)", () => {
     expect(issueToCreateInput(fresh).schema_version).toBe(KNOWN_SCHEMA_MAX);
   });
 });
+
+describe("parseIssue — priority bounds widened to (0.01, 5.99) (DX-521)", () => {
+  function withPriority(priorityYamlLiteral: string): string {
+    return `schema_version: 8
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: ${priorityYamlLiteral}
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+history: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+effort_level: null
+`;
+  }
+
+  it("accepts priority: 0.5 (in widened range, was rejected pre-DX-521)", () => {
+    const issue = parseIssue(withPriority("0.5"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(0.5);
+  });
+
+  it("accepts priority: 5.99 (in widened range)", () => {
+    const issue = parseIssue(withPriority("5.99"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(5.99);
+  });
+
+  it("clamps priority: 0 to PRIORITY_MIN (0.01)", () => {
+    const issue = parseIssue(withPriority("0"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(0.01);
+  });
+
+  it("clamps priority: 6 to PRIORITY_MAX (5.99)", () => {
+    const issue = parseIssue(withPriority("6"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(5.99);
+  });
+
+  it("clamps priority: -1 to PRIORITY_MIN", () => {
+    const issue = parseIssue(withPriority("-1"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(0.01);
+  });
+
+  it("defaults priority: .nan (non-finite) to PRIORITY_DEFAULT (3.0)", () => {
+    // yaml.js parses `.nan` as the float NaN — the clamp guards against
+    // non-finite numbers and falls back to PRIORITY_DEFAULT.
+    const issue = parseIssue(withPriority(".nan"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(3.0);
+  });
+
+  it("AC #5 — existing on-disk priority: 3 round-trips unchanged (regression guard)", () => {
+    // Bounds widen must not silently migrate existing values. Every YAML
+    // on disk today carries priority: 3 (the default); after the widen
+    // those values must still round-trip as exactly 3.0.
+    const issue = parseIssue(withPriority("3"), { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(3.0);
+    const reSerialized = serializeIssue(issue);
+    const reParsed = parseIssue(reSerialized, { expectedPrefix: "DX" });
+    expect(reParsed.priority).toBe(3.0);
+  });
+});

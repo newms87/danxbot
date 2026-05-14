@@ -13,8 +13,8 @@
  *    in `cards` whose `assigned_agent` is either null or matches the
  *    candidate agent's name (re-claim). Returns `null` when every card
  *    is owned by another agent. Caller is responsible for sorting
- *    `cards` first (the dispatchable list comes pre-sorted by ICE total
- *    DESC + priority DESC + FIFO from `listDispatchableYamls`).
+ *    `cards` first (the dispatchable list comes pre-sorted by priority
+ *    DESC + ICE total DESC + FIFO from `listDispatchableYamls`).
  *
  * Both helpers are pure — no DB queries, no filesystem reads. The
  * caller (`src/cron/sync-and-audit.ts`) builds `roster` from `readAgents(ctx)`,
@@ -138,9 +138,9 @@ export function pickFreeAgent(
 export interface PickCardForAgentInput {
   /**
    * Pre-sorted list of dispatchable cards. `listDispatchableYamls`
-   * already returns them in canonical pick order (ICE total DESC +
-   * priority DESC + FIFO); this helper preserves that order and just
-   * filters out cards another agent owns.
+   * already returns them in canonical pick order (priority DESC + ICE
+   * total DESC + FIFO; DX-521); this helper preserves that order and
+   * just filters out cards another agent owns.
    */
   cards: readonly Issue[];
   agentName: string;

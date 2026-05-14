@@ -111,7 +111,7 @@ describe("sortIssuesForStatus — priority bucket", () => {
     expect(ids(out)).toEqual(["ISS-20", "ISS-30", "ISS-10"]);
   });
 
-  it("priority DESC tiebreaks ICE-equal cards", () => {
+  it("priority DESC sorts ICE-equal cards (priority is primary, ICE ties)", () => {
     const a = mkIssue({ id: "ISS-1", iceTotal: 50, priority: 3.0 });
     const b = mkIssue({ id: "ISS-2", iceTotal: 50, priority: 4.5 });
     const c = mkIssue({ id: "ISS-3", iceTotal: 50, priority: 1.5 });
@@ -130,6 +130,54 @@ describe("sortIssuesForStatus — priority bucket", () => {
       byId,
     );
     expect(ids(out)).toEqual(["ISS-2", "ISS-1", "ISS-3"]);
+  });
+
+  it("DX-521 — priority DESC outranks ICE DESC when both differ", () => {
+    // Two cards in the same tier (both triaged, no position, no shared
+    // epic parent): one with priority 4 + low ICE, one with priority 2
+    // + high ICE. The priority-4 card ranks first regardless of ICE.
+    const lowPHighIce = mkIssue({
+      id: "ISS-1",
+      iceTotal: 125,
+      priority: 2.0,
+    });
+    const highPLowIce = mkIssue({ id: "ISS-2", iceTotal: 1, priority: 4.0 });
+    const byId = new Map<string, Issue>([
+      [lowPHighIce.id, lowPHighIce],
+      [highPLowIce.id, highPLowIce],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: lowPHighIce, mtime: 100 },
+        { issue: highPLowIce, mtime: 200 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-2", "ISS-1"]);
+  });
+
+  it("DX-521 — ICE total DESC breaks ties among priority-equal cards", () => {
+    // Three cards same priority (3.0 default) with different ICE
+    // totals. With priority equal, ICE DESC orders them.
+    const lowIce = mkIssue({ id: "ISS-1", iceTotal: 10, priority: 3.0 });
+    const highIce = mkIssue({ id: "ISS-2", iceTotal: 100, priority: 3.0 });
+    const midIce = mkIssue({ id: "ISS-3", iceTotal: 50, priority: 3.0 });
+    const byId = new Map<string, Issue>([
+      [lowIce.id, lowIce],
+      [highIce.id, highIce],
+      [midIce.id, midIce],
+    ]);
+    const out = sortInputsForStatus(
+      asInputs([
+        { issue: lowIce, mtime: 100 },
+        { issue: highIce, mtime: 200 },
+        { issue: midIce, mtime: 50 },
+      ]),
+      "ToDo",
+      byId,
+    );
+    expect(ids(out)).toEqual(["ISS-2", "ISS-3", "ISS-1"]);
   });
 
   it("missing priority on an Issue defaults to 3.0 via createEmptyIssue", () => {

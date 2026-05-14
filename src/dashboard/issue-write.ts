@@ -127,13 +127,25 @@ export interface IssuePatch {
   reopen?: true;
   /**
    * Operator manual ordering knob inside the card's status column
-   * (DX-264). Finite number wins over the canonical ICE → priority →
+   * (DX-264). Finite number wins over the canonical priority → ICE →
    * mtime tier; `null` clears the override. Computed by the dashboard's
    * fractional-indexing helper on intra-column drop. Schema invariants
    * are checked by `validatePatchShape` (must be a finite number or
    * null — anything else is a 400).
    */
   position?: number | null;
+  /**
+   * Operator priority knob (DX-521). Finite number in the open
+   * interval `(0, 6)` — `validatePatchShape` rejects out-of-range,
+   * non-finite, and non-numeric values with `400 Invalid priority`.
+   * Out-of-clamp-range values that still pass the open-interval check
+   * (e.g. `0.001`) round-trip through `parseIssue` on the next read
+   * and silently clamp to `[PRIORITY_MIN, PRIORITY_MAX]`. The
+   * dashboard's tier menu commits the midpoint of each tier
+   * (`PRIORITY_TIERS[i].defaultValue`); typed numeric overrides land
+   * verbatim.
+   */
+  priority?: number;
   /**
    * Full array replace of `conflict_on[]` (DX-309). Validated entry by
    * entry — every entry must be `{id: "<PREFIX>-N", reason: "<non-empty>"}`.
@@ -163,6 +175,7 @@ const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "requires_human",
   "reopen",
   "position",
+  "priority",
   "conflict_on",
   "blocked",
 ]);
@@ -484,6 +497,15 @@ function validatePatchShape(body: unknown): IssuePatch {
       patch.position = v;
     }
   }
+  if ("priority" in raw) {
+    const v = raw.priority;
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v >= 6) {
+      throw new IssuePatchError(400, {
+        error: "priority must be a finite number in (0, 6)",
+      });
+    }
+    patch.priority = v;
+  }
   if ("conflict_on" in raw) {
     if (!Array.isArray(raw.conflict_on)) {
       throw new IssuePatchError(400, {
@@ -641,6 +663,9 @@ function applyValidatedPatch(
   }
   if (patch.position !== undefined) {
     next.position = patch.position;
+  }
+  if (patch.priority !== undefined) {
+    next.priority = patch.priority;
   }
   if (patch.conflict_on !== undefined) {
     next.conflict_on = patch.conflict_on.map((e) => ({ ...e }));

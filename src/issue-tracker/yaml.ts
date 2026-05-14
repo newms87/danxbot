@@ -104,14 +104,21 @@ const warnedSchemaVersions = new Set<number>();
 const AGENT_NAME_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /**
- * Priority field bounds + default. Operators set `priority` in
- * `[1.0, 5.0]` (float; 3.0 is "medium"); the parser clamps out-of-range
- * values and defaults missing fields to `PRIORITY_DEFAULT` so legacy
- * v3/v4 YAMLs round-trip without a hard migration. See `Issue.priority`
- * for the full semantic. Introduced by ISS-210.
+ * Priority field bounds + default. Operators set `priority` in the open
+ * interval `(0, 6)` clamped on read to `[PRIORITY_MIN, PRIORITY_MAX]`
+ * (`[0.01, 5.99]` post-DX-521); the parser clamps out-of-range values
+ * and defaults missing fields to `PRIORITY_DEFAULT` so legacy v3/v4
+ * YAMLs round-trip without a hard migration. The numeric range maps to
+ * six labeled tiers via `priorityTier()` in `./priority-tier.ts`:
+ * `lowest` `(0, 1)`, `low` `[1, 2)`, `medium` `[2, 3)`, `high`
+ * `[3, 4)`, `very_high` `[4, 5)`, `critical` `[5, 5.99]`. See
+ * `Issue.priority` for the full semantic. Introduced by ISS-210;
+ * bounds widened from `[1.0, 5.0]` to `[0.01, 5.99]` by DX-521 to
+ * accommodate the 6-tier mapping (no schema bump — the value shape
+ * is unchanged, only the clamp range widened).
  */
-export const PRIORITY_MIN = 1.0;
-export const PRIORITY_MAX = 5.0;
+export const PRIORITY_MIN = 0.01;
+export const PRIORITY_MAX = 5.99;
 export const PRIORITY_DEFAULT = 3.0;
 
 function clampPriority(raw: unknown): number {

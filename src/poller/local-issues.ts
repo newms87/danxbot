@@ -24,9 +24,11 @@
  *
  *  - **Work-ready** (`listDispatchableYamls`): canonical
  *    `sortInputsForStatus("ToDo", ...)` order — tier (waiting/blocked
- *    last) → ICE total DESC (untriaged = +Inf) → priority DESC →
- *    `updatedAt` ASC (FIFO). The poller filters waiting/blocked rows
- *    out before sorting, so the tier predicate is a no-op there.
+ *    last) → priority DESC → ICE total DESC (untriaged = +Inf) →
+ *    `updatedAt` ASC (FIFO). DX-521 made priority the primary sort key
+ *    above ICE; pre-DX-521 the order was reversed. The poller filters
+ *    waiting/blocked rows out before sorting, so the tier predicate is
+ *    a no-op there.
  *
  *  - **Triage-due** (`listTriageDueYamls`): never-triaged first
  *    (`triage.expires_at === ""`), then `expires_at` ASC (oldest stale

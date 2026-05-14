@@ -539,20 +539,26 @@ export interface Issue {
   title: string;
   description: string;
   /**
-   * Operator-managed priority knob inside a sort bucket. Float in
-   * `[1.0, 5.0]`; default `3.0`. Semantics: 1 = very low, 2 = low,
-   * 3 = medium, 4 = high, 5 = critical. The float resolution lets
-   * operators express ordering inside a bracket (`3.44`, `5.88`)
-   * without a coarse five-bucket discretization.
+   * Operator-managed priority knob inside a sort bucket. Float in the
+   * open interval `(0, 6)` clamped on read to `[0.01, 5.99]`; default
+   * `3.0`. Mapped to six labeled tiers via `priorityTier()` in
+   * `src/issue-tracker/priority-tier.ts`: `lowest` `(0, 1)`, `low`
+   * `[1, 2)`, `medium` `[2, 3)`, `high` `[3, 4)`, `very_high` `[4, 5)`,
+   * `critical` `[5, 5.99]`. The float resolution lets operators express
+   * ordering inside a tier (`3.44`, `4.88`) without a coarse six-bucket
+   * discretization.
    *
    * The field is consumed by `sortIssuesForStatus` (in
-   * `src/issue-tracker/sort.ts`): for the Review / ToDo / Blocked
-   * buckets, `priority` DESC tiebreaks ICE-equal cards.
-   * In Progress / Done / Cancelled keep `updated_at` DESC and ignore
-   * priority. Out-of-range / missing values are clamped to `[1.0, 5.0]`
-   * on read by `parseIssue` and missing values default to `3.0`.
-   * ISS-210 introduced the field with a v4 → v5 schema bump and the
-   * one-off `migrate-issues-priority.ts` backfill.
+   * `src/issue-tracker/sort.ts`) as the PRIMARY sort key for the
+   * Review / ToDo / Blocked buckets — `priority` DESC ranks above
+   * ICE total DESC (DX-521; pre-DX-521 ICE was primary and priority
+   * was the tiebreaker). In Progress / Done / Cancelled keep
+   * `updated_at` DESC and ignore priority. Out-of-range / missing
+   * values are clamped to `[0.01, 5.99]` on read by `parseIssue` and
+   * missing values default to `3.0`. ISS-210 introduced the field with
+   * a v4 → v5 schema bump and the one-off `migrate-issues-priority.ts`
+   * backfill; DX-521 widened the bounds without a schema version bump
+   * (value shape unchanged, only the clamp range widened).
    */
   priority: number;
   /**

@@ -272,6 +272,102 @@ describe("applyIssuePatch — allowlist + body shape", () => {
       ),
     ).rejects.toMatchObject({ status: 400 });
   });
+
+  it("DX-521 — rejects priority: 0 (must be > 0)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: 0 },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
+
+  it("DX-521 — rejects priority: 6 (must be < 6)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: 6 },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
+
+  it("DX-521 — rejects priority: -1 (negative, out of open interval)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: -1 },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
+
+  it("DX-521 — rejects priority: NaN", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: Number.NaN },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
+
+  it("DX-521 — rejects priority: Infinity", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: Number.POSITIVE_INFINITY },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
+
+  it('DX-521 — rejects priority: "high" (non-numeric — caught by the (0, 6) guard)', async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { priority: "high" as unknown as number },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number in (0, 6)" },
+    });
+  });
 });
 
 describe("applyIssuePatch — round-trip mutation", () => {
@@ -322,6 +418,93 @@ describe("applyIssuePatch — round-trip mutation", () => {
       readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
     );
     expect(onDisk).toMatchObject({ position: null });
+  });
+
+  it("DX-521 — priority: 4.2 lands on disk + publishes issue:updated SSE", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { priority: 4.2 },
+      "alice",
+    );
+    expect(issue.priority).toBe(4.2);
+    const onDisk = parseYamlText(
+      readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
+    );
+    expect(onDisk).toMatchObject({ priority: 4.2 });
+    expect(mockEventBusPublish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        topic: "issue:updated",
+        data: expect.objectContaining({
+          repoName: "danxbot",
+          id: "DX-1",
+          issue: expect.objectContaining({ priority: 4.2 }),
+        }),
+      }),
+    );
+  });
+
+  it("DX-521 — priority: 0.01 (minimum allowed) round-trips", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { priority: 0.01 },
+      "alice",
+    );
+    expect(issue.priority).toBe(0.01);
+  });
+
+  it("DX-521 — priority: 5.99 (maximum allowed) round-trips", async () => {
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { priority: 5.99 },
+      "alice",
+    );
+    expect(issue.priority).toBe(5.99);
+  });
+
+  it("DX-521 — validator-vs-clamp asymmetry: priority 0.001 passes PATCH then clamps to 0.01 on re-parse", async () => {
+    // The PATCH validator accepts the open interval (0, 6) — `0.001`
+    // passes. The applier writes the raw value to disk; the next
+    // `parseIssue` clamps to `PRIORITY_MIN` (0.01). The two layers are
+    // intentionally asymmetric (validator = open interval, clamp =
+    // closed bounds) — this test pins the gap so a future "tighten the
+    // validator to match the clamp" change is a conscious choice.
+    writeFixture(makeIssue(), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { priority: 0.001 },
+      "alice",
+    );
+    // PATCH layer returns the raw post-patch issue (clamp does not run
+    // inside applyValidatedPatch).
+    expect(issue.priority).toBe(0.001);
+    // The on-disk YAML reflects the raw value too — clamp only runs
+    // when a future reader calls parseIssue. Sanity-check the chokidar
+    // mirror will see `0.001` and forward it; the clamp is the next
+    // reader's safety net.
+    const onDiskRaw = readFileSync(
+      issuePath(repoLocalPath, "DX-1", "open"),
+      "utf-8",
+    );
+    expect(onDiskRaw).toMatch(/priority:\s*0\.001/);
+    // Re-parsing through the strict parser clamps to PRIORITY_MIN.
+    const reParsed = parseYamlText(onDiskRaw);
+    expect(reParsed).toMatchObject({ priority: 0.001 });
+    // Confirm the clamp would fire by running parseIssue directly.
+    // (Import inline so we don't add a top-level import for one test.)
+    const { parseIssue } = await import("../issue-tracker/yaml.js");
+    const clamped = parseIssue(onDiskRaw, { expectedPrefix: "DX" });
+    expect(clamped.priority).toBe(0.01);
   });
 
   it("ac is full-array replace (not merge)", async () => {

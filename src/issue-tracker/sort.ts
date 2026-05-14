@@ -11,8 +11,16 @@
  *
  * | Status                          | Sort                                                             |
  * |---------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → ICE total DESC (untriaged = +Inf) → priority DESC → id numeric ASC (FIFO by creation) |
+ * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → priority DESC → ICE total DESC (untriaged = +Inf) → id numeric ASC (FIFO by creation) |
  * | In Progress, Done, Cancelled    | updated_at DESC                                                   |
+ *
+ * Priority becomes the primary sort key for Review/ToDo/Blocked in
+ * DX-521 (pre-DX-521 ICE was primary and priority was the
+ * tiebreaker). Rationale: the operator's priority knob is the human
+ * intent signal; the triage agent's ICE score is the machine
+ * heuristic. The operator's signal SHOULD outrank the machine's when
+ * both are present, with ICE breaking ties among priority-equal
+ * cards.
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
  * `blocked` fields AND any ancestor's. Ancestor walking re-uses the
@@ -199,15 +207,21 @@ export function sortInputsForStatus<T>(
       }
     }
 
-    // Both untriaged → both score +Infinity → iceDelta is NaN. Fall
-    // through to priority + FIFO tiebreaks. A finite delta or
-    // ±Infinity (one untriaged, one triaged) is a real ordering signal
-    // and must be returned — only NaN is the "no signal" case.
-    const iceDelta = effectiveIce(b.issue) - effectiveIce(a.issue);
-    if (!Number.isNaN(iceDelta) && iceDelta !== 0) return iceDelta;
-
+    // Priority is the PRIMARY sort key for Review/ToDo/Blocked buckets
+    // (DX-521). The operator's priority knob directly drives dispatch
+    // order; ICE total acts as the tiebreaker among priority-equal
+    // cards. Pre-DX-521 the order was reversed (ICE primary, priority
+    // tiebreaker) — the swap keeps the operator's human-intent signal
+    // ranked above the triage agent's machine-derived ICE score.
     const priorityDelta = b.issue.priority - a.issue.priority;
     if (priorityDelta !== 0) return priorityDelta;
+
+    // Both untriaged → both score +Infinity → iceDelta is NaN. Fall
+    // through to FIFO. A finite delta or ±Infinity (one untriaged,
+    // one triaged) is a real ordering signal and must be returned —
+    // only NaN is the "no signal" case.
+    const iceDelta = effectiveIce(b.issue) - effectiveIce(a.issue);
+    if (!Number.isNaN(iceDelta) && iceDelta !== 0) return iceDelta;
 
     // FIFO by creation order — parse numeric N from `<PREFIX>-N` and
     // sort ASC. IDs are allocated monotonically so the lower number is
