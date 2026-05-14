@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
+  buildClaudeProbeEnv,
   dispatchTagFor,
   findJsonlByTag,
   jsonlDiscoveryMessage,
@@ -594,6 +595,106 @@ describe("runProbe", () => {
     expect(result.verdict.pass).toBe(true); // The JSONL still shows a Skill call → verdict is independent of exit code.
   });
 
+  it("strips ANTHROPIC_API_KEY from the spawn env when CLAUDE_AUTH_MODE=subscription (so claude CLI falls back to OAuth)", async () => {
+    const prevAuthMode = process.env.CLAUDE_AUTH_MODE;
+    const prevApiKey = process.env.ANTHROPIC_API_KEY;
+    process.env.CLAUDE_AUTH_MODE = "subscription";
+    process.env.ANTHROPIC_API_KEY = "sk-ant-stale-key-should-be-stripped";
+    try {
+      const captured: Array<{ opts: { env?: NodeJS.ProcessEnv } }> = [];
+      const spawnFn: unknown = vi.fn(
+        (_cmd: string, argv: readonly string[], opts: unknown) => {
+          captured.push({ opts: opts as { env?: NodeJS.ProcessEnv } });
+          const tag =
+            (argv[1] as string).match(/<!--\s*danxbot-dispatch:[^\s]+\s*-->/)?.[0] ??
+            "";
+          const child = makeFakeChild();
+          setImmediate(() => {
+            writeJsonlFor(tag, [
+              {
+                type: "assistant",
+                message: {
+                  id: "m",
+                  role: "assistant",
+                  content: [
+                    { type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } },
+                  ],
+                  usage: {
+                    input_tokens: 1,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                  },
+                },
+              },
+            ]);
+            child.emit("close", 0);
+          });
+          return child as unknown as ReturnType<SpawnFn>;
+        },
+      );
+      await runProbe(baseArgs(), resolver, spawnFn as SpawnFn);
+      expect(captured).toHaveLength(1);
+      expect(captured[0].opts.env).toBeDefined();
+      expect(captured[0].opts.env?.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(captured[0].opts.env?.CLAUDE_AUTH_MODE).toBe("subscription");
+    } finally {
+      if (prevAuthMode === undefined) delete process.env.CLAUDE_AUTH_MODE;
+      else process.env.CLAUDE_AUTH_MODE = prevAuthMode;
+      if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevApiKey;
+    }
+  });
+
+  it("preserves ANTHROPIC_API_KEY in the spawn env when CLAUDE_AUTH_MODE is unset (legacy api-key auth)", async () => {
+    const prevAuthMode = process.env.CLAUDE_AUTH_MODE;
+    const prevApiKey = process.env.ANTHROPIC_API_KEY;
+    delete process.env.CLAUDE_AUTH_MODE;
+    process.env.ANTHROPIC_API_KEY = "sk-ant-real-key";
+    try {
+      const captured: Array<{ opts: { env?: NodeJS.ProcessEnv } }> = [];
+      const spawnFn: unknown = vi.fn(
+        (_cmd: string, argv: readonly string[], opts: unknown) => {
+          captured.push({ opts: opts as { env?: NodeJS.ProcessEnv } });
+          const tag =
+            (argv[1] as string).match(/<!--\s*danxbot-dispatch:[^\s]+\s*-->/)?.[0] ??
+            "";
+          const child = makeFakeChild();
+          setImmediate(() => {
+            writeJsonlFor(tag, [
+              {
+                type: "assistant",
+                message: {
+                  id: "m",
+                  role: "assistant",
+                  content: [
+                    { type: "tool_use", name: "Skill", input: { skill: "dev:debugging" } },
+                  ],
+                  usage: {
+                    input_tokens: 1,
+                    output_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                  },
+                },
+              },
+            ]);
+            child.emit("close", 0);
+          });
+          return child as unknown as ReturnType<SpawnFn>;
+        },
+      );
+      await runProbe(baseArgs(), resolver, spawnFn as SpawnFn);
+      expect(captured).toHaveLength(1);
+      expect(captured[0].opts.env?.ANTHROPIC_API_KEY).toBe("sk-ant-real-key");
+    } finally {
+      if (prevAuthMode === undefined) delete process.env.CLAUDE_AUTH_MODE;
+      else process.env.CLAUDE_AUTH_MODE = prevAuthMode;
+      if (prevApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prevApiKey;
+    }
+  });
+
   it("passes --strict-mcp-config + --mcp-config + --dangerously-skip-permissions to claude", async () => {
     const captured: Array<{ cmd: string; argv: readonly string[]; opts: unknown }> = [];
     const spawnFn: unknown = vi.fn(
@@ -641,6 +742,68 @@ describe("runProbe", () => {
     expect((captured[0].opts as { cwd: string }).cwd).toBe(
       "/custom/workspace/cwd",
     );
+  });
+});
+
+/**
+ * `buildClaudeProbeEnv` mirrors the OAuth-mode discipline from
+ * `anthropic-client.ts`: when the operator opted into subscription auth,
+ * a stale `ANTHROPIC_API_KEY` inherited by the spawned `claude` CLI
+ * causes it to send `X-Api-Key` + `Authorization: Bearer` simultaneously,
+ * and the server rejects on the stale key. Symptom: probes report
+ * `Invalid API key · Fix external API key` as the first assistant text,
+ * which masquerades as a skill-trigger false-negative.
+ */
+describe("buildClaudeProbeEnv", () => {
+  it("strips ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE=subscription", () => {
+    const env = {
+      CLAUDE_AUTH_MODE: "subscription",
+      ANTHROPIC_API_KEY: "sk-ant-stale",
+      PATH: "/usr/bin",
+    } as NodeJS.ProcessEnv;
+    const result = buildClaudeProbeEnv(env);
+    expect(result.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.CLAUDE_AUTH_MODE).toBe("subscription");
+    expect(result.PATH).toBe("/usr/bin");
+  });
+
+  it("preserves ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE is unset (legacy default)", () => {
+    const env = {
+      ANTHROPIC_API_KEY: "sk-ant-real",
+      PATH: "/usr/bin",
+    } as NodeJS.ProcessEnv;
+    const result = buildClaudeProbeEnv(env);
+    expect(result.ANTHROPIC_API_KEY).toBe("sk-ant-real");
+  });
+
+  it("preserves ANTHROPIC_API_KEY when CLAUDE_AUTH_MODE is something other than 'subscription'", () => {
+    const env = {
+      CLAUDE_AUTH_MODE: "api-key",
+      ANTHROPIC_API_KEY: "sk-ant-real",
+    } as NodeJS.ProcessEnv;
+    const result = buildClaudeProbeEnv(env);
+    expect(result.ANTHROPIC_API_KEY).toBe("sk-ant-real");
+    expect(result.CLAUDE_AUTH_MODE).toBe("api-key");
+  });
+
+  it("is a no-op when CLAUDE_AUTH_MODE=subscription but ANTHROPIC_API_KEY is unset", () => {
+    const env = {
+      CLAUDE_AUTH_MODE: "subscription",
+      PATH: "/usr/bin",
+    } as NodeJS.ProcessEnv;
+    const result = buildClaudeProbeEnv(env);
+    expect(result.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(result.CLAUDE_AUTH_MODE).toBe("subscription");
+    expect(result.PATH).toBe("/usr/bin");
+  });
+
+  it("does not mutate the input env (returns a new object on subscription strip)", () => {
+    const env = {
+      CLAUDE_AUTH_MODE: "subscription",
+      ANTHROPIC_API_KEY: "sk-ant-stale",
+    } as NodeJS.ProcessEnv;
+    buildClaudeProbeEnv(env);
+    expect(env.ANTHROPIC_API_KEY).toBe("sk-ant-stale");
   });
 });
 

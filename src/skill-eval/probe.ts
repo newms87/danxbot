@@ -249,6 +249,26 @@ export function sumUsageFromJsonl(jsonlText: string): ProbeUsage {
  */
 export type SpawnFn = typeof spawn;
 
+/**
+ * Build the env passed to the spawned `claude` CLI. When the operator
+ * opted into subscription auth (`CLAUDE_AUTH_MODE=subscription`), strip
+ * `ANTHROPIC_API_KEY` from the env so claude CLI falls back to the
+ * OAuth token at `~/.claude/.credentials.json`. Without the strip, a
+ * stale key causes claude CLI to send `X-Api-Key` + `Authorization:
+ * Bearer` simultaneously and the server rejects on the stale key —
+ * symptom is `Invalid API key · Fix external API key` as the first
+ * assistant text, which masquerades as a skill-trigger false-negative.
+ * Mirrors the `apiKey: null` discipline in `anthropic-client.ts`.
+ */
+export function buildClaudeProbeEnv(
+  parentEnv: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  if (parentEnv.CLAUDE_AUTH_MODE !== "subscription") return parentEnv;
+  const env = { ...parentEnv };
+  delete env.ANTHROPIC_API_KEY;
+  return env;
+}
+
 interface SpawnResult {
   readonly exitCode: number | null;
 }
@@ -273,7 +293,7 @@ function spawnClaude(
         ],
         {
           cwd: args.workspaceCwd,
-          env: process.env,
+          env: buildClaudeProbeEnv(process.env),
           stdio: ["ignore", "pipe", "pipe"],
         },
       );
