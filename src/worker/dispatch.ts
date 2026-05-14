@@ -717,6 +717,144 @@ export async function handleResume(
   }
 }
 
+/** Max length of operator-supplied `instructions` accepted by `/api/triage`.
+ * Keeps the prompt body bounded — claude's context budget is finite, and a
+ * runaway operator note belongs on the card description, not in a route
+ * argument. DX-515 phase 1. */
+const TRIAGE_INSTRUCTIONS_MAX_CHARS = 2000;
+
+/**
+ * Build the `task` body POSTed to claude for a triage dispatch (DX-515).
+ * Exported for the integration test — keeps the assertion symmetric with
+ * what the route actually shapes.
+ *
+ * Base form: `Triage card <issue_id> using the danx-triage-card skill.`
+ * With operator notes: appends a marked `## Operator notes` block. The
+ * `danx-triage-card` SKILL.md recognizes that block and augments the
+ * per-status decision tree with the operator's context (it does NOT
+ * override the tree).
+ */
+export function buildTriageTaskBody(
+  issueId: string,
+  instructions: string | null,
+): string {
+  const base = `Triage card ${issueId} using the danx-triage-card skill.`;
+  if (instructions === null) return base;
+  return `${base}\n\n## Operator notes\n\n${instructions}`;
+}
+
+/**
+ * `POST /api/triage` — operator-directed triage dispatch (DX-515 phase 1).
+ *
+ * Body: `{repo?, issue_id, instructions?, api_token?, status_url?}`.
+ * Spawns `/danx-triage-card <issue_id>`-shaped work in the `issue-worker`
+ * workspace; the dispatched agent applies the per-status decision tree
+ * documented in the `danxbot:danx-triage-card` plugin skill. When the
+ * caller supplies `instructions`, the route appends them to the task body
+ * as a `## Operator notes` block so the agent can fold them into the
+ * decision (see SKILL.md for the contract).
+ *
+ * Validation:
+ *   - `issue_id` must match `<PREFIX>-N` (e.g. `DX-123`).
+ *   - `instructions` is optional but, when present, MUST be a non-empty
+ *     string ≤ TRIAGE_INSTRUCTIONS_MAX_CHARS. Blank / whitespace-only is
+ *     rejected so a caller cannot accidentally smuggle empty notes that
+ *     would still render the `## Operator notes` header with no body.
+ *
+ * Symmetry: shares the same auth band + 503 toggle + error-mapping chain
+ * as `/api/flesh-out` and `/api/chat`. Stamps `dispatchKind: "triage"` on
+ * the dispatch row — distinct from `"work"` so `dispatch/core.ts` does
+ * NOT auto-flip the candidate YAML's status (triage decisions are made
+ * via `Edit`, not via auto-flip).
+ */
+export async function handleTriage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: RepoContext,
+): Promise<void> {
+  try {
+    if (!isFeatureEnabled(repo, "dispatchApi")) {
+      json(res, 503, {
+        error: `Dispatch API is disabled for repo ${repo.name}`,
+      });
+      return;
+    }
+
+    const body = await parseBody(req);
+
+    if (!validateRepoMatch(body, res, repo)) return;
+
+    const issueId = validateIssueIdBody(body, res);
+    if (!issueId) return;
+
+    // Optional operator notes. Reject non-string / oversized at the
+    // boundary so the agent never sees a partial / malformed block.
+    let instructions: string | null = null;
+    if (body.instructions !== undefined && body.instructions !== null) {
+      if (typeof body.instructions !== "string") {
+        json(res, 400, {
+          error: "instructions must be a string when provided",
+        });
+        return;
+      }
+      const trimmed = body.instructions.trim();
+      if (trimmed === "") {
+        json(res, 400, {
+          error: "instructions must be a non-empty string when provided",
+        });
+        return;
+      }
+      if (body.instructions.length > TRIAGE_INSTRUCTIONS_MAX_CHARS) {
+        json(res, 400, {
+          error: `instructions exceeds ${TRIAGE_INSTRUCTIONS_MAX_CHARS}-character limit (got ${body.instructions.length})`,
+        });
+        return;
+      }
+      instructions = body.instructions;
+    }
+
+    const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
+    const apiToken =
+      typeof body.api_token === "string" ? body.api_token : undefined;
+
+    const task = buildTriageTaskBody(issueId, instructions);
+    const apiDispatchMeta = buildApiDispatchMeta({
+      endpoint: "/api/triage",
+      workspace: "issue-worker",
+      callerIp,
+      statusUrl,
+      initialPrompt: task,
+    });
+
+    const { dispatchId } = await dispatch({
+      repo,
+      workspace: "issue-worker",
+      overlay: {},
+      task,
+      apiToken,
+      statusUrl,
+      apiDispatchMeta,
+      // Link the dispatch row to the card so the dashboard's per-card
+      // activity feed surfaces this triage run alongside work dispatches.
+      issueId,
+      // DX-515 — distinct from "work" so dispatch/core.ts does NOT
+      // auto-flip the candidate to In Progress. The triage agent owns
+      // the status decision via Edit.
+      dispatchKind: "triage",
+    });
+
+    json(res, 200, { job_id: dispatchId, status: "launched" });
+  } catch (err) {
+    // No StagedFilesError branch here — the triage route never validates
+    // staged files (`stagedFiles` is omitted on the dispatch input).
+    if (mapDispatchError(err, res, "Triage")) return;
+    log.error("Triage failed", err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Triage failed",
+    });
+  }
+}
+
 /**
  * `POST /api/flesh-out` — async card flesh-out (DX-348 Phase 1).
  *

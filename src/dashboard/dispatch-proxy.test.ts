@@ -21,6 +21,7 @@ import {
   handleLaunchProxy,
   handleResumeProxy,
   handleFleshOutProxy,
+  handleTriageProxy,
   handleChatProxy,
   handleJobProxy,
   loadDispatchToken,
@@ -696,6 +697,182 @@ describe("handleFleshOutProxy", () => {
 
   it("returns 404 when the repo is not configured", async () => {
     const { status, body } = await runFleshOut(
+      {
+        repo: "unknown-repo",
+        issue_id: "DX-1",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(404);
+    expect(JSON.parse(body).error).toMatch(/unknown-repo/);
+    expect(worker.requests).toHaveLength(0);
+  });
+});
+
+describe("handleTriageProxy", () => {
+  // DX-515 phase 1 — operator-directed triage proxy. Same auth band +
+  // body.repo → worker forwarder as launch/resume/flesh-out/chat. The
+  // worker owns issue_id + instructions validation + task shaping; the
+  // proxy is pure pass-through. Pins the upstream PATH (/api/triage) so
+  // a refactor that re-routes through /api/launch is caught.
+  let worker: FakeWorker;
+  let repos: RepoConfig[];
+
+  beforeAll(async () => {
+    worker = await startFakeWorker();
+    repos = [
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
+    ];
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => worker.server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    worker.requests.length = 0;
+    worker.respondWith(200, {
+      job_id: "triage-abc",
+      status: "launched",
+    });
+  });
+
+  async function runTriage(
+    body: Record<string, unknown>,
+    opts: { token?: string; auth?: string } = {},
+  ): Promise<{ status: number; body: string }> {
+    const { req, res } = createMockReqRes("POST", "/api/triage");
+    if (opts.auth) req.headers.authorization = opts.auth;
+    const bodyJson = JSON.stringify(body);
+    process.nextTick(() => {
+      req.emit("data", Buffer.from(bodyJson));
+      req.emit("end");
+    });
+    await handleTriageProxy(req, res, {
+      token: opts.token ?? "tok",
+      repos,
+      resolveHost: testHostResolver,
+    });
+    return {
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
+      body: (res as unknown as { _getBody: () => string })._getBody(),
+    };
+  }
+
+  it("rejects unauthenticated requests with 401 (missing header) — the missing-api_token AC", async () => {
+    // DX-515 AC: "missing api_token → 401". The bearer the dashboard
+    // checks IS the dispatch-side api_token surface — body.api_token is
+    // an unrelated upstream-side knob.
+    const { status } = await runTriage({
+      repo: "platform",
+      issue_id: "DX-515",
+    });
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("rejects wrong-bearer requests with 401 (invalid_token path)", async () => {
+    const { status } = await runTriage(
+      {
+        repo: "platform",
+        issue_id: "DX-515",
+      },
+      { auth: "Bearer wrong-token" },
+    );
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("forwards POST to /api/triage on the matching worker with body intact (base — no instructions)", async () => {
+    const { status, body } = await runTriage(
+      {
+        repo: "platform",
+        issue_id: "DX-515",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      job_id: "triage-abc",
+      status: "launched",
+    });
+
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0].method).toBe("POST");
+    expect(worker.requests[0].url).toBe("/api/triage");
+    expect(JSON.parse(worker.requests[0].body)).toEqual({
+      repo: "platform",
+      issue_id: "DX-515",
+      api_token: "t",
+    });
+  });
+
+  it("forwards `instructions` verbatim when present (no proxy-side rewriting)", async () => {
+    const notes = "re-score considering DX-269";
+    await runTriage(
+      {
+        repo: "platform",
+        issue_id: "DX-515",
+        instructions: notes,
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+
+    expect(worker.requests).toHaveLength(1);
+    expect(JSON.parse(worker.requests[0].body)).toEqual({
+      repo: "platform",
+      issue_id: "DX-515",
+      instructions: notes,
+      api_token: "t",
+    });
+  });
+
+  it("propagates upstream 400 verbatim when issue_id is malformed", async () => {
+    worker.respondWith(400, {
+      error: 'Invalid issue_id "dx-515" — must match <PREFIX>-N (e.g. DX-123)',
+    });
+    const { status, body } = await runTriage(
+      {
+        repo: "platform",
+        issue_id: "dx-515",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/Invalid issue_id/);
+  });
+
+  it("propagates upstream 400 verbatim when instructions exceeds the 2000-char limit", async () => {
+    worker.respondWith(400, {
+      error: "instructions exceeds 2000-character limit (got 2001)",
+    });
+    const { status, body } = await runTriage(
+      {
+        repo: "platform",
+        issue_id: "DX-515",
+        instructions: "x".repeat(2001),
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/2000-character limit/);
+  });
+
+  it("returns 404 when the repo is not configured", async () => {
+    const { status, body } = await runTriage(
       {
         repo: "unknown-repo",
         issue_id: "DX-1",

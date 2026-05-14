@@ -605,7 +605,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
   describe("auto-flip ToDo → In Progress before spawn", () => {
     async function writeCandidate(
       id: string,
-      status: "ToDo" | "In Progress" | "Blocked" = "ToDo",
+      status: "Review" | "ToDo" | "In Progress" | "Blocked" = "ToDo",
     ): Promise<void> {
       const { createEmptyIssue, serializeIssue } = await import(
         "../issue-tracker/yaml.js"
@@ -674,6 +674,30 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
       });
 
       expect(await readCandidateStatus("ISS-101")).toBe("ToDo");
+    });
+
+    it("skips flip when dispatchKind=triage — triage agent edits status via Edit, not auto-flip (DX-515)", async () => {
+      // Triage runs `/danx-triage-card`; the agent's per-status decision
+      // tree expects to READ the candidate at its current status
+      // (Review / Blocked / Waiting On) and then decide whether to flip
+      // it via Edit. If `dispatch/core.ts` auto-flipped to In Progress
+      // first, every Review card would look like a work-in-progress to
+      // the triage agent and the ICE decision tree would refuse to run.
+      // The gate at `dispatch/core.ts:1279` uses strict `=== "work"`
+      // equality so this test pins the literal contract.
+      await writeCandidate("ISS-102", "Review");
+
+      await dispatch({
+        repo: issueRepo,
+        task: "Triage card ISS-102 using the danx-triage-card skill.",
+        workspace: "issue-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        issueId: "ISS-102",
+        dispatchKind: "triage",
+      });
+
+      expect(await readCandidateStatus("ISS-102")).toBe("Review");
     });
 
     it("skips flip when issueId is undefined (Slack / external dispatch)", async () => {

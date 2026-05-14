@@ -7,6 +7,9 @@
  *
  *   POST /api/launch           — forwards to worker POST /api/launch
  *   POST /api/resume           — forwards to worker POST /api/resume
+ *   POST /api/flesh-out        — forwards to worker POST /api/flesh-out
+ *   POST /api/triage           — forwards to worker POST /api/triage
+ *   POST /api/chat             — forwards to worker POST /api/chat
  *   GET  /api/status/:jobId    — forwards to worker GET  /api/status/:jobId
  *   POST /api/cancel/:jobId    — forwards to worker POST /api/cancel/:jobId
  *   POST /api/stop/:jobId      — forwards to worker POST /api/stop/:jobId
@@ -616,6 +619,25 @@ export async function handleFleshOutProxy(
   deps: DispatchProxyDeps,
 ): Promise<void> {
   await forwardRepoBodyToWorker(req, res, deps, "/api/flesh-out");
+}
+
+/**
+ * POST /api/triage proxy — auth + body.repo → forward to worker.
+ *
+ * DX-515 phase 1. Pure pass-through: the worker (`handleTriage`)
+ * validates `body.issue_id`, optional `body.instructions`, builds the
+ * task body (base + optional `## Operator notes` block), and spawns
+ * the dispatch with `dispatchKind: "triage"`. The proxy carries the
+ * same auth band as `/api/launch`. Locking the upstream PATH
+ * (`/api/triage`) keeps a future refactor from accidentally re-routing
+ * triage through launch.
+ */
+export async function handleTriageProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  await forwardRepoBodyToWorker(req, res, deps, "/api/triage");
 }
 
 /**

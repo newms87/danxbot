@@ -6,6 +6,7 @@
  * - POST /api/launch — dispatch an agent for this repo
  * - POST /api/resume — resume a prior dispatch's Claude session (--resume)
  * - POST /api/flesh-out — async card flesh-out (DX-349)
+ * - POST /api/triage — operator-directed triage dispatch (DX-515)
  * - POST /api/chat — per-card chat session (DX-351 — fresh OR resume per
  *   the chat-sessions record at <repoRoot>/.danxbot/chat-sessions/<id>.json)
  * - GET /api/status/:jobId — check job status
@@ -24,6 +25,7 @@ import {
   handleLaunch,
   handleResume,
   handleFleshOut,
+  handleTriage,
   handleChat,
   handleCancel,
   handleListJobs,
@@ -78,6 +80,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "POST" && url.pathname === "/api/flesh-out") {
       await handleFleshOut(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/triage") {
+      await handleTriage(req, res, repo);
       return;
     }
 

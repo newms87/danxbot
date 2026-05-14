@@ -29,6 +29,7 @@ import {
   handleLaunchProxy,
   handleResumeProxy,
   handleFleshOutProxy,
+  handleTriageProxy,
   handleChatProxy,
   handleJobProxy,
   loadDispatchToken,
@@ -195,6 +196,11 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/flesh-out") {
     await handleFleshOutProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/triage") {
+    await handleTriageProxy(req, res, dispatchDeps);
     return true;
   }
 

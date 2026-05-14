@@ -272,6 +272,8 @@ import {
   handleLaunch,
   handleResume,
   handleFleshOut,
+  handleTriage,
+  buildTriageTaskBody,
   handleChat,
   handleCancel,
   handleListJobs,
@@ -2503,6 +2505,338 @@ describe("handleFleshOut — body validation + dispatch wiring", () => {
     const res = createMockRes();
 
     await handleFleshOut(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody())).toEqual({ error: "spawn ENOENT" });
+  });
+});
+
+/**
+ * `handleTriage` — DX-515 phase 1. Operator-directed triage dispatch.
+ *
+ * Mirrors `handleFleshOut` in shape (same auth band, same workspace,
+ * same error-mapping chain) but builds a task body that optionally
+ * carries a `## Operator notes` block and stamps
+ * `dispatchKind: "triage"` on the dispatch row.
+ *
+ * Test surface:
+ *   - 503 when dispatchApi is toggled off (consistency with other routes).
+ *   - 400 on missing / blank / malformed issue_id (delegated to the
+ *     shared validator — one happy-path coverage check).
+ *   - 400 when body.repo names a different worker.
+ *   - 400 when instructions is the wrong type / blank / oversized.
+ *   - 200 base path — task body is the bare triage line; no
+ *     `## Operator notes` block; `dispatchKind: "triage"`; `issueId`
+ *     linked.
+ *   - 200 with-notes path — task body appends the marked block verbatim
+ *     to make the SKILL.md contract observable in `prompt.md`.
+ *   - 200 with exactly 2000-char instructions (boundary).
+ *   - Default error mapping (ClaudeAuthError → 503, McpResolveError →
+ *     400, unknown → 500) matches the other dispatch routes.
+ *
+ * The `buildTriageTaskBody` helper is exercised separately so the
+ * task-shaping contract is pinned without going through the HTTP layer.
+ */
+describe("buildTriageTaskBody — task body shaping", () => {
+  it("returns just the base triage line when instructions is null", () => {
+    expect(buildTriageTaskBody("DX-515", null)).toBe(
+      "Triage card DX-515 using the danx-triage-card skill.",
+    );
+  });
+
+  it("appends the `## Operator notes` block when instructions is present", () => {
+    expect(buildTriageTaskBody("DX-515", "re-score considering DX-269")).toBe(
+      "Triage card DX-515 using the danx-triage-card skill.\n\n## Operator notes\n\nre-score considering DX-269",
+    );
+  });
+
+  it("preserves multi-line operator notes verbatim (no trimming, no escaping)", () => {
+    const notes = "line one\nline two\n\nparagraph break";
+    expect(buildTriageTaskBody("DX-1", notes)).toBe(
+      `Triage card DX-1 using the danx-triage-card skill.\n\n## Operator notes\n\n${notes}`,
+    );
+  });
+});
+
+describe("handleTriage — body validation + dispatch wiring", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-triage-1" });
+  });
+
+  it("returns 503 when dispatchApi is disabled (mirrors /api/launch contract)", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
+    );
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when body.repo names a different worker (cross-worker safety)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: "some-other-repo",
+      issue_id: "DX-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /This worker manages "[^"]+", not "some-other-repo"/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when issue_id is missing (delegated to the shared validator)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: issue_id",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 on malformed issue_id (delegated to the shared validator)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "dx-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /Invalid issue_id "dx-515"/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when instructions is the wrong type (e.g. JSON number)", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      instructions: 42,
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "instructions must be a string when provided",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when instructions is whitespace-only", async () => {
+    // Empty-after-trim is rejected so the agent never sees a `##
+    // Operator notes` header with no body underneath.
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      instructions: "   \n   ",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "instructions must be a non-empty string when provided",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when instructions exceeds 2000 chars", async () => {
+    const oversized = "x".repeat(2001);
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      instructions: oversized,
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /instructions exceeds 2000-character limit \(got 2001\)/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("accepts exactly 2000-char instructions (boundary)", async () => {
+    const maxed = "x".repeat(2000);
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      instructions: maxed,
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    type TriageDispatchInput = CapturedDispatchInput & {
+      workspace: string;
+      task: string;
+      issueId?: string;
+      dispatchKind?: string;
+    };
+    const input = mockDispatchFn.mock.calls[0][0] as TriageDispatchInput;
+    expect(input.task).toBe(
+      `Triage card DX-515 using the danx-triage-card skill.\n\n## Operator notes\n\n${maxed}`,
+    );
+  });
+
+  it("returns 200 + spawns base-form triage dispatch when instructions is omitted", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      api_token: "secret-bearer",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      job_id: "test-triage-1",
+      status: "launched",
+    });
+
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    type TriageDispatchInput = CapturedDispatchInput & {
+      workspace: string;
+      task: string;
+      apiToken?: string;
+      overlay: Record<string, string>;
+      issueId?: string;
+      dispatchKind?: string;
+    };
+    const input = mockDispatchFn.mock.calls[0][0] as TriageDispatchInput;
+    expect(input.workspace).toBe("issue-worker");
+    expect(input.task).toBe(
+      "Triage card DX-515 using the danx-triage-card skill.",
+    );
+    expect(input.task).not.toMatch(/Operator notes/);
+    expect(input.issueId).toBe("DX-515");
+    expect(input.apiToken).toBe("secret-bearer");
+    expect(input.overlay).toEqual({});
+    expect(input.dispatchKind).toBe("triage");
+    expect(input.apiDispatchMeta).toEqual({
+      trigger: "api",
+      metadata: {
+        endpoint: "/api/triage",
+        callerIp: null,
+        statusUrl: null,
+        initialPrompt: "Triage card DX-515 using the danx-triage-card skill.",
+        workspace: "issue-worker",
+      },
+    });
+  });
+
+  it("returns 200 + appends the `## Operator notes` block when instructions is present", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+      instructions: "this may be obsolete after DX-269",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    type TriageDispatchInput = CapturedDispatchInput & {
+      task: string;
+      dispatchKind?: string;
+    };
+    const input = mockDispatchFn.mock.calls[0][0] as TriageDispatchInput;
+    expect(input.task).toBe(
+      "Triage card DX-515 using the danx-triage-card skill.\n\n## Operator notes\n\nthis may be obsolete after DX-269",
+    );
+    // The initialPrompt in apiDispatchMeta must match the task exactly —
+    // it's the dashboard's source-of-truth for what the agent received.
+    expect(input.apiDispatchMeta.metadata.initialPrompt).toBe(input.task);
+    expect(input.dispatchKind).toBe("triage");
+  });
+
+  it("maps ClaudeAuthError from dispatch() to 503 (worker-config signal)", async () => {
+    // Pin the error-mapping chain so a future refactor that drops the
+    // shared mapDispatchError branch surfaces immediately.
+    const { ClaudeAuthError } = await import(
+      "../agent/claude-auth-preflight.js"
+    );
+    mockDispatchFn.mockRejectedValueOnce(
+      new ClaudeAuthError({
+        ok: false,
+        reason: "readonly",
+        summary: "claude-auth file read-only",
+      }),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody()).error).toMatch(/claude-auth/);
+  });
+
+  it("maps McpResolveError from dispatch() to 400 (caller-fixable)", async () => {
+    const { McpResolveError } = await import("../agent/mcp-types.js");
+    mockDispatchFn.mockRejectedValueOnce(
+      new McpResolveError("MCP placeholder ${FOO} unresolved"),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(/MCP placeholder/);
+  });
+
+  it("maps an unknown dispatch failure to 500 (catch-all)", async () => {
+    mockDispatchFn.mockRejectedValueOnce(new Error("spawn ENOENT"));
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-515",
+    });
+    const res = createMockRes();
+
+    await handleTriage(req, res, MOCK_REPO);
 
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody())).toEqual({ error: "spawn ENOENT" });

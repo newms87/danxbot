@@ -148,7 +148,7 @@ import type {
   IssueTracker,
 } from "../../issue-tracker/interface.js";
 import type { RepoContext } from "../../types.js";
-import type { AgentJob } from "../../agent/agent-types.js";
+import type { AgentJob, DispatchKind } from "../../agent/agent-types.js";
 import type { Dispatch } from "../../dashboard/dispatches.js";
 
 const mockedDispatchWithRecovery = vi.mocked(dispatchWithRecovery);
@@ -301,7 +301,7 @@ function makeDispatch(id: string, agentName = "alice"): Dispatch {
  * register stamps `prepVerdict` + `dispatchKind` on this object after
  * driving the route, then invokes the picker's `onComplete`.
  */
-function makeJob(dispatchId: string, dispatchKind: "prep" | "work"): AgentJob {
+function makeJob(dispatchId: string, dispatchKind: DispatchKind): AgentJob {
   return {
     id: dispatchId,
     status: "running",

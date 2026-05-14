@@ -36,13 +36,21 @@ export interface AgentUsage {
  *   - `"work"` — combined dispatch (combined mode, OR separate-mode
  *     self-claim work pass). Route lets the dispatch run past `ok`
  *     so the agent proceeds into `/danx-next`.
+ *   - `"triage"` — per-card triage dispatch (DX-515). Spawned by the
+ *     poller's empty-ToDo branch OR `POST /api/triage`. Runs the
+ *     `danx-triage-card` skill; the agent never calls the prep-verdict
+ *     tool. Distinct from `"work"` so `dispatch/core.ts` does NOT
+ *     auto-flip the candidate YAML from ToDo → In Progress (triage
+ *     decides Review→ToDo / Demote / Confirm-Block via Edit, not via
+ *     auto-flip).
  *
- * Undefined for every non-multi-agent-pick caller (Slack, ideator,
- * external `/api/launch`, tests bypassing the picker). The route's
- * `ok` branch defensively keeps the dispatch running on undefined
- * so a misconfigured non-prep dispatch can't accidentally finalize.
+ * Undefined for every non-multi-agent-pick / non-triage caller (Slack,
+ * ideator, external `/api/launch`, tests bypassing the picker). The
+ * route's `ok` branch defensively keeps the dispatch running on
+ * undefined so a misconfigured non-prep dispatch can't accidentally
+ * finalize.
  */
-export type DispatchKind = "prep" | "work";
+export type DispatchKind = "prep" | "work" | "triage";
 
 export interface AgentJob {
   id: string;
