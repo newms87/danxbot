@@ -489,6 +489,27 @@ vi.mock("../poller/multi-agent-pick.js", () => ({
     mockTryMultiAgentDispatch(...args),
 }));
 
+// DX-368: cron-tick safety net invokes `firePickerWithMutex` after the
+// audit-pass. Mock the scheduler so the test can assert call order +
+// arguments without standing up a real scheduler registry. Other
+// scheduler exports the cron does not consume are stubbed to no-ops so
+// tests that exercise them never see undefined.
+const mockFirePickerWithMutex = vi.fn().mockResolvedValue(undefined);
+vi.mock("../dispatch/scheduler.js", () => ({
+  firePickerWithMutex: (...args: unknown[]) =>
+    mockFirePickerWithMutex(...args),
+}));
+
+// DX-368: mock runAuditPass so the ordering + audit-throws tests can
+// drive specific scenarios without the real reconcile pass touching
+// the (mocked) filesystem. Default = clean tick (no drift, no errors).
+const mockRunAuditPass = vi
+  .fn()
+  .mockResolvedValue({ scanned: 0, drifted: [], errors: [] });
+vi.mock("./audit-pass.js", () => ({
+  runAuditPass: (...args: unknown[]) => mockRunAuditPass(...args),
+}));
+
 // Shared logger instance so tests can spy on log.error (e.g. crash-isolation
 // tests assert the top-level catch fires exactly once). Created via
 // `vi.hoisted` because the mock factory is hoisted above test code.
@@ -2797,6 +2818,110 @@ describe("poll — YAML-only mode (DX-342, createIssueTracker returns null)", ()
     // The `noTrackerRepos` Set short-circuits getRepoTracker; second
     // tick reads the cached verdict instead of allocating again.
     expect(mockCreateIssueTracker).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * DX-368 — cron-tick safety net. Per-minute cron sweep fires the
+ * scheduler's picker via `firePickerWithMutex(repo.name)` AFTER the
+ * audit-pass completes. Guarantees self-healing on a dropped
+ * event-driven poke (reconcile / roster-change / dispatch-termination /
+ * boot kick) — picker converges within ~60s regardless of which event
+ * source missed.
+ */
+describe("poll — DX-368 cron-tick picker safety net", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    setupRepoConfigMocks();
+  });
+
+  it("fires firePickerWithMutex(repo.name) on every successful cron tick", async () => {
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockFirePickerWithMutex).toHaveBeenCalledTimes(1);
+    expect(mockFirePickerWithMutex).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.name,
+    );
+  });
+
+  it("fires the picker even in YAML-only mode (no tracker registered)", async () => {
+    // YAML-only mode skips the inbound fetch but the picker still
+    // needs to fire — the dispatch loop runs identically with or
+    // without a tracker.
+    mockCreateIssueTracker.mockReturnValueOnce(null);
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFirePickerWithMutex).toHaveBeenCalledTimes(1);
+    expect(mockFirePickerWithMutex).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.name,
+    );
+  });
+
+  it("does NOT fire the picker when the cron is halted by CRITICAL_FAILURE", async () => {
+    mockReadFlag.mockReturnValueOnce({
+      source: "post-dispatch-check",
+      dispatchId: "x",
+      reason: "test halt",
+    });
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFirePickerWithMutex).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire the picker when issuePoller is disabled via settings", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) => (args[1] as string) !== "issuePoller",
+    );
+
+    await poll(MOCK_REPO_CONTEXT);
+
+    expect(mockFirePickerWithMutex).not.toHaveBeenCalled();
+  });
+
+  it("a thrown picker is caught by _sync's top-level guard — next tick still runs", async () => {
+    // Defense-in-depth: the production `firePickerWithMutex` swallows
+    // picker throws internally and never rejects, but `_sync`'s outer
+    // try/catch must still cover the bookkeeping-throws-on-Set-ops
+    // edge case so a future regression in the scheduler's swallow can't
+    // wedge the cron.
+    mockFirePickerWithMutex.mockRejectedValueOnce(new Error("picker boom"));
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    // Next tick fires the picker again — the throw didn't wedge state.
+    mockFirePickerWithMutex.mockResolvedValueOnce(undefined);
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockFirePickerWithMutex).toHaveBeenCalledTimes(2);
+  });
+
+  it("picker fires AFTER runAuditPass (ordering invariant)", async () => {
+    // The card description: "AFTER the audit-pass + reconcile sweep
+    // completes." Pin the relative call order so a refactor that
+    // re-orders the steps doesn't silently let the picker observe
+    // stale dispatchable state. `invocationCallOrder` is monotonic
+    // across all vi.fn calls within a test.
+    await poll(MOCK_REPO_CONTEXT);
+    const auditOrder = mockRunAuditPass.mock.invocationCallOrder[0];
+    const pickerOrder = mockFirePickerWithMutex.mock.invocationCallOrder[0];
+    expect(auditOrder).toBeDefined();
+    expect(pickerOrder).toBeDefined();
+    expect(auditOrder).toBeLessThan(pickerOrder!);
+  });
+
+  it("does NOT fire the picker when runAuditPass throws (caught by _sync's outer guard)", async () => {
+    // The picker call is sequenced AFTER `await runAuditPass(repo)`,
+    // both inside the same outer try/catch. If audit-pass rejects, the
+    // catch fires before the picker line is reached. A refactor that
+    // wraps audit-pass in its own try/catch (so _sync continues past)
+    // would silently break this — the test pins the current contract.
+    mockRunAuditPass.mockRejectedValueOnce(new Error("audit boom"));
+
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+
+    expect(mockFirePickerWithMutex).not.toHaveBeenCalled();
   });
 });
 

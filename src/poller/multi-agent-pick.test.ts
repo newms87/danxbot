@@ -24,6 +24,14 @@ vi.mock("../dispatch/recovery-mode.js", () => ({
 vi.mock("../dashboard/dispatches-db.js", () => ({
   listDispatchesByIssueId: vi.fn().mockResolvedValue([]),
 }));
+// DX-368 — invariant assertion records a system error when the picker
+// exits with a free agent + claimable card still available. Mock the
+// recorder so tests can assert the call shape without standing up the
+// dashboard SSE bus.
+const mockRecordSystemError = vi.fn();
+vi.mock("../dashboard/system-errors.js", () => ({
+  recordSystemError: (...args: unknown[]) => mockRecordSystemError(...args),
+}));
 // Stub the scheduler module so the multi-agent test doesn't drag in
 // the DB connection chain (`dashboard/dispatches-db.js` →
 // `db/connection.js` hard-requires DANXBOT_DB_*). The scheduler is the
@@ -2032,6 +2040,269 @@ describe("tryMultiAgentDispatch", () => {
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
       expect(dispatchInput.lockRelease).toBeUndefined();
+    });
+  });
+
+  describe("DX-368 — dispatch invariant assertion + idempotency", () => {
+    it("does NOT record a system error on a normal converging tick (one agent + one card, dispatched)", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("does NOT record a system error when no free agent exists at exit (every agent dispatched)", async () => {
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1"), issue("DX-2"), issue("DX-3")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("does NOT record a system error when every remaining card is owned by a now-busy agent", async () => {
+      // alice is in the busy set (already dispatched on another repo
+      // or another tick). The only card is owned by alice. Loop sees
+      // bob as free; bob can't claim alice's card; legitimately bails.
+      // Invariant must stay silent — there is no convergence bug.
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM dispatches")) {
+          return [{ agent_name: "alice" }] as never;
+        }
+        return [] as never;
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const aliceOwned = issue("DX-1", { assigned_agent: "alice" });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [aliceOwned],
+        openIssues: [aliceOwned],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("RECORDS a system error when alice (first by name) cannot claim but bob can — picker did not converge", async () => {
+      // The bug shape DX-368 exposes: pickFreeAgent returns alice
+      // alphabetically. alice can't claim the only card (owned by bob).
+      // Loop's `if (card === null) break` exits without trying bob,
+      // even though bob has a self-claim on the card and is free.
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      // openIssues = [] (no findOwnedCard hit for either agent), so
+      // alice's fresh pickCardForAgent path runs and returns null
+      // (card is owned by bob — different agent name).
+      const bobOwned = issue("DX-1", { assigned_agent: "bob" });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [bobOwned],
+        openIssues: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).toHaveBeenCalledTimes(1);
+      const errArg = mockRecordSystemError.mock.calls[0]?.[0] as {
+        source: string;
+        severity?: string;
+        repo: string;
+        message: string;
+        details: { freeAgents: string[]; dispatchableCards: string[] };
+      };
+      expect(errArg.source).toBe("poller");
+      // `severity` is omitted → defaults to "error" inside
+      // recordSystemError. The banner only renders warn+error so this
+      // is the intended path.
+      expect(errArg.severity).toBeUndefined();
+      expect(errArg.repo).toBe("danxbot");
+      expect(errArg.message).toContain("dispatch invariant violated");
+      expect(errArg.message).toContain("alice");
+      expect(errArg.message).toContain("bob");
+      expect(errArg.message).toContain("DX-1");
+      expect(errArg.details.freeAgents).toEqual(["alice", "bob"]);
+      expect(errArg.details.dispatchableCards).toEqual(["DX-1"]);
+    });
+
+    it("idempotent — two consecutive tryMultiAgentDispatch calls produce 1 dispatch total, not 2", async () => {
+      // Steady-state convergence check: the picker is safe to call
+      // repeatedly with no side effects when no candidate pair exists.
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      // First tick dispatches.
+      const first = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(first.dispatched).toBe(1);
+
+      // Second tick: alice is now busy (DB lock held by the prior
+      // dispatch). The cards list also excludes DX-1 because it's
+      // In Progress now. Both inputs reflect that real state.
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM dispatches")) {
+          return [{ agent_name: "alice" }] as never;
+        }
+        return [] as never;
+      });
+      mockedDispatchWithRecovery.mockClear();
+      mockRecordSystemError.mockClear();
+
+      const second = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [],
+        openIssues: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(second.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("idempotent — no-candidate ticks are safe to call repeatedly with zero side effects", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+
+      // No cards, no openIssues — picker should bail immediately.
+      const first = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [],
+        openIssues: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      const second = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [],
+        openIssues: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(first.dispatched).toBe(0);
+      expect(second.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("invariant stays silent when remaining card has a live-PID dispatch (false-positive guard)", async () => {
+      // A host-mode dispatch reparented to PID 1 after a worker restart
+      // still owns the card; `guardLiveDispatchForCard` returns true,
+      // the picker `removeFromRemaining(card) + continue`s. The card
+      // is gone from `remainingCards` by the time the invariant runs.
+      // Without this guarded behaviour the assertion would fire on
+      // every tick where a host-mode reparent existed.
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      vi.mocked(guardLiveDispatchForCard).mockResolvedValueOnce(true);
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("invariant stays silent when remaining card's tracker lock is held by another worker", async () => {
+      // Cross-environment tracker lock: another worker (production EC2,
+      // local dev clone) owns the dispatch-lock comment. The picker
+      // `removeFromRemaining(card) + continue`s. The card is gone from
+      // `remainingCards` by the time the invariant runs — assertion
+      // must stay silent so a sibling worker's lock doesn't trigger a
+      // false convergence alarm. Hand-built lock body matching
+      // `renderLockComment` (see the DX-241 test above for the
+      // canonical shape).
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      const heldTracker: IssueTracker = {
+        ...fakeTracker(),
+        getComments: async () => [
+          {
+            id: "lock-1",
+            author: "danxbot",
+            timestamp: "",
+            text: [
+              "<!-- danxbot -->",
+              "<!-- danxbot-lock -->",
+              "",
+              "**Dispatch lock**",
+              "",
+              "| Field | Value |",
+              "|---|---|",
+              "| holder | `other-target` |",
+              "| host | `other-host` |",
+              "| host_pid | `4242` |",
+              "| dispatch_id | `held-dispatch-uuid` |",
+              "| repo_path | `/x` |",
+              "| jsonl_dir | `/y` |",
+              "| workspace | `issue-worker` |",
+              "| started_at | `" + NOW.toISOString() + "` |",
+              "| ttl | `120m` |",
+              "| stale_after | `2099-12-31T00:00:00.000Z` |",
+              "| released_at | `` |",
+            ].join("\n"),
+          },
+        ],
+      };
+
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [issue("DX-1")],
+        tracker: heldTracker,
+        now: NOW,
+      });
+
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
     });
   });
 });

@@ -54,26 +54,27 @@ export interface PickFreeAgentInput {
 }
 
 /**
- * Return the first agent that's eligible to take a new dispatch, or
- * null when no agent qualifies. Filters in this order:
+ * Return EVERY agent that's eligible to take a new dispatch, sorted
+ * by name. Returns `[]` when no agent qualifies. Same filter chain as
+ * {@link pickFreeAgent} — kept as a single source of truth so the
+ * picker's "first eligible" pick and the dispatch invariant assertion
+ * (DX-368) cannot diverge.
+ *
+ * Filters in this order:
  *
  *   1. `enabled === true` (operator paused agents are always skipped).
  *   2. `capabilities` includes `"issue-worker"` (Slack-only or
  *      api-only agents don't process cards).
- *   3. `broken === null` (DX-292 — a prep dispatch that ended in
+ *   3. NOT in `busy` — no in-flight dispatch on this repo.
+ *   4. `broken === null` (DX-292 — a prep dispatch that ended in
  *      `abort` marks the agent unrecoverable; the operator clears the
  *      field via the dashboard once the worktree is healthy again).
- *   4. NOT in `busy` — no in-flight dispatch on this repo.
  *   5. `isAgentInSchedule(agent, now)` — the agent's tz + per-day
  *      windows say it's working hours.
- *
- * Tiebreak: when multiple agents pass, return the one whose `name`
- * sorts first (lexicographic). Stable across ticks; tests can assert
- * the deterministic pick.
  */
-export function pickFreeAgent(
+export function pickFreeAgentCandidates(
   input: PickFreeAgentInput,
-): AgentRecordWithName | null {
+): AgentRecordWithName[] {
   const { roster, busy, now, repoName } = input;
   // Filter chain ordered cheapest-first:
   //   1. enabled flag (object property read)
@@ -114,9 +115,24 @@ export function pickFreeAgent(
     if (!isAgentInSchedule(checkInput, now)) return false;
     return true;
   });
-  if (candidates.length === 0) return null;
   candidates.sort((a, b) => a.name.localeCompare(b.name));
-  return candidates[0];
+  return candidates;
+}
+
+/**
+ * Return the first agent that's eligible to take a new dispatch, or
+ * null when no agent qualifies. Thin wrapper around
+ * {@link pickFreeAgentCandidates} — returns `candidates[0] ?? null`.
+ *
+ * Tiebreak: when multiple agents pass, return the one whose `name`
+ * sorts first (lexicographic). Stable across ticks; tests can assert
+ * the deterministic pick.
+ */
+export function pickFreeAgent(
+  input: PickFreeAgentInput,
+): AgentRecordWithName | null {
+  const candidates = pickFreeAgentCandidates(input);
+  return candidates[0] ?? null;
 }
 
 export interface PickCardForAgentInput {

@@ -31,6 +31,12 @@
  *   6. `runAuditPass` — for each open YAML: `reconcileIssue(card,
  *      "audit")`. Drift surfaces as `recordSystemError({source:
  *      "audit-drift"})` so the dashboard banner counts divergence.
+ *   7. `firePickerWithMutex(repo.name)` — DX-368 convergence safety
+ *      net. Fires the picker unconditionally after audit-pass so a
+ *      dropped event-driven poke (reconcile / roster / dispatch
+ *      termination) self-heals within ~60s. The scheduler's single-
+ *      flight mutex coalesces this with any concurrent event-driven
+ *      fire so we never double-pick.
  *
  * Everything else `runSync` used to do is gone — dispatch decisions,
  * triage walk, dead-dispatch eviction, parent-status derive,
@@ -61,6 +67,7 @@ import { readAgents } from "../settings-file.js";
 import { syncRepoFiles } from "../inject/sync.js";
 import { runAuditPass } from "./audit-pass.js";
 import { runInboundFetch } from "./inbound-fetch.js";
+import { firePickerWithMutex } from "../dispatch/scheduler.js";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -346,6 +353,20 @@ async function _sync(repo: RepoContext): Promise<void> {
         `[${repo.name}] audit pass: ${audit.drifted.length} drift / ${audit.errors.length} errors / ${audit.scanned} scanned`,
       );
     }
+
+    // DX-368 — cron-tick safety net for missed event-driven picker
+    // pokes. The picker is event-driven (post-DX-290) — fires on
+    // `onReconcileResult` / `onAgentRosterChange` / `kickPickerOnceAtBoot` /
+    // `onDispatchTerminated`. If any of those events is dropped (in-process
+    // exception in a downstream handler, microtask ordering quirk, etc.),
+    // the picker can sit idle while a free agent + a dispatchable card
+    // both exist. Firing the picker unconditionally after the audit
+    // pass guarantees a self-heal within 1 cron tick. The single-flight
+    // mutex inside `firePickerWithMutex` serializes against concurrent
+    // event-driven calls; the cost is one extra picker invocation per
+    // minute per repo when no event fired (cheap — picker exits
+    // immediately if no candidate).
+    await firePickerWithMutex(repo.name);
   } catch (error) {
     // DX-149: any throw from inside `_sync` (tracker calls, lock
     // acquisition, hydrate-or-load, dispatch shell prep) lands here

@@ -4,6 +4,7 @@ import {
   findOwnedCard,
   pickCardForAgent,
   pickFreeAgent,
+  pickFreeAgentCandidates,
 } from "./pick-agent.js";
 import type { AgentRecordWithName } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
@@ -225,6 +226,62 @@ describe("pickFreeAgent", () => {
       });
       expect(out?.name).toBe("bob");
     });
+  });
+});
+
+describe("pickFreeAgentCandidates — DX-368 invariant input", () => {
+  it("returns every eligible agent, sorted by name", () => {
+    const roster = [agent("charlie"), agent("alice"), agent("bob")];
+    const out = pickFreeAgentCandidates({
+      roster,
+      busy: new Set(),
+      now: NOW,
+    });
+    expect(out.map((a) => a.name)).toEqual(["alice", "bob", "charlie"]);
+  });
+
+  it("applies the same filter chain as pickFreeAgent (busy / disabled / wrong capability / off-hours / broken excluded)", () => {
+    const closedSchedule = alwaysOpenSchedule();
+    closedSchedule.mon = [];
+    const roster = [
+      agent("alice"), // eligible
+      agent("bob", { enabled: false }), // disabled
+      agent("charlie", { capabilities: ["slack"] }), // wrong cap
+      agent("dani", { schedule: closedSchedule }), // off-hours
+      agent("eve", {
+        broken: {
+          reason: "stale",
+          suggested_steps: [],
+          set_at: "2026-01-01T00:00:00Z",
+          evaluator_status: "pending",
+          evaluator_dispatch_id: null,
+        },
+      }), // broken
+      agent("frank"), // eligible
+    ];
+    const out = pickFreeAgentCandidates({
+      roster,
+      busy: new Set(["frank"]), // busy → excluded
+      now: NOW,
+    });
+    expect(out.map((a) => a.name)).toEqual(["alice"]);
+  });
+
+  it("returns [] when no agent qualifies", () => {
+    const out = pickFreeAgentCandidates({
+      roster: [agent("alice", { enabled: false })],
+      busy: new Set(),
+      now: NOW,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it("pickFreeAgent stays consistent with candidates[0]", () => {
+    const roster = [agent("charlie"), agent("alice"), agent("bob")];
+    const input = { roster, busy: new Set<string>(), now: NOW };
+    const candidates = pickFreeAgentCandidates(input);
+    const first = pickFreeAgent(input);
+    expect(first?.name).toBe(candidates[0]?.name);
   });
 });
 

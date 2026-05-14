@@ -498,8 +498,18 @@ export async function unwatchAllSettingsFiles(): Promise<void> {
  * flag always clears — a thrown picker MUST NOT permanently lock out
  * the repo. Sync throws and async rejections both land in the catch
  * because `await fn(...)` covers both.
+ *
+ * DX-368 — exported so the per-minute cron sweep (`src/cron/sync-and-audit.ts`)
+ * can fire the picker unconditionally after the audit-pass completes.
+ * This is the self-healing safety net for any event-driven poke
+ * (reconcile / roster-change / dispatch-termination / boot kick) the
+ * worker dropped — the picker re-runs within 1 cron tick (~60s)
+ * regardless of which event source missed. The mutex guarantees
+ * serialization with event-driven calls; the cost is one extra
+ * picker call per minute per repo when no event fired (cheap —
+ * picker exits immediately if no candidate).
  */
-async function firePickerWithMutex(repoName: string): Promise<void> {
+export async function firePickerWithMutex(repoName: string): Promise<void> {
   if (pickerInflight.has(repoName)) {
     pendingTailRun.add(repoName);
     return;

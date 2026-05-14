@@ -2,6 +2,58 @@
  * Multi-agent pick + dispatch loop (DX-200 / multi-worker dispatch
  * epic DX-158 Phase 5; rewired by DX-291 Phase 5 / DX-296).
  *
+ * ## Trigger fan-in
+ *
+ * `tryMultiAgentDispatch` is the picker — every dispatch decision for
+ * a multi-agent repo lands here. It is invoked through one of six
+ * paths, all of which route through the scheduler's single-flight
+ * mutex (`firePickerWithMutex` in `src/dispatch/scheduler.ts`) so
+ * concurrent triggers cannot land a duplicate run against the same
+ * `busy` / `assigned` snapshot:
+ *
+ *   1. **Cron-tick safety net** (DX-368) — per-minute sweep in
+ *      `src/cron/sync-and-audit.ts#_sync` calls
+ *      `firePickerWithMutex(repo.name)` after the audit-pass. Catches
+ *      any event-driven poke the worker dropped; picker converges
+ *      within ~60s regardless of which event source missed.
+ *   2. **`onReconcileResult`** (DX-288) — chokidar-driven reconcile
+ *      reports `dispatchableChanged: true` from `src/issue/reconcile.ts`
+ *      → poke debounced by `pendingPokes`, fires the picker on the
+ *      next macrotask.
+ *   3. **`onAgentRosterChange`** (DX-289) — settings.json file-watch
+ *      observes operator toggles (agent enable/disable, broken clear,
+ *      schedule edit) → poke debounced by `pendingRosterPokes`, fires
+ *      the picker on the next macrotask.
+ *   4. **`/api/launch`** — operator-driven dispatch from the dashboard
+ *      bypasses the picker entirely; the worker's
+ *      `src/worker/dispatch.ts#handleLaunch` invokes `dispatch()`
+ *      directly. The picker re-runs via the post-dispatch
+ *      `onDispatchTerminated` poke when that dispatch ends, observing
+ *      any newly-freed agent slot.
+ *   5. **`onDispatchTerminated`** (DX-303 / DX-305) — every dispatch's
+ *      `handleStop` calls this from `src/worker/auto-sync.ts` after
+ *      the terminal write lands. Required for the freed-agent class of
+ *      poke (the dispatched card's eligibility may not flip, so the
+ *      reconcile-diff path produces no signal).
+ *   6. **Worker boot** (`kickPickerOnceAtBoot` from `src/index.ts`) —
+ *      one-shot fire after `bootRehydrate` so a worker booting into a
+ *      steady-state queue (no field flips, no roster change) still
+ *      gets the first picker run.
+ *
+ * Plus one bridge — `runWithPickerMutex(repoName, fn)` exports the
+ * same single-flight mutex to callers that want to run their own
+ * picker closure (the legacy `runSync` direct-picker path used this
+ * before DX-290 retired it). No production caller today; kept as a
+ * future seam so any non-`runPicker`-registered caller (a one-off
+ * dashboard endpoint, a CLI tool) can land under the same mutex.
+ *
+ * The cron-tick safety net is the convergence guarantor; the other
+ * five paths are optimisations that fire faster than the cron. If
+ * every event-driven path is wired correctly, the cron tick is a
+ * no-op (picker exits immediately — no free agent OR no dispatchable
+ * card). If any event is missed, the cron tick recovers the picker
+ * within 60s.
+ *
  * Glues together every roster + worktree-sync + persona deliverable
  * into the per-tick path the poller calls when its repo has at least
  * one configured agent:
@@ -96,7 +148,9 @@ import {
   findOwnedCard,
   pickCardForAgent,
   pickFreeAgent,
+  pickFreeAgentCandidates,
 } from "./pick-agent.js";
+import { recordSystemError } from "../dashboard/system-errors.js";
 import { listDispatchesByIssueId } from "../dashboard/dispatches-db.js";
 import { listInProgressYamls } from "./local-issues.js";
 import {
@@ -394,11 +448,16 @@ export async function tryMultiAgentDispatch(
         assigned,
       });
       if (card === null) {
-        // No remaining card the agent can claim. Other agents in the
-        // roster might still find candidates — but with the picker's
-        // first-by-name tiebreak, every later agent sees the same
-        // cards minus the one we couldn't claim, so they'd hit the same
-        // wall. Bail out.
+        // This agent has no claimable card. Other agents in the roster
+        // might — `pickCardForAgent` filters by `assigned_agent`, so a
+        // bob-owned card is visible to bob but invisible to alice. The
+        // loop here exits without trying bob; the DX-368 post-loop
+        // invariant assertion catches the resulting non-convergence
+        // (free agent + claimable card both still present at exit) so
+        // the operator sees the divergence on the dashboard banner. A
+        // future card may convert this `break` into a per-agent skip
+        // that retries the next free agent before bailing — the
+        // invariant assertion is the safety net until then.
         break;
       }
     }
@@ -853,6 +912,58 @@ export async function tryMultiAgentDispatch(
     const idx = remainingCards.indexOf(card);
     if (idx !== -1) remainingCards.splice(idx, 1);
     dispatched++;
+  }
+
+  // DX-368 — post-loop convergence invariant. The loop's exit
+  // conditions (`pickFreeAgent` returns null OR `pickCardForAgent`
+  // returns null) imply that at exit, no remaining free agent can
+  // claim any remaining card. Firing this assertion means the loop
+  // broke prematurely — a real picker bug. Surface loudly so the
+  // operator sees the divergence on the dashboard banner without
+  // grepping logs.
+  //
+  // `pickerSkipSet()` already accounts for agents we marked busy
+  // during this tick AND agents we skipped on transient tracker
+  // errors (DX-306). `remainingCards` reflects every card we did NOT
+  // successfully dispatch this tick.
+  //
+  // The claim-eligibility iteration is required: `pickFreeAgent`'s
+  // first-by-name tiebreak picks alice; if alice can't claim any
+  // remaining card but bob can, the loop's `if (card === null) break`
+  // exits without trying bob. The invariant catches that case while
+  // staying silent for legitimately-blocked states (every remaining
+  // card is owned by an agent now busy, lock-held cards we couldn't
+  // re-acquire this tick, etc.).
+  const remainingFreeAgents = pickFreeAgentCandidates({
+    roster,
+    busy: pickerSkipSet(),
+    now,
+    repoName: repo.name,
+  });
+  if (remainingFreeAgents.length > 0 && remainingCards.length > 0) {
+    const reclaimableByAnyFreeAgent = remainingFreeAgents.some(
+      (a) =>
+        pickCardForAgent({
+          cards: remainingCards,
+          agentName: a.name,
+          assigned,
+        }) !== null,
+    );
+    if (reclaimableByAnyFreeAgent) {
+      const freeNames = remainingFreeAgents.map((a) => a.name);
+      const cardIds = remainingCards.map((c) => c.id);
+      const message = `dispatch invariant violated: free=[${freeNames.join(",")}] cards=[${cardIds.join(",")}] — picker did not converge`;
+      log.error(`[${repo.name}] ${message}`);
+      recordSystemError({
+        source: "poller",
+        repo: repo.name,
+        message,
+        details: {
+          freeAgents: freeNames,
+          dispatchableCards: cardIds,
+        },
+      });
+    }
   }
 
   return { dispatched };

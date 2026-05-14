@@ -56,6 +56,7 @@ import {
   _resetSchedulerTrackers,
   bootScheduler,
   buildLockHolderInfo,
+  firePickerWithMutex,
   getSchedulerTracker,
   guardLiveDispatchForCard,
   onAgentRosterChange,
@@ -740,6 +741,120 @@ describe("onReconcileResult — Phase 4b.1 (DX-288)", () => {
     await waitMacrotask();
 
     expect(picker).not.toHaveBeenCalled();
+  });
+});
+
+describe("firePickerWithMutex — DX-368 cron-tick safety net", () => {
+  function waitMacrotask(): Promise<void> {
+    return new Promise((r) => setImmediate(r));
+  }
+
+  it("invokes the registered picker for the repo", async () => {
+    const repoName = "danxbot";
+    const picker = vi.fn<RunPickerFn>().mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoName }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    await firePickerWithMutex(repoName);
+
+    expect(picker).toHaveBeenCalledTimes(1);
+    expect(picker.mock.calls[0]?.[0].now).toBeInstanceOf(Date);
+  });
+
+  it("is a no-op when no picker is registered for the repo", async () => {
+    // No bootScheduler call for this repo name — picker registry is empty.
+    await expect(firePickerWithMutex("no-such-repo")).resolves.toBeUndefined();
+  });
+
+  it("serializes against a concurrent picker run — second call coalesces into a tail run", async () => {
+    const repoName = "danxbot";
+    // Picker that blocks until we resolve the gate. Tests the single-
+    // flight mutex: while the first run is in flight, the second call
+    // sets the pending-tail flag and returns immediately; after the
+    // first run completes, the tail run fires automatically.
+    let resolveFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockImplementationOnce(() => firstGate)
+      .mockResolvedValue(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoName }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    // Fire two back-to-back picker invocations. The first awaits the
+    // gate (in flight); the second observes the inflight flag and
+    // returns immediately after setting `pendingTailRun`.
+    const firstRun = firePickerWithMutex(repoName);
+    const secondRun = firePickerWithMutex(repoName);
+    expect(picker).toHaveBeenCalledTimes(1); // first run started, second deferred
+
+    // Resolve the first run; the `finally` block schedules a single
+    // tail run via `setImmediate`. Awaiting macrotask runs it.
+    resolveFirst();
+    await Promise.all([firstRun, secondRun]);
+    await waitMacrotask();
+    expect(picker).toHaveBeenCalledTimes(2); // tail run fired exactly once
+  });
+
+  it("swallows picker rejections so subsequent calls still fire", async () => {
+    const repoName = "danxbot";
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockRejectedValueOnce(new Error("picker boom"))
+      .mockResolvedValueOnce(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoName }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    await expect(firePickerWithMutex(repoName)).resolves.toBeUndefined();
+    await expect(firePickerWithMutex(repoName)).resolves.toBeUndefined();
+    expect(picker).toHaveBeenCalledTimes(2);
+  });
+
+  it("tail-run also swallows rejections — consecutive failures do not lock the repo", async () => {
+    // Tail-run path: when a poke lands during an inflight run, the
+    // finally block schedules a recursive `setImmediate(() => void
+    // firePickerWithMutex(...))`. That recursion re-enters the same
+    // try/catch — but the test covers it explicitly because a future
+    // refactor that splits the recursion path out of the try/catch
+    // would let a tail-run throw escape into the (unawaited)
+    // `void firePickerWithMutex(...)` rejection chain.
+    const repoName = "danxbot";
+    let resolveFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    const picker = vi
+      .fn<RunPickerFn>()
+      .mockImplementationOnce(() => firstGate)
+      .mockRejectedValueOnce(new Error("tail boom"))
+      .mockResolvedValueOnce(undefined);
+    bootScheduler({
+      repo: makeRepo({ name: repoName }),
+      tracker: makeMemoryTracker(),
+      runPicker: picker,
+    });
+
+    const firstRun = firePickerWithMutex(repoName); // in flight
+    const secondRun = firePickerWithMutex(repoName); // queues tail
+    resolveFirst();
+    await Promise.all([firstRun, secondRun]);
+    await waitMacrotask(); // tail run fires + throws + is swallowed
+
+    // Third explicit call must still succeed — the inflight flag was
+    // cleared by the tail's finally even though the tail rejected.
+    await expect(firePickerWithMutex(repoName)).resolves.toBeUndefined();
+    expect(picker).toHaveBeenCalledTimes(3);
   });
 });
 
