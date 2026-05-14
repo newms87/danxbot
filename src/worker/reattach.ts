@@ -622,7 +622,7 @@ export async function reattachOrResolveDispatches(
     autoResumed: [],
   };
   if (rows.length === 0) {
-    log.info(`[${repoName}] No non-terminal dispatches to reattach`);
+    log.debug(`[${repoName}] No non-terminal dispatches to reattach`);
     return result;
   }
 

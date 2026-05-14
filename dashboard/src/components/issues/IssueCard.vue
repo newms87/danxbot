@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { IssueListItem } from "../../types";
 import type { CardDragHandlers } from "../../composables/useCardDrag";
 import TypeBadge from "./TypeBadge.vue";
@@ -151,6 +152,11 @@ function onParentClick(e: MouseEvent): void {
     @dragend="props.dragHandlers?.onDragend($event)"
   >
     <div class="card-header">
+      <PriorityIcon
+        class="priority-slot"
+        :priority="issue.priority"
+        size="sm"
+      />
       <span class="id-chip" data-test="card-id">{{ issue.id }}</span>
       <TypeBadge :type="issue.type" compact />
       <span
@@ -161,47 +167,60 @@ function onParentClick(e: MouseEvent): void {
       <span v-if="childrenDetail.length > 0" class="children-count-chip">
         {{ childrenDetail.length }} {{ childrenLabel }}
       </span>
-      <span
+      <DanxTooltip
         v-if="showRequiresHumanChildrenChip"
-        class="requires-human-children-chip"
-        :title="`${requiresHumanChildCount} ${requiresHumanChildCount === 1 ? 'phase needs' : 'phases need'} human action`"
-        data-test="requires-human-children-chip"
-      >👤 {{ requiresHumanChildCount }}</span>
-      <span
+        :tooltip="`${requiresHumanChildCount} ${requiresHumanChildCount === 1 ? 'phase needs' : 'phases need'} human action`"
+      >
+        <template #trigger>
+          <span class="requires-human-children-chip" data-test="requires-human-children-chip">👤 {{ requiresHumanChildCount }}</span>
+        </template>
+      </DanxTooltip>
+      <DanxTooltip
         v-if="requiresHuman"
-        class="requires-human-badge"
-        :title="requiresHumanTooltip"
-        data-test="requires-human-badge"
-      >👤</span>
+        :tooltip="requiresHumanTooltip"
+      >
+        <template #trigger>
+          <span class="requires-human-badge" data-test="requires-human-badge">👤</span>
+        </template>
+      </DanxTooltip>
       <span v-if="hasAnyGate" class="gates-wrap">
-      <span
+      <DanxTooltip
         v-if="selfBlocked"
-        class="gate-pill gate-blocked"
-        :title="selfBlocked.reason"
-        data-test="blocked-pill"
+        :tooltip="selfBlocked.reason"
       >
-        <span class="gate-glyph">🔒</span>
-        BLOCKED
-      </span>
-      <span
+        <template #trigger>
+          <span class="gate-pill gate-blocked" data-test="blocked-pill">
+            <span class="gate-glyph">🔒</span>
+            BLOCKED
+          </span>
+        </template>
+      </DanxTooltip>
+      <DanxTooltip
         v-if="waitingOn"
-        class="gate-pill gate-waiting"
-        :title="waitingOnTooltip"
-        data-test="waiting-on-pill"
+        :tooltip="waitingOnTooltip"
       >
-        <span class="gate-glyph">⏳</span>
-        WAITING ON {{ waitingOnIds.length }}
-      </span>
-      <span
+        <template #trigger>
+          <span class="gate-pill gate-waiting" data-test="waiting-on-pill">
+            <span class="gate-glyph">⏳</span>
+            WAITING ON {{ waitingOnIds.length }}
+          </span>
+        </template>
+      </DanxTooltip>
+      <DanxTooltip
         v-if="conflictActiveCount > 0 || conflictEntries.length > 0"
-        class="gate-pill gate-conflict"
-        :class="{ 'gate-conflict-audit': conflictActiveCount === 0 }"
-        :title="conflictTooltip"
-        data-test="conflict-pill"
+        :tooltip="conflictTooltip"
       >
-        <span class="gate-glyph">⚡</span>
-        CONFLICT {{ conflictActiveCount > 0 ? conflictActiveCount : conflictEntries.length }}
-      </span>
+        <template #trigger>
+          <span
+            class="gate-pill gate-conflict"
+            :class="{ 'gate-conflict-audit': conflictActiveCount === 0 }"
+            data-test="conflict-pill"
+          >
+            <span class="gate-glyph">⚡</span>
+            CONFLICT {{ conflictActiveCount > 0 ? conflictActiveCount : conflictEntries.length }}
+          </span>
+        </template>
+      </DanxTooltip>
       </span>
       <AgentAvatarStack
         v-if="hasChildAssignments"
@@ -216,11 +235,6 @@ function onParentClick(e: MouseEvent): void {
         class="row-agent"
         :repo="props.repo"
         :agent-name="issue.assigned_agent"
-        size="sm"
-      />
-      <PriorityIcon
-        class="priority-slot"
-        :priority="issue.priority"
         size="sm"
       />
     </div>
@@ -246,13 +260,18 @@ function onParentClick(e: MouseEvent): void {
     </div>
 
     <div class="footer">
-      <button
+      <DanxTooltip
         v-if="issue.parent_id"
-        type="button"
-        class="parent-chip"
-        :title="`Parent epic ${issue.parent_id}`"
-        @click="onParentClick"
-      >↑ {{ issue.parent_id }}</button>
+        :tooltip="`Parent epic ${issue.parent_id}`"
+      >
+        <template #trigger>
+          <button
+            type="button"
+            class="parent-chip"
+            @click="onParentClick"
+          >↑ {{ issue.parent_id }}</button>
+        </template>
+      </DanxTooltip>
       <span v-if="issue.comments_count > 0" class="comments">
         <span class="emoji">💬</span>{{ issue.comments_count }}
       </span>
@@ -386,14 +405,9 @@ function onParentClick(e: MouseEvent): void {
   margin-left: auto;
 }
 .priority-slot {
-  /*
-   * Sits at the right edge of the card-header row opposite the
-   * id-chip. When gates/agent already consume the first `margin-left:
-   * auto`, this second auto still picks up any residual whitespace
-   * after them — flexbox treats sibling autos additively, so the
-   * indicator hugs the right edge even when the row is mostly empty.
-   */
-  margin-left: auto;
+  /* Leads the card-header row, immediately before the id-chip. */
+  margin-right: 2px;
+  flex-shrink: 0;
 }
 .gates-wrap {
   margin-left: auto;

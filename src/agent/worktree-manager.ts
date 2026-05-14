@@ -989,7 +989,7 @@ function provisionIssuesSymlink(repoRoot: string, worktreePath: string): void {
   }
 
   symlinkSync(mainIssues, linkAbs, "dir");
-  log.info(`provisionIssuesSymlink: symlinked ${linkAbs} -> ${mainIssues}`);
+  log.debug(`provisionIssuesSymlink: symlinked ${linkAbs} -> ${mainIssues}`);
 }
 
 /**
@@ -1211,7 +1211,7 @@ export function provisionSymlink(
   }
 
   symlinkSync(sourceAbs, linkAbs, type);
-  log.info(`${logTag}: symlinked ${linkAbs} -> ${sourceAbs}`);
+  log.debug(`${logTag}: symlinked ${linkAbs} -> ${sourceAbs}`);
 }
 
 export class WorktreeError extends Error {

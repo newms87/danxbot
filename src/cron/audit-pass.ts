@@ -84,7 +84,7 @@ export async function runAuditPass(
   // override flag (`src/issue/reconcile.ts:614`). Trello sync is a side
   // system; the issue-tracker convergence pass must NEVER gate on it.
   if (isTrelloSyncOverrideDisabled(repo.localPath)) {
-    log.info(
+    log.debug(
       `[${repo.name}] trelloSync override=false — reconcile will skip the Trello push step for each card (every other reconcile step runs as normal)`,
     );
   }

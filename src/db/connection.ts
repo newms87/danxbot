@@ -56,7 +56,7 @@ function basePoolOptions(): PoolConfig {
  */
 export function getPool(): Pool {
   if (!pool) {
-    log.info("Creating application database pool");
+    log.debug("Creating application database pool");
     pool = new Pool({
       ...basePoolOptions(),
       database: config.db.database,

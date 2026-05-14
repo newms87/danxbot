@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { IssueDetail, IssueHistoryEntry, IssueHistoryEvent, IssueStatus } from "../../types";
 import { relativeTime } from "../../utils/relativeTime";
 import { COLUMN_ACCENTS } from "./issuePalette";
@@ -100,25 +101,39 @@ const entries = computed<RenderedEntry[]>(() => {
   </div>
   <div v-else class="history">
     <div v-for="e in entries" :key="e.key" class="row">
-      <span class="icon" role="img" :aria-label="e.event" :title="e.event">{{ e.icon }}</span>
+      <DanxTooltip :tooltip="e.event">
+        <template #trigger>
+          <span class="icon" role="img" :aria-label="e.event">{{ e.icon }}</span>
+        </template>
+      </DanxTooltip>
       <div class="content">
         <div class="head">
-          <span class="ts" :title="e.iso">{{ e.tsLabel }}</span>
-          <a
-            v-if="e.actor.href"
-            class="actor"
-            :class="`actor-${e.actor.kind}`"
-            :href="e.actor.href"
-            :title="e.actor.fullActor"
-          >{{ e.actor.label }}</a>
-          <span
-            v-else
-            class="actor"
-            :class="`actor-${e.actor.kind}`"
-            :title="e.actor.fullActor"
-          >
-            <span v-if="e.actor.kind === 'worker'" class="bot-glyph" aria-hidden="true">🤖</span>{{ e.actor.label }}
-          </span>
+          <DanxTooltip :tooltip="e.iso">
+            <template #trigger>
+              <span class="ts">{{ e.tsLabel }}</span>
+            </template>
+          </DanxTooltip>
+          <DanxTooltip :tooltip="e.actor.fullActor">
+            <template #trigger>
+              <a
+                v-if="e.actor.href"
+                class="actor"
+                :class="`actor-${e.actor.kind}`"
+                :href="e.actor.href"
+              >{{ e.actor.label }}</a>
+            </template>
+          </DanxTooltip>
+          <DanxTooltip :tooltip="e.actor.fullActor">
+            <template #trigger>
+              <span
+                v-if="!e.actor.href"
+                class="actor"
+                :class="`actor-${e.actor.kind}`"
+              >
+                <span v-if="e.actor.kind === 'worker'" class="bot-glyph" aria-hidden="true">🤖</span>{{ e.actor.label }}
+              </span>
+            </template>
+          </DanxTooltip>
           <span class="diff">
             <template v-if="e.event === 'status_change' && e.from">
               <span class="status-pill" :style="statusPill(e.from)">{{ e.from }}</span>

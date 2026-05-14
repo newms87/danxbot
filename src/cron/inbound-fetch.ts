@@ -77,13 +77,13 @@ export async function runInboundFetch(
   // running but Trello calls short-circuit.
   result.trelloSyncEnabled = isFeatureEnabled(repo, "trelloSync");
   if (!result.trelloSyncEnabled) {
-    log.info(
+    log.debug(
       `[${repo.name}] trello sync disabled via settings — skipping inbound hydration + comment pull`,
     );
     return result;
   }
 
-  log.info(`[${repo.name}] Checking Needs Help + ToDo lists...`);
+  log.debug(`[${repo.name}] Checking Needs Help + ToDo lists...`);
 
   // Check Needs Help first — user-responded cards get moved to ToDo top.
   result.movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);

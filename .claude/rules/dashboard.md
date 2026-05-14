@@ -1,5 +1,39 @@
 # Dashboard
 
+## Component Library Mandate — `@thehammer/danx-ui` First
+
+**Default to DanxUI for every UI primitive.** Before hand-rolling a button, dialog, popover, tooltip, toggle, slider, tabs panel, scroll container, code viewer, markdown editor, icon — check `@thehammer/danx-ui` exports first. The library ships themed, accessible, dark-mode-aware versions of the common pieces; reaching past it to a raw `<button>`, `<dialog>`, browser-native `title=` tooltip, or one-off CSS modal forks the dashboard's look-and-feel.
+
+Current canonical mappings (extend as the library grows):
+
+| UI need | Use | Never use |
+|---|---|---|
+| Hover/focus tooltip | `<DanxTooltip :tooltip="…">` with `#trigger` slot | Native `title=` / `:title=` on a raw HTML element |
+| Modal / confirmation | `<DanxDialog>` (or repo-local `AgentConfirmModal` which wraps it) | Custom `<div class="modal">` overlays, native `<dialog>` |
+| Button | `<DanxButton>` | Raw `<button>` for any branded surface (raw `<button>` is OK only inside compound widgets like `IssueCard` where button = the whole card) |
+| Icon | `<DanxIcon>` (registry or raw SVG); for FA glyphs source via `danx-icon` `?raw` import | Inline `<svg>` literals, Unicode glyphs, emoji-as-icon |
+| Tabs | `<DanxTabs>` | Hand-rolled tab state |
+| Scrollable column | `<DanxScroll>` | Raw `overflow:auto` divs when the page already lives inside a DanxScroll context |
+| Toggle / switch | `<DanxToggle>` | Native checkbox styled to look like a switch |
+| Code block | `<CodeViewer>` | Raw `<pre><code>` |
+| Markdown rendering / editing | `<MarkdownEditor>` | Hand-rolled markdown rendering |
+
+**Tooltip rule, hard.** Zero raw `title=` HTML attributes on any element in `dashboard/src/components/**/*.vue`. Component-prop `title=` on PascalCase tags (`<DanxDialog title="…">`, `<AgentConfirmModal title="…">`) is fine — that's a dialog header, not a hover tooltip. Browser-native `title=` ignores theme, ignores reduced-motion, has no focus path, and disagrees with the rest of the dashboard's hover-popover UX. Use:
+
+```vue
+<DanxTooltip :tooltip="reasonExpr">
+  <template #trigger>
+    <span class="x">{{ label }}</span>
+  </template>
+</DanxTooltip>
+```
+
+The `tooltip` prop accepts `string | undefined`; an undefined value renders no panel, so the conditional-tooltip pattern (`:tooltip="maybeReason ?? undefined"`) works directly.
+
+**Test guard (planned).** A repo-level sweep that walks every `.vue` file under `dashboard/src/components/`, parses each `<template>` block, and fails the build on raw HTML tags carrying `title=` / `:title=` (PascalCase component tags exempt — their `title` is a component prop). Lands once the in-flight Triage UI rewrite + this rule's first sweep converge. Until then, the rule is doc-only — convert on sight when touching a component.
+
+**When DanxUI does not yet have what you need:** open an issue in `~/web/gpt-manager/danx-ui/` (the source repo of `@thehammer/danx-ui`). Ship the missing primitive THERE, publish, then consume here. Do not fork a one-off in the dashboard.
+
 ## Real-time Updates Are Mandatory (DX-227)
 
 Every dashboard composable that owns server state subscribes to `/api/stream` via `useStream`. **No `setInterval` may call into `api.ts`** — server state updates flow through the SSE bus, not a client clock.

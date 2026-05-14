@@ -443,7 +443,11 @@ export async function bootRehydrate(args: {
   });
   // Step 3 — arm triage timers from open YAMLs.
   scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
-  log.info(
+  const fn =
+    plan.alive.length > 0 || plan.cleared.length > 0 || ttlScan.armed > 0
+      ? log.info
+      : log.debug;
+  fn(
     `[${repo.name}] bootRehydrate: alive=${plan.alive.length} cleared=${plan.cleared.length} ttl-armed=${ttlScan.armed} ttl-skipped=${ttlScan.skipped}`,
   );
   return { alive: plan.alive.length, cleared: plan.cleared.length, ttlArmed: ttlScan.armed };

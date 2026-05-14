@@ -228,7 +228,7 @@ function logTrelloSyncDisabledOnce(repoName: string | undefined): void {
   const key = repoName ?? "unknown";
   if (loggedTrelloSyncDisabled.has(key)) return;
   loggedTrelloSyncDisabled.add(key);
-  log.info(
+  log.debug(
     `Retry queue: trello sync disabled for repo (${key}) — deferring queue activity (entries stay on disk)`,
   );
 }

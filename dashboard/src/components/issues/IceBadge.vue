@@ -10,6 +10,7 @@
  * when `triage.history.length === 0`.
  */
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import { ICE_TIER_META, iceTier } from "./issuePalette";
 
 const props = defineProps<{
@@ -22,17 +23,20 @@ const meta = computed(() => ICE_TIER_META[tier.value]);
 </script>
 
 <template>
-  <span
-    class="ice-badge"
-    :class="`ice-${tier}`"
-    :style="{
-      color: meta.fg,
-      background: meta.bg,
-      borderColor: meta.border,
-    }"
-    :title="`ICE ${total}`"
-    data-test="ice-badge"
-  >ICE {{ total }}</span>
+  <DanxTooltip :tooltip="`ICE ${total}`">
+    <template #trigger>
+      <span
+        class="ice-badge"
+        :class="`ice-${tier}`"
+        :style="{
+          color: meta.fg,
+          background: meta.bg,
+          borderColor: meta.border,
+        }"
+        data-test="ice-badge"
+      >ICE {{ total }}</span>
+    </template>
+  </DanxTooltip>
 </template>
 
 <style scoped>

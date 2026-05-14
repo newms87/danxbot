@@ -83,7 +83,8 @@ export async function ensureWorktreesProvisioned(
   }
 
   if (agentNames.length > 0) {
-    log.info(
+    const fn = result.failed.length > 0 ? log.warn : log.debug;
+    fn(
       `[${ctx.name}] ensureWorktreesProvisioned: ${result.provisioned.length} ok, ${result.failed.length} failed (of ${agentNames.length})`,
     );
   }

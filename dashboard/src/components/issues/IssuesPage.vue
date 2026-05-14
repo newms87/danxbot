@@ -3,14 +3,13 @@ import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
 import { nextPosition } from "../../composables/cardPosition";
-import { DanxDialog, DanxSplitPanel } from "@thehammer/danx-ui";
+import { DanxDialog, DanxSplitPanel, DanxTooltip } from "@thehammer/danx-ui";
 import CreateCardButton from "./CreateCardButton.vue";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDetailView from "./IssueDetailView.vue";
 import PasteCardsDialog from "./PasteCardsDialog.vue";
 import TriageButton from "./TriageButton.vue";
-import { markPending, clearIfTriaged } from "./triage-pending";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
 import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../../types";
@@ -71,15 +70,6 @@ function onUpdateIssue(updated: Issue): void {
       ...updated,
       updated_at: Date.now(),
     };
-  }
-  // DX-518 — clear the Triage in-flight badge once the agent's new
-  // decision lands. The pure helper compares the NEWEST history entry
-  // (history[length-1] — append-only, capped at 10) against the stored
-  // dispatch wall-clock; unrelated SSE emissions (rename, AC checkoff)
-  // leave the entry alone.
-  const next = clearIfTriaged(pendingTriageAtMs.value, updated);
-  if (next !== pendingTriageAtMs.value) {
-    pendingTriageAtMs.value = next as Map<string, number>;
   }
 }
 
@@ -275,24 +265,6 @@ function onPasteImported(topId: string, _totalCards: number): void {
   void openDrawer(topId);
 }
 
-// DX-518 — Per-issue Triage in-flight tracking. Set by `TriageButton`
-// after a successful `triggerTriage`; cleared by `onUpdateIssue` via
-// the pure `clearIfTriaged` helper when a fresh `triage.history[]`
-// entry arrives via the SSE bus. Local state only — refresh-mid-
-// dispatch loses the badge (the operator can verify via the dispatches
-// list); no backend column added.
-const pendingTriageAtMs = ref<Map<string, number>>(new Map());
-
-function onTriageDispatched(issueId: string): void {
-  pendingTriageAtMs.value = markPending(pendingTriageAtMs.value, issueId, Date.now());
-}
-
-const triageInFlightForOpenIssue = computed<boolean>(() => {
-  const id = selectedDetail.value?.id;
-  if (!id) return false;
-  return pendingTriageAtMs.value.has(id);
-});
-
 function onParentClick(parentId: string): void {
   scopedEpicId.value = parentId;
 }
@@ -348,19 +320,17 @@ watch(
     <div v-if="!selectedRepo" class="placeholder">Select a repo to see issues</div>
     <template v-else>
       <div class="header-row">
-        <TriageButton
-          :repo="selectedRepo"
-          :candidates="issues"
-          :initial-issue-id="selectedDetail?.id ?? null"
-          @dispatched="onTriageDispatched"
-        />
-        <button
-          type="button"
-          class="paste-btn"
-          data-test="issues-paste-button"
-          title="Paste a Copy payload into this repo"
-          @click="pasteDialogOpen = true"
-        >Paste cards…</button>
+        <TriageButton :repo="selectedRepo" />
+        <DanxTooltip tooltip="Paste a Copy payload into this repo">
+          <template #trigger>
+            <button
+              type="button"
+              class="paste-btn"
+              data-test="issues-paste-button"
+              @click="pasteDialogOpen = true"
+            >Paste cards…</button>
+          </template>
+        </DanxTooltip>
         <CreateCardButton
           :repo="selectedRepo"
           @created="onCreatedFromDialog"
@@ -422,7 +392,6 @@ watch(
             :all-issues="issues"
             :scoped-epic-id="scopedEpicId"
             :selected-repo="selectedRepo"
-            :triage-in-flight="triageInFlightForOpenIssue"
             @close="closeDrawer"
             @jump-issue="onJumpIssue"
             @toggle-scope="onToggleScope"
@@ -461,7 +430,6 @@ watch(
         :scoped-epic-id="scopedEpicId"
         :selected-repo="selectedRepo"
         :show-close-button="false"
-        :triage-in-flight="triageInFlightForOpenIssue"
         @close="closeDrawer"
         @jump-issue="onJumpIssue"
         @toggle-scope="onToggleScope"

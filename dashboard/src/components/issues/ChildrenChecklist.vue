@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { IssueListChild } from "../../types";
 import { CHILD_STATUS_META, projectChildStatus } from "./issuePalette";
 
@@ -34,12 +35,14 @@ const rows = computed(() =>
       >{{ CHILD_STATUS_META[c.status].glyph }}</span>
       <span class="id-chip">{{ c.id }}</span>
       <span class="label">{{ i + 1 }}: {{ c.name }}</span>
-      <span
+      <DanxTooltip
         v-if="c.requiresHuman"
-        class="rh-glyph"
-        title="Requires human action"
-        data-test="children-checklist-rh"
-      >👤</span>
+        tooltip="Requires human action"
+      >
+        <template #trigger>
+          <span class="rh-glyph" data-test="children-checklist-rh">👤</span>
+        </template>
+      </DanxTooltip>
     </div>
   </div>
 </template>

@@ -10,6 +10,7 @@
  * animates without a roster re-fetch.
  */
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type {
   AgentBusyOn,
   AgentRosterEntry,
@@ -176,13 +177,16 @@ const brokenSetLabel = computed<string>(() => {
         </div>
       </div>
       <div class="head-right">
-        <span
-          class="busy-dot"
-          :class="{ on: busy }"
-          :title="busyLabel"
-          :aria-label="busyLabel"
-          data-test="agent-busy-dot"
-        ></span>
+        <DanxTooltip :tooltip="busyLabel">
+          <template #trigger>
+            <span
+              class="busy-dot"
+              :class="{ on: busy }"
+              :aria-label="busyLabel"
+              data-test="agent-busy-dot"
+            ></span>
+          </template>
+        </DanxTooltip>
         <span
           class="busy-label"
           :data-test="`agent-busy-label-${agent.name}`"

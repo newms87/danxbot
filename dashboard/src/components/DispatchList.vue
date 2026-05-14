@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { Dispatch } from "../types";
 import TriggerBadge from "./TriggerBadge.vue";
 import StatusBadge from "./StatusBadge.vue";
@@ -65,7 +66,13 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
           <th class="p-3 text-right whitespace-nowrap">Duration</th>
           <th class="p-3 text-right whitespace-nowrap">Tools</th>
           <th class="p-3 text-right whitespace-nowrap">Sub-ag</th>
-          <th class="p-3 text-right whitespace-nowrap" title="Auto-recovers from Claude API stream-idle errors (DX-246)">Recovers</th>
+          <th class="p-3 text-right whitespace-nowrap">
+            <DanxTooltip tooltip="Auto-recovers from Claude API stream-idle errors (DX-246)">
+              <template #trigger>
+                <span>Recovers</span>
+              </template>
+            </DanxTooltip>
+          </th>
           <th class="p-3 text-right whitespace-nowrap">Tok total</th>
           <th class="p-3 text-right whitespace-nowrap">Tok in</th>
           <th class="p-3 text-right whitespace-nowrap">Tok out</th>
@@ -93,13 +100,18 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
                operator "this is a recovery" but not WHICH dispatch it
                recovered from. Plain `d.id` for the common (non-chain)
                case keeps the hover quiet. -->
-          <td class="p-3 font-mono text-slate-300 whitespace-nowrap" :title="d.parentRecoverId ? `${d.id} — auto-recovered from ${d.parentRecoverId}` : d.id">
-            <span
-              v-if="d.parentRecoverId"
-              class="inline-block mr-1 text-amber-300 cursor-help"
-              :title="`Recovery of ${d.parentRecoverId} (DX-246 auto-recover chain)`"
-              data-testid="recover-chain-indicator"
-            >↳</span>{{ d.id.slice(0, 8) }}
+          <td class="p-3 font-mono text-slate-300 whitespace-nowrap">
+            <DanxTooltip :tooltip="d.parentRecoverId ? `${d.id} — auto-recovered from ${d.parentRecoverId}` : d.id">
+              <template #trigger>
+                <span class="inline-flex items-center">
+                  <span
+                    v-if="d.parentRecoverId"
+                    class="inline-block mr-1 text-amber-300 cursor-help"
+                    data-testid="recover-chain-indicator"
+                  >↳</span>{{ d.id.slice(0, 8) }}
+                </span>
+              </template>
+            </DanxTooltip>
           </td>
           <td class="p-3"><TriggerBadge :trigger="d.trigger" /></td>
           <td class="p-3 text-slate-400">{{ d.repoName }}</td>
@@ -121,12 +133,17 @@ const hasDispatches = computed(() => props.dispatches.length > 0);
             >{{ d.subagentCount }}</span>
           </td>
           <td class="p-3 text-right" data-testid="recover-cell">
-            <span
+            <DanxTooltip
               v-if="d.recoverCount > 0"
-              class="inline-block min-w-[24px] text-center px-1.5 rounded-full text-[11.5px] font-semibold font-mono bg-amber-500/20 text-amber-300"
-              :title="`Auto-recovered ${d.recoverCount} time(s) from Claude API stream-idle errors`"
-              data-testid="recover-badge"
-            >{{ d.recoverCount }}</span>
+              :tooltip="`Auto-recovered ${d.recoverCount} time(s) from Claude API stream-idle errors`"
+            >
+              <template #trigger>
+                <span
+                  class="inline-block min-w-[24px] text-center px-1.5 rounded-full text-[11.5px] font-semibold font-mono bg-amber-500/20 text-amber-300"
+                  data-testid="recover-badge"
+                >{{ d.recoverCount }}</span>
+              </template>
+            </DanxTooltip>
           </td>
           <td class="p-3 text-right font-mono text-slate-300">{{ d.tokensTotal.toLocaleString() }}</td>
           <td class="p-3 text-right font-mono text-slate-400">{{ d.tokensIn.toLocaleString() }}</td>

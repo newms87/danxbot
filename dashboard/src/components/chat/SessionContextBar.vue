@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { ChatSession } from "./chatTypes";
 import TokenMeter from "./TokenMeter.vue";
 
@@ -23,27 +24,33 @@ const dispatchShort = computed(() =>
       <span class="dot" :class="{ blink: isLive }" />
       {{ isLive ? "Live · resumable" : "Resumable" }}
     </span>
-    <span
+    <DanxTooltip
       v-if="dispatchShort"
-      class="dispatch"
-      :title="`Dispatch ${session.dispatchId}`"
-    >↳ dispatch {{ dispatchShort }}</span>
+      :tooltip="`Dispatch ${session.dispatchId}`"
+    >
+      <template #trigger>
+        <span class="dispatch">↳ dispatch {{ dispatchShort }}</span>
+      </template>
+    </DanxTooltip>
     <span v-if="scope" class="scope">{{ scope }}</span>
     <span class="right">
       <span class="counters">
         {{ session.turns }} turns · {{ session.toolCalls }} tools<template v-if="session.subagentCount"> · {{ session.subagentCount }} sub-agents</template>
       </span>
       <TokenMeter :session="session" />
-      <button
-        v-if="streaming"
-        type="button"
-        class="stop"
-        title="Interrupt the agent"
-        @click="emit('stop')"
-      >
-        <span class="square" />
-        Stop
-      </button>
+      <DanxTooltip tooltip="Interrupt the agent">
+        <template #trigger>
+          <button
+            v-if="streaming"
+            type="button"
+            class="stop"
+            @click="emit('stop')"
+          >
+            <span class="square" />
+            Stop
+          </button>
+        </template>
+      </DanxTooltip>
     </span>
   </div>
 </template>

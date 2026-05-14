@@ -502,7 +502,7 @@ export function validateRepoConfig(repo: RepoContext): void {
     );
   }
 
-  log.info(`[${repo.name}] Repo config validated successfully`);
+  log.debug(`[${repo.name}] Repo config validated successfully`);
 }
 
 export function shutdown(): void {

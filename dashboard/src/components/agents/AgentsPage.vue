@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import {
   clearAgentBroken,
   createAgent,
@@ -383,26 +384,26 @@ async function confirmResolve(): Promise<void> {
           {{ roster.length }} / {{ AGENT_LIMIT }} agents
         </p>
       </div>
-      <span
-        class="inline-flex"
-        :title="newButtonTitle"
-        data-test="new-agent-tooltip"
-      >
-        <button
-          type="button"
-          class="rounded-md px-3 py-1.5 text-sm font-medium"
-          :class="
-            newButtonDisabled
-              ? 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-              : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
-          "
-          :disabled="newButtonDisabled"
-          data-test="new-agent-button"
-          @click="openCreate"
-        >
-          + New Agent
-        </button>
-      </span>
+      <DanxTooltip :tooltip="newButtonTitle">
+        <template #trigger>
+          <span class="inline-flex" data-test="new-agent-tooltip">
+            <button
+              type="button"
+              class="rounded-md px-3 py-1.5 text-sm font-medium"
+              :class="
+                newButtonDisabled
+                  ? 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
+                  : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
+              "
+              :disabled="newButtonDisabled"
+              data-test="new-agent-button"
+              @click="openCreate"
+            >
+              + New Agent
+            </button>
+          </span>
+        </template>
+      </DanxTooltip>
     </header>
 
     <div

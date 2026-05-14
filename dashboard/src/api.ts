@@ -166,6 +166,35 @@ export async function patchIssue(
 }
 
 /**
+ * DELETE /api/issues/:id?repo=<name>&cascade=<bool> — soft-delete a
+ * card by moving its YAML out of the watched issues tree into
+ * `/tmp/danxbot/<repo>/issues/`. Chokidar `unlink` flips the DB row to
+ * tombstoned; SSE `issue:updated` `removed: true` drops the row from
+ * every subscriber. Cascade defaults to `true` server-side — the SPA's
+ * confirm dialog shows the descendant count, so an un-specified flag
+ * means "operator confirmed the cascade." Pass `false` to delete a
+ * single card and orphan its descendants.
+ */
+export interface DeleteIssueResult {
+  removed: string[];
+}
+
+export async function deleteIssue(
+  repo: string,
+  id: string,
+  options: { cascade?: boolean } = {},
+): Promise<DeleteIssueResult> {
+  const params = new URLSearchParams({ repo });
+  if (options.cascade === false) params.set("cascade", "false");
+  const res = await fetchWithAuth(
+    `/api/issues/${encodeURIComponent(id)}?${params.toString()}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as DeleteIssueResult;
+}
+
+/**
  * Statuses the human-driven create surface accepts (DX-350). A narrowed
  * subset of `IssueStatus` — Review (operator wants triage + flesh-out)
  * or ToDo (operator already knows the scope). Other statuses come from
@@ -267,27 +296,25 @@ export async function importIssues(
 }
 
 /**
- * POST /api/triage — DX-518. Operator-directed ad-hoc triage dispatch.
- * Forwards `{repo, issue_id, instructions?}` to the dashboard's triage
- * proxy (DX-515 Phase 1), which in turn forwards to the worker's
- * `/api/triage` route. The dispatched triage agent reads `instructions`
- * as a `## Operator notes` block in its prompt; an omitted / null
- * `instructions` triggers a default triage pass ahead of schedule.
+ * POST /api/triage — operator-directed triage orchestrator dispatch.
+ * Forwards `{repo, instructions?}` to the dashboard's triage proxy, which
+ * forwards to the worker's `/api/triage` route. The dispatched
+ * orchestrator agent (`danxbot:danx-triage-orchestrator`) picks targets
+ * from the Review list (default scope), then fans out per-card subagents
+ * in parallel batches of 3 to apply the `danx-triage-card` decision
+ * tree. `instructions`, when present, flow through as a `## Operator
+ * notes` block that overrides scope / criteria for this pass.
  *
- * Returns the worker's dispatch metadata so the caller can correlate
- * the new dispatch row from the SSE bus when needed. Errors surface as
- * a `ToggleError` so the dialog can render the server's `error` string
+ * Returns the worker's dispatch metadata so the caller can correlate the
+ * new dispatch row from the SSE bus when needed. Errors surface as a
+ * `ToggleError` so the dialog can render the server's `error` string
  * inline (4xx from validation) or a generic retry hint (5xx).
  */
 export async function triggerTriage(
   repo: string,
-  issueId: string,
   instructions: string | null,
 ): Promise<{ jobId?: string; status?: string }> {
-  const body: Record<string, unknown> = {
-    repo,
-    issue_id: issueId,
-  };
+  const body: Record<string, unknown> = { repo };
   if (instructions !== null) body.instructions = instructions;
   const res = await fetchWithAuth("/api/triage", {
     method: "POST",

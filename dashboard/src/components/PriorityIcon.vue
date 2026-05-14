@@ -3,23 +3,24 @@
  * Single-glyph priority indicator. The numeric `priority` field on
  * every issue maps to one of six tiers via `priorityTier()` (sourced
  * from the backend module so dashboard + dispatcher share one
- * classification). Each tier picks a distinct glyph + color so an
- * operator can rank the board's cards at a glance without reading
- * numeric values.
+ * classification). Each tier picks a distinct FontAwesome glyph from
+ * `danx-icon` plus a heat-ramp color so an operator can rank the
+ * board's cards at a glance.
  *
- * Two size variants: `sm` for board-tile placement (10px glyph) and
- * `md` for drawer-header placement (14px glyph). The `title` +
- * `aria-label` carry the human tier label so a hover or screen-reader
- * pass surfaces the same information as the visual rank.
- *
- * The dashboard does not depend on `lucide-vue-next`; we use Unicode
- * triangles + flame glyph instead. Visual order — paired-down → down
- * → dash → up → paired-up → flame — preserves the low→high reading
- * lucide's ChevronsDown/ChevronDown/Minus/ChevronUp/ChevronsUp/Flame
- * series would have produced.
+ * Color ramp: gray → green → yellow → orange → red.
+ * SVGs use `fill="currentColor"`, so the wrapper's `color` style
+ * paints them.
  */
 import { computed } from "vue";
+import { DanxIcon, DanxTooltip } from "@thehammer/danx-ui";
 import { priorityTier, type PriorityTierKey } from "../lib/priorityTier";
+
+import anglesDown from "danx-icon/src/fontawesome/solid/angles-down.svg?raw";
+import angleDown from "danx-icon/src/fontawesome/solid/angle-down.svg?raw";
+import equals from "danx-icon/src/fontawesome/solid/equals.svg?raw";
+import angleUp from "danx-icon/src/fontawesome/solid/angle-up.svg?raw";
+import anglesUp from "danx-icon/src/fontawesome/solid/angles-up.svg?raw";
+import fire from "danx-icon/src/fontawesome/solid/fire.svg?raw";
 
 const props = withDefaults(
   defineProps<{
@@ -32,18 +33,18 @@ const props = withDefaults(
 );
 
 interface TierMeta {
-  glyph: string;
+  icon: string;
   label: string;
   color: string;
 }
 
 const TIER_META: Record<PriorityTierKey, TierMeta> = {
-  lowest: { glyph: "⏬", label: "Lowest", color: "#94a3b8" },
-  low: { glyph: "▼", label: "Low", color: "#60a5fa" },
-  medium: { glyph: "─", label: "Medium", color: "#34d399" },
-  high: { glyph: "▲", label: "High", color: "#fbbf24" },
-  very_high: { glyph: "⏫", label: "Very High", color: "#f97316" },
-  critical: { glyph: "🔥", label: "Critical", color: "#ef4444" },
+  lowest: { icon: anglesDown, label: "Lowest", color: "#94a3b8" },
+  low: { icon: angleDown, label: "Low", color: "#22c55e" },
+  medium: { icon: equals, label: "Medium", color: "#eab308" },
+  high: { icon: angleUp, label: "High", color: "#f97316" },
+  very_high: { icon: anglesUp, label: "Very High", color: "#ef4444" },
+  critical: { icon: fire, label: "Critical", color: "#b91c1c" },
 };
 
 const tier = computed(() => priorityTier(props.priority));
@@ -51,14 +52,19 @@ const meta = computed(() => TIER_META[tier.value]);
 </script>
 
 <template>
-  <span
-    class="priority-icon"
-    :class="`priority-${tier} priority-size-${props.size}`"
-    :style="{ color: meta.color }"
-    :title="meta.label"
-    :aria-label="`Priority: ${meta.label}`"
-    data-test="priority-icon"
-  >{{ meta.glyph }}</span>
+  <DanxTooltip :tooltip="meta.label">
+    <template #trigger>
+      <span
+        class="priority-icon"
+        :class="`priority-${tier} priority-size-${props.size}`"
+        :style="{ color: meta.color }"
+        :aria-label="`Priority: ${meta.label}`"
+        data-test="priority-icon"
+      >
+        <DanxIcon :icon="meta.icon" />
+      </span>
+    </template>
+  </DanxTooltip>
 </template>
 
 <style scoped>
@@ -68,14 +74,23 @@ const meta = computed(() => TIER_META[tier.value]);
   justify-content: center;
   line-height: 1;
   cursor: help;
-  font-variant-numeric: tabular-nums;
+}
+.priority-icon :deep(.danx-icon) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.priority-icon :deep(svg) {
+  width: 1em;
+  height: 1em;
+  display: block;
 }
 .priority-size-sm {
-  font-size: 10px;
+  font-size: 12px;
   min-width: 12px;
 }
 .priority-size-md {
-  font-size: 14px;
+  font-size: 16px;
   min-width: 16px;
 }
 </style>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { DanxTooltip } from "@thehammer/danx-ui";
 import type { Feature } from "../../types";
 
 const props = defineProps<{
@@ -73,23 +74,31 @@ function onResetToDefault(event: Event): void {
         :class="effectiveEnabled() ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'"
       >
         {{ effectiveEnabled() ? "Enabled" : "Disabled" }}
-        <span
+        <DanxTooltip
           v-if="enabled === null"
-          class="ml-1 text-gray-400 dark:text-gray-500 font-normal"
-          title="Deferring to env default"
+          tooltip="Deferring to env default"
         >
-          (default)
-        </span>
-        <button
+          <template #trigger>
+            <span class="ml-1 text-gray-400 dark:text-gray-500 font-normal">
+              (default)
+            </span>
+          </template>
+        </DanxTooltip>
+        <DanxTooltip
           v-else
-          type="button"
-          class="ml-1 text-gray-400 dark:text-gray-500 font-normal underline hover:text-gray-600 dark:hover:text-gray-300"
-          :disabled="busy"
-          title="Reset to env default"
-          @click="onResetToDefault"
+          tooltip="Reset to env default"
         >
-          reset
-        </button>
+          <template #trigger>
+            <button
+              type="button"
+              class="ml-1 text-gray-400 dark:text-gray-500 font-normal underline hover:text-gray-600 dark:hover:text-gray-300"
+              :disabled="busy"
+              @click="onResetToDefault"
+            >
+              reset
+            </button>
+          </template>
+        </DanxTooltip>
       </span>
       <span v-if="subline" class="text-gray-500 dark:text-gray-400">{{ subline }}</span>
     </div>

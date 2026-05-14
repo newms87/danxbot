@@ -14,7 +14,7 @@ Auto-loaded rules + skills. Trigger the right one BEFORE editing.
 | `<repo>/.danxbot/settings.json` ownership / feature toggles | `.claude/rules/settings-file.md` |
 | Anything `make`-able | `.claude/rules/make-commands.md` |
 | Repo bind-mounts, container layout, runtime detection, root `.mcp.json` inject, `.env.<target>` overlays | `.claude/rules/docker-runtime.md` |
-| Dashboard dev URLs (5566/5555), restart matrix, agent auth token | `.claude/rules/dashboard.md` |
+| Dashboard dev URLs (5566/5555), restart matrix, agent auth token, **DanxUI component-library mandate (no raw HTML tooltips, no hand-rolled modals/buttons/icons)** | `.claude/rules/dashboard.md` |
 
 ### Skill triggers (invoke via Skill tool)
 

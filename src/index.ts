@@ -101,7 +101,7 @@ export async function assertJsonlDirectoryAccess(
   try {
     await mkdir(dir, { recursive: true });
     await access(dir, constants.W_OK);
-    log.info(`[${repoName}] JSONL projects dir OK: ${dir}`);
+    log.debug(`[${repoName}] JSONL projects dir OK: ${dir}`);
   } catch (err) {
     log.warn(
       `[${repoName}] JSONL projects dir NOT writable: ${dir} — ` +
@@ -157,7 +157,7 @@ async function startWorkerMode(): Promise<void> {
     if (!result.ok) {
       throw new SystemdPreflightError(result);
     }
-    log.info(`[${repo.name}] systemd-run preflight OK — host dispatches will be scope-confined`);
+    log.debug(`[${repo.name}] systemd-run preflight OK — host dispatches will be scope-confined`);
   }
 
   // Sync `.danxbot/settings.json` display section from RepoContext on
@@ -334,9 +334,13 @@ async function startWorkerMode(): Promise<void> {
       tmpRoot: tmpdir(),
       maxAgeMs: 2 * config.dispatch.agentTimeoutMs,
     });
-    if (swept.removed.length > 0 || swept.errors.length > 0) {
-      log.info(
+    if (swept.errors.length > 0) {
+      log.warn(
         `[${repo.name}] /tmp danxbot-* sweep: removed=${swept.removed.length} errors=${swept.errors.length}`,
+      );
+    } else if (swept.removed.length > 0) {
+      log.debug(
+        `[${repo.name}] /tmp danxbot-* sweep: removed=${swept.removed.length}`,
       );
     }
   } catch (err) {
@@ -436,7 +440,7 @@ async function startWorkerMode(): Promise<void> {
         ).then(() => undefined),
     },
   );
-  log.info(`[${repo.name}] Issues mirror started`);
+  log.debug(`[${repo.name}] Issues mirror started`);
 
   // One-shot boot heal: walk every open YAML and clear the `dispatch`
   // slot on any card whose dispatch is verifiably dead. The
@@ -650,9 +654,13 @@ async function startWorkerMode(): Promise<void> {
       tracker: repoTracker,
       recordSystemError: retrySystemErrorHook,
     });
-    if (reschedule.rearmed > 0 || reschedule.malformed > 0) {
-      log.info(
+    if (reschedule.malformed > 0) {
+      log.warn(
         `[${repo.name}] Retry queue boot-rescheduled: ${reschedule.rearmed} armed, ${reschedule.malformed} malformed`,
+      );
+    } else if (reschedule.rearmed > 0) {
+      log.debug(
+        `[${repo.name}] Retry queue boot-rescheduled: ${reschedule.rearmed} armed`,
       );
     }
   }
@@ -675,7 +683,7 @@ async function startWorkerMode(): Promise<void> {
     await startSlackListener(repo);
     log.info(`[${repo.name}] Slack integration enabled`);
   } else {
-    log.info(`[${repo.name}] Slack not configured`);
+    log.debug(`[${repo.name}] Slack not configured`);
   }
 
   // Start the cron sync sweep for this repo (renamed from `startPoller`
@@ -683,7 +691,6 @@ async function startWorkerMode(): Promise<void> {
   // dispatch decisions moved to the scheduler engine via DX-287's 4b
   // chain).
   await startCronSync();
-  log.info(`[${repo.name}] Cron sync started`);
 
   initShutdownHandlers({});
 

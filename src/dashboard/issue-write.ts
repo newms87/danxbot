@@ -41,7 +41,8 @@ import {
   writeFileSync,
   readFileSync,
 } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import type { IncomingMessage, ServerResponse } from "http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
@@ -829,6 +830,187 @@ export async function handlePatchIssue(
     log.error(`handlePatchIssue(${repo.name}, ${id}) failed`, err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Failed to patch issue",
+    });
+  }
+}
+
+/**
+ * Soft-delete a card by moving its YAML out of the watched
+ * `<repo>/.danxbot/issues/{open,closed}/` tree into a trash dir under
+ * `/tmp/danxbot/<repo>/issues/`. Chokidar's `unlink` event flips the
+ * DB row to `is_deleted=true` (issues-mirror tombstone path); the SPA's
+ * `issue:updated` `removed: true` SSE payload drops the row from every
+ * subscriber. The on-disk file survives in `/tmp` until the OS reaper
+ * sweeps it — operators can recover a wrongly-deleted card by hand for
+ * the next ~10 days on most distros.
+ *
+ * Cascade semantics: when `cascade=true`, the BFS walks `children[]`
+ * recursively (same shape as `buildIssueSubtreePayload` in
+ * `issue-import.ts`) and moves every descendant YAML alongside the
+ * root. Children-missing-on-disk are skipped silently — a half-deleted
+ * subtree is a normal mid-state, not a failure mode. When `cascade=
+ * false`, only the root YAML moves; descendants are left orphaned (the
+ * caller already opted out of cascade).
+ *
+ * Per-id mutex held for the duration so a concurrent PATCH on the same
+ * card can't read mid-move. Cross-repo `<repo>::<id>` keying means two
+ * operators deleting different cards on different repos never serialize
+ * against each other.
+ */
+const TRASH_ROOT = join(tmpdir(), "danxbot");
+
+export interface DeleteIssueResult {
+  removed: string[];
+}
+
+function trashPathFor(repoName: string, id: string): string {
+  return resolve(TRASH_ROOT, repoName, "issues", `${id}.yml`);
+}
+
+function collectDescendants(
+  repoLocalPath: string,
+  rootId: string,
+  expectedPrefix: string,
+): string[] {
+  const visited = new Set<string>();
+  const order: string[] = [];
+  const queue: string[] = [rootId];
+  while (queue.length > 0) {
+    const id = queue.shift()!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    order.push(id);
+    const source = locateIssueFile(repoLocalPath, id);
+    if (!source) continue;
+    let issue: Issue;
+    try {
+      const text = readFileSync(source.path, "utf-8");
+      issue = parseIssue(text, { expectedPrefix });
+    } catch {
+      // Malformed descendant — skip its children but still delete its
+      // file (queued above). Operator can repair from the trash copy.
+      continue;
+    }
+    for (const childId of issue.children) {
+      if (!visited.has(childId)) queue.push(childId);
+    }
+  }
+  return order;
+}
+
+function moveYamlToTrash(
+  sourcePath: string,
+  repoName: string,
+  id: string,
+): void {
+  const dest = trashPathFor(repoName, id);
+  mkdirSync(dirname(dest), { recursive: true });
+  // Stamp the trash filename with a timestamp suffix so a second delete
+  // of the same id (recreate → re-delete cycle) does not clobber the
+  // first trashed copy. The operator's "undelete by hand" play remains
+  // tractable — `ls /tmp/danxbot/<repo>/issues/DX-N*` lists every prior
+  // version.
+  if (existsSync(dest)) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    renameSync(sourcePath, `${dest}.${stamp}`);
+  } else {
+    renameSync(sourcePath, dest);
+  }
+}
+
+/**
+ * Public core entry point for delete. Cascade defaults to `true` —
+ * callers that want a single-card delete must pass `cascade: false`
+ * explicitly. The handler's body shape gates this.
+ */
+export async function deleteIssue(
+  repoName: string,
+  repoLocalPath: string,
+  id: string,
+  cascade: boolean,
+): Promise<DeleteIssueResult> {
+  const expectedPrefix = loadIssuePrefix(repoLocalPath);
+  // Resolve every id we plan to delete BEFORE acquiring the per-id
+  // mutex so we don't read the root issue twice. The mutex below covers
+  // the actual file moves; descendants can rotate concurrently but
+  // chokidar reconciles the order eventually.
+  const rootSource = locateIssueFile(repoLocalPath, id);
+  if (!rootSource) {
+    throw new IssuePatchError(404, { error: `Issue "${id}" not found` });
+  }
+  const targets = cascade
+    ? collectDescendants(repoLocalPath, id, expectedPrefix)
+    : [id];
+
+  const removed: string[] = [];
+  for (const targetId of targets) {
+    // Per-id lock so a concurrent PATCH on this card can't race the
+    // move. Skip missing files silently (cascade walk may include a
+    // descendant whose YAML disappeared mid-walk).
+    await withPerIdLock(repoLocalPath, targetId, async () => {
+      const source = locateIssueFile(repoLocalPath, targetId);
+      if (!source) return;
+      try {
+        moveYamlToTrash(source.path, repoName, targetId);
+        removed.push(targetId);
+      } catch (err) {
+        throw new IssuePatchError(500, {
+          error: `Failed to delete ${targetId}: ${(err as Error).message}`,
+        });
+      }
+    });
+    eventBus.publish({
+      topic: "issue:updated",
+      data: { repoName, id: targetId, removed: true },
+    });
+  }
+  return { removed };
+}
+
+/**
+ * `DELETE /api/issues/:id?repo=<name>&cascade=true|false` — auth-gated
+ * dashboard delete surface. Same auth band as PATCH/POST. The handler
+ * runs `requireUser` itself ahead of the blanket `/api/*` gate.
+ */
+export async function handleDeleteIssue(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string,
+  repoQuery: string | null,
+  cascadeQuery: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  const auth = await requireUser(req);
+  if (!auth.ok) {
+    json(res, 401, { error: "Unauthorized" });
+    return;
+  }
+  if (!repoQuery) {
+    json(res, 400, { error: "Missing required query param: repo" });
+    return;
+  }
+  const repo = deps.repos.find((r) => r.name === repoQuery);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoQuery}" is not configured` });
+    return;
+  }
+  // Default cascade=true — the UI dialog already shows the descendant
+  // count and asks for explicit consent before sending; an unset query
+  // param means "the operator confirmed the cascade in the dialog."
+  // Explicit `cascade=false` opts out for power users hitting the API
+  // directly.
+  const cascade = cascadeQuery === null ? true : cascadeQuery !== "false";
+  try {
+    const result = await deleteIssue(repo.name, repo.localPath, id, cascade);
+    json(res, 200, result);
+  } catch (err) {
+    if (err instanceof IssuePatchError) {
+      json(res, err.status, err.body);
+      return;
+    }
+    log.error(`handleDeleteIssue(${repo.name}, ${id}) failed`, err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Failed to delete issue",
     });
   }
 }

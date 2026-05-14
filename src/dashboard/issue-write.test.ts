@@ -37,6 +37,7 @@ vi.mock("./event-bus.js", () => ({
 import {
   applyIssuePatch,
   createIssue,
+  deleteIssue,
   handlePatchIssue,
   handlePostIssue,
   IssuePatchError,
@@ -1775,5 +1776,103 @@ describe("handlePostIssue — HTTP route", () => {
     await handlePostIssue(req, res, "danxbot", makeDeps());
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/issue_prefix|config\.yml/);
+  });
+});
+
+describe("deleteIssue — soft-delete via /tmp trash", () => {
+  function trashPath(repoName: string, id: string): string {
+    return resolve(tmpdir(), "danxbot", repoName, "issues", `${id}.yml`);
+  }
+
+  function clearTrash(repoName: string): void {
+    rmSync(resolve(tmpdir(), "danxbot", repoName), {
+      recursive: true,
+      force: true,
+    });
+  }
+
+  afterEach(() => {
+    clearTrash("danxbot");
+  });
+
+  it("moves the YAML out of open/ into /tmp/danxbot/<repo>/issues/<id>.yml", async () => {
+    const source = writeFixture(makeIssue(), "open");
+    expect(existsSync(source)).toBe(true);
+
+    const result = await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
+
+    expect(result.removed).toEqual(["DX-1"]);
+    expect(existsSync(source)).toBe(false);
+    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
+  });
+
+  it("returns 404 IssuePatchError when the id has no YAML on disk", async () => {
+    await expect(
+      deleteIssue("danxbot", repoLocalPath, "DX-9", false),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("publishes one removed:true SSE event per deleted card", async () => {
+    writeFixture(makeIssue(), "open");
+    mockEventBusPublish.mockClear();
+    await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
+    expect(mockEventBusPublish).toHaveBeenCalledWith({
+      topic: "issue:updated",
+      data: { repoName: "danxbot", id: "DX-1", removed: true },
+    });
+  });
+
+  it("cascade=true walks children[] recursively and trashes every descendant", async () => {
+    // Epic DX-1 with phase children DX-2 + DX-3; DX-2 has a sub-child DX-4.
+    writeFixture(
+      makeIssue({ id: "DX-1", type: "Epic", children: ["DX-2", "DX-3"] }),
+      "open",
+    );
+    writeFixture(
+      makeIssue({ id: "DX-2", parent_id: "DX-1", children: ["DX-4"] }),
+      "open",
+    );
+    writeFixture(makeIssue({ id: "DX-3", parent_id: "DX-1" }), "open");
+    writeFixture(makeIssue({ id: "DX-4", parent_id: "DX-2" }), "open");
+
+    const result = await deleteIssue("danxbot", repoLocalPath, "DX-1", true);
+
+    expect(new Set(result.removed)).toEqual(
+      new Set(["DX-1", "DX-2", "DX-3", "DX-4"]),
+    );
+    for (const id of ["DX-1", "DX-2", "DX-3", "DX-4"]) {
+      expect(existsSync(issuePath(repoLocalPath, id, "open"))).toBe(false);
+      expect(existsSync(trashPath("danxbot", id))).toBe(true);
+    }
+  });
+
+  it("cascade=false leaves descendants in place when the root has children", async () => {
+    writeFixture(
+      makeIssue({ id: "DX-1", type: "Epic", children: ["DX-2"] }),
+      "open",
+    );
+    writeFixture(makeIssue({ id: "DX-2", parent_id: "DX-1" }), "open");
+
+    await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
+
+    expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(false);
+    expect(existsSync(issuePath(repoLocalPath, "DX-2", "open"))).toBe(true);
+    expect(existsSync(trashPath("danxbot", "DX-2"))).toBe(false);
+  });
+
+  it("appends a timestamp suffix when the trash dir already holds a YAML for the same id (recreate → re-delete cycle)", async () => {
+    writeFixture(makeIssue(), "open");
+    await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
+    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
+
+    // Recreate + re-delete — second pass must NOT clobber the first.
+    writeFixture(makeIssue({ title: "second" }), "open");
+    await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
+
+    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
+    const trashDir = resolve(tmpdir(), "danxbot", "danxbot", "issues");
+    const entries = readdirSync(trashDir);
+    const suffixed = entries.filter((n) => n.startsWith("DX-1.yml."));
+    expect(suffixed.length).toBe(1);
   });
 });

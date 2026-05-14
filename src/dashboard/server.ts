@@ -63,7 +63,11 @@ import {
   handleGetIssueHistory,
   handleListIssues,
 } from "./issues-routes.js";
-import { handlePatchIssue, handlePostIssue } from "./issue-write.js";
+import {
+  handleDeleteIssue,
+  handlePatchIssue,
+  handlePostIssue,
+} from "./issue-write.js";
 import {
   handleGetIssueSubtree,
   handleImportIssues,
@@ -449,6 +453,21 @@ async function route(
       res,
       decodeURIComponent(issuePatchMatch[1]),
       url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // DELETE /api/issues/:id?repo=<name>&cascade=<bool> — soft-delete
+  // (moves YAML → /tmp/danxbot/<repo>/issues/). Auth-gated by the
+  // handler's own `requireUser` call (same band as PATCH/POST).
+  if (method === "DELETE" && issuePatchMatch) {
+    await handleDeleteIssue(
+      req,
+      res,
+      decodeURIComponent(issuePatchMatch[1]),
+      url.searchParams.get("repo"),
+      url.searchParams.get("cascade"),
       dispatchDeps,
     );
     return true;

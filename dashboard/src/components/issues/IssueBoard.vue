@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { DanxScroll } from "@thehammer/danx-ui";
+import { DanxScroll, DanxTooltip } from "@thehammer/danx-ui";
 import type { IssueListItem, IssueStatus } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { COLUMN_ACCENTS } from "./issuePalette";
@@ -218,12 +218,14 @@ function toggle(key: string): void {
         <span class="dot" :style="{ background: col.accent }" />
         <span class="label">{{ col.label }}</span>
         <span class="count">{{ grouped[col.key]?.length ?? 0 }}</span>
-        <span
+        <DanxTooltip
           v-if="requiresHumanCounts[col.key] > 0"
-          class="rh-count"
-          :title="`${requiresHumanCounts[col.key]} card(s) require human action`"
-          :data-test="`column-rh-${col.testId}`"
-        >👤 {{ requiresHumanCounts[col.key] }}</span>
+          :tooltip="`${requiresHumanCounts[col.key]} card(s) require human action`"
+        >
+          <template #trigger>
+            <span class="rh-count" :data-test="`column-rh-${col.testId}`">👤 {{ requiresHumanCounts[col.key] }}</span>
+          </template>
+        </DanxTooltip>
         <span class="glyph">{{ collapsed[col.key] ? "▸" : "▾" }}</span>
       </button>
 

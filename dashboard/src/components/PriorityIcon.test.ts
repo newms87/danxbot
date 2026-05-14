@@ -7,19 +7,16 @@ import { PRIORITY_TIERS } from "../lib/priorityTier";
 // midpoint so the classifier lands inside the bucket the row claims —
 // a future tier table edit that changes a midpoint without updating
 // the table fails this test before it reaches a stale icon render.
+// Each tier maps to a FontAwesome glyph from `danx-icon` (rendered via
+// DanxIcon as inline SVG) plus a heat-ramp color (gray → green →
+// yellow → orange → red).
 const TIER_FIXTURES = [
-  { key: "lowest", value: 0.5, label: "Lowest", color: "#94a3b8", glyph: "⏬" },
-  { key: "low", value: 1.5, label: "Low", color: "#60a5fa", glyph: "▼" },
-  { key: "medium", value: 2.5, label: "Medium", color: "#34d399", glyph: "─" },
-  { key: "high", value: 3.5, label: "High", color: "#fbbf24", glyph: "▲" },
-  {
-    key: "very_high",
-    value: 4.5,
-    label: "Very High",
-    color: "#f97316",
-    glyph: "⏫",
-  },
-  { key: "critical", value: 5.5, label: "Critical", color: "#ef4444", glyph: "🔥" },
+  { key: "lowest", value: 0.5, label: "Lowest", color: "#94a3b8" },
+  { key: "low", value: 1.5, label: "Low", color: "#22c55e" },
+  { key: "medium", value: 2.5, label: "Medium", color: "#eab308" },
+  { key: "high", value: 3.5, label: "High", color: "#f97316" },
+  { key: "very_high", value: 4.5, label: "Very High", color: "#ef4444" },
+  { key: "critical", value: 5.5, label: "Critical", color: "#b91c1c" },
 ] as const;
 
 describe("PriorityIcon — six tier classification", () => {
@@ -27,14 +24,34 @@ describe("PriorityIcon — six tier classification", () => {
     it(`renders ${fix.key} tier for priority ${fix.value}`, () => {
       const w = mount(PriorityIcon, { props: { priority: fix.value } });
       const icon = w.get("[data-test='priority-icon']");
-      expect(icon.text()).toBe(fix.glyph);
       expect(icon.classes()).toContain(`priority-${fix.key}`);
       const style = icon.attributes("style") ?? "";
       expect(style.toLowerCase()).toContain(fix.color.toLowerCase());
-      expect(icon.attributes("title")).toBe(fix.label);
       expect(icon.attributes("aria-label")).toBe(`Priority: ${fix.label}`);
+      // Tooltip text now comes from the DanxTooltip wrapper's `tooltip`
+      // prop, not the trigger span's `title=` attr. Assert wrapper renders.
+      expect(w.html()).toContain(fix.label);
+      // DanxIcon renders the danx-icon SVG inline with fill=currentColor.
+      const svg = icon.find("svg");
+      expect(svg.exists(), `${fix.key} svg should render`).toBe(true);
+      expect(svg.attributes("fill")).toBe("currentColor");
     });
   }
+
+  // Each tier MUST render a distinct glyph — guards against a future
+  // edit collapsing two tiers onto the same icon.
+  it("renders a distinct SVG per tier", () => {
+    const seen = new Set<string>();
+    for (const fix of TIER_FIXTURES) {
+      const w = mount(PriorityIcon, { props: { priority: fix.value } });
+      const svg = w.get("[data-test='priority-icon']").find("svg");
+      const path = svg.find("path").attributes("d");
+      expect(path, `${fix.key} should have a path`).toBeTruthy();
+      expect(seen.has(path!), `duplicate glyph for ${fix.key}`).toBe(false);
+      seen.add(path!);
+    }
+    expect(seen.size).toBe(TIER_FIXTURES.length);
+  });
 
   // Fixture-driven coverage above relies on the midpoint values. Pin
   // the boundary values too so an off-by-one in priorityTier() (`<`

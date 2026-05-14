@@ -16,6 +16,7 @@
  * existing `?tab=agents` query — the badge itself stays UI-agnostic.
  */
 import { computed } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import AgentAvatar from "./agents/AgentAvatar.vue";
 
 const props = withDefaults(
@@ -32,20 +33,23 @@ const avatarPx = computed(() => (props.size === "md" ? 24 : 16));
 </script>
 
 <template>
-  <span
-    class="agent-badge"
-    :class="`size-${size}`"
-    :data-test="`agent-badge-${agentName}`"
-    :title="`Assigned to ${agentName}`"
-  >
-    <AgentAvatar
-      :repo="repo"
-      :name="agentName"
-      :avatar-path="avatarPath"
-      :size="avatarPx"
-    />
-    <span class="name">{{ agentName }}</span>
-  </span>
+  <DanxTooltip :tooltip="`Assigned to ${agentName}`">
+    <template #trigger>
+      <span
+        class="agent-badge"
+        :class="`size-${size}`"
+        :data-test="`agent-badge-${agentName}`"
+      >
+        <AgentAvatar
+          :repo="repo"
+          :name="agentName"
+          :avatar-path="avatarPath"
+          :size="avatarPx"
+        />
+        <span class="name">{{ agentName }}</span>
+      </span>
+    </template>
+  </DanxTooltip>
 </template>
 
 <style scoped>

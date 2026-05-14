@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { DanxPopover, DanxTooltip } from "@thehammer/danx-ui";
+import {
+  DanxDialog,
+  DanxIcon,
+  DanxPopover,
+  DanxTooltip,
+  trashIcon,
+} from "@thehammer/danx-ui";
 import type { Issue, IssueDetail, IssueStatus } from "../../types";
-import { getIssueSubtree, patchIssue } from "../../api";
+import { deleteIssue, getIssueSubtree, patchIssue } from "../../api";
 import TypeBadge from "./TypeBadge.vue";
 import AgentBadge from "../AgentBadge.vue";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
@@ -304,6 +310,50 @@ async function onCopy(): Promise<void> {
     }, 2500);
   }
 }
+
+// Delete affordance — opens a confirm dialog, then DELETE
+// /api/issues/:id. Cascade defaults to ON server-side; the dialog warns
+// when this card has children so the operator can opt out by closing
+// the dialog (we don't currently expose a "single-card only" toggle —
+// the recursive case is the common one, and orphaned children are
+// rarely what the operator wants).
+const deleteOpen = ref(false);
+const deleteBusy = ref(false);
+const deleteError = ref<string | null>(null);
+const hasChildren = computed(() => props.issue.children.length > 0);
+const deleteBodyText = computed(() => {
+  if (hasChildren.value) {
+    const n = props.issue.children.length;
+    return `Move ${props.issue.id} and its ${n} ${n === 1 ? "child" : "descendants"} (recursive) to /tmp/danxbot/${props.repo}/issues/. The YAML survives on disk until the OS clears /tmp — no in-dashboard undo.`;
+  }
+  return `Move ${props.issue.id} to /tmp/danxbot/${props.repo}/issues/. The YAML survives on disk until the OS clears /tmp — no in-dashboard undo.`;
+});
+
+function openDelete(): void {
+  deleteError.value = null;
+  deleteOpen.value = true;
+}
+
+function closeDelete(): void {
+  if (deleteBusy.value) return;
+  deleteOpen.value = false;
+  deleteError.value = null;
+}
+
+async function confirmDelete(): Promise<void> {
+  if (deleteBusy.value) return;
+  deleteBusy.value = true;
+  deleteError.value = null;
+  try {
+    await deleteIssue(props.repo, props.issue.id);
+    deleteOpen.value = false;
+    emit("close");
+  } catch (err) {
+    deleteError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    deleteBusy.value = false;
+  }
+}
 </script>
 
 <template>
@@ -425,20 +475,36 @@ async function onCopy(): Promise<void> {
           :created-at="issue.created_at"
         />
       </span>
-      <button
-        type="button"
-        class="copy-btn"
-        data-test="drawer-copy"
-        :disabled="copyState === 'copying'"
-        :title="copyMessage ?? 'Copy this card and all descendants to clipboard'"
-        :aria-label="copyMessage ?? 'Copy this card and all descendants'"
-        @click="onCopy"
-      >
-        <span v-if="copyState === 'copying'">…</span>
-        <span v-else-if="copyState === 'copied'" data-test="drawer-copy-success">✓</span>
-        <span v-else-if="copyState === 'error'" data-test="drawer-copy-error">!</span>
-        <span v-else>⧉</span>
-      </button>
+      <DanxTooltip :tooltip="copyMessage ?? 'Copy this card and all descendants to clipboard'">
+        <template #trigger>
+          <button
+            type="button"
+            class="copy-btn"
+            data-test="drawer-copy"
+            :disabled="copyState === 'copying'"
+            :aria-label="copyMessage ?? 'Copy this card and all descendants'"
+            @click="onCopy"
+          >
+            <span v-if="copyState === 'copying'">…</span>
+            <span v-else-if="copyState === 'copied'" data-test="drawer-copy-success">✓</span>
+            <span v-else-if="copyState === 'error'" data-test="drawer-copy-error">!</span>
+            <span v-else>⧉</span>
+          </button>
+        </template>
+      </DanxTooltip>
+      <DanxTooltip tooltip="Delete this card (moves YAML to /tmp)">
+        <template #trigger>
+          <button
+            type="button"
+            class="delete-btn"
+            data-test="drawer-delete"
+            aria-label="Delete card"
+            @click="openDelete"
+          >
+            <DanxIcon :icon="trashIcon" />
+          </button>
+        </template>
+      </DanxTooltip>
       <button
         v-if="props.showClose"
         type="button"
@@ -467,16 +533,21 @@ async function onCopy(): Promise<void> {
       />
       <div v-if="errorMsg" class="title-error" data-test="drawer-title-error">{{ errorMsg }}</div>
     </template>
-    <h2
+    <DanxTooltip
       v-else
-      class="title"
-      role="button"
-      tabindex="0"
-      data-test="drawer-title"
-      :title="`${issue.title} — click to edit`"
-      @click="startEdit"
-      @keydown="onTitleKeydown"
-    >{{ issue.title }}</h2>
+      :tooltip="`${issue.title} — click to edit`"
+    >
+      <template #trigger>
+        <h2
+          class="title"
+          role="button"
+          tabindex="0"
+          data-test="drawer-title"
+          @click="startEdit"
+          @keydown="onTitleKeydown"
+        >{{ issue.title }}</h2>
+      </template>
+    </DanxTooltip>
     <button
       v-if="requiresHuman"
       type="button"
@@ -530,6 +601,28 @@ async function onCopy(): Promise<void> {
         @click="emit('toggle-scope')"
       >{{ isScoped ? "✓ Scoped to epic" : "Scope board to epic" }}</button>
     </div>
+    <DanxDialog
+      :model-value="deleteOpen"
+      :title="`Delete ${issue.id}?`"
+      :close-button="'Cancel'"
+      :confirm-button="deleteBusy ? 'Deleting…' : 'Delete'"
+      :is-saving="deleteBusy"
+      :disabled="deleteBusy"
+      variant="danger"
+      persistent
+      data-test="drawer-delete-dialog"
+      @close="closeDelete"
+      @confirm="confirmDelete"
+    >
+      <div class="delete-dialog-body" data-test="drawer-delete-dialog-body">
+        <p>{{ deleteBodyText }}</p>
+        <p
+          v-if="deleteError"
+          class="delete-dialog-error"
+          data-test="drawer-delete-error"
+        >{{ deleteError }}</p>
+      </div>
+    </DanxDialog>
   </div>
 </template>
 
@@ -717,6 +810,45 @@ async function onCopy(): Promise<void> {
 .copy-btn:disabled {
   opacity: 0.6;
   cursor: progress;
+}
+.delete-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  min-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.delete-btn :deep(svg) {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+.delete-btn:hover:not(:disabled) {
+  color: #fca5a5;
+  background: rgb(127 29 29 / 0.25);
+  border-color: rgb(220 38 38 / 0.4);
+}
+.delete-dialog-body {
+  font-size: 14px;
+  color: #cbd5e1;
+  line-height: 1.5;
+}
+.delete-dialog-body p {
+  margin: 0 0 10px 0;
+}
+.delete-dialog-body p:last-child {
+  margin-bottom: 0;
+}
+.delete-dialog-error {
+  color: #fca5a5;
+  font-weight: 500;
 }
 .copy-toast {
   font-size: 11px;
