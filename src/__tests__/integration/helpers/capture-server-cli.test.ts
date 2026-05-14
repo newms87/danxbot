@@ -57,16 +57,21 @@ describe("capture-server-cli", () => {
       // contention (tsx warm-up + node startup) without masking a real
       // hang — `pool: "forks"` + `maxForks: 4` in vitest.config.ts is
       // the contention-side half of the same fix.
-      setTimeout(() => reject(new Error("CLI did not print port within 30s")), 30000);
+      setTimeout(() => reject(new Error("CLI did not print port within 30s")), 30_000);
     });
   }
 
+  // DX-307: per-test 30_000 budget — every it() spawns `tsx capture-server-cli.ts`.
+  // Cold tsx startup is 1–3s on a quiet host; under the 4-fork pool's contention
+  // it can climb past the global 15_000 default. Matches DX-310's per-test pin in
+  // api-error-recover.test.ts; same root cause (subprocess-startup-bound flake),
+  // same fix.
   it("starts on a random port and prints it to stdout", async () => {
     const { port } = await startCli();
 
     expect(port).toBeGreaterThan(0);
     expect(port).toBeLessThan(65536);
-  });
+  }, 30_000);
 
   it("captures requests and writes to output file on shutdown", async () => {
     outputFile = `/tmp/danxbot-cli-test-${Date.now()}.json`;
@@ -115,7 +120,7 @@ describe("capture-server-cli", () => {
 
     expect(captured[1].method).toBe("POST");
     expect(captured[1].path).toBe("/events");
-  });
+  }, 30_000);
 
   it("responds 200 to all requests", async () => {
     const { port } = await startCli();
@@ -127,7 +132,7 @@ describe("capture-server-cli", () => {
 
     const body = await response.json();
     expect(body).toEqual({ ok: true });
-  });
+  }, 30_000);
 
   it("listens on an explicit port when --port is provided", async () => {
     // Use a high ephemeral port unlikely to conflict
@@ -138,7 +143,7 @@ describe("capture-server-cli", () => {
 
     const response = await fetch(`http://127.0.0.1:${explicitPort}/test`);
     expect(response.ok).toBe(true);
-  });
+  }, 30_000);
 
   it("writes empty array to output file when no requests are captured", async () => {
     outputFile = `/tmp/danxbot-cli-test-empty-${Date.now()}.json`;
@@ -162,7 +167,7 @@ describe("capture-server-cli", () => {
     expect(existsSync(outputFile)).toBe(true);
     const captured = JSON.parse(readFileSync(outputFile, "utf8"));
     expect(captured).toEqual([]);
-  });
+  }, 30_000);
 
   it("writes output file on SIGINT as well as SIGTERM", async () => {
     outputFile = `/tmp/danxbot-cli-test-sigint-${Date.now()}.json`;
@@ -189,7 +194,7 @@ describe("capture-server-cli", () => {
     const captured = JSON.parse(readFileSync(outputFile, "utf8"));
     expect(captured).toHaveLength(1);
     expect(captured[0].path).toBe("/ping");
-  });
+  }, 30_000);
 
   it("records monotonically increasing timestamps", async () => {
     outputFile = `/tmp/danxbot-cli-test-ts-${Date.now()}.json`;
@@ -218,5 +223,5 @@ describe("capture-server-cli", () => {
     expect(captured).toHaveLength(2);
     expect(captured[0].timestamp).toBeLessThanOrEqual(captured[1].timestamp);
     expect(captured[0].timestamp).toBeGreaterThan(0);
-  });
+  }, 30_000);
 });

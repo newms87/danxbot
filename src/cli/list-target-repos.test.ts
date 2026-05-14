@@ -65,6 +65,11 @@ describe("list-target-repos.ts", () => {
   // and `make validate-repos`. Pin the format here so a future refactor to
   // e.g. `names.join(",")` fails this test loudly instead of failing the
   // Makefile cryptically.
+  // DX-307: per-test 30_000 budget — every it() in this file spawns `npx tsx
+  // src/cli/list-target-repos.ts`. Cold tsx startup is 1–3s on a quiet host;
+  // under the 4-fork pool's CPU contention it can climb past the global
+  // 15_000 default. 30_000 is the per-test pin DX-310 already applied to
+  // api-error-recover.test.ts; same root cause, same fix.
   it("emits one repo name per line in target order", () => {
     writeTarget(
       "local",
@@ -89,7 +94,7 @@ describe("list-target-repos.ts", () => {
 
     expect(status, `stderr:\n${stderr}`).toBe(0);
     expect(stdout).toBe("alpha\nbravo\ncharlie\n");
-  });
+  }, 30_000);
 
   it("emits empty stdout (and exits 0) when the target has no repos", () => {
     writeTarget("local", "name: local\nmode: local\nrepos: []\n");
@@ -98,7 +103,7 @@ describe("list-target-repos.ts", () => {
 
     expect(status).toBe(0);
     expect(stdout).toBe("");
-  });
+  }, 30_000);
 
   it("loads the target named by DANXBOT_TARGET (not always 'local')", () => {
     writeTarget("local", "name: local\nmode: local\nrepos: []\n");
@@ -118,7 +123,7 @@ describe("list-target-repos.ts", () => {
 
     expect(status).toBe(0);
     expect(stdout).toBe("only-gpt-repo\n");
-  });
+  }, 30_000);
 
   it("exits non-zero when the target file is missing (operator typo / wrong DANXBOT_TARGET)", () => {
     // No target file at all — loadTarget throws, the script propagates.
@@ -126,5 +131,5 @@ describe("list-target-repos.ts", () => {
 
     expect(status).not.toBe(0);
     expect(stderr).toMatch(/deploy\/targets\/nonexistent\.yml/);
-  });
+  }, 30_000);
 });

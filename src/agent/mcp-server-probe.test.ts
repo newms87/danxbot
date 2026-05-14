@@ -127,6 +127,16 @@ describe("probeMcpServer", () => {
     };
   }
 
+  // DX-307: per-test 30_000 budget on every spawning probe test. Most of these
+  // run in <500ms in isolation, but "actually kills the hung subprocess on
+  // timeout" specifically races a 3s probe deadline + cold node `-e` spawn,
+  // and the global 15_000 testTimeout (DX-310) shaves the margin tighter than
+  // the empirical baseline once the 4-fork pool contends. 30_000 keeps every
+  // spawning test in this file on the same comfortable budget as DX-310's
+  // api-error-recover pin. The 4 validation tests in `probeAllMcpServers` that
+  // throw before spawning (no-mcpServers-key / empty-map / missing-file /
+  // invalid-JSON) intentionally do not carry this pin — they never reach the
+  // child-process path so the global 15s default is the right budget for them.
   it("returns ok when the server responds to initialize with a result", async () => {
     const result = await probeMcpServer(
       "healthy",
@@ -135,7 +145,7 @@ describe("probeMcpServer", () => {
     );
 
     expect(result.ok).toBe(true);
-  });
+  }, 30_000);
 
   it("returns failure with reason=exit when the server exits non-zero", async () => {
     const result = await probeMcpServer(
@@ -152,7 +162,7 @@ describe("probeMcpServer", () => {
     expect(result.stderr).toContain("SCHEMA_DEFINITION_ID is required");
     expect(result.message).toContain("schema");
     expect(result.message).toContain("SCHEMA_DEFINITION_ID is required");
-  });
+  }, 30_000);
 
   it("returns failure with reason=timeout when the server hangs without responding", async () => {
     const result = await probeMcpServer("silent", configFor(HANG_SERVER), 500);
@@ -163,7 +173,7 @@ describe("probeMcpServer", () => {
     expect(result.serverName).toBe("silent");
     expect(result.message).toContain("silent");
     expect(result.message).toContain("timeout");
-  });
+  }, 30_000);
 
   it("returns failure with reason=protocol when the server responds with a JSON-RPC error", async () => {
     const result = await probeMcpServer(
@@ -178,7 +188,7 @@ describe("probeMcpServer", () => {
     expect(result.serverName).toBe("buggy");
     expect(result.message).toContain("buggy");
     expect(result.message).toContain("Method not found");
-  });
+  }, 30_000);
 
   it("returns failure with reason=protocol when the server emits malformed non-JSON output", async () => {
     const result = await probeMcpServer(
@@ -192,7 +202,7 @@ describe("probeMcpServer", () => {
     expect(result.reason).toBe("protocol");
     expect(result.message).toContain("garbage");
     expect(result.message).toContain("malformed JSON");
-  });
+  }, 30_000);
 
   it("returns failure with reason=exit when the command does not exist", async () => {
     // Spawning a nonexistent binary fires `child.on('error', ...)` rather
@@ -214,7 +224,7 @@ describe("probeMcpServer", () => {
     expect(result.serverName).toBe("missing");
     expect(result.message).toContain("missing");
     expect(result.message.toLowerCase()).toMatch(/failed to spawn|enoent/);
-  });
+  }, 30_000);
 
   it("ignores stray notifications and unrelated frames before the initialize response", async () => {
     // A compliant MCP server may emit notifications/log, notifications/progress,
@@ -227,7 +237,7 @@ describe("probeMcpServer", () => {
     );
 
     expect(result.ok).toBe(true);
-  });
+  }, 30_000);
 
   it('accepts a stringy JSON-RPC id (e.g. "1") matching the request id', async () => {
     // JSON-RPC permits both numeric and string ids. A server that echoes
@@ -240,7 +250,7 @@ describe("probeMcpServer", () => {
     );
 
     expect(result.ok).toBe(true);
-  });
+  }, 30_000);
 
   it("kills the subprocess after a successful probe", async () => {
     const start = Date.now();
@@ -254,7 +264,7 @@ describe("probeMcpServer", () => {
     expect(result.ok).toBe(true);
     // Healthy probe should complete well under the timeout window.
     expect(elapsed).toBeLessThan(2_000);
-  });
+  }, 30_000);
 
   it("actually kills the hung subprocess on timeout (PID is no longer alive)", async () => {
     // Captures the spawned PID via a marker file the server writes before
@@ -306,7 +316,7 @@ describe("probeMcpServer", () => {
       if ((err as NodeJS.ErrnoException).code === "ESRCH") stillAlive = false;
     }
     expect(stillAlive).toBe(false);
-  });
+  }, 30_000);
 
   it("merges env vars into the child process environment", async () => {
     const script = `
@@ -324,7 +334,7 @@ describe("probeMcpServer", () => {
     );
 
     expect(result.ok).toBe(true);
-  });
+  }, 30_000);
 
   it("reports an exit-code-only message when stderr is empty on exit failure", async () => {
     const result = await probeMcpServer(
@@ -340,7 +350,7 @@ describe("probeMcpServer", () => {
     expect(result.stderr).toBe("");
     expect(result.message).toContain("quiet");
     expect(result.message).toContain("42");
-  });
+  }, 30_000);
 
   it("reports exitCode=null with a signal mention when the child is killed by a signal", async () => {
     // A server that sleeps long enough for the probe's own SIGKILL after
@@ -365,7 +375,7 @@ describe("probeMcpServer", () => {
       expect(result.exitCode).toBeNull();
       expect(result.message).toMatch(/signal/i);
     }
-  });
+  }, 30_000);
 });
 
 describe("probeAllMcpServers", () => {
@@ -405,7 +415,7 @@ describe("probeAllMcpServers", () => {
 
     expect(result.ok).toBe(true);
     expect(result.failures).toEqual([]);
-  });
+  }, 30_000);
 
   it("throws when the settings file has no mcpServers key (bug at call site)", async () => {
     const settingsPath = writeSettings({});
@@ -445,7 +455,7 @@ describe("probeAllMcpServers", () => {
     expect(result.failures).toHaveLength(1);
     expect(result.failures[0].serverName).toBe("broken");
     expect(result.failures[0].reason).toBe("exit");
-  });
+  }, 30_000);
 
   it("aggregates every broken server when multiple fail", async () => {
     const settingsPath = writeSettings({
@@ -468,7 +478,7 @@ describe("probeAllMcpServers", () => {
     expect(result.ok).toBe(false);
     const names = result.failures.map((f) => f.serverName).sort();
     expect(names).toEqual(["crashes", "hangs"]);
-  });
+  }, 30_000);
 
   it("throws when the settings file does not exist", async () => {
     await expect(
