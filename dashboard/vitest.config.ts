@@ -12,7 +12,13 @@ export default defineConfig({
   test: {
     environment: "happy-dom",
     include: ["src/**/*.test.ts"],
-    setupFiles: ["./vitest.setup.ts"],
+    // dashboard/package.json pins vitest to ~4.0.x. vitest 4.1.x pulls
+    // rolldown which imports `styleText` from `node:util` (Node ≥20.12);
+    // the host runs Node 18.19.1, so 4.1.x crashes at startup. Bumping
+    // the pin without raising the Node floor (or rolldown-free vitest)
+    // reintroduces DX-358. Absolute setupFiles path also needed —
+    // vitest 4.0.x resolves "./vitest.setup.ts" against the wrong root.
+    setupFiles: [resolve(__dirname, "vitest.setup.ts")],
     restoreMocks: true,
     // Full-suite runs do a cold transform+import of every test file's
     // graph. The first `mount()` after the cold import can blow past 5s
