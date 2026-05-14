@@ -29,9 +29,13 @@
 
 import { readdirSync, existsSync } from "node:fs";
 import { basename, join } from "node:path";
-import { reconcileIssue, type ReconcileRepoContext } from "../issue/reconcile.js";
+import {
+  reconcileIssue,
+  type ReconcileRepoContext,
+} from "../issue/reconcile.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
 import { createLogger } from "../logger.js";
+import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 import type { RepoContext } from "../types.js";
 
 const log = createLogger("audit-pass");
@@ -73,6 +77,12 @@ export async function runAuditPass(
 
   const openDir = join(repo.localPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) return result;
+
+  if (isTrelloSyncOverrideDisabled(repo.localPath)) {
+    log.info(
+      `[${repo.name}] trelloSync override=false — skipping outbound tracker pushes this audit pass (will re-fire on next reconcile after re-enable)`,
+    );
+  }
 
   let entries: string[];
   try {

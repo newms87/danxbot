@@ -27,11 +27,21 @@
  * gets workspaces provisioned at start.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
 import { resolve } from "node:path";
+import { recordSystemError } from "../dashboard/system-errors.js";
 import { parseSimpleYaml } from "../poller/parse-yaml.js";
 import { renderRepoConfigMarkdown } from "../poller/repo-config-rule.js";
-import { ensureGitignoreEntry, ensureIssuesDirs } from "../poller/yaml-lifecycle.js";
+import {
+  ensureGitignoreEntry,
+  ensureIssuesDirs,
+} from "../poller/yaml-lifecycle.js";
 import type { RepoContext } from "../types.js";
 import { log, projectRoot } from "./_shared/inject-utils.js";
 import { ensureWorkspaceGitignoreEntries } from "./gitignore-workspaces.js";
@@ -178,22 +188,40 @@ function mirrorWorkspacesIntoWorktrees(
     } catch {
       continue;
     }
-    const workspacesTarget = resolve(worktree, ".danxbot", "workspaces");
-    mkdirSync(workspacesTarget, { recursive: true });
-    for (const entry of readdirSync(mainWorkspaces)) {
-      const src = resolve(mainWorkspaces, entry);
-      try {
-        if (!statSync(src).isDirectory()) continue;
-      } catch {
-        continue;
+    // Isolate per-worktree errors so one unwritable worktree (e.g. a
+    // worktree dir owned by a different uid from a prior container run)
+    // does not abort the entire `_sync` tick — that previously took
+    // every downstream cron step offline indefinitely.
+    try {
+      const workspacesTarget = resolve(worktree, ".danxbot", "workspaces");
+      mkdirSync(workspacesTarget, { recursive: true });
+      for (const entry of readdirSync(mainWorkspaces)) {
+        const src = resolve(mainWorkspaces, entry);
+        try {
+          if (!statSync(src).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        mirrorWorkspaceTree(src, resolve(workspacesTarget, entry), []);
       }
-      mirrorWorkspaceTree(src, resolve(workspacesTarget, entry), []);
+      renderPerRepoFilesIntoWorkspaces(
+        repo,
+        danxbotConfigDir,
+        cfg,
+        workspacesTarget,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn(
+        `[${repo.name}] worktree ${agentName} mirror skipped — ${message}`,
+      );
+      recordSystemError({
+        source: "worktree",
+        severity: "warn",
+        repo: repo.name,
+        message: `Failed to mirror workspaces into worktree ${agentName}: ${message}`,
+        details: { agent: agentName, worktree, error: message },
+      });
     }
-    renderPerRepoFilesIntoWorkspaces(
-      repo,
-      danxbotConfigDir,
-      cfg,
-      workspacesTarget,
-    );
   }
 }

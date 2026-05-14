@@ -75,10 +75,7 @@ import {
   dbListDependentsByWaitingOnId,
 } from "../poller/issues-db.js";
 import { repoNameFromPath } from "../poller/repo-name.js";
-import type {
-  Issue,
-  IssueHistoryEntry,
-} from "../issue-tracker/interface.js";
+import type { Issue, IssueHistoryEntry } from "../issue-tracker/interface.js";
 import {
   applyParentDeriveMutation,
   deriveParentStatus,
@@ -364,10 +361,7 @@ interface LoadedYaml {
  * exist (operator manually re-opened a Done card), reconcile reads from
  * `open/`. Same semantics as `moveToClosedIfTerminal` already enforces.
  */
-function loadYaml(
-  repoLocalPath: string,
-  id: string,
-): LoadedYaml | null {
+function loadYaml(repoLocalPath: string, id: string): LoadedYaml | null {
   const openPath = issuePath(repoLocalPath, id, "open");
   const closedPath = issuePath(repoLocalPath, id, "closed");
   let path: string | null = null;
@@ -396,10 +390,10 @@ function loadYaml(
     typeof parsed !== "object" ||
     Array.isArray(parsed)
   ) {
-    throw new ReconcileValidationError(
-      `Non-object YAML at ${path}`,
-      { id, path },
-    );
+    throw new ReconcileValidationError(`Non-object YAML at ${path}`, {
+      id,
+      path,
+    });
   }
   return { path, bucket, text, parsed: parsed as Record<string, unknown> };
 }
@@ -617,11 +611,6 @@ async function reconcileBody(
     tracker !== undefined &&
     lastPushed !== nextHash &&
     isTrelloSyncOverrideDisabled(repo.localPath);
-  if (trelloSyncDisabled) {
-    log.info(
-      `[${repo.name}] ${id} trelloSync override=false — skipping outbound tracker push (will re-fire on next reconcile after re-enable)`,
-    );
-  }
   if (tracker && lastPushed !== nextHash && !trelloSyncDisabled) {
     const recordSystemError = systemErrorHooksByRepo.get(repo.name);
     const pushPromise = pushTrelloDiff({
@@ -683,10 +672,7 @@ async function reconcileBody(
   if (reconcileMutated) {
     if (mutated.parent_id) {
       parentRecursed = mutated.parent_id;
-      if (
-        rec.depth < MAX_RECURSION_DEPTH &&
-        !rec.visited.has(parentRecursed)
-      ) {
+      if (rec.depth < MAX_RECURSION_DEPTH && !rec.visited.has(parentRecursed)) {
         const childVisited = new Set(rec.visited);
         childVisited.add(id);
         try {
@@ -759,8 +745,7 @@ async function reconcileBody(
     triageExpiresAtByCardId.delete(triageCacheKey);
   } else {
     const nextTriageExpiresAt = mutated.triage.expires_at;
-    const priorTriageExpiresAt =
-      triageExpiresAtByCardId.get(triageCacheKey);
+    const priorTriageExpiresAt = triageExpiresAtByCardId.get(triageCacheKey);
     if (priorTriageExpiresAt !== nextTriageExpiresAt) {
       // First observation OR triage agent stamped a fresh expiry —
       // re-arm the timer to fire at the new value. The string-to-ms
