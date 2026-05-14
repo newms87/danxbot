@@ -474,7 +474,13 @@ export interface ConflictOnEntry {
  * 400.
  */
 export interface IssueCopyPayload {
-  schema_version: 8;
+  /**
+   * Pinned to `Issue["schema_version"]` so the next coordinated bump
+   * (writer literal + `KNOWN_SCHEMA_MAX` + `Issue` type) drags this
+   * field along automatically. A naked literal `8` here would drift
+   * silently when the rest of the schema-version lockstep moves.
+   */
+  schema_version: Issue["schema_version"];
   issues: Issue[];
 }
 

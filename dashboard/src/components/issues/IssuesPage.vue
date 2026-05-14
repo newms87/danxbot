@@ -8,6 +8,7 @@ import CreateCardButton from "./CreateCardButton.vue";
 import FilterToolbar from "./FilterToolbar.vue";
 import IssueBoard from "./IssueBoard.vue";
 import IssueDetailView from "./IssueDetailView.vue";
+import PasteCardsDialog from "./PasteCardsDialog.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import { typeToId } from "./issuePalette";
 import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../../types";
@@ -240,6 +241,20 @@ function onCreatedFromDialog(issueId: string): void {
   void openDrawer(issueId);
 }
 
+// DX-519 — Paste dialog state. Operator clicks the Paste button, dialog
+// opens, operator pastes (or auto-reads from clipboard) the JSON payload
+// produced by the drawer's Copy button. On successful import we open
+// the drawer on the new top-level card so the operator confirms the
+// duplicate landed correctly.
+const pasteDialogOpen = ref<boolean>(false);
+
+function onPasteImported(topId: string, _totalCards: number): void {
+  // Open the drawer on the new top-level card. The SSE round-trip
+  // re-affirms the list within ~50ms of the YAML writes; the drawer
+  // detail fetch reads the new YAML directly via fetchIssueDetail.
+  void openDrawer(topId);
+}
+
 function onParentClick(parentId: string): void {
   scopedEpicId.value = parentId;
 }
@@ -295,6 +310,13 @@ watch(
     <div v-if="!selectedRepo" class="placeholder">Select a repo to see issues</div>
     <template v-else>
       <div class="header-row">
+        <button
+          type="button"
+          class="paste-btn"
+          data-test="issues-paste-button"
+          title="Paste a Copy payload into this repo"
+          @click="pasteDialogOpen = true"
+        >Paste cards…</button>
         <CreateCardButton
           :repo="selectedRepo"
           @created="onCreatedFromDialog"
@@ -407,6 +429,12 @@ watch(
       :repo="selectedRepo"
       @close="boardChatOpen = false"
     />
+    <PasteCardsDialog
+      v-if="selectedRepo"
+      v-model="pasteDialogOpen"
+      :repo="selectedRepo"
+      @imported="onPasteImported"
+    />
     <div v-if="detailError" class="error-banner detail-err">
       {{ detailError }}
     </div>
@@ -423,7 +451,25 @@ watch(
 .header-row {
   display: flex;
   justify-content: flex-end;
+  gap: 8px;
   margin-bottom: 8px;
+}
+.paste-btn {
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: #cbd5e1;
+  background: rgb(30 41 59 / 0.6);
+  border: 1px solid #334155;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 120ms, border-color 120ms;
+}
+.paste-btn:hover {
+  background: rgb(51 65 85 / 0.7);
+  border-color: rgb(99 102 241 / 0.45);
+  color: #e2e8f0;
 }
 .board-wrap {
   flex: 1 1 auto;

@@ -282,6 +282,45 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
     }
   });
 
+  it("handles cycle-shaped children[] without recursing forever", () => {
+    // Pathological fixture: DX-1 lists DX-2 as a child; DX-2 lists
+    // DX-1 back. The walker's `visited` set must collapse the cycle
+    // to two emitted entries.
+    writeIssueFixture(
+      repoLocalPath,
+      makeIssue({
+        id: "DX-1",
+        type: "Epic",
+        children: ["DX-2"],
+      }),
+    );
+    writeIssueFixture(
+      repoLocalPath,
+      makeIssue({
+        id: "DX-2",
+        parent_id: "DX-1",
+        children: ["DX-1"],
+      }),
+    );
+    const payload = buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
+    expect(payload.issues.map((i) => i.id).sort()).toEqual(["DX-1", "DX-2"]);
+  });
+
+  it("500s on malformed on-disk YAML, naming the offending id", () => {
+    ensureIssuesDirs(repoLocalPath);
+    const p = issuePath(repoLocalPath, "DX-1", "open");
+    writeFileSync(p, "schema_version: 8\nthis is not valid yaml: : : :");
+    try {
+      buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
+      throw new Error("expected throw");
+    } catch (err) {
+      const e = err as IssuePatchError;
+      expect(e.status).toBe(500);
+      expect(e.body.error).toContain("DX-1");
+      expect(e.body.error).toContain("malformed");
+    }
+  });
+
   it("treats a missing descendant as incoherent subtree (404)", () => {
     writeIssueFixture(
       repoLocalPath,
@@ -636,6 +675,21 @@ describe("applyIssueImport — validation failures", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
+  it("rejects a payload with duplicate source ids", async () => {
+    const dup1 = makeIssue({ id: "DX-100", title: "first" });
+    const dup2 = makeIssue({ id: "DX-100", title: "second" });
+    await expect(
+      applyIssueImport(
+        "danxbot",
+        repoLocalPath,
+        payloadOf([dup1, dup2]),
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: expect.stringContaining("duplicates an earlier entry") },
+    });
+  });
+
   it("rejects empty issues[] with 400", async () => {
     await expect(
       applyIssueImport("danxbot", repoLocalPath, payloadOf([])),
@@ -652,6 +706,30 @@ describe("applyIssueImport — validation failures", () => {
         issues: [{ id: "not-an-id" }],
       }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rolls back prior disk writes when a later write fails mid-loop", async () => {
+    // Force a real write failure on the SECOND card. Allocation order
+    // is DX-1, DX-2; the second card's atomic write goes through
+    // `${target}.tmp` first. Pre-create a directory at `DX-2.yml.tmp`
+    // so `writeFileSync` against that path throws EISDIR — a real
+    // syscall fault, no mocking the fs surface (ESM blocks vi.spyOn
+    // on `node:fs` exports).
+    ensureIssuesDirs(repoLocalPath);
+    mkdirSync(
+      resolve(repoLocalPath, ".danxbot/issues/open/DX-2.yml.tmp"),
+    );
+    const a = makeIssue({ id: "DX-100", title: "first" });
+    const b = makeIssue({ id: "DX-200", title: "second" });
+    await expect(
+      applyIssueImport("danxbot", repoLocalPath, payloadOf([a, b])),
+    ).rejects.toMatchObject({ status: 500 });
+    // First card's destination must be rolled back — the import is
+    // observably atomic either-all-or-none. The leftover `.tmp`
+    // directory is fine; only `<id>.yml` files matter for the
+    // observable state.
+    expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(false);
+    expect(existsSync(issuePath(repoLocalPath, "DX-2", "open"))).toBe(false);
   });
 
   it("is atomic — a mid-batch validation failure leaves zero YAMLs written", async () => {
@@ -810,6 +888,28 @@ describe("handleGetIssueSubtree — HTTP route", () => {
       res,
       "DX-999",
       "danxbot",
+      depsForRepo(),
+    );
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("returns 400 when ?repo= is omitted", async () => {
+    const req = createMockReqWithBody("GET");
+    req.headers.authorization = "Bearer user-alice";
+    const res = createMockRes();
+    await handleGetIssueSubtree(req, res, "DX-1", null, depsForRepo());
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("returns 404 when the repo is not configured", async () => {
+    const req = createMockReqWithBody("GET");
+    req.headers.authorization = "Bearer user-alice";
+    const res = createMockRes();
+    await handleGetIssueSubtree(
+      req,
+      res,
+      "DX-1",
+      "no-such-repo",
       depsForRepo(),
     );
     expect(res._getStatusCode()).toBe(404);

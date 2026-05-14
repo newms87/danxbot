@@ -45,7 +45,7 @@
  * (the schema invariant requires `by[]` non-empty).
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "http";
 import { json, parseBody } from "../http/helpers.js";
@@ -58,7 +58,7 @@ import {
   parseIssue,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
-import { nextIssueId } from "../issue-tracker/id-generator.js";
+import { maxIssueNumber } from "../issue-tracker/id-generator.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import type {
   ConflictOnEntry,
@@ -71,7 +71,6 @@ import {
   withPerRepoCreateLock,
   writeIssueYamlAtomic,
 } from "./issue-write.js";
-import { unlinkSync } from "node:fs";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 
 const log = createLogger("issue-import");
@@ -288,6 +287,12 @@ function validatePayloadShape(raw: unknown): IssueCopyPayload {
       error: "issues must be a non-empty array",
     });
   }
+  // Duplicate-id reject — the rewrite phase uses `idMap.set(src.id, …)`
+  // and would silently overwrite the first entry when two issues share
+  // an id, producing one ghost card (allocated id, never referenced)
+  // and one card whose refs land on the second writer. Fail-loud so
+  // the operator fixes the payload before any disk write.
+  const seenSourceIds = new Set<string>();
   for (let i = 0; i < obj.issues.length; i++) {
     const entry = obj.issues[i];
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -301,6 +306,12 @@ function validatePayloadShape(raw: unknown): IssueCopyPayload {
         error: `issues[${i}].id must match <PREFIX>-N`,
       });
     }
+    if (seenSourceIds.has(rec.id)) {
+      throw new IssuePatchError(400, {
+        error: `issues[${i}].id "${rec.id}" duplicates an earlier entry in the payload`,
+      });
+    }
+    seenSourceIds.add(rec.id);
   }
   // Cast is safe — `parseIssue` round-trip in the apply phase will
   // catch any field-level drift the schema validator owns.
@@ -333,13 +344,14 @@ export async function applyIssueImport(
   const issuesRoot = resolve(repoLocalPath, ".danxbot", "issues");
 
   return withPerRepoCreateLock(repoLocalPath, async () => {
-    // Phase 1 — allocate fresh ids in payload order. `nextIssueId`
-    // reads max(N) from disk; without holding the lock across the
-    // whole loop, two reads could return the same N. We're inside
-    // the lock, but the disk state advances as we allocate, so we
-    // also need to bump our in-memory counter rather than re-reading.
+    // Phase 1 — allocate fresh ids in payload order. We hold the
+    // per-repo create lock (taken at function entry), so the disk
+    // counter cannot move under us; one `maxIssueNumber` read then
+    // an in-memory bump per allocation is sufficient. Bumping
+    // in-memory (vs re-reading) also avoids the per-iteration
+    // `readdir` cost that `nextIssueId` would impose.
     const idMap = new Map<string, string>();
-    let nextN = await maxAllocatedN(issuesRoot, expectedPrefix);
+    let nextN = await maxIssueNumber(issuesRoot, expectedPrefix);
     for (const src of payload.issues) {
       nextN += 1;
       idMap.set(src.id, `${expectedPrefix}-${nextN}`);
@@ -412,30 +424,6 @@ export async function applyIssueImport(
       issues: rewritten,
     };
   });
-}
-
-/**
- * Read max(N) from disk for the target repo's id space. Mirrors
- * `nextIssueId` but exposes the counter so the import loop can
- * allocate N ids in a row without N disk reads (and without races
- * inside the lock — every allocate-then-write sequence happens
- * inside `withPerRepoCreateLock`).
- */
-async function maxAllocatedN(
-  issuesRoot: string,
-  prefix: string,
-): Promise<number> {
-  // Cheapest path: one nextIssueId read gives us `${prefix}-${N+1}`;
-  // strip the prefix and decrement to get N. Reuses the same dir-scan
-  // logic so we don't have a second source of truth.
-  const next = await nextIssueId(issuesRoot, prefix);
-  const m = next.match(/-(\d+)$/);
-  if (!m) {
-    throw new IssuePatchError(500, {
-      error: `nextIssueId returned an unparseable id: ${next}`,
-    });
-  }
-  return parseInt(m[1], 10) - 1;
 }
 
 /**
