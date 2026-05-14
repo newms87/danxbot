@@ -87,6 +87,16 @@ vi.mock("./agent-cleanup.js", () => ({
   buildCleanup: vi.fn().mockReturnValue(vi.fn().mockResolvedValue(undefined)),
 }));
 
+// DX-338 — inactivity + max-runtime timers route through stopAgentTree
+// (host: `systemctl --user stop <scope>.scope`; docker: SIGTERM + grace +
+// SIGKILL on the tracked PID). Mock the primitive so tests can assert
+// the timer wired through the runtime-aware reap without spawning
+// systemctl or invoking the real `terminateWithGrace`.
+const mockStopAgentTree = vi.fn().mockResolvedValue(undefined);
+vi.mock("./job-stop.js", () => ({
+  stopAgentTree: (...args: unknown[]) => mockStopAgentTree(...args),
+}));
+
 vi.mock("./danxbot-commit.js", () => ({
   getDanxbotCommit: vi.fn().mockReturnValue("test-sha"),
 }));
@@ -221,7 +231,7 @@ describe("attachMonitoringStack", () => {
     expect(job.usage.cache_creation_input_tokens).toBe(10);
   });
 
-  it("resets the inactivity timer on every watcher entry — long tool-use streams without text count as alive", async () => {
+  it("resets the inactivity timer on every watcher entry — long tool-use streams without text count as alive, and routes through stopAgentTree on fire (DX-338)", async () => {
     vi.useFakeTimers();
     const job = createSkeletonJob();
     job.handle = {
@@ -241,19 +251,27 @@ describe("attachMonitoringStack", () => {
     });
 
     // Advance just under the timeout, then emit an entry — the timer
-    // should reset and the kill MUST NOT have fired.
+    // should reset and the stop primitive MUST NOT have fired.
     vi.advanceTimersByTime(20_000);
     emitWatcherEntry({
       type: "assistant",
       data: { content: [{ type: "tool_use" }] },
     });
     vi.advanceTimersByTime(20_000);
+    expect(mockStopAgentTree).not.toHaveBeenCalled();
+    // DX-338 invariant — no direct `job.handle.kill` ever fires from
+    // the dispatch lifecycle path; the stop primitive owns reap.
     expect(job.handle.kill).not.toHaveBeenCalled();
     expect(job.status).toBe("running");
 
-    // No more entries — the timer fires and kills.
+    // No more entries — the timer fires and routes through stopAgentTree.
     vi.advanceTimersByTime(15_000);
-    expect(job.handle.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(mockStopAgentTree).toHaveBeenCalledTimes(1);
+    expect(mockStopAgentTree).toHaveBeenCalledWith({
+      job,
+      scopeName: undefined,
+    });
+    expect(job.handle.kill).not.toHaveBeenCalled();
     expect(job.status).toBe("timeout");
     expect(mockNotifyTerminalStatus).toHaveBeenCalledWith(
       job,
@@ -261,6 +279,38 @@ describe("attachMonitoringStack", () => {
       "timeout",
       expect.any(String),
     );
+  });
+
+  it("inactivity timer forwards job.scopeName so host runtime reaps the cgroup atomically (DX-338)", async () => {
+    vi.useFakeTimers();
+    const job = createSkeletonJob();
+    job.scopeName = "danxbot-dispatch-abc123";
+    job.handle = {
+      pid: 4242,
+      kill: vi.fn(),
+      isAlive: vi.fn().mockReturnValue(true),
+      onExit: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    await attachMonitoringStack({
+      job,
+      jobId: "test-job-id",
+      agentCwd: "/tmp/test-workspace",
+      promptDir: null,
+      options: baseOptions({ timeoutMs: 10_000 }),
+    });
+
+    vi.advanceTimersByTime(10_000);
+
+    // Host runtime — scopeName threaded through so the stop primitive
+    // runs `systemctl --user stop <scope>.scope` and walks the cgroup
+    // instead of signaling the tracked PID directly.
+    expect(mockStopAgentTree).toHaveBeenCalledWith({
+      job,
+      scopeName: "danxbot-dispatch-abc123",
+    });
+    expect(job.handle.kill).not.toHaveBeenCalled();
   });
 
   it("Phase 2c seam: existingDispatchTracker bypasses startDispatchTracking and is stamped on job.dispatchTracker", async () => {
@@ -374,7 +424,7 @@ describe("attachMonitoringStack", () => {
     expect(mockStartHeartbeat).toHaveBeenCalledWith(fullJob, "tok");
   });
 
-  it("max-runtime timer kills the job and signals timeout when the cap fires while running", async () => {
+  it("max-runtime timer routes through stopAgentTree and signals timeout when the cap fires while running (DX-338)", async () => {
     vi.useFakeTimers();
     const job = createSkeletonJob();
     job.handle = {
@@ -397,7 +447,16 @@ describe("attachMonitoringStack", () => {
     });
 
     vi.advanceTimersByTime(60_001);
-    expect(job.handle.kill).toHaveBeenCalledWith("SIGTERM");
+    // DX-338 — max-runtime cap reaps the tree via stopAgentTree, NOT
+    // a direct `job.handle.kill("SIGTERM")`. On host that means
+    // `systemctl --user stop <scope>.scope` walks the cgroup so
+    // backgrounded grandchildren die with the parent.
+    expect(mockStopAgentTree).toHaveBeenCalledTimes(1);
+    expect(mockStopAgentTree).toHaveBeenCalledWith({
+      job,
+      scopeName: undefined,
+    });
+    expect(job.handle.kill).not.toHaveBeenCalled();
     expect(job.status).toBe("timeout");
     expect(job.summary).toMatch(/exceeded max runtime/);
     expect(mockNotifyTerminalStatus).toHaveBeenCalledWith(
@@ -406,6 +465,38 @@ describe("attachMonitoringStack", () => {
       "timeout",
       expect.stringMatching(/exceeded max runtime/),
     );
+  });
+
+  it("max-runtime timer forwards job.scopeName for host runtime cgroup reap (DX-338)", async () => {
+    vi.useFakeTimers();
+    const job = createSkeletonJob();
+    job.scopeName = "danxbot-dispatch-maxruntime";
+    job.handle = {
+      pid: 4242,
+      kill: vi.fn(),
+      isAlive: vi.fn().mockReturnValue(true),
+      onExit: vi.fn(),
+      dispose: vi.fn(),
+    };
+
+    await attachMonitoringStack({
+      job,
+      jobId: "test-job-id",
+      agentCwd: "/tmp/test-workspace",
+      promptDir: null,
+      options: baseOptions({
+        timeoutMs: 600_000,
+        maxRuntimeMs: 60_000,
+      }),
+    });
+
+    vi.advanceTimersByTime(60_001);
+
+    expect(mockStopAgentTree).toHaveBeenCalledWith({
+      job,
+      scopeName: "danxbot-dispatch-maxruntime",
+    });
+    expect(job.handle.kill).not.toHaveBeenCalled();
   });
 
   it("skips event forwarding setup when options.eventForwarding is undefined", async () => {

@@ -145,14 +145,27 @@ export async function spawnAgent(
       job.status = "failed";
       job.summary = "Paired host_pid write rolled back";
       job.completedAt = new Date();
-      try {
-        job.handle.kill("SIGTERM");
-      } catch (killErr) {
-        log.error(
-          `[Job ${jobId}] failed to SIGTERM after paired-write rollback`,
-          killErr,
-        );
-      }
+      // DX-338 — route through stopAgentTree so host runtime reaps the
+      // whole cgroup. A direct `job.handle.kill("SIGTERM")` here would
+      // only signal the `script -q -f` wrapper, leaving any
+      // backgrounded grandchild the agent spawned before paired-write
+      // failed orphaned to PID 1.
+      //
+      // Fire-and-forget (matching the pre-DX-338 sync `kill` semantic):
+      // we don't block the throw on the grace + SIGKILL window. The
+      // docker path's `terminateWithGrace` (DOCKER_GRACE_MS=5_000)
+      // would otherwise stall every paired-write rollback by 5s before
+      // unwinding to the caller. cleanup() below is also fire-and-forget;
+      // the close/exit handlers still drive the dispatch row to
+      // `failed` once the SIGTERM lands.
+      void stopAgentTree({ job, scopeName: job.scopeName }).catch(
+        (stopErr) => {
+          log.error(
+            `[Job ${jobId}] stopAgentTree failed after paired-write rollback`,
+            stopErr,
+          );
+        },
+      );
       void cleanup();
       throw pairedErr;
     }

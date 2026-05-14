@@ -84,16 +84,22 @@ export function logPromptToDisk(
 }
 
 /**
- * Create an inactivity timer that kills the agent process after a period of no
- * watcher activity. Returns reset/clear functions. Callers attach `reset()` to
- * `SessionLogWatcher.onEntry` — the single source of truth for agent activity
- * (see `.claude/rules/agent-dispatch.md`). Stdout is not a monitoring channel.
+ * Create an inactivity timer that stops the agent process tree after a
+ * period of no watcher activity. Returns reset/clear functions. Callers
+ * attach `reset()` to `SessionLogWatcher.onEntry` — the single source of
+ * truth for agent activity (see `.claude/rules/agent-dispatch.md`).
+ * Stdout is not a monitoring channel.
  *
- * `killProcess` abstracts the runtime difference: docker mode closes over a
- * `ChildProcess.kill`; host mode closes over a PID-based `process.kill(pid, signal)`.
+ * `stopAgent` is the agent-tree stop primitive. The callback runs the
+ * runtime-aware reap (host: `systemctl --user stop <scope>.scope`;
+ * docker: SIGTERM + grace + SIGKILL on the tracked PID) so backgrounded
+ * grandchildren in the scope's cgroup die with the parent. Callers
+ * MUST route the callback through `stopAgentTree` — a direct
+ * `job.handle.kill("SIGTERM")` here re-opens the host orphan-grandchild
+ * class (DX-262 / DX-326 / DX-338).
  */
 export function createInactivityTimer(
-  killProcess: (signal: NodeJS.Signals) => void,
+  stopAgent: () => void | Promise<void>,
   timeoutMs: number,
   onTimeout: (job: AgentJob) => void,
   job: AgentJob,
@@ -105,9 +111,9 @@ export function createInactivityTimer(
     handle = setTimeout(() => {
       if (job.status === "running") {
         log.info(
-          `[Job ${job.id}] Inactivity timeout — no output for ${timeoutMs / 1000}s — killing process`,
+          `[Job ${job.id}] Inactivity timeout — no output for ${timeoutMs / 1000}s — stopping agent tree`,
         );
-        killProcess("SIGTERM");
+        void stopAgent();
         job.status = "timeout";
         job.summary = `Agent timed out after ${Math.round(timeoutMs / 1000)} seconds of inactivity`;
         job.completedAt = new Date();

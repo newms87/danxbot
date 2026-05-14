@@ -166,25 +166,33 @@ describe("createInactivityTimer", () => {
     };
   }
 
-  it("fires onTimeout after timeoutMs and kills the process via the injected kill fn", () => {
+  it("fires onTimeout after timeoutMs and invokes the no-arg stopAgent callback (DX-338 — routes through stopAgentTree, not job.handle.kill)", () => {
     const job = makeJob();
-    const killProcess = vi.fn();
+    const stopAgent = vi.fn();
     const onTimeout = vi.fn();
 
-    createInactivityTimer(killProcess, 5000, onTimeout, job);
+    createInactivityTimer(stopAgent, 5000, onTimeout, job);
 
     vi.advanceTimersByTime(5000);
-    expect(killProcess).toHaveBeenCalledWith("SIGTERM");
+    // No-arg call — callback owns the scope reap; no signal is forwarded.
+    // `.toHaveBeenCalledWith()` (zero args) also passes when the call was
+    // `[undefined]`, so we explicitly assert the mock's recorded args list
+    // is the empty array. A regression that re-passes the signal (pre-DX-338
+    // shape) would land `["SIGTERM"]` here; a regression that passes
+    // `undefined` explicitly would land `[undefined]`. Both fail the
+    // `.toEqual([])` check below.
+    expect(stopAgent).toHaveBeenCalledTimes(1);
+    expect(stopAgent.mock.calls[0]).toEqual([]);
     expect(onTimeout).toHaveBeenCalledWith(job);
     expect(job.status).toBe("timeout");
   });
 
   it("reset() restarts the clock and prevents premature timeout", () => {
     const job = makeJob();
-    const killProcess = vi.fn();
+    const stopAgent = vi.fn();
     const onTimeout = vi.fn();
 
-    const timer = createInactivityTimer(killProcess, 5000, onTimeout, job);
+    const timer = createInactivityTimer(stopAgent, 5000, onTimeout, job);
 
     vi.advanceTimersByTime(4000);
     timer.reset();
@@ -197,10 +205,10 @@ describe("createInactivityTimer", () => {
 
   it("clear() cancels the pending timeout", () => {
     const job = makeJob();
-    const killProcess = vi.fn();
+    const stopAgent = vi.fn();
     const onTimeout = vi.fn();
 
-    const timer = createInactivityTimer(killProcess, 5000, onTimeout, job);
+    const timer = createInactivityTimer(stopAgent, 5000, onTimeout, job);
     timer.clear();
     vi.advanceTimersByTime(10000);
     expect(onTimeout).not.toHaveBeenCalled();
@@ -208,13 +216,33 @@ describe("createInactivityTimer", () => {
 
   it("does not fire onTimeout when job is no longer 'running'", () => {
     const job = makeJob();
-    const killProcess = vi.fn();
+    const stopAgent = vi.fn();
     const onTimeout = vi.fn();
 
-    createInactivityTimer(killProcess, 5000, onTimeout, job);
+    createInactivityTimer(stopAgent, 5000, onTimeout, job);
     job.status = "completed";
     vi.advanceTimersByTime(5000);
     expect(onTimeout).not.toHaveBeenCalled();
+    expect(stopAgent).not.toHaveBeenCalled();
+  });
+
+  it("swallows async rejection from stopAgent callback (fire-and-forget — onTimeout still fires)", async () => {
+    // DX-338 — the stopAgent callback may return a promise (stopAgentTree
+    // awaits systemctl). The timer uses `void stopAgent()` so a rejection
+    // never escapes as an unhandled rejection, AND the rest of the
+    // terminal sequence (status="timeout", onTimeout) still runs.
+    const job = makeJob();
+    const stopAgent = vi.fn().mockRejectedValue(new Error("scope stop boom"));
+    const onTimeout = vi.fn();
+
+    createInactivityTimer(stopAgent, 5000, onTimeout, job);
+    vi.advanceTimersByTime(5000);
+
+    expect(stopAgent).toHaveBeenCalledTimes(1);
+    expect(onTimeout).toHaveBeenCalledWith(job);
+    expect(job.status).toBe("timeout");
+    // Flush microtasks so the rejected promise settles without throwing.
+    await Promise.resolve();
   });
 });
 

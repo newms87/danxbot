@@ -68,6 +68,7 @@ import { startHeartbeat, notifyTerminalStatus } from "./agent-status.js";
 import { attachUsageAccumulator } from "./usage-accumulator.js";
 import { buildCleanup } from "./agent-cleanup.js";
 import { buildJobStopHandler } from "./agent-stop.js";
+import { stopAgentTree } from "./job-stop.js";
 import { ApiErrorDetector, type ApiErrorInfo } from "./api-error-detector.js";
 import { writeFlag } from "../critical-failure.js";
 import type { AgentJob, SpawnAgentOptions } from "./agent-types.js";
@@ -343,10 +344,14 @@ export async function attachMonitoringStack(
 
   let termSettingsDirToClean: string | undefined;
 
-  // --- Inactivity timer: resets on watcher entries, kills via the runtime-
-  //     aware handle (docker: child.kill; host: process.kill(pid, sig)). ---
+  // --- Inactivity timer: resets on watcher entries, reaps the agent tree
+  //     via the runtime-aware primitive (host: `systemctl --user stop
+  //     <scope>.scope` walks the cgroup; docker: SIGTERM + grace + SIGKILL
+  //     on the tracked PID). DX-338 — a direct `job.handle.kill(signal)`
+  //     here would only signal the script wrapper on host, re-orphaning
+  //     backgrounded grandchildren in the scope's cgroup. ---
   const inactivityTimer = createInactivityTimer(
-    (signal) => job.handle?.kill(signal),
+    () => stopAgentTree({ job, scopeName: job.scopeName }),
     options.timeoutMs,
     (j) => {
       // Fire-and-forget: cleanup awaits drain + finalize internally so the
@@ -373,9 +378,14 @@ export async function attachMonitoringStack(
     maxRuntimeHandle = setTimeout(() => {
       if (job.status === "running") {
         log.info(
-          `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — killing process`,
+          `[Job ${jobId}] Max runtime exceeded — ${options.maxRuntimeMs! / 1000}s — stopping agent tree`,
         );
-        job.handle?.kill("SIGTERM");
+        // DX-338 — route through stopAgentTree so host runtime reaps
+        // the whole cgroup (backgrounded grandchildren included)
+        // instead of only signaling the `script -q -f` wrapper.
+        // Fire-and-forget: cleanup is invoked unconditionally below
+        // and awaits drain + finalize for the dispatch row.
+        void stopAgentTree({ job, scopeName: job.scopeName });
         job.status = "timeout";
         job.summary = `Agent exceeded max runtime of ${Math.round(options.maxRuntimeMs! / 1000 / 60)} minutes`;
         job.completedAt = new Date();
