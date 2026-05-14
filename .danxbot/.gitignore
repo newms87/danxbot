@@ -43,3 +43,15 @@ workspaces/system-test/workspace-shape.test.ts
 workspaces/system-test/.mcp.json
 workspaces/system-test/.claude/settings.json
 workspaces/system-test/.claude/skills/danx-prep/
+workspaces/issue-chat/CLAUDE.md
+workspaces/issue-chat/workspace.yml
+workspaces/issue-chat/workspace-shape.test.ts
+workspaces/issue-chat/.mcp.json
+workspaces/issue-chat/.claude/settings.json
+workspaces/issue-chat/.claude/skills/danx-prep/
+workspaces/system-evaluator/CLAUDE.md
+workspaces/system-evaluator/workspace.yml
+workspaces/system-evaluator/workspace-shape.test.ts
+workspaces/system-evaluator/.mcp.json
+workspaces/system-evaluator/.claude/settings.json
+workspaces/system-evaluator/.claude/skills/danx-prep/

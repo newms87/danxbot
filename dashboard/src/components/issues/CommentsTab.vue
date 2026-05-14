@@ -3,7 +3,7 @@ import { computed, ref } from "vue";
 import type { Issue, IssueDetail } from "../../types";
 import { patchIssue } from "../../api";
 import { relativeTime } from "../../utils/relativeTime";
-import { MarkdownEditor } from "@thehammer/danx-ui";
+import { DanxTooltip, MarkdownEditor } from "@thehammer/danx-ui";
 
 const props = defineProps<{
   issue: IssueDetail;
@@ -142,12 +142,15 @@ async function onSubmit(): Promise<void> {
               aria-hidden="true"
               data-test="comment-bot-icon"
             >🤖</span>{{ c.authorLabel }}</span>
-          <span
-            class="ts"
-            :class="{ 'has-tooltip': c.tsTooltip !== null }"
-            :title="c.tsTooltip ?? undefined"
-            data-test="comment-ts"
-          >{{ c.tsLabel }}</span>
+          <DanxTooltip :tooltip="c.tsTooltip ?? undefined">
+            <template #trigger>
+              <span
+                class="ts"
+                :class="{ 'has-tooltip': c.tsTooltip !== null }"
+                data-test="comment-ts"
+              >{{ c.tsLabel }}</span>
+            </template>
+          </DanxTooltip>
         </div>
         <MarkdownEditor
           :model-value="c.text"

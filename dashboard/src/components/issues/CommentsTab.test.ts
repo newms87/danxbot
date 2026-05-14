@@ -302,7 +302,7 @@ describe("CommentsTab", () => {
         }),
       );
       const ts = w.get('[data-test="comment-real"] [data-test="comment-ts"]');
-      expect(ts.attributes("title")).toBe("2026-05-10T12:00:00Z");
+      // DanxTooltip wraps the element; tooltip content is in a portal
       expect(ts.classes()).toContain("has-tooltip");
     });
 
@@ -315,7 +315,7 @@ describe("CommentsTab", () => {
         }),
       );
       const ts = w.get('[data-test="comment-real"] [data-test="comment-ts"]');
-      expect(ts.attributes("title")).toBeUndefined();
+      // Tooltip is conditional on having a timestamp
       expect(ts.classes()).not.toContain("has-tooltip");
       // Visible label falls back to a non-empty placeholder when ts parsing fails.
       expect(ts.text()).toBe("(no timestamp)");
