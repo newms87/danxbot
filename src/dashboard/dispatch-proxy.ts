@@ -42,6 +42,7 @@ import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import type { RepoConfig } from "../types.js";
 import type { WorktreeManager } from "../agent/worktree-manager.js";
+import { requireUser } from "./auth-middleware.js";
 
 const log = createLogger("dispatch-proxy");
 
@@ -514,17 +515,35 @@ export interface DispatchProxyDeps {
  * Shared by launch and status/cancel/stop handlers so the auth+resolve
  * sequence lives in one place.
  */
+/**
+ * Dual auth: accept EITHER the per-user dashboard bearer (operator from
+ * the SPA) OR the dispatch token (external dispatchers like gpt-manager).
+ * The two credentials are deliberately separate — dispatch token =
+ * bot↔repo, user token = human↔dashboard — but every job-scoped route
+ * (`/api/cancel/:id`, `/api/stop/:id`, `/api/status/:id`) plus every
+ * dispatch route has both classes of legitimate caller.
+ */
+async function authProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<boolean> {
+  const userAuth = await requireUser(req);
+  if (userAuth.ok) return true;
+  const tokenAuth = checkAuth(req, deps.token);
+  if (tokenAuth.ok) return true;
+  rejectUnauthorized(res, tokenAuth);
+  return false;
+}
+
 async function authAndResolveRepo(
   req: IncomingMessage,
   res: ServerResponse,
   deps: DispatchProxyDeps,
   repoName: string | null,
 ): Promise<RepoConfig | null> {
-  const auth = checkAuth(req, deps.token);
-  if (!auth.ok) {
-    rejectUnauthorized(res, auth);
-    return null;
-  }
+  const ok = await authProxy(req, res, deps);
+  if (!ok) return null;
   if (!repoName) {
     json(res, 400, {
       error: "`repo` identifier is required (body field or query parameter)",
@@ -552,11 +571,9 @@ async function forwardRepoBodyToWorker(
   upstreamPath: string,
 ): Promise<void> {
   // Auth first — don't parse the body for unauthenticated callers.
-  const authCheck = checkAuth(req, deps.token);
-  if (!authCheck.ok) {
-    rejectUnauthorized(res, authCheck);
-    return;
-  }
+  // Dual band: per-user bearer (SPA) OR dispatch token (external).
+  const ok = await authProxy(req, res, deps);
+  if (!ok) return;
 
   let body: Record<string, unknown>;
   try {
@@ -622,15 +639,10 @@ export async function handleFleshOutProxy(
 }
 
 /**
- * POST /api/triage proxy — auth + body.repo → forward to worker.
- *
- * DX-515 phase 1. Pure pass-through: the worker (`handleTriage`)
- * validates `body.issue_id`, optional `body.instructions`, builds the
- * task body (base + optional `## Operator notes` block), and spawns
- * the dispatch with `dispatchKind: "triage"`. The proxy carries the
- * same auth band as `/api/launch`. Locking the upstream PATH
- * (`/api/triage`) keeps a future refactor from accidentally re-routing
- * triage through launch.
+ * POST /api/triage proxy — dual auth (per-user bearer from SPA OR
+ * dispatch token from external). Forwards body.repo → worker. Worker
+ * (`handleTriage`) validates body shape, builds the task body, spawns
+ * the orchestrator dispatch with `dispatchKind: "triage"`.
  */
 export async function handleTriageProxy(
   req: IncomingMessage,

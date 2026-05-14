@@ -1,35 +1,25 @@
 /**
- * Integration test for `/api/triage` (DX-515 phase 1).
+ * Integration test for `/api/triage` — orchestrator route.
  *
  * Drives the worker route end-to-end:
  *
  *   POST /api/triage (worker, real HTTP)
- *     → handleTriage validates body
+ *     → handleTriage validates body (rejects legacy issue_id)
  *     → dispatch() invoked with workspace=issue-worker,
- *       task=<base + optional ## Operator notes>,
- *       issueId=<issue_id>, dispatchKind="triage"
+ *       task=`/danx-triage-orchestrator` (+ optional `## Operator notes`),
+ *       dispatchKind="triage", no issueId
  *
  * Scope: WORKER ROUTE ONLY. The dashboard proxy → worker leg is covered
  * by `src/dashboard/dispatch-proxy.test.ts > handleTriageProxy`; the
  * task-shaping contract is unit-tested in
- * `src/worker/dispatch.test.ts > buildTriageTaskBody`. This file pins
- * the real HTTP path: route registration in `src/worker/server.ts`,
- * JSON body round-trip, and the captured `dispatch()` call's input.
+ * `src/worker/dispatch.test.ts > buildTriageTaskBody`.
  *
- * Per the DX-515 AC, this test covers the four cases:
- *   (a) base — no `instructions` → task body is the bare triage line
+ * Cases:
+ *   (a) base — no `instructions` → task body is `/danx-triage-orchestrator`
  *   (b) with-notes — task body appends the `## Operator notes` block
- *       verbatim
- *   (c) missing api_token — 401 belongs to the proxy auth band; this
- *       file documents the boundary (worker accepts requests without
- *       api_token — see comment on the test)
- *   (d) instructions > 2000 chars → 400 with the exceeds-limit message
- *
- * The "prompt.md captured under logs/<jobId>/" AC clause is satisfied
- * transitively: `dispatch()` writes prompt.md from `input.task` via
- * `spawnAgent` → `logPromptToDisk(...)`. Asserting the captured
- * `input.task` is the same observation without paying the real-spawn
- * cost.
+ *   (c) missing api_token — worker accepts (auth lives on the proxy)
+ *   (d) instructions > 2000 chars → 400
+ *   (e) stray issue_id → 400 (zero back-compat)
  *
  * Cost: free. Mocks `dispatch()` to a stub.
  */
@@ -150,11 +140,10 @@ describe("triage integration — real worker HTTP", () => {
     await workerStop();
   });
 
-  it("(a) base — POST /api/triage without instructions spawns dispatch with the bare triage line", async () => {
+  it("(a) base — POST /api/triage without instructions spawns the orchestrator dispatch", async () => {
     mockDispatch.mockClear();
     const res = await postJson(workerPort, "/api/triage", {
       repo: "test-repo",
-      issue_id: "DX-515",
       api_token: "secret",
     });
 
@@ -175,14 +164,9 @@ describe("triage integration — real worker HTTP", () => {
       apiDispatchMeta: { trigger: string; metadata: { endpoint: string } };
     };
     expect(input.workspace).toBe("issue-worker");
-    expect(input.task).toBe(
-      "Triage card DX-515 using the danx-triage-card skill.",
-    );
-    // The task body — and therefore prompt.md, which `dispatch()` →
-    // `spawnAgent` → `logPromptToDisk` writes verbatim — does NOT
-    // carry the operator-notes header when `instructions` is omitted.
+    expect(input.task).toBe("/danx-triage-orchestrator");
     expect(input.task).not.toMatch(/Operator notes/);
-    expect(input.issueId).toBe("DX-515");
+    expect(input.issueId).toBeUndefined();
     expect(input.apiToken).toBe("secret");
     expect(input.overlay).toEqual({});
     expect(input.dispatchKind).toBe("triage");
@@ -192,10 +176,9 @@ describe("triage integration — real worker HTTP", () => {
 
   it("(b) with-notes — POST /api/triage with instructions appends the `## Operator notes` block", async () => {
     mockDispatch.mockClear();
-    const notes = "re-score considering DX-269 — this may be obsolete";
+    const notes = "only Blocked cards older than 2 weeks";
     const res = await postJson(workerPort, "/api/triage", {
       repo: "test-repo",
-      issue_id: "DX-515",
       instructions: notes,
     });
 
@@ -206,23 +189,15 @@ describe("triage integration — real worker HTTP", () => {
       dispatchKind?: string;
     };
     expect(input.task).toBe(
-      `Triage card DX-515 using the danx-triage-card skill.\n\n## Operator notes\n\n${notes}`,
+      `/danx-triage-orchestrator\n\n## Operator notes\n\n${notes}`,
     );
     expect(input.dispatchKind).toBe("triage");
   });
 
   it("(c) the worker route does not 401 on missing api_token — that auth gate lives on the dashboard proxy", async () => {
-    // The DX-515 AC pair "missing api_token → 401" is enforced by the
-    // dashboard proxy's `Authorization: Bearer <DANXBOT_DISPATCH_TOKEN>`
-    // gate (`handleTriageProxy` → `checkAuth`); workers bind only on
-    // `danxbot-net` and never see external callers. This case-level
-    // assertion documents the boundary: a worker-direct call without
-    // `api_token` still succeeds. The proxy-side 401 contract is pinned
-    // in `src/dashboard/dispatch-proxy.test.ts > handleTriageProxy`.
     mockDispatch.mockClear();
     const res = await postJson(workerPort, "/api/triage", {
       repo: "test-repo",
-      issue_id: "DX-515",
     });
     expect(res.status).toBe(200);
     const input = mockDispatch.mock.calls[0][0] as { apiToken?: string };
@@ -234,7 +209,6 @@ describe("triage integration — real worker HTTP", () => {
     const oversized = "x".repeat(2001);
     const res = await postJson(workerPort, "/api/triage", {
       repo: "test-repo",
-      issue_id: "DX-515",
       instructions: oversized,
     });
 
@@ -242,6 +216,17 @@ describe("triage integration — real worker HTTP", () => {
     expect(JSON.parse(res.body).error).toMatch(
       /instructions exceeds 2000-character limit/,
     );
+    expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  it("(e) legacy issue_id — POST /api/triage with stray issue_id returns 400 (zero back-compat)", async () => {
+    mockDispatch.mockClear();
+    const res = await postJson(workerPort, "/api/triage", {
+      repo: "test-repo",
+      issue_id: "DX-515",
+    });
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(/issue_id is not accepted/);
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 

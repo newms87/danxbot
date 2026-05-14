@@ -171,7 +171,7 @@ describe("fetchWithAuth", () => {
 });
 
 describe("triggerTriage", () => {
-  it("POSTs to /api/triage with {repo, issue_id, instructions} when instructions is a string", async () => {
+  it("POSTs to /api/triage with {repo, instructions} when instructions is a string", async () => {
     seedToken("ok");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -180,7 +180,7 @@ describe("triggerTriage", () => {
       ),
     );
 
-    const res = await triggerTriage("danxbot", "DX-1", "re-score considering DX-269");
+    const res = await triggerTriage("danxbot", "re-score considering DX-269");
 
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe("/api/triage");
@@ -191,14 +191,13 @@ describe("triggerTriage", () => {
     expect((init as RequestInit).body).toBe(
       JSON.stringify({
         repo: "danxbot",
-        issue_id: "DX-1",
         instructions: "re-score considering DX-269",
       }),
     );
     expect(res).toEqual({ jobId: "job-1", status: "launched" });
   });
 
-  it("OMITS the instructions key entirely when instructions is null (default-triage path)", async () => {
+  it("OMITS the instructions key entirely when instructions is null (default orchestrator path)", async () => {
     seedToken("ok");
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -207,11 +206,11 @@ describe("triggerTriage", () => {
       ),
     );
 
-    await triggerTriage("danxbot", "DX-1", null);
+    await triggerTriage("danxbot", null);
 
     const [, init] = fetchMock.mock.calls[0];
     const body = JSON.parse((init as RequestInit).body as string);
-    expect(body).toEqual({ repo: "danxbot", issue_id: "DX-1" });
+    expect(body).toEqual({ repo: "danxbot" });
     expect("instructions" in body).toBe(false);
   });
 
@@ -224,7 +223,7 @@ describe("triggerTriage", () => {
       ),
     );
 
-    await expect(triggerTriage("danxbot", "DX-1", "x".repeat(2050))).rejects.toThrow(
+    await expect(triggerTriage("danxbot", "x".repeat(2050))).rejects.toThrow(
       "instructions exceeds 2000-character limit",
     );
   });

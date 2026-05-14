@@ -42,6 +42,21 @@ vi.mock("../logger.js", () => ({
   }),
 }));
 
+// Proxy routes use dual auth: per-user bearer OR DANXBOT_DISPATCH_TOKEN.
+// Stub `requireUser` to accept ONLY the literal `user-tok` so existing
+// tests that pass `Bearer tok` (the dispatch token) still authenticate
+// via the dispatch-token leg, while tests with `Bearer nope` /
+// `Bearer wrong-token` fail BOTH legs and surface the proxy's 401.
+vi.mock("./auth-middleware.js", () => ({
+  requireUser: async (req: { headers: Record<string, string | undefined> }) => {
+    const auth = req.headers["authorization"] ?? "";
+    if (auth === "Bearer user-tok") {
+      return { ok: true, user: { userId: 1, username: "test-user" } };
+    }
+    return { ok: false, status: 401 };
+  },
+}));
+
 describe("workerHost", () => {
   it("returns the docker container hostname for a repo", () => {
     expect(workerHost("platform")).toBe("danxbot-worker-platform");
@@ -767,24 +782,15 @@ describe("handleTriageProxy", () => {
     };
   }
 
-  it("rejects unauthenticated requests with 401 (missing header) — the missing-api_token AC", async () => {
-    // DX-515 AC: "missing api_token → 401". The bearer the dashboard
-    // checks IS the dispatch-side api_token surface — body.api_token is
-    // an unrelated upstream-side knob.
-    const { status } = await runTriage({
-      repo: "platform",
-      issue_id: "DX-515",
-    });
+  it("rejects unauthenticated requests with 401 (missing header)", async () => {
+    const { status } = await runTriage({ repo: "platform" });
     expect(status).toBe(401);
     expect(worker.requests).toHaveLength(0);
   });
 
   it("rejects wrong-bearer requests with 401 (invalid_token path)", async () => {
     const { status } = await runTriage(
-      {
-        repo: "platform",
-        issue_id: "DX-515",
-      },
+      { repo: "platform" },
       { auth: "Bearer wrong-token" },
     );
     expect(status).toBe(401);
@@ -793,11 +799,7 @@ describe("handleTriageProxy", () => {
 
   it("forwards POST to /api/triage on the matching worker with body intact (base — no instructions)", async () => {
     const { status, body } = await runTriage(
-      {
-        repo: "platform",
-        issue_id: "DX-515",
-        api_token: "t",
-      },
+      { repo: "platform", api_token: "t" },
       { auth: "Bearer tok" },
     );
 
@@ -812,17 +814,15 @@ describe("handleTriageProxy", () => {
     expect(worker.requests[0].url).toBe("/api/triage");
     expect(JSON.parse(worker.requests[0].body)).toEqual({
       repo: "platform",
-      issue_id: "DX-515",
       api_token: "t",
     });
   });
 
   it("forwards `instructions` verbatim when present (no proxy-side rewriting)", async () => {
-    const notes = "re-score considering DX-269";
+    const notes = "only Blocked cards older than 2 weeks";
     await runTriage(
       {
         repo: "platform",
-        issue_id: "DX-515",
         instructions: notes,
         api_token: "t",
       },
@@ -832,26 +832,9 @@ describe("handleTriageProxy", () => {
     expect(worker.requests).toHaveLength(1);
     expect(JSON.parse(worker.requests[0].body)).toEqual({
       repo: "platform",
-      issue_id: "DX-515",
       instructions: notes,
       api_token: "t",
     });
-  });
-
-  it("propagates upstream 400 verbatim when issue_id is malformed", async () => {
-    worker.respondWith(400, {
-      error: 'Invalid issue_id "dx-515" — must match <PREFIX>-N (e.g. DX-123)',
-    });
-    const { status, body } = await runTriage(
-      {
-        repo: "platform",
-        issue_id: "dx-515",
-        api_token: "t",
-      },
-      { auth: "Bearer tok" },
-    );
-    expect(status).toBe(400);
-    expect(JSON.parse(body).error).toMatch(/Invalid issue_id/);
   });
 
   it("propagates upstream 400 verbatim when instructions exceeds the 2000-char limit", async () => {
@@ -861,7 +844,6 @@ describe("handleTriageProxy", () => {
     const { status, body } = await runTriage(
       {
         repo: "platform",
-        issue_id: "DX-515",
         instructions: "x".repeat(2001),
         api_token: "t",
       },
@@ -873,10 +855,7 @@ describe("handleTriageProxy", () => {
 
   it("returns 404 when the repo is not configured", async () => {
     const { status, body } = await runTriage(
-      {
-        repo: "unknown-repo",
-        issue_id: "DX-1",
-      },
+      { repo: "unknown-repo" },
       { auth: "Bearer tok" },
     );
     expect(status).toBe(404);

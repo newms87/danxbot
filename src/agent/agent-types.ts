@@ -36,13 +36,19 @@ export interface AgentUsage {
  *   - `"work"` — combined dispatch (combined mode, OR separate-mode
  *     self-claim work pass). Route lets the dispatch run past `ok`
  *     so the agent proceeds into `/danx-next`.
- *   - `"triage"` — per-card triage dispatch (DX-515). Spawned by the
- *     poller's empty-ToDo branch OR `POST /api/triage`. Runs the
- *     `danx-triage-card` skill; the agent never calls the prep-verdict
- *     tool. Distinct from `"work"` so `dispatch/core.ts` does NOT
- *     auto-flip the candidate YAML from ToDo → In Progress (triage
- *     decides Review→ToDo / Demote / Confirm-Block via Edit, not via
- *     auto-flip).
+ *   - `"triage"` — triage dispatch. Two callers:
+ *       (a) poller's empty-ToDo branch spawns per-card triage —
+ *           `/danx-triage-card <ID>`, runs the `danxbot:danx-triage-card`
+ *           skill against ONE card, links `issueId` on the row.
+ *       (b) `POST /api/triage` (dashboard Triage button) spawns the
+ *           list-level orchestrator — `/danx-triage-orchestrator`, runs
+ *           the `danxbot:danx-triage-orchestrator` skill which picks
+ *           targets from the Review list and fans out per-card subagents
+ *           (cap 3 in flight). No `issueId` on the row.
+ *     Neither shape calls the prep-verdict tool. Distinct from `"work"`
+ *     so `dispatch/core.ts` does NOT auto-flip the candidate YAML from
+ *     ToDo → In Progress (triage decides Review→ToDo / Demote /
+ *     Confirm-Block via Edit, not via auto-flip).
  *
  * Undefined for every non-multi-agent-pick / non-triage caller (Slack,
  * ideator, external `/api/launch`, tests bypassing the picker). The

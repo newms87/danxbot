@@ -1,83 +1,99 @@
 <script setup lang="ts">
 /**
- * DX-518 — Triage button. Lives in the Issues page header next to the
- * Paste / Create-Card controls. Click opens `TriageDialog`. Disabled
- * when no triage-eligible cards exist for the active repo (the dialog
- * would have nothing to dispatch against).
+ * Triage button. Two states:
+ *
+ *   1. No active triage dispatch for the selected repo →
+ *      "Triage…" button, opens `TriageDialog` to launch one.
+ *   2. Active triage dispatch in flight →
+ *      pulsing "Triage running" indicator, opens `TriageStatusDialog`
+ *      with the operator notes + a Cancel button.
+ *
+ * Active-state detection runs through `useActiveTriage`, which derives
+ * from the SSE-fed `useDispatches` store — no polling. The disabled
+ * state on the launch button (no repo selected) collapses to the same
+ * `!repo` guard.
  */
-import { computed, ref } from "vue";
+import { computed, ref, toRef } from "vue";
+import { DanxTooltip } from "@thehammer/danx-ui";
 import TriageDialog from "./TriageDialog.vue";
-import type { IssueListItem } from "../../types";
+import TriageStatusDialog from "./TriageStatusDialog.vue";
+import { useActiveTriage } from "../../composables/useActiveTriage";
 
 const props = defineProps<{
   /** Repo to scope the triage against. Empty string disables the button. */
   repo: string;
-  /**
-   * Pool of triage-eligible candidates. The dialog filters internally —
-   * the parent passes the full list of currently-loaded issues.
-   */
-  candidates: IssueListItem[];
-  /**
-   * Pre-select this id when the dialog opens. Typically the currently-
-   * focused drawer card; null falls back to the first eligible card.
-   */
-  initialIssueId: string | null;
 }>();
 
 const emit = defineEmits<{
-  /** Fired with the issue id after a successful dispatch. */
-  dispatched: [issueId: string];
+  /** Fired after a successful launch dispatch. */
+  dispatched: [];
 }>();
 
-const dialogOpen = ref<boolean>(false);
+const launchOpen = ref<boolean>(false);
+const statusOpen = ref<boolean>(false);
 
-// Mirror `local-issues.ts#inTriageScope` so the disabled state matches
-// the dialog's selector contents — the operator never sees an enabled
-// button that opens an empty dropdown. (List projection collapses
-// `waiting_on` to a boolean; the worker reads the full record off YAML.)
-function isTriageEligible(issue: IssueListItem): boolean {
-  if (issue.waiting_on) return true;
-  if (issue.status === "Review") return true;
-  if (issue.status === "Blocked") return true;
-  return false;
+const activeTriage = useActiveTriage(toRef(props, "repo"));
+const isRunning = computed<boolean>(() => activeTriage.value !== null);
+
+function onLaunchClick(): void {
+  if (!props.repo) return;
+  if (isRunning.value) return;
+  launchOpen.value = true;
 }
 
-const hasEligibleCandidate = computed<boolean>(
-  () => props.candidates.some(isTriageEligible),
-);
-
-const disabled = computed<boolean>(
-  () => !props.repo || !hasEligibleCandidate.value,
-);
-
-function onClick(): void {
-  if (disabled.value) return;
-  dialogOpen.value = true;
+function onIndicatorClick(): void {
+  if (!isRunning.value) return;
+  statusOpen.value = true;
 }
 
-function onDispatched(issueId: string): void {
-  emit("dispatched", issueId);
+function onDispatched(): void {
+  emit("dispatched");
 }
 </script>
 
 <template>
-  <button
-    type="button"
-    class="triage-btn"
-    :disabled="disabled"
-    data-test="issues-triage-button"
-    title="Re-triage a Review / Blocked / Waiting-On card now"
-    @click="onClick"
-  >Triage…</button>
+  <template v-if="isRunning && activeTriage">
+    <DanxTooltip tooltip="Triage orchestrator is running — click for status / cancel">
+      <template #trigger>
+        <button
+          type="button"
+          class="triage-running"
+          data-test="issues-triage-running"
+          @click="onIndicatorClick"
+        >
+          <span class="pulse-dot" />
+          Triage running
+        </button>
+      </template>
+    </DanxTooltip>
 
-  <TriageDialog
-    v-if="repo"
-    v-model="dialogOpen"
-    :repo="repo"
-    :candidates="candidates"
-    :initial-issue-id="initialIssueId"
-    @dispatched="onDispatched"
-  />
+    <TriageStatusDialog
+      v-model="statusOpen"
+      :repo="repo"
+      :dispatch="activeTriage"
+    />
+  </template>
+
+  <template v-else>
+    <DanxTooltip tooltip="Dispatch a triage orchestrator over the Review list">
+      <template #trigger>
+        <button
+          type="button"
+          class="triage-btn"
+          :disabled="!repo"
+          data-test="issues-triage-button"
+          @click="onLaunchClick"
+        >Triage…</button>
+      </template>
+    </DanxTooltip>
+
+    <TriageDialog
+      v-if="repo"
+      v-model="launchOpen"
+      :repo="repo"
+      @dispatched="onDispatched"
+    />
+  </template>
 </template>
 
 <style scoped>
@@ -101,5 +117,36 @@ function onDispatched(issueId: string): void {
 .triage-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.triage-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  color: #fcd34d;
+  background: rgb(245 158 11 / 0.10);
+  border: 1px solid rgb(245 158 11 / 0.45);
+  border-radius: 6px;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+  transition: background 120ms, border-color 120ms;
+}
+.triage-running:hover {
+  background: rgb(245 158 11 / 0.18);
+  border-color: rgb(245 158 11 / 0.7);
+}
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fcd34d;
+  animation: triage-pulse 1.2s ease-in-out infinite;
+}
+@keyframes triage-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
 }
 </style>

@@ -720,52 +720,55 @@ export async function handleResume(
 /** Max length of operator-supplied `instructions` accepted by `/api/triage`.
  * Keeps the prompt body bounded — claude's context budget is finite, and a
  * runaway operator note belongs on the card description, not in a route
- * argument. DX-515 phase 1. */
+ * argument. */
 const TRIAGE_INSTRUCTIONS_MAX_CHARS = 2000;
 
 /**
- * Build the `task` body POSTed to claude for a triage dispatch (DX-515).
+ * Build the `task` body POSTed to claude for a triage orchestrator dispatch.
+ *
+ * Base form: `/danx-triage-orchestrator` (slash-command entry into the
+ * `danxbot:danx-triage-orchestrator` skill — orchestrator picks its own
+ * targets from the Review list by default).
+ * With operator notes: appends a marked `## Operator notes` block. The
+ * orchestrator SKILL.md treats the notes as scope / criteria / filter
+ * direction and passes them verbatim to each per-card subagent.
+ *
  * Exported for the integration test — keeps the assertion symmetric with
  * what the route actually shapes.
- *
- * Base form: `Triage card <issue_id> using the danx-triage-card skill.`
- * With operator notes: appends a marked `## Operator notes` block. The
- * `danx-triage-card` SKILL.md recognizes that block and augments the
- * per-status decision tree with the operator's context (it does NOT
- * override the tree).
  */
-export function buildTriageTaskBody(
-  issueId: string,
-  instructions: string | null,
-): string {
-  const base = `Triage card ${issueId} using the danx-triage-card skill.`;
+export function buildTriageTaskBody(instructions: string | null): string {
+  const base = `/danx-triage-orchestrator`;
   if (instructions === null) return base;
   return `${base}\n\n## Operator notes\n\n${instructions}`;
 }
 
 /**
- * `POST /api/triage` — operator-directed triage dispatch (DX-515 phase 1).
+ * `POST /api/triage` — operator-directed triage orchestrator dispatch.
  *
- * Body: `{repo?, issue_id, instructions?, api_token?, status_url?}`.
- * Spawns `/danx-triage-card <issue_id>`-shaped work in the `issue-worker`
- * workspace; the dispatched agent applies the per-status decision tree
- * documented in the `danxbot:danx-triage-card` plugin skill. When the
- * caller supplies `instructions`, the route appends them to the task body
- * as a `## Operator notes` block so the agent can fold them into the
- * decision (see SKILL.md for the contract).
+ * Body: `{repo?, instructions?, api_token?, status_url?}`. NO `issue_id` —
+ * the orchestrator picks targets (default: every `status: "Review"` card).
+ * Spawns the `danxbot:danx-triage-orchestrator` skill in the
+ * `issue-worker` workspace; the orchestrator fans out to per-card
+ * `danxbot:danx-triage-card` subagents in parallel batches of up to 3.
+ * Operator notes (optional) flow through as a `## Operator notes` block
+ * in the orchestrator's prompt — the skill treats them as scope / filter
+ * direction and re-renders them into each subagent's prompt as per-card
+ * augmentation context.
  *
  * Validation:
- *   - `issue_id` must match `<PREFIX>-N` (e.g. `DX-123`).
  *   - `instructions` is optional but, when present, MUST be a non-empty
  *     string ≤ TRIAGE_INSTRUCTIONS_MAX_CHARS. Blank / whitespace-only is
- *     rejected so a caller cannot accidentally smuggle empty notes that
- *     would still render the `## Operator notes` header with no body.
+ *     rejected so the agent never sees a `## Operator notes` header with
+ *     no body underneath.
+ *   - Stray `issue_id` (legacy per-card shape) returns 400 — zero
+ *     backwards compat. Per-card triage is the poller's path
+ *     (`/danx-triage-card <ID>`); the operator-facing route is
+ *     orchestrator-only.
  *
  * Symmetry: shares the same auth band + 503 toggle + error-mapping chain
  * as `/api/flesh-out` and `/api/chat`. Stamps `dispatchKind: "triage"` on
- * the dispatch row — distinct from `"work"` so `dispatch/core.ts` does
- * NOT auto-flip the candidate YAML's status (triage decisions are made
- * via `Edit`, not via auto-flip).
+ * the dispatch row — `issueId` is intentionally undefined (orchestrator
+ * picks dynamically).
  */
 export async function handleTriage(
   req: IncomingMessage,
@@ -784,8 +787,14 @@ export async function handleTriage(
 
     if (!validateRepoMatch(body, res, repo)) return;
 
-    const issueId = validateIssueIdBody(body, res);
-    if (!issueId) return;
+    if (body.issue_id !== undefined) {
+      json(res, 400, {
+        error:
+          "issue_id is not accepted on /api/triage — the orchestrator picks targets. " +
+          "Per-card triage is poller-internal (/danx-triage-card).",
+      });
+      return;
+    }
 
     // Optional operator notes. Reject non-string / oversized at the
     // boundary so the agent never sees a partial / malformed block.
@@ -817,7 +826,7 @@ export async function handleTriage(
     const apiToken =
       typeof body.api_token === "string" ? body.api_token : undefined;
 
-    const task = buildTriageTaskBody(issueId, instructions);
+    const task = buildTriageTaskBody(instructions);
     const apiDispatchMeta = buildApiDispatchMeta({
       endpoint: "/api/triage",
       workspace: "issue-worker",
@@ -834,12 +843,9 @@ export async function handleTriage(
       apiToken,
       statusUrl,
       apiDispatchMeta,
-      // Link the dispatch row to the card so the dashboard's per-card
-      // activity feed surfaces this triage run alongside work dispatches.
-      issueId,
-      // DX-515 — distinct from "work" so dispatch/core.ts does NOT
-      // auto-flip the candidate to In Progress. The triage agent owns
-      // the status decision via Edit.
+      // No issueId — orchestrator picks targets dynamically. The
+      // dispatch row surfaces under the repo's triage activity, not a
+      // single card.
       dispatchKind: "triage",
     });
 

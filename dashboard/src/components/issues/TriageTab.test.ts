@@ -70,28 +70,12 @@ function makeIssue(triage: IssueTriage): IssueDetail {
   } as IssueDetail;
 }
 
-function mountTab(
-  issue: IssueDetail,
-  extraProps: { inFlight?: boolean } = {},
-) {
+function mountTab(issue: IssueDetail) {
   return mount(TriageTab, {
-    props: { issue, ...extraProps },
+    props: { issue },
     global: { stubs: { MarkdownEditor: MarkdownEditorStub } },
   });
 }
-
-describe("TriageTab — in-flight indicator (DX-518 AC #7)", () => {
-  it("renders the in-flight badge in the header when `inFlight: true`", () => {
-    const w = mountTab(makeIssue(makeTriage()), { inFlight: true });
-    const badge = w.get("[data-test='triage-in-flight']");
-    expect(badge.text()).toContain("in flight");
-  });
-
-  it("does NOT render the in-flight badge when `inFlight` is omitted (default false)", () => {
-    const w = mountTab(makeIssue(makeTriage()));
-    expect(w.find("[data-test='triage-in-flight']").exists()).toBe(false);
-  });
-});
 
 describe("TriageTab — header (AC #2)", () => {
   it("renders last_status badge with the status text", () => {

@@ -1,18 +1,16 @@
 <script setup lang="ts">
 /**
- * DX-518 — Triage dialog. Operator clicks the Triage button in the
- * Issues page header → dialog opens → operator picks a candidate
- * (Review / Blocked / Waiting-On — `local-issues.ts#inTriageScope`)
- * and optionally types free-form instructions (≤2000 chars, the
- * Phase 1 worker cap) → submit POSTs to `/api/triage` via
- * `triggerTriage`. On success the dialog emits `dispatched` with the
- * issue id (the parent uses it to drive the Triage tab's in-flight
- * indicator) and closes; failures stay open with an inline error.
+ * Triage dialog. Operator clicks the Triage button → dialog opens →
+ * operator optionally types free-form instructions (≤2000 chars, the
+ * worker cap) → submit POSTs to `/api/triage` via `triggerTriage`. No
+ * card picker — the dispatched orchestrator
+ * (`danxbot:danx-triage-orchestrator`) picks targets from the Review
+ * list and fans out per-card subagents (cap 3 in flight).
  *
- * Empty instructions are valid — they trigger a default triage pass
- * ahead of schedule. The worker rejects empty / whitespace-only
- * non-null `instructions`, so the wrapper passes `null` instead of
- * `""` when the textarea is blank.
+ * Empty instructions are valid — they trigger the default Review-list
+ * orchestrator pass. The worker rejects empty / whitespace-only
+ * non-null `instructions`, so the wrapper passes `null` instead of `""`
+ * when the textarea is blank.
  *
  * Validation: any input >2000 chars is blocked client-side with an
  * inline error (no fetch). 4xx server errors surface the body's
@@ -22,7 +20,6 @@
  */
 import { computed, ref, watch } from "vue";
 import { DanxDialog } from "@thehammer/danx-ui";
-import type { IssueListItem } from "../../types";
 import { triggerTriage } from "../../api";
 
 const props = defineProps<{
@@ -30,58 +27,23 @@ const props = defineProps<{
   modelValue: boolean;
   /** Repo to scope the triage against. */
   repo: string;
-  /**
-   * Pool of triage-eligible candidates the operator can pick from.
-   * The dialog filters internally so a parent passing the full list
-   * (e.g. all issues currently loaded) still narrows correctly.
-   */
-  candidates: IssueListItem[];
-  /**
-   * Pre-select this issue id when the dialog opens (typically the card
-   * the drawer is currently focused on). `null` falls through to the
-   * first triage-eligible card in `candidates`.
-   */
-  initialIssueId: string | null;
 }>();
 
 const emit = defineEmits<{
   "update:modelValue": [open: boolean];
-  /**
-   * Fired after a successful dispatch — gives the parent the issue id
-   * so it can drive the in-flight indicator in the Triage tab without
-   * waiting for the SSE round-trip.
-   */
-  dispatched: [issueId: string];
+  /** Fired after a successful dispatch. */
+  dispatched: [];
 }>();
 
 const MAX_INSTRUCTIONS_CHARS = 2000;
 
 const RETRY_MESSAGE = "Dispatch failed, retry in a moment.";
 
-// Triage scope: Review, Blocked, OR any waiting_on. Mirrors
-// `src/poller/local-issues.ts#inTriageScope` so the dropdown only
-// surfaces cards the worker would actually accept. (Note: the dashboard
-// list projection collapses `waiting_on` to a boolean; the worker reads
-// the full record off the YAML.)
-function isTriageEligible(issue: IssueListItem): boolean {
-  if (issue.waiting_on) return true;
-  if (issue.status === "Review") return true;
-  if (issue.status === "Blocked") return true;
-  return false;
-}
-
-const eligibleCandidates = computed<IssueListItem[]>(() =>
-  props.candidates.filter(isTriageEligible),
-);
-
-const selectedIssueId = ref<string>("");
 const instructions = ref<string>("");
 const submitting = ref<boolean>(false);
 const errorMessage = ref<string | null>(null);
 
-// Reset form state every time the dialog re-opens; pick the initial
-// issue id (when triage-eligible) or fall back to the first eligible
-// candidate.
+// Reset form state every time the dialog re-opens.
 watch(
   () => props.modelValue,
   (open) => {
@@ -89,12 +51,6 @@ watch(
     instructions.value = "";
     submitting.value = false;
     errorMessage.value = null;
-    const initial =
-      props.initialIssueId &&
-      eligibleCandidates.value.some((c) => c.id === props.initialIssueId)
-        ? props.initialIssueId
-        : eligibleCandidates.value[0]?.id ?? "";
-    selectedIssueId.value = initial;
   },
   { immediate: true },
 );
@@ -104,10 +60,7 @@ const oversized = computed<boolean>(
 );
 
 const canSubmit = computed<boolean>(
-  () =>
-    !submitting.value &&
-    !oversized.value &&
-    selectedIssueId.value.length > 0,
+  () => !submitting.value && !oversized.value,
 );
 
 const charCountLabel = computed<string>(
@@ -120,20 +73,18 @@ async function onSubmit(): Promise<void> {
     return;
   }
   if (!canSubmit.value) return;
-  if (!selectedIssueId.value) return;
 
   submitting.value = true;
   errorMessage.value = null;
   // Empty/whitespace-only instructions => null. The worker's body
-  // validation rejects an empty *string* (Phase 1) but accepts
-  // omission entirely; treating "" as null routes through the
-  // default-triage path.
+  // validation rejects an empty *string* but accepts omission entirely;
+  // treating "" as null routes through the default-orchestrator path.
   const trimmed = instructions.value.trim();
   const payload: string | null = trimmed.length > 0 ? instructions.value : null;
   try {
-    await triggerTriage(props.repo, selectedIssueId.value, payload);
+    await triggerTriage(props.repo, payload);
     submitting.value = false;
-    emit("dispatched", selectedIssueId.value);
+    emit("dispatched");
     emit("update:modelValue", false);
   } catch (err) {
     const status =
@@ -165,8 +116,8 @@ function onClose(): void {
 <template>
   <DanxDialog
     :model-value="modelValue"
-    title="Triage card"
-    subtitle="Re-score a Review / Blocked / Waiting-On card now"
+    title="Triage Review list"
+    subtitle="Dispatch an orchestrator to re-score Review cards (parallel batches of 3)"
     :persistent="submitting"
     :is-saving="submitting"
     :disabled="!canSubmit"
@@ -179,22 +130,6 @@ function onClose(): void {
   >
     <form class="form" data-test="triage-dialog-form" @submit.prevent="onSubmit">
       <label class="field">
-        <span class="label">Card</span>
-        <select
-          v-model="selectedIssueId"
-          class="input"
-          required
-          data-test="triage-issue-select"
-        >
-          <option
-            v-for="issue in eligibleCandidates"
-            :key="issue.id"
-            :value="issue.id"
-          >{{ issue.id }} — {{ issue.title }}</option>
-        </select>
-      </label>
-
-      <label class="field">
         <span class="label">
           Operator notes
           <span class="char-count" :class="{ over: oversized }">{{ charCountLabel }}</span>
@@ -205,7 +140,7 @@ function onClose(): void {
           rows="6"
           spellcheck="true"
           data-test="triage-instructions"
-          placeholder="Optional context for the triage agent — e.g. 're-score considering DX-269 retirement' or 'this card may be obsolete after the auto-sync refactor'."
+          placeholder="Optional — direct the orchestrator. e.g. 'only Blocked cards', 'skip epics', 're-score considering DX-269', 'focus on cards older than 2 weeks'. Leave blank for a default Review-list pass."
         />
       </label>
 

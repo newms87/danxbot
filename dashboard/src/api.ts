@@ -327,6 +327,24 @@ export async function triggerTriage(
 }
 
 /**
+ * POST /api/cancel/:jobId?repo=<name> — cancel an in-flight dispatch.
+ * Dual-auth proxy (per-user bearer or dispatch token); the SPA uses the
+ * user bearer. Worker's cancel handler stops the agent process tree and
+ * finalizes the row as `cancelled`. The SSE bus surfaces the status
+ * change without a separate refetch.
+ */
+export async function cancelDispatch(
+  repo: string,
+  jobId: string,
+): Promise<void> {
+  const res = await fetchWithAuth(
+    `/api/cancel/${encodeURIComponent(jobId)}?repo=${encodeURIComponent(repo)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+}
+
+/**
  * POST /api/flesh-out — DX-349. Fire-and-forget dispatch to flesh out a
  * freshly-created stub card. The dashboard fires this after a successful
  * `createIssue` so the agent rewrites the description, populates ac[],
