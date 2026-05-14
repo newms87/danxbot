@@ -11,10 +11,17 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { makeRepoContext } from "./__tests__/helpers/fixtures.js";
 import {
+  DEFAULT_AGENT_EFFORT_LEVEL,
+  DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+  DEFAULT_EFFORT_LEVELS,
+  EFFORT_LEVEL_NAMES,
   FEATURES,
   _resetForTesting,
   buildDisplayFromContext,
   defaultSettings,
+  getAgentEffortLevel,
+  getEffortAssignmentPrompt,
+  getEffortLevels,
   getIssuePollerPickupPrefix,
   getPrepMode,
   isAgentBroken,
@@ -25,6 +32,7 @@ import {
   mutateAgents,
   readAgents,
   readSettings,
+  resolveEffortToFlags,
   setAgentBroken,
   settingsFilePath,
   settingsLockPath,
@@ -36,6 +44,7 @@ import {
   type AgentRecord,
   type AgentStrikeEntry,
   type AgentStrikes,
+  type EffortLevelMapping,
   type Settings,
 } from "./settings-file.js";
 
@@ -2585,6 +2594,605 @@ describe("settings-file", () => {
       await new Promise((r) => setTimeout(r, 600));
 
       expect(calls.length).toBe(baseline);
+    });
+  });
+
+  // ============================================================
+  // DX-509 — effort levels schema (backend half of DX-508 epic):
+  // ladder defaults, operator override, per-row fallback,
+  // resolveEffortToFlags, per-agent effortLevel, writer-merge.
+  // ============================================================
+
+  describe("DX-509: effort levels schema", () => {
+    function validAgent(over?: Partial<AgentRecord>): AgentRecord {
+      return {
+        type: "agent",
+        bio: "Default test bio.",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          always_on: true,
+          mon: [],
+          tue: [],
+          wed: [],
+          thu: [],
+          fri: [],
+          sat: [],
+          sun: [],
+        },
+        enabled: true,
+        broken: null,
+        strikes: { count: 0, history: [] },
+        created_at: "2026-05-14T12:00:00Z",
+        updated_at: "2026-05-14T12:00:00Z",
+        ...over,
+      };
+    }
+
+    function makeOperatorLevels(): EffortLevelMapping[] {
+      return [
+        { name: "min", model: "custom-haiku", effort: "k1" },
+        { name: "very_low", model: "custom-haiku", effort: "k2" },
+        { name: "low", model: "custom-haiku", effort: "k3" },
+        { name: "medium", model: "custom-sonnet", effort: "k4" },
+        { name: "high", model: "custom-sonnet", effort: "k5" },
+        { name: "very_high", model: "custom-sonnet", effort: "k6" },
+        { name: "max", model: "custom-opus", effort: "k7" },
+      ];
+    }
+
+    describe("defaults", () => {
+      it("DEFAULT_EFFORT_LEVELS has exactly 7 entries in canonical order", () => {
+        expect(DEFAULT_EFFORT_LEVELS).toHaveLength(7);
+        expect(DEFAULT_EFFORT_LEVELS.map((e) => e.name)).toEqual([
+          ...EFFORT_LEVEL_NAMES,
+        ]);
+      });
+
+      it("every default row has non-empty model + effort", () => {
+        for (const row of DEFAULT_EFFORT_LEVELS) {
+          expect(row.model.length).toBeGreaterThan(0);
+          expect(row.effort.length).toBeGreaterThan(0);
+        }
+      });
+
+      it("DEFAULT_EFFORT_ASSIGNMENT_PROMPT is a non-empty string", () => {
+        expect(typeof DEFAULT_EFFORT_ASSIGNMENT_PROMPT).toBe("string");
+        expect(DEFAULT_EFFORT_ASSIGNMENT_PROMPT.length).toBeGreaterThan(0);
+      });
+
+      it("defaultSettings() carries the built-in ladder + prompt", () => {
+        const d = defaultSettings();
+        expect(d.effortLevels).toEqual(DEFAULT_EFFORT_LEVELS);
+        expect(d.effortAssignmentPrompt).toBe(DEFAULT_EFFORT_ASSIGNMENT_PROMPT);
+      });
+
+      it("getEffortLevels on a fresh repo returns the built-in default array", () => {
+        expect(getEffortLevels(localPath)).toEqual(DEFAULT_EFFORT_LEVELS);
+      });
+
+      it("getEffortAssignmentPrompt on a fresh repo returns the built-in default string", () => {
+        expect(getEffortAssignmentPrompt(localPath)).toBe(
+          DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+        );
+      });
+
+      it("getAgentEffortLevel returns DEFAULT_AGENT_EFFORT_LEVEL when the agent is absent", () => {
+        expect(getAgentEffortLevel(localPath, "ghost")).toBe(
+          DEFAULT_AGENT_EFFORT_LEVEL,
+        );
+        expect(DEFAULT_AGENT_EFFORT_LEVEL).toBe("medium");
+      });
+
+      it("getAgentEffortLevel returns 'medium' when the agent record has no effortLevel field", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent();
+            return c;
+          },
+          "dashboard:test",
+        );
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("medium");
+      });
+    });
+
+    describe("operator override — effortLevels", () => {
+      it("writeSettings({effortLevels}) round-trips a complete 7-entry array verbatim", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        expect(getEffortLevels(localPath)).toEqual(op);
+      });
+
+      it("malformed row (empty model) downgrades that single row to default; others preserved", async () => {
+        const op = makeOperatorLevels();
+        op[3] = { name: "medium", model: "", effort: "k4" };
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        const levels = getEffortLevels(localPath);
+        expect(levels[3]).toEqual(DEFAULT_EFFORT_LEVELS[3]);
+        // Other rows survive verbatim
+        expect(levels[0]).toEqual(op[0]);
+        expect(levels[6]).toEqual(op[6]);
+      });
+
+      it("malformed row (empty effort) downgrades that single row to default; others preserved", async () => {
+        const op = makeOperatorLevels();
+        op[0] = { name: "min", model: "X", effort: "" };
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        const levels = getEffortLevels(localPath);
+        expect(levels[0]).toEqual(DEFAULT_EFFORT_LEVELS[0]);
+        expect(levels[1]).toEqual(op[1]);
+      });
+
+      it("missing rows from operator array are back-filled with defaults in canonical position", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [{ name: "high", model: "X", effort: "y" }],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels).toHaveLength(7);
+        expect(levels.map((l) => l.name)).toEqual([...EFFORT_LEVEL_NAMES]);
+        expect(levels[4]).toEqual({ name: "high", model: "X", effort: "y" });
+        // Position 0 is the default for "min"
+        expect(levels[0]).toEqual(DEFAULT_EFFORT_LEVELS[0]);
+      });
+
+      it("out-of-order operator entries are sorted into canonical position", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              { name: "max", model: "X", effort: "x" },
+              { name: "min", model: "Y", effort: "y" },
+            ],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels.map((l) => l.name)).toEqual([...EFFORT_LEVEL_NAMES]);
+        expect(levels[0]).toEqual({ name: "min", model: "Y", effort: "y" });
+        expect(levels[6]).toEqual({ name: "max", model: "X", effort: "x" });
+      });
+
+      it("unknown name entries in operator array are dropped — canonical positions fall back to default", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              { name: "extreme", model: "X", effort: "x" },
+              { name: "medium", model: "Y", effort: "y" },
+            ],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels[3]).toEqual({ name: "medium", model: "Y", effort: "y" });
+        expect(levels[0]).toEqual(DEFAULT_EFFORT_LEVELS[0]);
+        // No "extreme" leaks into the output
+        for (const row of levels) {
+          expect(EFFORT_LEVEL_NAMES).toContain(row.name);
+        }
+      });
+
+      it("non-array effortLevels on disk returns full default ladder", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({ overrides: {}, effortLevels: "totally bogus" }),
+        );
+        expect(getEffortLevels(localPath)).toEqual(DEFAULT_EFFORT_LEVELS);
+      });
+    });
+
+    describe("operator override — effortAssignmentPrompt", () => {
+      it("writeSettings({effortAssignmentPrompt}) round-trips a non-empty string verbatim", async () => {
+        const prompt = "## My prompt\nPick `low` for trivial work.";
+        await writeSettings(localPath, {
+          effortAssignmentPrompt: prompt,
+          writtenBy: "dashboard:operator",
+        });
+        expect(getEffortAssignmentPrompt(localPath)).toBe(prompt);
+      });
+
+      it("empty string falls back to built-in default on read", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({ overrides: {}, effortAssignmentPrompt: "" }),
+        );
+        expect(getEffortAssignmentPrompt(localPath)).toBe(
+          DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+        );
+      });
+
+      it("missing field falls back to built-in default on read", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({ overrides: {} }),
+        );
+        expect(getEffortAssignmentPrompt(localPath)).toBe(
+          DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+        );
+      });
+
+      it("non-string field falls back to built-in default on read", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({ overrides: {}, effortAssignmentPrompt: 42 }),
+        );
+        expect(getEffortAssignmentPrompt(localPath)).toBe(
+          DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+        );
+      });
+    });
+
+    describe("resolveEffortToFlags", () => {
+      it("returns the right {model, effort} for each canonical default level", () => {
+        for (const row of DEFAULT_EFFORT_LEVELS) {
+          expect(resolveEffortToFlags(localPath, row.name)).toEqual({
+            model: row.model,
+            effort: row.effort,
+          });
+        }
+      });
+
+      it("returns the operator-mapped {model, effort} for each level once configured", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        for (const row of op) {
+          expect(resolveEffortToFlags(localPath, row.name)).toEqual({
+            model: row.model,
+            effort: row.effort,
+          });
+        }
+      });
+
+      it("unknown level name falls back to the medium mapping (built-in default)", () => {
+        const medium = DEFAULT_EFFORT_LEVELS.find((r) => r.name === "medium");
+        expect(medium).toBeDefined();
+        expect(resolveEffortToFlags(localPath, "blah" as never)).toEqual({
+          model: medium!.model,
+          effort: medium!.effort,
+        });
+      });
+
+      it("unknown level name falls back to the operator's medium row when configured", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        const opMedium = op.find((r) => r.name === "medium");
+        expect(resolveEffortToFlags(localPath, "ghost" as never)).toEqual({
+          model: opMedium!.model,
+          effort: opMedium!.effort,
+        });
+      });
+    });
+
+    describe("per-agent effortLevel", () => {
+      it("AgentRecord round-trips effortLevel: 'high' through mutateAgents", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent({ effortLevel: "high" });
+            return c;
+          },
+          "dashboard:test",
+        );
+        const s = readSettings(localPath);
+        expect(s.agents?.alice.effortLevel).toBe("high");
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("high");
+      });
+
+      it("AgentRecord without effortLevel reads back undefined; getAgentEffortLevel falls back to 'medium'", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent();
+            return c;
+          },
+          "dashboard:test",
+        );
+        const s = readSettings(localPath);
+        expect(s.agents?.alice.effortLevel).toBeUndefined();
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("medium");
+      });
+
+      it("invalid effortLevel string drops the field from the record (fail-soft on read)", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            agents: { alice: { ...validAgent(), effortLevel: "extreme" } },
+          }),
+        );
+        const s = readSettings(localPath);
+        expect(s.agents?.alice).toBeDefined();
+        expect(s.agents?.alice.effortLevel).toBeUndefined();
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("medium");
+      });
+
+      it("mutateAgents updating only effortLevel preserves broken/strikes/bio + sibling agents", async () => {
+        const fooBroken: AgentBrokenState = {
+          reason: "wedged",
+          suggested_steps: ["operator fix"],
+          set_at: "2026-05-01T00:00:00Z",
+          evaluator_status: "completed",
+          evaluator_dispatch_id: null,
+        };
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.foo = validAgent({
+              bio: "foo-bio",
+              broken: fooBroken,
+              strikes: { count: 2, history: [] },
+              effortLevel: "low",
+            });
+            c.bar = validAgent({ bio: "bar-bio", effortLevel: "high" });
+            return c;
+          },
+          "dashboard:test",
+        );
+
+        // Patch only foo.effortLevel; the rest of foo + all of bar must survive.
+        await mutateAgents(
+          localPath,
+          (c) => {
+            const prior = c.foo;
+            c.foo = {
+              ...prior,
+              effortLevel: "very_high",
+              updated_at: "2026-05-15T00:00:00Z",
+            };
+            return c;
+          },
+          "dashboard:test",
+        );
+
+        const s = readSettings(localPath);
+        expect(s.agents?.foo.effortLevel).toBe("very_high");
+        expect(s.agents?.foo.bio).toBe("foo-bio");
+        expect(s.agents?.foo.broken).toEqual(fooBroken);
+        expect(s.agents?.foo.strikes).toEqual({ count: 2, history: [] });
+        expect(s.agents?.bar.bio).toBe("bar-bio");
+        expect(s.agents?.bar.effortLevel).toBe("high");
+      });
+    });
+
+    describe("writer-merge invariants", () => {
+      it("writeSettings({display}) preserves on-disk effortLevels", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        await writeSettings(localPath, {
+          display: { worker: { port: 1234, runtime: "host" } },
+          writtenBy: "worker",
+        });
+        expect(getEffortLevels(localPath)).toEqual(op);
+      });
+
+      it("writeSettings({display}) preserves on-disk effortAssignmentPrompt", async () => {
+        const prompt = "custom prompt content";
+        await writeSettings(localPath, {
+          effortAssignmentPrompt: prompt,
+          writtenBy: "dashboard:operator",
+        });
+        await writeSettings(localPath, {
+          display: { worker: { port: 1234, runtime: "host" } },
+          writtenBy: "worker",
+        });
+        expect(getEffortAssignmentPrompt(localPath)).toBe(prompt);
+      });
+
+      it("writeSettings({effortLevels}) replaces the whole array atomically (operator edits the table as a unit)", async () => {
+        const op1 = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op1,
+          writtenBy: "dashboard:operator",
+        });
+        const op2 = op1.map((r) => ({ ...r, model: `${r.model}-v2` }));
+        await writeSettings(localPath, {
+          effortLevels: op2,
+          writtenBy: "dashboard:operator",
+        });
+        expect(getEffortLevels(localPath)).toEqual(op2);
+      });
+
+      it("writeSettings({effortAssignmentPrompt}) does not clobber effortLevels", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          writtenBy: "dashboard:operator",
+        });
+        await writeSettings(localPath, {
+          effortAssignmentPrompt: "new prompt",
+          writtenBy: "dashboard:operator",
+        });
+        expect(getEffortLevels(localPath)).toEqual(op);
+        expect(getEffortAssignmentPrompt(localPath)).toBe("new prompt");
+      });
+
+      it("mutateAgents preserves on-disk effortLevels + effortAssignmentPrompt", async () => {
+        const op = makeOperatorLevels();
+        await writeSettings(localPath, {
+          effortLevels: op,
+          effortAssignmentPrompt: "operator's prompt",
+          writtenBy: "dashboard:operator",
+        });
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent({ effortLevel: "max" });
+            return c;
+          },
+          "dashboard:test",
+        );
+        expect(getEffortLevels(localPath)).toEqual(op);
+        expect(getEffortAssignmentPrompt(localPath)).toBe("operator's prompt");
+      });
+
+      it("writeSettings({overrides}) preserves agents.<name>.effortLevel", async () => {
+        await mutateAgents(
+          localPath,
+          (c) => {
+            c.alice = validAgent({ effortLevel: "max" });
+            return c;
+          },
+          "dashboard:test",
+        );
+        await writeSettings(localPath, {
+          overrides: { slack: { enabled: true } },
+          writtenBy: "dashboard:operator",
+        });
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("max");
+      });
+    });
+
+    describe("never-throws contract", () => {
+      it("getEffortLevels returns default ladder on corrupt JSON", () => {
+        writeFileSync(settingsFilePath(localPath), "{not valid json");
+        expect(getEffortLevels(localPath)).toEqual(DEFAULT_EFFORT_LEVELS);
+      });
+
+      it("getEffortAssignmentPrompt returns default prompt on corrupt JSON", () => {
+        writeFileSync(settingsFilePath(localPath), "{not valid json");
+        expect(getEffortAssignmentPrompt(localPath)).toBe(
+          DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+        );
+      });
+
+      it("getAgentEffortLevel returns 'medium' on corrupt JSON", () => {
+        writeFileSync(settingsFilePath(localPath), "{not valid json");
+        expect(getAgentEffortLevel(localPath, "alice")).toBe("medium");
+      });
+
+      it("resolveEffortToFlags returns the default mapping on corrupt JSON for both known + unknown levels", () => {
+        writeFileSync(settingsFilePath(localPath), "{not valid json");
+        const high = DEFAULT_EFFORT_LEVELS.find((r) => r.name === "high");
+        const medium = DEFAULT_EFFORT_LEVELS.find((r) => r.name === "medium");
+        // Known level resolves to the default for that level
+        expect(resolveEffortToFlags(localPath, "high")).toEqual({
+          model: high!.model,
+          effort: high!.effort,
+        });
+        // Unknown level falls back to default medium
+        expect(resolveEffortToFlags(localPath, "blah" as never)).toEqual({
+          model: medium!.model,
+          effort: medium!.effort,
+        });
+      });
+    });
+
+    describe("normalizer edge cases", () => {
+      it("first-wins on duplicate-name entries in operator array", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              { name: "medium", model: "A", effort: "a" },
+              { name: "medium", model: "B", effort: "b" },
+              { name: "medium", model: "C", effort: "c" },
+            ],
+          }),
+        );
+        expect(getEffortLevels(localPath)[3]).toEqual({
+          name: "medium",
+          model: "A",
+          effort: "a",
+        });
+      });
+
+      it("non-object / null / array / scalar entries in operator array are skipped", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              null,
+              "string",
+              [1, 2, 3],
+              42,
+              { name: "medium", model: "X", effort: "x" },
+            ],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels).toHaveLength(7);
+        expect(levels[3]).toEqual({ name: "medium", model: "X", effort: "x" });
+        // Every other slot defaulted
+        for (let i = 0; i < 7; i++) {
+          if (i === 3) continue;
+          expect(levels[i]).toEqual(DEFAULT_EFFORT_LEVELS[i]);
+        }
+      });
+
+      it("per-row non-string model (number / null) downgrades to default", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              { name: "min", model: 42, effort: "x" },
+              { name: "very_low", model: null, effort: "x" },
+              { name: "low", model: "X", effort: "y" },
+            ],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels[0]).toEqual(DEFAULT_EFFORT_LEVELS[0]);
+        expect(levels[1]).toEqual(DEFAULT_EFFORT_LEVELS[1]);
+        expect(levels[2]).toEqual({ name: "low", model: "X", effort: "y" });
+      });
+
+      it("per-row non-string effort (number / null) downgrades to default", () => {
+        writeFileSync(
+          settingsFilePath(localPath),
+          JSON.stringify({
+            overrides: {},
+            effortLevels: [
+              { name: "min", model: "X", effort: 42 },
+              { name: "very_low", model: "X", effort: null },
+            ],
+          }),
+        );
+        const levels = getEffortLevels(localPath);
+        expect(levels[0]).toEqual(DEFAULT_EFFORT_LEVELS[0]);
+        expect(levels[1]).toEqual(DEFAULT_EFFORT_LEVELS[1]);
+      });
+    });
+
+    describe("shared-reference safety", () => {
+      it("defaultSettings() returns an independent clone of DEFAULT_EFFORT_LEVELS", () => {
+        const a = defaultSettings();
+        // Mutating the caller's copy must NOT mutate the global default
+        a.effortLevels![0] = { name: "min", model: "MUTATED", effort: "x" };
+        expect(DEFAULT_EFFORT_LEVELS[0].model).not.toBe("MUTATED");
+      });
+
+      it("getEffortLevels returns independent arrays on repeated calls", () => {
+        const first = getEffortLevels(localPath);
+        first[0] = { name: "min", model: "MUTATED", effort: "x" };
+        const second = getEffortLevels(localPath);
+        expect(second[0].model).not.toBe("MUTATED");
+      });
     });
   });
 });

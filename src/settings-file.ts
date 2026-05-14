@@ -348,6 +348,14 @@ export interface AgentRecord {
    * Phase 1 ships the field so Phase 2 has somewhere to write.
    */
   strikes: AgentStrikes;
+  /**
+   * DX-509 — per-agent default effort label. Missing /
+   * normalizer-rejected → `getAgentEffortLevel` falls back to
+   * `DEFAULT_AGENT_EFFORT_LEVEL`. Dashboard PATCH writes the field via
+   * `mutateAgents`; the DX-281 per-key merge keeps sibling agents and
+   * sibling fields intact.
+   */
+  effortLevel?: EffortLevelName;
   created_at: string;
   updated_at: string;
 }
@@ -387,6 +395,89 @@ export const AGENTS_MAX = 5;
 /** URL/branch/path-safe agent name shape. */
 export const AGENT_NAME_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/;
 
+/**
+ * DX-508 / DX-509 — operator-configurable effort ladder.
+ *
+ * 7 ordered slots, immutable position. Each slot maps a `name` (the
+ * agent-facing label) to a `{model, effort}` pair the launcher forwards
+ * at spawn time. The `effort` half is opaque at the dispatch boundary
+ * (per-model knob — thinking budget for sonnet-thinking, ignored for
+ * haiku, etc.); Phase 5 (DX-513) owns the model-side mapping.
+ *
+ * Default agent effort is `"medium"`. The DEFAULT_EFFORT_ASSIGNMENT_PROMPT
+ * biases agents toward lower levels + fewer phase cards — see the
+ * DX-508 epic body "Bias to encode in default prompt".
+ */
+export type EffortLevelName =
+  | "min"
+  | "very_low"
+  | "low"
+  | "medium"
+  | "high"
+  | "very_high"
+  | "max";
+
+export const EFFORT_LEVEL_NAMES: readonly EffortLevelName[] = [
+  "min",
+  "very_low",
+  "low",
+  "medium",
+  "high",
+  "very_high",
+  "max",
+] as const;
+
+const EFFORT_LEVEL_NAMES_SET: ReadonlySet<string> = new Set(EFFORT_LEVEL_NAMES);
+
+/** Opaque per-model knob. What each value MEANS is a per-model lookup. */
+export type EffortKnob = string;
+
+export interface EffortLevelMapping {
+  name: EffortLevelName;
+  model: string;
+  effort: EffortKnob;
+}
+
+/**
+ * Built-in default ladder. A brand-new repo with no settings.json gets
+ * these values. Operator overrides land via `writeSettings({effortLevels})`
+ * — the dashboard PATCH always re-sends the full 7-entry array (atomic
+ * unit), so partial-row updates don't need a separate merge surface.
+ */
+export const DEFAULT_EFFORT_LEVELS: readonly EffortLevelMapping[] = [
+  { name: "min", model: "claude-haiku-4-5", effort: "minimal" },
+  { name: "very_low", model: "claude-haiku-4-5", effort: "low" },
+  { name: "low", model: "claude-haiku-4-5", effort: "high" },
+  { name: "medium", model: "claude-sonnet-4-6", effort: "low" },
+  { name: "high", model: "claude-sonnet-4-6", effort: "medium" },
+  { name: "very_high", model: "claude-sonnet-4-6", effort: "high" },
+  { name: "max", model: "claude-opus-4-7", effort: "high" },
+] as const;
+
+/** Default per-agent label when `AgentRecord.effortLevel` is missing. */
+export const DEFAULT_AGENT_EFFORT_LEVEL: EffortLevelName = "medium";
+
+/**
+ * Operator-tunable prompt agents read when picking an effort level for
+ * a card. Bias matches the DX-508 epic "Bias to encode in default
+ * prompt" section — default `medium`, bump up only for genuine depth,
+ * bump down for mechanical work, prefer fewer phase cards.
+ */
+export const DEFAULT_EFFORT_ASSIGNMENT_PROMPT = [
+  "Pick the LOWEST effort level that can plausibly complete the card.",
+  "",
+  "Levels are an ordered ladder: min, very_low, low, medium, high, very_high, max.",
+  "",
+  "Default: medium. Bump UP only when the card genuinely needs deeper reasoning —",
+  "multi-file refactor, architectural decision, subtle concurrency.",
+  "Bump DOWN aggressively for mechanical edits, single-file fixes, doc tweaks,",
+  "well-scoped renames.",
+  "",
+  "Fewer phase cards is better than more. Combine phases when the combined unit",
+  "still fits one commit + one TDD pass. Every phase is a fresh dispatch, fresh",
+  "context load, fresh review cycle — phase fan-out is a cost multiplier.",
+].join("\n");
+
 /** HH:MM-HH:MM, 24-hour, both ends optional minute leading zero handled. */
 export const SCHEDULE_WINDOW_SHAPE =
   /^([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d$/;
@@ -404,6 +495,22 @@ export interface Settings {
    */
   agents?: Record<string, AgentRecord>;
   agentDefaults?: AgentDefaults;
+  /**
+   * DX-509 — operator-configurable effort ladder. Optional in the type
+   * for fixture compatibility; `normalize` always materializes a length-7
+   * array via per-row fallback to `DEFAULT_EFFORT_LEVELS`. Operator
+   * writes go through `writeSettings({effortLevels})` (whole-array
+   * replace — partial-row updates land via the dashboard PATCH that
+   * re-sends the full array).
+   */
+  effortLevels?: EffortLevelMapping[];
+  /**
+   * DX-509 — operator-tunable prompt agents read when picking an
+   * effort level. Optional in the type; `normalize` always materializes
+   * to `DEFAULT_EFFORT_ASSIGNMENT_PROMPT` when missing / empty / wrong
+   * type. Whole-string atomic replace via `writeSettings`.
+   */
+  effortAssignmentPrompt?: string;
   meta: SettingsMeta;
 }
 
@@ -435,6 +542,18 @@ export interface WriteSettingsPatch {
   agents?: Record<string, AgentRecord>;
   /** Patch a subset of agentDefaults; missing keys are preserved. */
   agentDefaults?: Partial<AgentDefaults>;
+  /**
+   * DX-509 — whole-array atomic replace. The dashboard PATCH always
+   * re-sends the full 7-entry array, so partial-row updates land
+   * through this single field. `undefined` (or omitted) preserves the
+   * existing on-disk array.
+   */
+  effortLevels?: EffortLevelMapping[];
+  /**
+   * DX-509 — atomic string replace. `undefined` preserves the existing
+   * on-disk value. Empty string normalizes to default on the next read.
+   */
+  effortAssignmentPrompt?: string;
   writtenBy: SettingsWriter;
 }
 
@@ -471,6 +590,8 @@ export function defaultSettings(): Settings {
     display: {},
     agents: {},
     agentDefaults: defaultAgentDefaults(),
+    effortLevels: DEFAULT_EFFORT_LEVELS.map((r) => ({ ...r })),
+    effortAssignmentPrompt: DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
   };
 }
@@ -817,6 +938,11 @@ function normalizeOneAgent(raw: unknown): AgentRecord | null {
   if (typeof r.avatar_path === "string" && r.avatar_path.length > 0) {
     out.avatar_path = r.avatar_path;
   }
+  // DX-509 — drop unrecognized labels silently (fail-soft on read; the
+  // dashboard PATCH route is the fail-loud surface for bad input).
+  if (typeof r.effortLevel === "string" && EFFORT_LEVEL_NAMES_SET.has(r.effortLevel)) {
+    out.effortLevel = r.effortLevel as EffortLevelName;
+  }
   return out;
 }
 
@@ -846,6 +972,49 @@ function normalizeAgents(raw: unknown): Record<string, AgentRecord> {
     count += 1;
   }
   return out;
+}
+
+/**
+ * DX-509 — fail-soft loader for the 7-entry effort ladder.
+ *
+ * Operator state is consulted by name (not by array index) so out-of-order
+ * entries land in canonical position and missing entries fall through to
+ * the default. A single malformed row downgrades that one slot to default
+ * — others survive verbatim. Output is ALWAYS length 7 with names in
+ * canonical order, so callers (and `resolveEffortToFlags`) can iterate
+ * without a presence check.
+ */
+function normalizeEffortLevels(raw: unknown): EffortLevelMapping[] {
+  const operatorByName = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.name !== "string" || !EFFORT_LEVEL_NAMES_SET.has(e.name)) continue;
+      // First-wins on duplicate names — matches the operator's intent
+      // when the dashboard PATCH re-sends a canonical-order array.
+      if (!operatorByName.has(e.name)) operatorByName.set(e.name, e);
+    }
+  }
+  return EFFORT_LEVEL_NAMES.map((name, idx) => {
+    const op = operatorByName.get(name);
+    const fallback = DEFAULT_EFFORT_LEVELS[idx];
+    if (!op) return { ...fallback };
+    if (typeof op.model !== "string" || op.model.length === 0) return { ...fallback };
+    if (typeof op.effort !== "string" || op.effort.length === 0) return { ...fallback };
+    return { name, model: op.model, effort: op.effort };
+  });
+}
+
+/**
+ * DX-509 — fail-soft loader for the operator prompt. Empty / non-string
+ * fall through to the built-in default.
+ */
+function normalizeEffortAssignmentPrompt(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length === 0) {
+    return DEFAULT_EFFORT_ASSIGNMENT_PROMPT;
+  }
+  return raw;
 }
 
 function normalizeAgentDefaults(raw: unknown): AgentDefaults {
@@ -897,6 +1066,10 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
         : {},
     agents: normalizeAgents(partial.agents),
     agentDefaults: normalizeAgentDefaults(partial.agentDefaults),
+    effortLevels: normalizeEffortLevels(partial.effortLevels),
+    effortAssignmentPrompt: normalizeEffortAssignmentPrompt(
+      partial.effortAssignmentPrompt,
+    ),
     meta,
   };
 }
@@ -1018,6 +1191,22 @@ async function runWrite(
             ...patch.agentDefaults,
           }
         : (existing.agentDefaults ?? defaultAgentDefaults()),
+      // DX-509 — whole-array atomic replace. Dashboard PATCH always
+      // re-sends the full 7-entry array, so partial-row updates land
+      // through this single field. `undefined` (or omitted) preserves
+      // the existing on-disk array. `normalize` re-runs on read so a
+      // partially-malformed write self-heals per-row on next read.
+      // `existing` flows through `safeParse → normalize`, so
+      // `existing.effortLevels` is always materialized (length 7) —
+      // no `?? DEFAULT_*` fallback required.
+      effortLevels:
+        patch.effortLevels !== undefined
+          ? normalizeEffortLevels(patch.effortLevels)
+          : existing.effortLevels!,
+      effortAssignmentPrompt:
+        patch.effortAssignmentPrompt !== undefined
+          ? normalizeEffortAssignmentPrompt(patch.effortAssignmentPrompt)
+          : existing.effortAssignmentPrompt!,
       meta: {
         updatedAt: new Date().toISOString(),
         updatedBy: patch.writtenBy,
@@ -1237,6 +1426,12 @@ export async function mutateAgents(
         display: existing.display,
         agents: normalizeAgents(next),
         agentDefaults: existing.agentDefaults ?? defaultAgentDefaults(),
+        // DX-509 — `mutateAgents` only touches the agents map; the
+        // ladder + prompt come through from disk unchanged. `existing`
+        // is `safeParse → normalize` output (or `defaultSettings()`),
+        // so both fields are always materialized — no fallback needed.
+        effortLevels: existing.effortLevels!,
+        effortAssignmentPrompt: existing.effortAssignmentPrompt!,
         meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
       };
       const body = JSON.stringify(merged, null, 2) + "\n";
@@ -1318,6 +1513,101 @@ export function getPrepMode(localPath: string): AgentPrepMode {
     log.error(`getPrepMode threw — returning "combined" for ${localPath}`, err);
     return "combined";
   }
+}
+
+/**
+ * DX-509 — return the 7-entry effort ladder, with per-row fallback to
+ * `DEFAULT_EFFORT_LEVELS`. Operator value rounds-trips verbatim when
+ * complete + well-formed; a single malformed row downgrades that one
+ * slot to default. Output is ALWAYS length 7 with names in canonical
+ * order. Never throws — all failure modes degrade to the built-in
+ * default array.
+ */
+export function getEffortLevels(localPath: string): EffortLevelMapping[] {
+  try {
+    const settings = readSettings(localPath);
+    return (
+      settings.effortLevels ?? DEFAULT_EFFORT_LEVELS.map((r) => ({ ...r }))
+    );
+  } catch (err) {
+    log.error(
+      `getEffortLevels threw — returning default ladder for ${localPath}`,
+      err,
+    );
+    return DEFAULT_EFFORT_LEVELS.map((r) => ({ ...r }));
+  }
+}
+
+/**
+ * DX-509 — return the operator's effort-assignment prompt, or the
+ * built-in default when missing / empty / wrong type. Never throws —
+ * a corrupt settings file degrades to the built-in default so the
+ * agent-prompt path can't break on bad operator data.
+ */
+export function getEffortAssignmentPrompt(localPath: string): string {
+  try {
+    const settings = readSettings(localPath);
+    return settings.effortAssignmentPrompt ?? DEFAULT_EFFORT_ASSIGNMENT_PROMPT;
+  } catch (err) {
+    log.error(
+      `getEffortAssignmentPrompt threw — returning default for ${localPath}`,
+      err,
+    );
+    return DEFAULT_EFFORT_ASSIGNMENT_PROMPT;
+  }
+}
+
+/**
+ * DX-509 — return a single agent's default effort label. Falls back to
+ * `DEFAULT_AGENT_EFFORT_LEVEL` when the agent is absent or its record
+ * has no `effortLevel` field. Never throws.
+ */
+export function getAgentEffortLevel(
+  localPath: string,
+  agentName: string,
+): EffortLevelName {
+  try {
+    const settings = readSettings(localPath);
+    return settings.agents?.[agentName]?.effortLevel ?? DEFAULT_AGENT_EFFORT_LEVEL;
+  } catch (err) {
+    log.error(
+      `getAgentEffortLevel threw — returning "${DEFAULT_AGENT_EFFORT_LEVEL}" for ${localPath}#${agentName}`,
+      err,
+    );
+    return DEFAULT_AGENT_EFFORT_LEVEL;
+  }
+}
+
+/**
+ * DX-509 — resolve an effort label to the `{model, effort}` pair the
+ * launcher forwards at spawn time. Unknown labels fall back to the
+ * ladder's `medium` slot (which itself is the operator's medium row
+ * when configured, else the built-in default). Single source of truth
+ * for the dispatch boundary — Phase 5 (DX-513) callers use this rather
+ * than indexing into the ladder themselves.
+ *
+ * Accepts `EffortLevelName` at the type level; callers feeding raw
+ * strings from disk (YAML `effort_level`, dashboard POST body) should
+ * validate at their boundary or cast — the runtime contract handles
+ * unknowns via the medium-fallback so a misconfigured card cannot
+ * crash dispatch.
+ *
+ * Pure-ish — reads the settings file once per call. Never throws —
+ * `getEffortLevels` guarantees a length-7 ladder containing every
+ * canonical name, so the medium lookup always succeeds.
+ */
+export function resolveEffortToFlags(
+  localPath: string,
+  levelName: EffortLevelName,
+): { model: string; effort: EffortKnob } {
+  const levels = getEffortLevels(localPath);
+  const match = levels.find((l) => l.name === levelName);
+  if (match) return { model: match.model, effort: match.effort };
+  // `getEffortLevels` invariant: length 7, canonical names. The medium
+  // row is always present — non-null assertion is the fail-loud signal
+  // if a future refactor breaks the invariant.
+  const medium = levels.find((l) => l.name === "medium")!;
+  return { model: medium.model, effort: medium.effort };
 }
 
 /**
