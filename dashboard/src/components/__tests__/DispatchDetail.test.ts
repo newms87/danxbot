@@ -232,6 +232,87 @@ describe("DispatchDetail", () => {
     expect(w.emitted("close")).toBeTruthy();
   });
 
+  it("shows the 'new entries' affordance when streamed blocks arrive while the user is scrolled away from the bottom", async () => {
+    mockFetchDispatchDetail.mockResolvedValueOnce({
+      dispatch: makeDispatch({ status: "running", completedAt: null }),
+      timeline: [{ type: "user", text: "first", timestampMs: 1 }] as JsonlBlock[],
+      totals: null,
+    });
+
+    let onBlock: ((b: JsonlBlock) => void) | null = null;
+    mockFollowDispatch.mockImplementationOnce(
+      (_id: string, push: (b: JsonlBlock) => void) => {
+        onBlock = push;
+        return () => {};
+      },
+    );
+
+    const w = mount(DispatchDetail, {
+      props: { dispatch: makeDispatch({ status: "running", completedAt: null }) },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    // happy-dom does not compute layout; force "user is scrolled up" by
+    // pinning the scroll container's geometry such that scrollHeight far
+    // exceeds scrollTop + clientHeight, then firing a scroll event so
+    // the component's `onScroll` reclassifies `userAtBottom` to false.
+    const scroller = w.get('[data-test="timeline-scroll"]')
+      .element as HTMLElement;
+    Object.defineProperty(scroller, "scrollHeight", { value: 5000, configurable: true });
+    Object.defineProperty(scroller, "clientHeight", { value: 400, configurable: true });
+    Object.defineProperty(scroller, "scrollTop", { value: 0, writable: true, configurable: true });
+    await w.get('[data-test="timeline-scroll"]').trigger("scroll");
+
+    // Affordance is hidden until new entries arrive.
+    expect(w.find('[data-test="new-entries-affordance"]').exists()).toBe(false);
+
+    // New streamed block lands while user is away from bottom.
+    onBlock!({ type: "assistant_text", text: "live", timestampMs: 99 });
+    await flushPromises();
+
+    const affordance = w.find('[data-test="new-entries-affordance"]');
+    expect(affordance.exists()).toBe(true);
+    expect(affordance.text()).toContain("new entries");
+
+    // Clicking the affordance dismisses it (component scrolls to bottom +
+    // flips userAtBottom back to true).
+    await affordance.trigger("click");
+    expect(w.find('[data-test="new-entries-affordance"]').exists()).toBe(false);
+
+    w.unmount();
+  });
+
+  it("does NOT surface the affordance when the user is pinned to the bottom and new blocks arrive", async () => {
+    mockFetchDispatchDetail.mockResolvedValueOnce({
+      dispatch: makeDispatch({ status: "running", completedAt: null }),
+      timeline: [{ type: "user", text: "first", timestampMs: 1 }] as JsonlBlock[],
+      totals: null,
+    });
+
+    let onBlock: ((b: JsonlBlock) => void) | null = null;
+    mockFollowDispatch.mockImplementationOnce(
+      (_id: string, push: (b: JsonlBlock) => void) => {
+        onBlock = push;
+        return () => {};
+      },
+    );
+
+    const w = mount(DispatchDetail, {
+      props: { dispatch: makeDispatch({ status: "running", completedAt: null }) },
+      attachTo: document.body,
+    });
+    await flushPromises();
+
+    // User stays pinned to bottom — default state.
+    onBlock!({ type: "assistant_text", text: "live", timestampMs: 99 });
+    await flushPromises();
+
+    expect(w.find('[data-test="new-entries-affordance"]').exists()).toBe(false);
+
+    w.unmount();
+  });
+
   it("re-loads detail when the dispatch prop id changes", async () => {
     mockFetchDispatchDetail.mockResolvedValue({
       dispatch: makeDispatch(),

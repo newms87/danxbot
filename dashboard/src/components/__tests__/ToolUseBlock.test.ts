@@ -24,6 +24,22 @@ describe("ToolUseBlock", () => {
     expect(w.text()).toContain("toolu_01abc");
   });
 
+  it("renders the Show more toggle for input over the long threshold and flips on click", async () => {
+    const w = mount(ToolUseBlock, {
+      props: { block: makeBlock({ input: { content: "x".repeat(800) } }) },
+    });
+    const toggle = w.find('[data-test="tool-use-toggle"]');
+    expect(toggle.exists()).toBe(true);
+    expect(toggle.text()).toBe("Show more");
+    await toggle.trigger("click");
+    expect(toggle.text()).toBe("Show less");
+  });
+
+  it("omits the Show more toggle for short input", () => {
+    const w = mount(ToolUseBlock, { props: { block: makeBlock() } });
+    expect(w.find('[data-test="tool-use-toggle"]').exists()).toBe(false);
+  });
+
   it("pretty-prints block.input as 2-space indented JSON", () => {
     const w = mount(ToolUseBlock, {
       props: {
@@ -39,12 +55,12 @@ describe("ToolUseBlock", () => {
 
   it("does NOT render a nested SessionTimeline when block.subagent is absent", () => {
     const w = mount(ToolUseBlock, { props: { block: makeBlock() } });
-    expect(w.text()).not.toContain("sub-agent");
+    expect(w.text()).not.toContain("SUB-AGENT");
     // The pink rail color is only applied for subagent blocks
     expect(w.html()).not.toContain("border-pink-400");
   });
 
-  it("renders a nested SessionTimeline when block.subagent is present", () => {
+  it("renders a nested SubagentBlock when block.subagent is present", () => {
     const block = makeBlock({
       name: "Agent",
       subagent: {
@@ -79,9 +95,9 @@ describe("ToolUseBlock", () => {
     const w = mount(ToolUseBlock, { props: { block } });
     const text = w.text();
 
-    // Sub-agent header
+    // Sub-agent header (now uppercase via SubagentBlock)
     expect(text).toContain("test-reviewer");
-    expect(text).toContain("sub-agent");
+    expect(text).toContain("SUB-AGENT");
     expect(text).toContain("Audit coverage");
 
     // Nested timeline rendered the children

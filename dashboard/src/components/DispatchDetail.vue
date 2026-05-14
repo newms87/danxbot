@@ -1,11 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import type {
-  Dispatch,
-  DispatchDetail,
-  JsonlBlock,
-  ToolUseBlock,
-} from "../types";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import type { Dispatch, DispatchDetail, JsonlBlock } from "../types";
+import { DanxButton, DanxIcon } from "@thehammer/danx-ui";
+import arrowDownIcon from "danx-icon/src/fontawesome/solid/arrow-down.svg?raw";
 import { fetchDispatchDetail, followDispatch } from "../api";
 import SessionTimeline from "./SessionTimeline.vue";
 import TriggerBadge from "./TriggerBadge.vue";
@@ -17,12 +14,46 @@ defineEmits<{ close: [] }>();
 const detail = ref<DispatchDetail | null>(null);
 const liveBlocks = ref<JsonlBlock[]>([]);
 const loading = ref(true);
+// Distinguishes "first paint after load()" (pin to bottom unconditionally)
+// from "later updates" (respect user scroll position). Resetting on every
+// load() means a prop-change reload also pins on first paint.
+let pendingFirstFill = true;
 let stopFollow: (() => void) | null = null;
+
+// Auto-scroll discipline: only follow the tail if the user is already
+// pinned to the bottom of the timeline. The moment they scroll up to
+// read something we stop auto-scrolling and surface a "new entries ↓"
+// affordance instead. `userAtBottom` tracks position; `newEntriesPending`
+// signals the affordance.
+const timelineRef = ref<HTMLDivElement | null>(null);
+const userAtBottom = ref(true);
+const newEntriesPending = ref(false);
+const BOTTOM_PX_THRESHOLD = 32;
+
+function isPinnedToBottom(el: HTMLElement): boolean {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_PX_THRESHOLD;
+}
+
+function onScroll(): void {
+  const el = timelineRef.value;
+  if (!el) return;
+  userAtBottom.value = isPinnedToBottom(el);
+  if (userAtBottom.value) newEntriesPending.value = false;
+}
+
+function scrollToBottom(): void {
+  const el = timelineRef.value;
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  userAtBottom.value = true;
+  newEntriesPending.value = false;
+}
 
 async function load(id: string): Promise<void> {
   loading.value = true;
   detail.value = null;
   liveBlocks.value = [];
+  pendingFirstFill = true;
   try {
     detail.value = await fetchDispatchDetail(id);
   } finally {
@@ -56,6 +87,22 @@ const combinedBlocks = computed<JsonlBlock[]>(() => [
   ...liveBlocks.value,
 ]);
 
+watch(combinedBlocks, async (curr) => {
+  if (curr.length === 0) return;
+  if (pendingFirstFill) {
+    pendingFirstFill = false;
+    await nextTick();
+    scrollToBottom();
+    return;
+  }
+  if (userAtBottom.value) {
+    await nextTick();
+    scrollToBottom();
+  } else {
+    newEntriesPending.value = true;
+  }
+});
+
 const totals = computed(() => detail.value?.totals ?? null);
 
 function durationSec(d: Dispatch): string {
@@ -69,16 +116,19 @@ function durationSec(d: Dispatch): string {
 }
 
 // Top tools: count occurrences across timeline (including sub-agent blocks).
+// The Agent tool_use wrapper IS counted alongside its nested subagent
+// blocks — the existing test pins this semantic ("subagent wrapper itself
+// counts as a parent tool_use") so operators see one consolidated tool
+// frequency table including the meta dispatch action.
 function collectToolCounts(blocks: JsonlBlock[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const b of blocks) {
-    if (b.type === "tool_use") {
-      counts[b.name] = (counts[b.name] || 0) + 1;
-      if ((b as ToolUseBlock).subagent) {
-        const nested = collectToolCounts((b as ToolUseBlock).subagent!.blocks);
-        for (const [k, v] of Object.entries(nested)) {
-          counts[k] = (counts[k] || 0) + v;
-        }
+    if (b.type !== "tool_use") continue;
+    counts[b.name] = (counts[b.name] || 0) + 1;
+    if (b.subagent) {
+      const nested = collectToolCounts(b.subagent.blocks);
+      for (const [k, v] of Object.entries(nested)) {
+        counts[k] = (counts[k] || 0) + v;
       }
     }
   }
@@ -119,12 +169,31 @@ const topTools = computed(() => {
     </div>
 
     <div class="grid grid-cols-[1fr_260px] flex-1 overflow-hidden">
-      <div class="overflow-auto p-5 bg-slate-950">
-        <div v-if="loading" class="text-slate-500 text-sm">Loading timeline…</div>
-        <div v-else-if="combinedBlocks.length === 0" class="text-slate-500 text-sm">
-          No JSONL entries yet.
+      <div class="relative overflow-hidden">
+        <div
+          ref="timelineRef"
+          data-test="timeline-scroll"
+          class="absolute inset-0 overflow-auto p-5 bg-slate-950"
+          @scroll="onScroll"
+        >
+          <div v-if="loading" class="text-slate-500 text-sm">Loading timeline…</div>
+          <div v-else-if="combinedBlocks.length === 0" class="text-slate-500 text-sm">
+            No JSONL entries yet.
+          </div>
+          <SessionTimeline v-else :blocks="combinedBlocks" />
         </div>
-        <SessionTimeline v-else :blocks="combinedBlocks" />
+        <DanxButton
+          v-if="newEntriesPending"
+          data-test="new-entries-affordance"
+          size="sm"
+          class="!absolute bottom-4 right-4 z-10 shadow-lg"
+          @click="scrollToBottom"
+        >
+          <span class="flex items-center gap-1.5">
+            new entries
+            <DanxIcon :icon="arrowDownIcon" class="w-3 h-3" />
+          </span>
+        </DanxButton>
       </div>
 
       <aside class="border-l border-slate-800 bg-slate-900/40 overflow-auto p-4 text-xs text-slate-300">

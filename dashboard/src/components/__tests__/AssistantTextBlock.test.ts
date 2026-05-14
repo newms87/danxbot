@@ -10,21 +10,26 @@ const block: AssistantTextBlockType = {
   timestampMs: 1700000000000,
 };
 
-describe("AssistantTextBlock", () => {
-  it("renders the Assistant label", () => {
-    const w = mount(AssistantTextBlock, { props: { block } });
-    expect(w.text()).toContain("Assistant");
-  });
+// AssistantTextBlock is rendered INSIDE the SessionTimeline turn
+// wrapper, which owns the "Assistant · turn N" label + the violet
+// left-rail. The inner block is therefore a plain text body — no
+// duplicate header, no second rail.
 
+describe("AssistantTextBlock", () => {
   it("renders block.text", () => {
     const w = mount(AssistantTextBlock, { props: { block } });
     expect(w.text()).toContain("Sure, here is the answer.");
   });
 
-  it("uses the violet type-specific rail color and label color", () => {
+  it("does NOT emit its own `Assistant` header (turn wrapper owns it)", () => {
     const w = mount(AssistantTextBlock, { props: { block } });
-    const html = w.html();
-    expect(html).toContain("border-violet-400/70");
-    expect(html).toContain("text-violet-300");
+    // The text body should not contain the label "Assistant" — that
+    // label lives on the turn wrapper, not the inner text block.
+    expect(w.text()).not.toMatch(/Assistant/);
+  });
+
+  it("does NOT carry its own violet left-rail (turn wrapper owns it)", () => {
+    const w = mount(AssistantTextBlock, { props: { block } });
+    expect(w.html()).not.toContain("border-violet-400/70");
   });
 });
