@@ -6,6 +6,15 @@
  *   dispatch:created
  *   dispatch:updated
  *   dispatch:jsonl:<jobId>
+ *   chat:<ISS-N>            — per-card chat alias (DX-351). Resolves to
+ *                             the latest issue-chat dispatch AT SUBSCRIBE
+ *                             TIME and re-emits its `dispatch:jsonl:<id>`
+ *                             blocks under the stable chat-topic name.
+ *                             The alias is bound to ONE leaf — when the
+ *                             user posts another chat turn (which spawns
+ *                             a new dispatch), the dashboard MUST
+ *                             re-establish the SSE connection so the
+ *                             stream re-resolves to the new leaf.
  *   agent:updated
  *
  * The connection stays open until the client disconnects or is evicted for
@@ -23,7 +32,10 @@
 
 import type { IncomingMessage, ServerResponse } from "http";
 import { createLogger } from "../logger.js";
-import { getDispatchById } from "./dispatches-db.js";
+import {
+  findLatestChatDispatchByIssueId,
+  getDispatchById,
+} from "./dispatches-db.js";
 import { eventBus, type BusEvent } from "./event-bus.js";
 import { startJsonlWatcher, stopJsonlWatcher } from "./dispatch-stream.js";
 import { expectedJsonlPath } from "./jsonl-path-resolver.js";
@@ -51,6 +63,10 @@ const VALID_STATIC_TOPICS = new Set([
 function isValidTopic(topic: string): boolean {
   if (VALID_STATIC_TOPICS.has(topic)) return true;
   if (/^dispatch:jsonl:[a-zA-Z0-9_-]+$/.test(topic)) return true;
+  // Per-card chat alias (DX-351): `chat:<ISS-N>` follows the latest
+  // issue-chat dispatch for the card so the dashboard subscribes once
+  // and tracks the conversation across new dispatches.
+  if (/^chat:[A-Z][A-Z0-9]*-\d+$/.test(topic)) return true;
   return false;
 }
 
@@ -117,6 +133,54 @@ export async function handleStream(
     }
   }
 
+  // For chat:<ISS-N> topics, resolve the leaf issue-chat dispatch via DB and
+  // re-emit its `dispatch:jsonl:<jobId>` events with the stable chat-topic
+  // name. This is the alias contract: the dashboard subscribes once to a
+  // per-card topic and keeps receiving blocks even as the resume chain
+  // grows new dispatch ids underneath.
+  const chatTopics = topics.filter((t) => t.startsWith("chat:"));
+  const chatStartup: Array<{
+    aliasTopic: string;
+    jobId: string;
+    jsonlPath: string;
+  }> = [];
+
+  for (const topic of chatTopics) {
+    // Already validated by `isValidTopic` — match cannot fail.
+    const issueId = topic.slice("chat:".length);
+    try {
+      const dispatch = await findLatestChatDispatchByIssueId(issueId);
+      if (!dispatch) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `No issue-chat session for ${issueId} yet`,
+          }),
+        );
+        return;
+      }
+      const jsonlPath = expectedJsonlPath(dispatch);
+      if (!jsonlPath) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: `No JSONL path available yet for chat session ${issueId}`,
+          }),
+        );
+        return;
+      }
+      chatStartup.push({ aliasTopic: topic, jobId: dispatch.id, jsonlPath });
+    } catch (err) {
+      log.warn(
+        `handleStream: failed to resolve chat session for ${issueId}`,
+        err,
+      );
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Internal server error" }));
+      return;
+    }
+  }
+
   // Open the SSE stream.
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -140,7 +204,16 @@ export async function handleStream(
       unsub();
     }
     // Stop JSONL file watchers whose subscriber count drops to zero.
-    for (const { jobId } of jsonlStartup) {
+    // Chat aliases subscribe to `dispatch:jsonl:<jobId>` under the hood
+    // (the chat re-emit is just a callback wrapper around the same
+    // subscription), so a single subscriber-count check on that topic
+    // covers both the direct `dispatch:jsonl:*` subscribers and the
+    // alias-driven ones.
+    const watcherJobIds = new Set<string>([
+      ...jsonlStartup.map((s) => s.jobId),
+      ...chatStartup.map((s) => s.jobId),
+    ]);
+    for (const jobId of watcherJobIds) {
       if (eventBus.subscriberCount(`dispatch:jsonl:${jobId}`) === 0) {
         stopJsonlWatcher(jobId);
       }
@@ -168,8 +241,11 @@ export async function handleStream(
     cleanup();
   });
 
-  // Subscribe to each topic.
-  for (const topic of topics) {
+  // Subscribe to each direct topic (everything except chat aliases — those
+  // re-emit from the underlying `dispatch:jsonl:<jobId>` topic with the
+  // alias name stamped on the SSE payload below).
+  const directTopics = topics.filter((t) => !t.startsWith("chat:"));
+  for (const topic of directTopics) {
     const unsub = eventBus.subscribe(
       topic,
       (event) => {
@@ -190,9 +266,47 @@ export async function handleStream(
     unsubscribers.push(unsub);
   }
 
+  // Chat alias subscriptions — wrap the underlying `dispatch:jsonl:<jobId>`
+  // subscription with a topic-rewriting callback so the SSE payload reads
+  // `{topic: "chat:<ISS-N>", data: [blocks]}` even though the eventBus
+  // produces only `dispatch:jsonl:*` events. This is the per-card stable
+  // topic the dashboard's Chat tab consumes — it follows the leaf of the
+  // resume chain at subscribe time and stays attached while the watcher
+  // runs.
+  for (const { aliasTopic, jobId } of chatStartup) {
+    const underlying = `dispatch:jsonl:${jobId}` as const;
+    const unsub = eventBus.subscribe(
+      underlying,
+      (event) => {
+        if (closed) return;
+        try {
+          writeEvent(res, { topic: aliasTopic, data: event.data } as BusEvent);
+        } catch {
+          cleanup();
+        }
+      },
+      () => {
+        log.warn(
+          `SSE subscriber evicted for alias topic "${aliasTopic}" (slow consumer)`,
+        );
+        cleanup();
+      },
+      () => (res.writableLength ?? 0) > MAX_WRITE_BUFFER_BYTES,
+    );
+    unsubscribers.push(unsub);
+  }
+
   // Start JSONL file watchers (after subscribing to topics so we don't miss
-  // events between subscription and watcher start).
-  for (const { jobId, jsonlPath } of jsonlStartup) {
+  // events between subscription and watcher start). Chat aliases ride the
+  // same `dispatch:jsonl:<jobId>` topic, so they need the same watcher.
+  // `startJsonlWatcher` is idempotent per jobId — a chat alias and a
+  // direct `dispatch:jsonl:<id>` subscription pointing at the same row
+  // share one watcher.
+  const watcherStartups = [
+    ...jsonlStartup,
+    ...chatStartup.map(({ jobId, jsonlPath }) => ({ jobId, jsonlPath })),
+  ];
+  for (const { jobId, jsonlPath } of watcherStartups) {
     // startJsonlWatcher hydrates existing content synchronously via publish
     // and then starts the poll interval.
     startJsonlWatcher(jobId, jsonlPath).catch((err) => {

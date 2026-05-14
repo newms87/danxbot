@@ -21,6 +21,7 @@ import {
   handleLaunchProxy,
   handleResumeProxy,
   handleFleshOutProxy,
+  handleChatProxy,
   handleJobProxy,
   loadDispatchToken,
   clearCachedWorkerHost,
@@ -704,6 +705,166 @@ describe("handleFleshOutProxy", () => {
     expect(status).toBe(404);
     expect(JSON.parse(body).error).toMatch(/unknown-repo/);
     expect(worker.requests).toHaveLength(0);
+  });
+});
+
+describe("handleChatProxy", () => {
+  // DX-348 Phase 3 (DX-351) — per-card chat proxy. Same auth band +
+  // body.repo → worker forwarder as launch/resume/flesh-out. The worker
+  // owns issue_id + text validation + fresh/resume decision; the proxy
+  // is pure pass-through. Pins the upstream PATH (/api/chat) so a
+  // refactor that re-routes through /api/launch is caught.
+  let worker: FakeWorker;
+  let repos: RepoConfig[];
+
+  beforeAll(async () => {
+    worker = await startFakeWorker();
+    repos = [
+      {
+        name: "platform",
+        url: "",
+        localPath: "/tmp/platform",
+        hostPath: "/tmp/platform",
+        workerPort: worker.port,
+      },
+    ];
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve) => worker.server.close(() => resolve()));
+  });
+
+  beforeEach(() => {
+    worker.requests.length = 0;
+    worker.respondWith(200, {
+      job_id: "chat-abc",
+      parent_job_id: null,
+      status: "launched",
+    });
+  });
+
+  async function runChat(
+    body: Record<string, unknown>,
+    opts: { token?: string; auth?: string } = {},
+  ): Promise<{ status: number; body: string }> {
+    const { req, res } = createMockReqRes("POST", "/api/chat");
+    if (opts.auth) req.headers.authorization = opts.auth;
+    const bodyJson = JSON.stringify(body);
+    process.nextTick(() => {
+      req.emit("data", Buffer.from(bodyJson));
+      req.emit("end");
+    });
+    await handleChatProxy(req, res, {
+      token: opts.token ?? "tok",
+      repos,
+      resolveHost: testHostResolver,
+    });
+    return {
+      status: (
+        res as unknown as { _getStatusCode: () => number }
+      )._getStatusCode(),
+      body: (res as unknown as { _getBody: () => string })._getBody(),
+    };
+  }
+
+  it("rejects unauthenticated requests with 401 (missing header)", async () => {
+    const { status } = await runChat({
+      repo: "platform",
+      issue_id: "DX-351",
+      text: "hi",
+    });
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("rejects wrong-bearer requests with 401", async () => {
+    const { status } = await runChat(
+      {
+        repo: "platform",
+        issue_id: "DX-351",
+        text: "hi",
+      },
+      { auth: "Bearer wrong-token" },
+    );
+    expect(status).toBe(401);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("forwards POST to /api/chat on the matching worker with body intact", async () => {
+    const { status, body } = await runChat(
+      {
+        repo: "platform",
+        issue_id: "DX-351",
+        text: "please flip status to ToDo",
+        api_token: "t",
+      },
+      { auth: "Bearer tok" },
+    );
+
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual({
+      job_id: "chat-abc",
+      parent_job_id: null,
+      status: "launched",
+    });
+
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0].method).toBe("POST");
+    expect(worker.requests[0].url).toBe("/api/chat");
+    expect(JSON.parse(worker.requests[0].body)).toEqual({
+      repo: "platform",
+      issue_id: "DX-351",
+      text: "please flip status to ToDo",
+      api_token: "t",
+    });
+  });
+
+  it("propagates upstream 400 verbatim when issue_id is malformed", async () => {
+    worker.respondWith(400, {
+      error: 'Invalid issue_id "dx-351" — must match <PREFIX>-N (e.g. DX-123)',
+    });
+    const { status, body } = await runChat(
+      {
+        repo: "platform",
+        issue_id: "dx-351",
+        text: "hi",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(400);
+    expect(JSON.parse(body).error).toMatch(/Invalid issue_id/);
+  });
+
+  it("returns 404 when the repo is not configured", async () => {
+    const { status, body } = await runChat(
+      {
+        repo: "unknown-repo",
+        issue_id: "DX-1",
+        text: "hi",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(404);
+    expect(JSON.parse(body).error).toMatch(/unknown-repo/);
+    expect(worker.requests).toHaveLength(0);
+  });
+
+  it("propagates upstream 200 with parent_job_id set on RESUME path", async () => {
+    worker.respondWith(200, {
+      job_id: "chat-resumed",
+      parent_job_id: "chat-prior",
+      status: "launched",
+    });
+    const { status, body } = await runChat(
+      {
+        repo: "platform",
+        issue_id: "DX-351",
+        text: "next turn",
+      },
+      { auth: "Bearer tok" },
+    );
+    expect(status).toBe(200);
+    expect(JSON.parse(body).parent_job_id).toBe("chat-prior");
   });
 });
 

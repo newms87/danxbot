@@ -5,6 +5,9 @@
  * - GET /health — liveness check (DB + Slack)
  * - POST /api/launch — dispatch an agent for this repo
  * - POST /api/resume — resume a prior dispatch's Claude session (--resume)
+ * - POST /api/flesh-out — async card flesh-out (DX-349)
+ * - POST /api/chat — per-card chat session (DX-351 — fresh OR resume per
+ *   the chat-sessions record at <repoRoot>/.danxbot/chat-sessions/<id>.json)
  * - GET /api/status/:jobId — check job status
  * - POST /api/cancel/:jobId — cancel a running job
  * - POST /api/stop/:jobId — agent self-stop (lifecycle tool callback)
@@ -21,6 +24,7 @@ import {
   handleLaunch,
   handleResume,
   handleFleshOut,
+  handleChat,
   handleCancel,
   handleListJobs,
   handleStatus,
@@ -71,6 +75,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "POST" && url.pathname === "/api/flesh-out") {
       await handleFleshOut(req, res, repo);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/chat") {
+      await handleChat(req, res, repo);
       return;
     }
 

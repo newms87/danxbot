@@ -79,3 +79,7 @@ deploy/targets/.cache/
 .danxbot/CRITICAL_FAILURE
 # DX-324 — per-minute system cron tick state (lastRunMs per registered job)
 .danxbot/cron-state.json
+# DX-351 — per-card chat session storage (find-or-create-or-resume cache
+# read by handleChat; survives worker restart but is repo-local runtime
+# state, never committed).
+.danxbot/chat-sessions/

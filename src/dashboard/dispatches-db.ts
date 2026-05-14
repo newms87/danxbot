@@ -382,6 +382,42 @@ export async function listDispatchesByIssueId(
 }
 
 /**
+ * Find the latest issue-chat dispatch for a card (DX-348 Phase 3 / DX-351).
+ *
+ * The per-card chat SSE topic `chat:<ISS-N>` needs to resolve to the leaf
+ * of the resume chain for that card so the dashboard subscribes once and
+ * follows the conversation across new dispatches. Filter is on
+ * `issue_id = $1 AND triggerMetadata->>'workspace' = 'issue-chat'`,
+ * newest-first, limit 1.
+ *
+ * Not filtered by `repo_name`: issue ids are globally unique within a
+ * danxbot deployment (each connected repo declares its own `<PREFIX>` in
+ * `.danxbot/config/issue-prefix.yml` and no two repos share a prefix), so
+ * a `<PREFIX>-N` id uniquely identifies the card without a repo
+ * qualifier. If a future deployment ever allows duplicate prefixes, this
+ * helper would need a `repo_name` argument — the test fixture pins the
+ * SQL shape so the gap is visible.
+ *
+ * Returns null when no issue-chat dispatch has been created for the
+ * card yet — handleStream maps that to a 404 so the dashboard doesn't
+ * open an SSE connection on a topic with no producer.
+ */
+export async function findLatestChatDispatchByIssueId(
+  issueId: string,
+): Promise<Dispatch | null> {
+  const rows = await query<DispatchRow>(
+    `SELECT * FROM dispatches
+     WHERE issue_id = $1
+       AND trigger_metadata->>'workspace' = 'issue-chat'
+     ORDER BY started_at DESC
+     LIMIT 1`,
+    [issueId],
+  );
+  if (rows.length === 0) return null;
+  return rowToDispatch(rows[0]);
+}
+
+/**
  * List every board-chat dispatch for the given repo. Filter is on
  * `triggerMetadata->>'workspace' = 'board-chat'` — workspace is a JSONB
  * key (no dedicated column). Newest-first.

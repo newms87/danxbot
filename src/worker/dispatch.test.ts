@@ -249,12 +249,23 @@ import {
   handleLaunch,
   handleResume,
   handleFleshOut,
+  handleChat,
   handleCancel,
   handleListJobs,
   handleStatus,
   handleStop,
   clearJobCleanupIntervals,
 } from "./dispatch.js";
+
+// `handleChat` reads + writes <repoRoot>/.danxbot/chat-sessions/<id>.json
+// to decide fresh-vs-resume. Mock the storage helper so tests can drive
+// every branch without touching disk.
+const mockReadChatSession = vi.fn();
+const mockWriteChatSession = vi.fn();
+vi.mock("../issue/chat-sessions.js", () => ({
+  readChatSession: (...args: unknown[]) => mockReadChatSession(...args),
+  writeChatSession: (...args: unknown[]) => mockWriteChatSession(...args),
+}));
 
 const MOCK_REPO = makeRepoContext();
 
@@ -2304,5 +2315,427 @@ describe("handleFleshOut — body validation + dispatch wiring", () => {
 
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody())).toEqual({ error: "spawn ENOENT" });
+  });
+});
+
+/**
+ * `handleChat` — DX-348 Phase 3 (DX-351). Per-card chat session.
+ *
+ * The handler validates {issue_id, text}, looks up the chat-sessions
+ * record for the issue, decides FRESH (no record / stale session) vs
+ * RESUME (record + claude session file still exists), then forwards to
+ * `dispatch()` with workspace `issue-chat`. After a successful spawn,
+ * the new `dispatch_id` is persisted to the chat-sessions file so the
+ * next call resumes the leaf of the chain.
+ *
+ * Test surface:
+ *   - 503 when dispatchApi toggled off (mirrors the rest of the dispatch routes).
+ *   - 400 on missing / blank / malformed issue_id + text.
+ *   - 400 when body.repo names a different worker.
+ *   - 200 FRESH path — no prior record → `/danx-chat <id>\n\n<text>` task.
+ *   - 200 RESUME path — prior record + session resolves → text-only task,
+ *     resumeSessionId + parentJobId threaded.
+ *   - 200 FRESH path when chat-sessions exists but the prior session uuid
+ *     can't be resolved (stale record after worker move / claude purge).
+ *   - chat-sessions write happens AFTER dispatch returns, with the new id.
+ *   - error-mapping chain matches handleFleshOut (ClaudeAuthError → 503, etc.)
+ */
+describe("handleChat — body validation + fresh/resume routing", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "test-chat-1" });
+    mockReadChatSession.mockResolvedValue(null);
+    mockWriteChatSession.mockResolvedValue(undefined);
+    mockFindSessionFileByDispatchId.mockResolvedValue(null);
+  });
+
+  it("returns 503 when dispatchApi is disabled", async () => {
+    mockIsFeatureEnabled.mockImplementation(
+      (_ctx: unknown, feature: string) => feature !== "dispatchApi",
+    );
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "hello",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: `Dispatch API is disabled for repo ${MOCK_REPO.name}`,
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+    expect(mockWriteChatSession).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when body.repo names a different worker", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: "wrong-repo",
+      issue_id: "DX-351",
+      text: "hi",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /This worker manages "[^"]+", not "wrong-repo"/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when issue_id is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      text: "hi",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: issue_id",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["lowercase prefix", "dx-351"],
+    ["digit prefix", "12-351"],
+    ["no dash", "DX351"],
+    ["empty digits", "DX-"],
+    ["trailing junk", "DX-351x"],
+  ])("returns 400 on malformed issue_id (%s)", async (_label, raw) => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: raw,
+      text: "hi",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /^Invalid issue_id ".*" — must match <PREFIX>-N/,
+    );
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when text is missing", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: text",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when text is whitespace-only", async () => {
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "   ",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "Missing or blank required field: text",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("FRESH path: no prior record → dispatches with /danx-chat <id> + text task, no resume, persists new id", async () => {
+    mockReadChatSession.mockResolvedValue(null);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "new-chat-job" });
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "please flip status to ToDo",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      job_id: "new-chat-job",
+      parent_job_id: null,
+      status: "launched",
+    });
+
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    type ChatDispatchInput = {
+      workspace: string;
+      task: string;
+      issueId?: string;
+      resumeSessionId?: string;
+      parentJobId?: string;
+      apiDispatchMeta: {
+        trigger: string;
+        metadata: { endpoint: string; workspace: string };
+      };
+    };
+    const input = mockDispatchFn.mock.calls[0][0] as ChatDispatchInput;
+    expect(input.workspace).toBe("issue-chat");
+    expect(input.task).toBe(
+      "/danx-chat DX-351\n\nplease flip status to ToDo",
+    );
+    expect(input.issueId).toBe("DX-351");
+    expect(input.resumeSessionId).toBeUndefined();
+    expect(input.parentJobId).toBeUndefined();
+    expect(input.apiDispatchMeta.metadata.endpoint).toBe("/api/chat");
+    expect(input.apiDispatchMeta.metadata.workspace).toBe("issue-chat");
+
+    expect(mockWriteChatSession).toHaveBeenCalledTimes(1);
+    expect(mockWriteChatSession).toHaveBeenCalledWith(
+      MOCK_REPO.localPath,
+      "DX-351",
+      "new-chat-job",
+    );
+  });
+
+  it("RESUME path: prior record + session resolves → text-only task, resumeSessionId + parentJobId set, new id persisted", async () => {
+    mockReadChatSession.mockResolvedValue({
+      dispatch_id: "prior-chat-job",
+      updated_at: "2026-05-14T07:00:00.000Z",
+    });
+    // findSessionFileByDispatchId returns the JSONL file path; the
+    // resolver basenames it (minus `.jsonl`) to get the session uuid.
+    mockFindSessionFileByDispatchId.mockResolvedValue(
+      "/fake/projects/x/session-uuid-abc.jsonl",
+    );
+    mockDispatchFn.mockResolvedValue({ dispatchId: "resumed-chat-job" });
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "and also bump priority",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      job_id: "resumed-chat-job",
+      parent_job_id: "prior-chat-job",
+      status: "launched",
+    });
+
+    const input = mockDispatchFn.mock.calls[0][0] as {
+      task: string;
+      resumeSessionId?: string;
+      parentJobId?: string;
+    };
+    // No skill prompt on resume — claude --resume continues the
+    // conversation history; reinjecting the skill would duplicate
+    // boilerplate in the dispatched session.
+    expect(input.task).toBe("and also bump priority");
+    expect(input.resumeSessionId).toBe("session-uuid-abc");
+    expect(input.parentJobId).toBe("prior-chat-job");
+
+    expect(mockWriteChatSession).toHaveBeenCalledWith(
+      MOCK_REPO.localPath,
+      "DX-351",
+      "resumed-chat-job",
+    );
+  });
+
+  it("STALE record path: prior record exists but session uuid unresolvable → fall through to FRESH dispatch", async () => {
+    mockReadChatSession.mockResolvedValue({
+      dispatch_id: "abandoned-job",
+      updated_at: "2026-05-01T00:00:00.000Z",
+    });
+    mockFindSessionFileByDispatchId.mockResolvedValue(null);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "fresh-after-stale" });
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "still want to chat",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.parent_job_id).toBeNull();
+
+    const input = mockDispatchFn.mock.calls[0][0] as {
+      task: string;
+      resumeSessionId?: string;
+    };
+    expect(input.task).toBe("/danx-chat DX-351\n\nstill want to chat");
+    expect(input.resumeSessionId).toBeUndefined();
+    // Stale record was overwritten with the new dispatch id.
+    expect(mockWriteChatSession).toHaveBeenCalledWith(
+      MOCK_REPO.localPath,
+      "DX-351",
+      "fresh-after-stale",
+    );
+  });
+
+  it("chat-sessions write failure AFTER dispatch still returns 200 + job_id (dispatch already launched)", async () => {
+    // The dispatch IS the authoritative side effect; failing to record
+    // the new leaf would only cost a re-dispatch FRESH on the next
+    // turn. Telling the caller "your request failed" while the agent
+    // is burning tokens is worse than the lost cache write.
+    mockReadChatSession.mockResolvedValue(null);
+    mockDispatchFn.mockResolvedValue({ dispatchId: "launched-job" });
+    mockWriteChatSession.mockRejectedValueOnce(
+      new Error("EACCES on chat-sessions"),
+    );
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "hello",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      job_id: "launched-job",
+      parent_job_id: null,
+      status: "launched",
+    });
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT pass dispatchKind on chat dispatch — prevents the ToDo→In Progress auto-flip from triggering on a chat turn", async () => {
+    // src/dispatch/core.ts auto-flips ToDo → In Progress when
+    // `dispatchKind === "work"` and `issueId` is set. Chat dispatches
+    // MUST NOT trigger that flip — a chat turn against a ToDo card is
+    // a conversation, not a pickup. Defensive against a future
+    // refactor that defaults dispatchKind="work" or adds it implicitly.
+    mockReadChatSession.mockResolvedValue(null);
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "what is this card about?",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    const input = mockDispatchFn.mock.calls[0][0] as {
+      issueId?: string;
+      dispatchKind?: string;
+    };
+    expect(input.issueId).toBe("DX-351");
+    expect(input.dispatchKind).toBeUndefined();
+  });
+
+  it("chat-sessions read failure is non-fatal — proceeds as FRESH", async () => {
+    // Disk-read errors must not 500 — the chat-sessions record is a
+    // cache, not authoritative state. A bad read self-heals via the
+    // subsequent write.
+    mockReadChatSession.mockRejectedValue(new Error("EIO read failure"));
+    mockDispatchFn.mockResolvedValue({ dispatchId: "recovered-job" });
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "still works",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = mockDispatchFn.mock.calls[0][0] as { task: string };
+    expect(input.task).toBe("/danx-chat DX-351\n\nstill works");
+    expect(mockWriteChatSession).toHaveBeenCalledWith(
+      MOCK_REPO.localPath,
+      "DX-351",
+      "recovered-job",
+    );
+  });
+
+  it("forwards api_token + status_url to dispatch()", async () => {
+    mockReadChatSession.mockResolvedValue(null);
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "hello",
+      api_token: "bearer-xyz",
+      status_url: "https://laravel.example.com/agent/status",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(200);
+    const input = mockDispatchFn.mock.calls[0][0] as {
+      apiToken?: string;
+      statusUrl?: string;
+    };
+    expect(input.apiToken).toBe("bearer-xyz");
+    expect(input.statusUrl).toBe("https://laravel.example.com/agent/status");
+  });
+
+  it("maps ClaudeAuthError from dispatch() to 503", async () => {
+    const { ClaudeAuthError } = await import(
+      "../agent/claude-auth-preflight.js"
+    );
+    mockReadChatSession.mockResolvedValue(null);
+    mockDispatchFn.mockRejectedValueOnce(
+      new ClaudeAuthError({
+        ok: false,
+        reason: "readonly",
+        summary: "claude-auth read-only",
+      }),
+    );
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "hi",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(503);
+    expect(JSON.parse(res._getBody()).error).toBe("claude-auth read-only");
+    // No write on failure — the chat-sessions record only advances
+    // when a dispatch actually launched.
+    expect(mockWriteChatSession).not.toHaveBeenCalled();
+  });
+
+  it("maps generic dispatch() failure to 500", async () => {
+    mockReadChatSession.mockResolvedValue(null);
+    mockDispatchFn.mockRejectedValueOnce(new Error("spawn ENOENT"));
+
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      issue_id: "DX-351",
+      text: "hi",
+    });
+    const res = createMockRes();
+
+    await handleChat(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(500);
+    expect(JSON.parse(res._getBody())).toEqual({ error: "spawn ENOENT" });
+    expect(mockWriteChatSession).not.toHaveBeenCalled();
   });
 });

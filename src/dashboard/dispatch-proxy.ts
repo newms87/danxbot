@@ -619,6 +619,22 @@ export async function handleFleshOutProxy(
 }
 
 /**
+ * POST /api/chat proxy — auth + body.repo → forward to worker. The
+ * worker's chat handler validates `body.issue_id` + `body.text`, looks
+ * up the per-card chat-sessions record, and either spawns a fresh
+ * `/danx-chat <issue_id>` dispatch under the `issue-chat` workspace OR
+ * resumes the prior session via `claude --resume`. DX-348 Phase 3 /
+ * DX-351.
+ */
+export async function handleChatProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  await forwardRepoBodyToWorker(req, res, deps, "/api/chat");
+}
+
+/**
  * Proxy for status/cancel/stop routes. Requires `?repo=<name>` on the URL
  * because the dashboard does not store the jobId→worker mapping; workers do.
  */

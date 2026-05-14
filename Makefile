@@ -27,7 +27,7 @@ TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/l
        test test-unit test-integration test-validate test-system \
        test-system-health test-system-dispatch test-system-heartbeat test-system-cancel \
        test-system-error test-system-stall test-system-poller test-system-yaml-memory test-system-cleanup \
-       test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep test-system-flesh-out test-system-orphan-reap \
+       test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep test-system-flesh-out test-system-chat test-system-orphan-reap \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user ensure-root-user reset-data \
        publish-danx-issue-mcp publish-playwright-mcp \
@@ -309,6 +309,9 @@ test-system-prep: ## DX-291 / DX-297 — prep verdict route + onComplete chain (
 
 test-system-flesh-out: ## DX-348 Phase 1 / DX-349 — /api/flesh-out route end-to-end (free, no Claude API)
 	@./src/__tests__/system/run-flesh-out-system-test.sh
+
+test-system-chat: ## DX-348 Phase 3 / DX-351 — /api/chat route + chat-sessions persistence (free, no Claude API)
+	@./src/__tests__/system/run-chat-system-test.sh
 
 test-system-multi-worker: ## DX-164 Phase 6 — multi-agent roster surface (free) + REAL_CLAUDE=1 concurrent dispatch (~$1)
 	@$(SYSTEM_TEST_SCRIPT) --test multi-worker

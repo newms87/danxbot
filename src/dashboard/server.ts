@@ -28,6 +28,7 @@ import {
   handleLaunchProxy,
   handleResumeProxy,
   handleFleshOutProxy,
+  handleChatProxy,
   handleJobProxy,
   loadDispatchToken,
   makeResolveWorkerHost,
@@ -190,6 +191,11 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/flesh-out") {
     await handleFleshOutProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  if (method === "POST" && url.pathname === "/api/chat") {
+    await handleChatProxy(req, res, dispatchDeps);
     return true;
   }
 

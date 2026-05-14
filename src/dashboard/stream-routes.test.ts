@@ -30,8 +30,11 @@ vi.mock("./event-bus.js", () => ({
 }));
 
 const mockGetDispatchById = vi.fn();
+const mockFindLatestChatDispatchByIssueId = vi.fn();
 vi.mock("./dispatches-db.js", () => ({
   getDispatchById: (...args: unknown[]) => mockGetDispatchById(...args),
+  findLatestChatDispatchByIssueId: (...args: unknown[]) =>
+    mockFindLatestChatDispatchByIssueId(...args),
 }));
 
 const mockStartJsonlWatcher = vi.fn().mockResolvedValue(undefined);
@@ -293,6 +296,157 @@ describe("handleStream — keep-alive", () => {
     await vi.advanceTimersByTimeAsync(15_000);
 
     expect(res.written.some((w) => w === ": keep-alive\n\n")).toBe(true);
+  });
+});
+
+describe("handleStream — chat:<ISS-N> alias topic (DX-351)", () => {
+  // Validates the per-card stable topic that the dashboard's Chat tab
+  // subscribes to. The alias resolves to the latest issue-chat dispatch
+  // at subscribe time and re-emits its `dispatch:jsonl:<jobId>` events
+  // with the chat topic name stamped on the SSE payload.
+
+  it("rejects malformed chat topics in the topic validator (400)", async () => {
+    const req = makeReq("topics=chat:not-an-id");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:not-an-id"),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(res.ended).toBe(true);
+    expect(mockFindLatestChatDispatchByIssueId).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when no issue-chat dispatch exists yet for the card", async () => {
+    mockFindLatestChatDispatchByIssueId.mockResolvedValue(null);
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+    expect(res.statusCode).toBe(404);
+    expect(res.ended).toBe(true);
+    expect(mockStartJsonlWatcher).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 when the leaf dispatch has no resolvable JSONL path", async () => {
+    mockFindLatestChatDispatchByIssueId.mockResolvedValue({
+      id: "job-x",
+      jsonlPath: null,
+      sessionUuid: null,
+    });
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+    expect(res.statusCode).toBe(404);
+    expect(mockStartJsonlWatcher).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when the DB lookup throws", async () => {
+    mockFindLatestChatDispatchByIssueId.mockRejectedValue(
+      new Error("DB connection lost"),
+    );
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+    expect(res.statusCode).toBe(500);
+  });
+
+  it("starts the JSONL watcher for the resolved leaf dispatch on a valid chat topic", async () => {
+    mockFindLatestChatDispatchByIssueId.mockResolvedValue({
+      id: "leaf-job",
+      jsonlPath: "/runs/leaf-job/session.jsonl",
+    });
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(mockStartJsonlWatcher).toHaveBeenCalledWith(
+      "leaf-job",
+      "/runs/leaf-job/session.jsonl",
+    );
+    // Subscription is to the UNDERLYING `dispatch:jsonl:<jobId>` topic —
+    // the re-emit happens inside the callback. A direct subscribe on
+    // `chat:<ISS-N>` would deadlock against the watcher (nobody publishes
+    // to that topic).
+    expect(mockSubscribe).toHaveBeenCalledWith(
+      "dispatch:jsonl:leaf-job",
+      expect.any(Function),
+      expect.any(Function),
+      expect.any(Function),
+    );
+  });
+
+  it("re-emits underlying dispatch:jsonl events with the chat topic name", async () => {
+    let capturedCb: ((event: unknown) => void) | null = null;
+    mockSubscribe.mockImplementation(
+      (_topic: string, cb: (event: unknown) => void) => {
+        capturedCb = cb;
+        return () => {};
+      },
+    );
+    mockFindLatestChatDispatchByIssueId.mockResolvedValue({
+      id: "leaf-job",
+      jsonlPath: "/runs/leaf-job/session.jsonl",
+    });
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+
+    // EventBus delivers an event on the UNDERLYING topic.
+    capturedCb!({
+      topic: "dispatch:jsonl:leaf-job",
+      data: [{ blockId: "msg-1" }],
+    });
+
+    // SSE payload is re-stamped with the chat alias topic name; the
+    // dashboard's subscriber never sees the underlying dispatch_id.
+    expect(
+      res.written.some((w) => w.includes('"topic":"chat:DX-351"')),
+    ).toBe(true);
+    expect(
+      res.written.some((w) => w.includes('"blockId":"msg-1"')),
+    ).toBe(true);
+    // And it does NOT leak the underlying dispatch:jsonl:* topic name.
+    expect(
+      res.written.some((w) => w.includes('"topic":"dispatch:jsonl:')),
+    ).toBe(false);
+  });
+
+  it("stops the JSONL watcher on client disconnect when no other subscribers remain", async () => {
+    mockFindLatestChatDispatchByIssueId.mockResolvedValue({
+      id: "leaf-job",
+      jsonlPath: "/runs/leaf-job/session.jsonl",
+    });
+    mockSubscriberCount.mockReturnValue(0);
+    const req = makeReq("topics=chat:DX-351");
+    const res = makeRes();
+    await handleStream(
+      req,
+      res,
+      new URLSearchParams("topics=chat:DX-351"),
+    );
+    (req as unknown as EventEmitter).emit("close");
+    expect(mockStopJsonlWatcher).toHaveBeenCalledWith("leaf-job");
   });
 });
 

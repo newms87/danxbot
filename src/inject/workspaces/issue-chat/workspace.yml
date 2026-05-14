@@ -1,0 +1,7 @@
+name: issue-chat
+description: Per-card chat with the danxbot agent (DX-348 Phase 3 / DX-351). One Claude Code session per card — read + reply + optional YAML edit via Edit / Write; subsequent messages resume the same session via claude --resume.
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []

@@ -40,6 +40,7 @@ import {
   deleteOldDispatches,
   rowToDispatch,
   dispatchToInsertParams,
+  findLatestChatDispatchByIssueId,
   listDispatchesByIssueId,
   listBoardChatDispatches,
   getResumeChain,
@@ -1069,6 +1070,36 @@ describe("listDispatchesByIssueId", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe("job-2");
     expect(rows[0].issueId).toBe("DX-84");
+  });
+});
+
+describe("findLatestChatDispatchByIssueId (DX-351)", () => {
+  it("filters by issue_id + workspace=issue-chat, orders newest-first, limits 1", async () => {
+    mockQuery.mockResolvedValueOnce([]);
+    await findLatestChatDispatchByIssueId("DX-351");
+    const sql = mockQuery.mock.calls[0][0] as string;
+    const params = mockQuery.mock.calls[0][1] as unknown[];
+    expect(sql).toContain("FROM dispatches");
+    expect(sql).toContain("issue_id = $1");
+    expect(sql).toContain("trigger_metadata->>'workspace' = 'issue-chat'");
+    expect(sql).toMatch(/ORDER BY started_at DESC/i);
+    expect(sql).toMatch(/LIMIT\s+1/i);
+    expect(params).toEqual(["DX-351"]);
+  });
+
+  it("returns null when no rows match", async () => {
+    mockQuery.mockResolvedValueOnce([]);
+    const result = await findLatestChatDispatchByIssueId("DX-999");
+    expect(result).toBeNull();
+  });
+
+  it("hydrates the matched row via rowToDispatch", async () => {
+    mockQuery.mockResolvedValueOnce([
+      makeRow({ id: "chat-leaf-job", issue_id: "DX-351" }),
+    ]);
+    const result = await findLatestChatDispatchByIssueId("DX-351");
+    expect(result?.id).toBe("chat-leaf-job");
+    expect(result?.issueId).toBe("DX-351");
   });
 });
 

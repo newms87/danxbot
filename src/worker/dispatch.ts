@@ -28,6 +28,10 @@ import {
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 import { resolveParentSessionId } from "../agent/resolve-parent-session.js";
+import {
+  readChatSession,
+  writeChatSession,
+} from "../issue/chat-sessions.js";
 import { normalizeCallbackUrl } from "./url-normalizer.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { writeFlag } from "../critical-failure.js";
@@ -96,6 +100,69 @@ function requireString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? value : null;
+}
+
+/**
+ * Canonical `<PREFIX>-N` regex used by every issue-id-aware dispatch
+ * route (`/api/flesh-out`, `/api/chat`). Single source of truth — a
+ * regression that loosens the shape in one handler shows up under grep
+ * here. Mirrors `chatSessionPath`'s validator in `chat-sessions.ts` (the
+ * storage helper enforces the same shape from a different reachability
+ * surface).
+ */
+const ISSUE_ID_REGEX = /^[A-Z][A-Z0-9]*-\d+$/;
+
+/**
+ * Validate the body's `issue_id` field for the flesh-out / chat routes.
+ * Returns the trimmed issue id on success, or null after writing the
+ * appropriate 400 to `res`. Two distinct error messages: missing/blank
+ * vs malformed-shape — callers downstream sometimes grep on the literal
+ * text, so the pair is canonical.
+ */
+function validateIssueIdBody(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+): string | null {
+  const issueId = requireString(body.issue_id);
+  if (!issueId) {
+    json(res, 400, { error: "Missing or blank required field: issue_id" });
+    return null;
+  }
+  if (!ISSUE_ID_REGEX.test(issueId)) {
+    json(res, 400, {
+      error: `Invalid issue_id "${issueId}" — must match <PREFIX>-N (e.g. DX-123)`,
+    });
+    return null;
+  }
+  return issueId;
+}
+
+/**
+ * Build the `apiDispatchMeta` block every dispatch route stamps on the
+ * dispatch row. Single helper so a new field added to the metadata
+ * shape lands in every handler without four parallel edits — and so a
+ * typo in `endpoint` / `workspace` can't drift between routes. Used by
+ * the trio of issue-id-aware routes (`/api/flesh-out`, `/api/chat`) and
+ * available to future single-task routes that don't need the full
+ * `parseDispatchRequest` shape.
+ */
+function buildApiDispatchMeta(opts: {
+  endpoint: string;
+  workspace: string;
+  callerIp: string | null;
+  statusUrl: string | undefined;
+  initialPrompt: string;
+}): DispatchTriggerMetadata {
+  return {
+    trigger: "api",
+    metadata: {
+      endpoint: opts.endpoint,
+      callerIp: opts.callerIp,
+      statusUrl: opts.statusUrl ?? null,
+      initialPrompt: opts.initialPrompt,
+      workspace: opts.workspace,
+    },
+  };
 }
 
 /**
@@ -682,36 +749,21 @@ export async function handleFleshOut(
     // a misrouted call should 400 here just like `/api/launch` does.
     if (!validateRepoMatch(body, res, repo)) return;
 
-    const issueId = requireString(body.issue_id);
-    if (!issueId) {
-      json(res, 400, { error: "Missing or blank required field: issue_id" });
-      return;
-    }
-    // The flesh-out skill embeds the id literally in its `/danx-flesh-out
-    // <issue_id>` argument; reject non-`<PREFIX>-N` shapes here so a typo'd
-    // caller doesn't get a confusing dispatch failure deeper in the stack.
-    if (!/^[A-Z][A-Z0-9]*-\d+$/.test(issueId)) {
-      json(res, 400, {
-        error: `Invalid issue_id "${issueId}" — must match <PREFIX>-N (e.g. DX-123)`,
-      });
-      return;
-    }
+    const issueId = validateIssueIdBody(body, res);
+    if (!issueId) return;
 
     const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
     const apiToken =
       typeof body.api_token === "string" ? body.api_token : undefined;
 
     const task = `/danx-flesh-out ${issueId}`;
-    const apiDispatchMeta: DispatchTriggerMetadata = {
-      trigger: "api",
-      metadata: {
-        endpoint: "/api/flesh-out",
-        callerIp,
-        statusUrl: statusUrl ?? null,
-        initialPrompt: task,
-        workspace: "issue-worker",
-      },
-    };
+    const apiDispatchMeta = buildApiDispatchMeta({
+      endpoint: "/api/flesh-out",
+      workspace: "issue-worker",
+      callerIp,
+      statusUrl,
+      initialPrompt: task,
+    });
 
     const { dispatchId } = await dispatch({
       repo,
@@ -737,6 +789,154 @@ export async function handleFleshOut(
     log.error("Flesh-out failed", err);
     json(res, 500, {
       error: err instanceof Error ? err.message : "Flesh-out failed",
+    });
+  }
+}
+
+/**
+ * `POST /api/chat` — per-card chat session backend (DX-348 Phase 3 / DX-351).
+ *
+ * Body: `{repo?, issue_id, text, api_token?, status_url?}`. Looks up the
+ * per-card chat record at `<repoRoot>/.danxbot/chat-sessions/<issue_id>.json`
+ * and decides FRESH vs RESUME:
+ *
+ *   - **FRESH** (no record OR stale session) — spawns
+ *     `/danx-chat <issue_id>\n\n<text>` in the `issue-chat` workspace.
+ *   - **RESUME** (record + claude session uuid still resolvable on disk)
+ *     — spawns the next turn via `claude --resume <session-uuid>` with
+ *     `task = <text>` (no skill re-injection; conversation history
+ *     already carries the skill body + prior YAML state).
+ *
+ * After a successful dispatch, the new dispatch id is persisted to the
+ * chat-sessions file so the next call resumes the leaf of the chain. The
+ * chat-sessions file is best-effort: a read failure self-heals via the
+ * subsequent write; a write failure surfaces from the handler as a 500
+ * (the dispatch already launched, but the next call would re-dispatch
+ * fresh — a recoverable inconsistency).
+ *
+ * Decoupled from `/api/launch` so the dashboard's Chat tab doesn't need
+ * to know the workspace name / task shape / session lookup. The route
+ * is symmetric with `/api/flesh-out` (DX-349) — same auth band, same
+ * error-mapping chain, same `dispatchApi` toggle gate.
+ */
+export async function handleChat(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repo: RepoContext,
+): Promise<void> {
+  try {
+    if (!isFeatureEnabled(repo, "dispatchApi")) {
+      json(res, 503, {
+        error: `Dispatch API is disabled for repo ${repo.name}`,
+      });
+      return;
+    }
+
+    const body = await parseBody(req);
+
+    if (!validateRepoMatch(body, res, repo)) return;
+
+    const issueId = validateIssueIdBody(body, res);
+    if (!issueId) return;
+
+    const text = requireString(body.text);
+    if (!text) {
+      json(res, 400, { error: "Missing or blank required field: text" });
+      return;
+    }
+
+    const { statusUrl, callerIp } = parseSharedRequestFields(req, body);
+    const apiToken =
+      typeof body.api_token === "string" ? body.api_token : undefined;
+
+    // Decide FRESH vs RESUME. The chat-sessions record is a cache, so
+    // a read failure does NOT 500 — but it MUST log loudly (fail-loud
+    // discipline). `readChatSession` already collapses every known
+    // recoverable failure (ENOENT, malformed JSON, missing field) to
+    // `null` internally; reaching this catch means an infrastructure-
+    // level error (EIO / EACCES / EMFILE) that the operator should see.
+    let resumeSessionId: string | undefined;
+    let parentJobId: string | undefined;
+    let prior: Awaited<ReturnType<typeof readChatSession>> = null;
+    try {
+      prior = await readChatSession(repo.localPath, issueId);
+    } catch (err) {
+      log.warn(
+        `Chat ${issueId}: chat-sessions read failed, falling through to FRESH`,
+        err,
+      );
+    }
+    if (prior) {
+      const resolved = await resolveParentSessionId(repo.name, prior.dispatch_id);
+      if (resolved.kind === "found") {
+        resumeSessionId = resolved.sessionId;
+        parentJobId = prior.dispatch_id;
+      }
+      // "not-found" / "no-session-dir" → fall through to FRESH. The
+      // record gets overwritten with the new dispatch id post-spawn.
+    }
+
+    // First-turn task includes the skill argument so the dispatched
+    // agent loads danx-chat. Resume passes only the user text — claude
+    // --resume restores the prior session and the skill body is
+    // already in-context.
+    const task = resumeSessionId
+      ? text
+      : `/danx-chat ${issueId}\n\n${text}`;
+
+    const apiDispatchMeta = buildApiDispatchMeta({
+      endpoint: "/api/chat",
+      workspace: "issue-chat",
+      callerIp,
+      statusUrl,
+      initialPrompt: task,
+    });
+
+    const { dispatchId } = await dispatch({
+      repo,
+      workspace: "issue-chat",
+      overlay: {},
+      task,
+      apiToken,
+      statusUrl,
+      apiDispatchMeta,
+      issueId,
+      resumeSessionId,
+      parentJobId,
+    });
+
+    // Persist the new leaf AFTER a successful dispatch — a thrown
+    // dispatch error must NOT advance the chat-sessions record (the
+    // next call would resume a never-started dispatch).
+    //
+    // The dispatch has already launched at this point. If the
+    // chat-sessions write fails (disk full, EACCES on
+    // `.danxbot/chat-sessions/`), the caller still gets 200 +
+    // `job_id` — the agent is running and discarding the launch
+    // signal would be worse than the next turn re-dispatching FRESH.
+    // The error is logged loudly so an operator inspecting the cause
+    // of duplicate dispatches can find the broken write.
+    try {
+      await writeChatSession(repo.localPath, issueId, dispatchId);
+    } catch (err) {
+      log.error(
+        `Chat ${issueId}: chat-sessions write failed after dispatch ${dispatchId} launched — next turn will re-dispatch FRESH instead of resuming`,
+        err,
+      );
+    }
+
+    json(res, 200, {
+      job_id: dispatchId,
+      parent_job_id: parentJobId ?? null,
+      status: "launched",
+    });
+  } catch (err) {
+    if (mapDispatchError(err, res, "Chat")) return;
+    // Best-effort issue-id pull for grep-friendliness; `req` body has
+    // been parsed at this point so the cheap re-typecheck is safe.
+    log.error("Chat failed", err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Chat failed",
     });
   }
 }
