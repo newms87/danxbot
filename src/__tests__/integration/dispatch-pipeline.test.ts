@@ -147,6 +147,37 @@ let tempDir: string;
 let repoDir: string;
 let sessionDir: string;
 let fakeBinDir: string;
+/**
+ * Jobs spawned via `runToCompletion` are pushed here from their
+ * `onComplete` callback so `afterEach` can drain `_cleanup` +
+ * `_forwarderFlush` BEFORE `captureServer.stop()` releases the
+ * ephemeral port.
+ *
+ * `runToCompletion` is the ONLY helper in this file that wires
+ * `eventForwarding` (so it's the only producer of forwarder-side
+ * POSTs that can leak). Direct `spawnAgent` callsites in this file
+ * pass `statusUrl` for heartbeat but never `eventForwarding`, so no
+ * `LaravelForwarder` is constructed and `job._forwarderFlush` stays
+ * undefined — they have nothing to drain.
+ *
+ * Without this drain, the Laravel forwarder's retry tail (default
+ * `[1s,2s,4s,8s,16s,30s]` in `laravel-forwarder.ts`) outlives the
+ * test body — `runCleanup` stashes `forwarderFlush?.()` on
+ * `job._forwarderFlush` as fire-and-forget (`agent-cleanup.ts:119`)
+ * to keep production cleanup latency short. The next test's
+ * `captureServer.start()` (port 0) often gets the SAME ephemeral port
+ * the OS just released; an in-flight POST from the prior dispatch
+ * then lands on the new server (singleton, shared `requests[]`),
+ * polluting assertions like `posts.length === 0` in the "no statusUrl"
+ * test.
+ *
+ * Mirrors `_drainPendingCleanupsForTesting` (`dispatch/core.ts:232`)
+ * for jobs spawned via direct `spawnAgent()` (which doesn't register
+ * them in `activeJobs`). Both promises swallow internal errors per
+ * their contracts; the `Promise.race` against a 5s timeout is
+ * defense-in-depth so a genuinely hung POST cannot freeze teardown.
+ */
+const trackedJobs: AgentJob[] = [];
 
 /**
  * Create a shell wrapper script named `claude` that runs fake-claude.ts via tsx.
@@ -303,7 +334,10 @@ function runToCompletion(overrides?: {
       statusUrl,
       apiToken,
       eventForwarding: overrides?.eventForwarding ?? { statusUrl, apiToken },
-      onComplete: resolve,
+      onComplete: (job) => {
+        trackedJobs.push(job);
+        resolve(job);
+      },
       env: fakeClasudeEnv(overrides),
     }).catch(reject);
   });
@@ -319,6 +353,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   // Reset mutable config to defaults between tests to prevent state leakage
   mockConfig.isHost = false;
+  trackedJobs.length = 0;
   captureServer.clear();
   await captureServer.start();
 
@@ -372,6 +407,26 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Drain every dispatch's `_cleanup` + `_forwarderFlush` BEFORE the
+  // capture server releases its port. See `trackedJobs` header for the
+  // port-reuse race this guards against. Race against a 5s timeout so
+  // a hung POST cannot freeze teardown; both promises are documented
+  // not to reject, so `allSettled` is purely a defense-in-depth shape.
+  //
+  // `_cleanup` is the cached idempotent promise from
+  // `agent-cleanup.ts` (cleanupPromise) — re-awaiting it after the
+  // close handler invoked it is a no-op once resolved, but the
+  // re-await is what guarantees `_forwarderFlush` is set (it's
+  // populated at step 6 inside `runCleanup`, AFTER the awaited
+  // `watcher.drain` + `watcher.stop`).
+  const drains = trackedJobs.map(async (j) => {
+    if (j._cleanup) await j._cleanup();
+    if (j._forwarderFlush) await j._forwarderFlush;
+  });
+  await Promise.race([
+    Promise.allSettled(drains),
+    new Promise<void>((res) => setTimeout(res, 5_000)),
+  ]);
   await captureServer.stop();
   if (sessionDir && existsSync(sessionDir)) {
     rmSync(sessionDir, { recursive: true, force: true });

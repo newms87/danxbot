@@ -458,7 +458,15 @@ describe("watchRepoEnvFile", () => {
       updates: { FOO: "first" },
       writtenBy: "test",
     });
-    await new Promise((r) => setTimeout(r, 500));
+    // Poll for the chokidar fire instead of a fixed 500ms wait. Under
+    // full-sweep load the watcher's debounce + inotify delivery can
+    // exceed the 500ms ceiling (DX-502 verification surfaced this).
+    // 2s deadline + 25ms poll keeps the happy path fast (~100ms) and
+    // the slow path resilient.
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline && !secondFire) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
 
     expect(secondFire).toBe(true);
   });
