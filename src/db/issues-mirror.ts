@@ -666,6 +666,13 @@ export async function startIssuesMirror(
       // the file; skip the upsert + history insert.
       rememberRecent(repoName, parsed.id, contentHash);
       resolvePending(repoName, parsed.id, contentHash);
+      // DX-548: post phase 2, the writer pre-populates the DB row before
+      // the file write — so for own-writes this branch is the dominant
+      // case. The skip-match log lets the operator confirm the
+      // external-vs-own write distribution from a worker log scan.
+      log.debug(
+        `[${repoName}] mirrored ${parsed.id} (source=${source}, action=skip-match)`,
+      );
       // The DB row is in place (from a prior tick). The fs event still
       // reached us, so reconcile MUST fire — its fanout (Phase 2+) is
       // independent of whether THIS tick wrote a row.
@@ -688,7 +695,9 @@ export async function startIssuesMirror(
     }
     rememberRecent(repoName, parsed.id, contentHash);
     resolvePending(repoName, parsed.id, contentHash);
-    log.debug(`[${repoName}] mirrored ${parsed.id} (source=${source})`);
+    log.debug(
+      `[${repoName}] mirrored ${parsed.id} (source=${source}, action=upsert)`,
+    );
     await fireOnWatcherUpsert(parsed.id, source);
     return parsed.id;
   }

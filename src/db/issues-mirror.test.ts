@@ -777,3 +777,208 @@ describe("upsertIssueRowNow (DX-547 — writer path)", () => {
     expect(getWriterDb(repo.localPath)).toBeUndefined();
   });
 });
+
+describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let db: FakeDb;
+  let mirror: IssuesMirror;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let prevLogLevel: string | undefined;
+
+  beforeEach(async () => {
+    prevLogLevel = process.env.LOG_LEVEL;
+    process.env.LOG_LEVEL = "debug";
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    repo = makeRepo();
+    db = createFakeDb();
+    mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      awaitTimeoutMs: 50,
+    });
+  });
+
+  afterEach(async () => {
+    await mirror.stop();
+    rmSync(repo.tmpdir, { recursive: true, force: true });
+    logSpy.mockRestore();
+    if (prevLogLevel === undefined) delete process.env.LOG_LEVEL;
+    else process.env.LOG_LEVEL = prevLogLevel;
+  });
+
+  function debugLogsContaining(needle: string): string[] {
+    return logSpy.mock.calls
+      .map((args: unknown[]) => String(args[0]))
+      .filter((line: string) => {
+        try {
+          const parsed = JSON.parse(line) as { level?: string; message?: string };
+          return parsed.level === "debug" && (parsed.message ?? "").includes(needle);
+        } catch {
+          return false;
+        }
+      });
+  }
+
+  it("writer pre-populates the DB row → watcher hits skip-match branch + logs action=skip-match (no second history row)", async () => {
+    // Phase 3 invariant: post phase 2, the writer's synchronous upsert
+    // lands BEFORE the file write, so by the time chokidar fires the row
+    // and content hash already match. mirrorOne MUST short-circuit on
+    // the existing-hash branch — no second history row, no second
+    // upsert call.
+    const yaml = SAMPLE_YAML("DX-5480");
+    const path = writeYaml(repo.localPath, "open", "DX-5480", yaml);
+    const hash = sha256(canonicalize(PARSED_SAMPLE("DX-5480")));
+    // Simulate phase 2 — the writer pre-populated the row.
+    db.rows.set(rowKey("test-repo", "DX-5480"), {
+      data: PARSED_SAMPLE("DX-5480"),
+      content_hash: hash,
+    });
+
+    await mirror.simulateWatcherEvent({ event: "add", path });
+
+    // mirrorOne short-circuited: zero history rows, zero upsert calls.
+    expect(db.history).toHaveLength(0);
+    // Debug log fires the action=skip-match branch (and not the upsert one).
+    const skipLines = debugLogsContaining("action=skip-match");
+    expect(skipLines.length).toBeGreaterThan(0);
+    expect(skipLines.some((l) => l.includes("DX-5480"))).toBe(true);
+    expect(skipLines.some((l) => l.includes("source=watcher"))).toBe(true);
+    expect(debugLogsContaining("action=upsert")).toHaveLength(0);
+  });
+
+  it("external write (DB empty) → watcher upserts + logs action=upsert with source=watcher", async () => {
+    // Mirror image of the skip-match test: when the writer did NOT run
+    // first (operator hand-edit, git pull, external tool), mirrorOne
+    // MUST upsert. Asserts the new debug-log distinction so the
+    // operator can grep worker logs for external-write activity.
+    const path = writeYaml(repo.localPath, "open", "DX-5481", SAMPLE_YAML("DX-5481"));
+
+    await mirror.simulateWatcherEvent({ event: "add", path });
+
+    expect(db.history).toHaveLength(1);
+    expect(db.history[0].source).toBe("watcher");
+    const upsertLines = debugLogsContaining("action=upsert");
+    expect(upsertLines.length).toBeGreaterThan(0);
+    expect(upsertLines.some((l) => l.includes("DX-5481"))).toBe(true);
+    expect(upsertLines.some((l) => l.includes("source=watcher"))).toBe(true);
+    expect(debugLogsContaining("action=skip-match")).toHaveLength(0);
+  });
+
+  it("integration: writeIssue + chokidar-event share one DB → ONE history row (writer), no second watcher row", async () => {
+    // AC #3 (DX-548): the writer's sync upsert lands first (source=writer),
+    // so when chokidar fires later for the same file, the watcher MUST
+    // hit the skip-match branch — NOT add a second history row. This
+    // test wires the writer DB and the mirror DB to the same FakeDb
+    // instance (startIssuesMirror already registers the writer DB to
+    // the same db handle), calls writeIssue, then simulates the
+    // watcher event the real chokidar would fire ~1s later.
+    const { writeIssue: writeIssueFn } = await import(
+      "../poller/yaml-lifecycle.js"
+    );
+    const id = "DX-5483";
+    const issue = {
+      schema_version: 9 as const,
+      tracker: "memory" as const,
+      id,
+      external_id: "",
+      parent_id: null,
+      children: [],
+      dispatch: null,
+      status: "ToDo" as const,
+      type: "Feature" as const,
+      title: `Title for ${id}`,
+      description: "Body",
+      priority: 3.0,
+      position: null,
+      triage: {
+        expires_at: "",
+        reassess_hint: "",
+        last_status: "",
+        last_explain: "",
+        ice: { total: 0, i: 0, c: 0, e: 0 },
+        history: [],
+      },
+      ac: [],
+      comments: [],
+      history: [],
+      retro: { good: "", bad: "", action_item_ids: [], commits: [] },
+      assigned_agent: null,
+      waiting_on: null,
+      blocked: null,
+      requires_human: null,
+      conflict_on: [],
+      effort_level: "medium" as const,
+      db_updated_at: "",
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await writeIssueFn(repo.localPath, issue as any);
+
+    // After writeIssue, FakeDb's history records ONE writer row.
+    const writerCount = db.history.filter((h) => h.source === "writer").length;
+    expect(writerCount).toBe(1);
+    const writerRow = db.history.find((h) => h.source === "writer")!;
+    const writerHash = writerRow.contentHash;
+
+    // Simulate chokidar firing for the same file ~1s later (real watcher
+    // would do this; we drive deterministically via simulateWatcherEvent).
+    const yamlPath = resolve(
+      repo.localPath,
+      ".danxbot",
+      "issues",
+      "open",
+      `${id}.yml`,
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path: yamlPath });
+
+    // No second history row — the watcher saw existing.content_hash ===
+    // contentHash and short-circuited. The skip-match debug log fired.
+    expect(db.history.filter((h) => h.source === "watcher")).toHaveLength(0);
+    expect(db.history).toHaveLength(1);
+    expect(db.history[0].contentHash).toBe(writerHash);
+    expect(
+      debugLogsContaining("action=skip-match").some((l) => l.includes(id)),
+    ).toBe(true);
+  });
+
+  it("integration: external writeFileSync (writer NOT involved) → chokidar fires → watcher history row appears", async () => {
+    // AC #4 (DX-548): when an external actor (operator hand-edit, git
+    // pull, agent Edit tool) writes the YAML directly without going
+    // through writeIssue, the writer's upsertIssueRowNow never runs.
+    // The DB row is missing — mirrorOne MUST upsert + record a
+    // source=watcher history row.
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-5484",
+      SAMPLE_YAML("DX-5484"),
+    );
+
+    await mirror.simulateWatcherEvent({ event: "add", path });
+
+    expect(db.history).toHaveLength(1);
+    expect(db.history[0].source).toBe("watcher");
+    expect(
+      debugLogsContaining("action=upsert").some((l) => l.includes("DX-5484")),
+    ).toBe(true);
+  });
+
+  it("reconcile sweep hits hash-skip on a healthy card (no churn, no new history)", async () => {
+    // AC: per-tick reconcile sweep against a row whose DB hash already
+    // matches the on-disk YAML must NOT add a new history row. The same
+    // hash-match branch carries the source=reconcile path.
+    const yaml = SAMPLE_YAML("DX-5482");
+    writeYaml(repo.localPath, "open", "DX-5482", yaml);
+    const hash = sha256(canonicalize(PARSED_SAMPLE("DX-5482")));
+    db.rows.set(rowKey("test-repo", "DX-5482"), {
+      data: PARSED_SAMPLE("DX-5482"),
+      content_hash: hash,
+    });
+
+    await mirror.reconcileNow();
+
+    expect(db.history).toHaveLength(0);
+    const skipLines = debugLogsContaining("action=skip-match");
+    expect(skipLines.some((l) => l.includes("source=reconcile"))).toBe(true);
+  });
+});
