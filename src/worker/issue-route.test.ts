@@ -39,7 +39,7 @@ import type { RepoContext } from "../types.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "ISS-1",
     external_id: "ext-1",
@@ -71,6 +71,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     effort_level: null,
     history: [],
     ...overrides,
+    db_updated_at: "",
   };
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {

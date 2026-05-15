@@ -134,7 +134,7 @@ export function buildIssueSubtreePayload(
       if (!visited.has(childId)) queue.push(childId);
     }
   }
-  return { schema_version: 8, issues: out };
+  return { schema_version: 9, issues: out };
 }
 
 /**
@@ -174,7 +174,7 @@ export function buildIssueSubtreePayload(
  */
 function stripIssueForCopy(issue: Issue): Issue {
   const stripped: Issue = {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: issue.id,
     external_id: "",
@@ -244,6 +244,7 @@ function stripIssueForCopy(issue: Issue): Issue {
     })),
     effort_level: issue.effort_level,
     history: [],
+    db_updated_at: "",
   };
   return stripped;
 }
@@ -496,7 +497,7 @@ function rewriteForImport(
     .filter((id): id is string => id !== null);
 
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: newId,
     external_id: "",
@@ -554,6 +555,7 @@ function rewriteForImport(
     conflict_on: newConflictOn,
     effort_level: src.effort_level,
     history: [],
+    db_updated_at: "",
   };
 }
 

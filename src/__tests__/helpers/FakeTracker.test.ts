@@ -6,7 +6,7 @@ function defaultInput(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -319,7 +319,7 @@ describe("FakeTracker", () => {
     const tracker = new FakeTracker({
       seed: [
         {
-          schema_version: 8,
+          schema_version: 9,
           tracker: "memory",
           id: "ISS-1",
           external_id: "seed-1",
@@ -343,6 +343,7 @@ describe("FakeTracker", () => {
           conflict_on: [],
           effort_level: null,
           history: [],
+          db_updated_at: "",
         },
       ],
     });
@@ -358,7 +359,7 @@ describe("FakeTracker", () => {
     const tracker = new FakeTracker({
       seed: [
         {
-          schema_version: 8,
+          schema_version: 9,
           tracker: "trello",
           id: "ISS-2",
           external_id: "seed-trello",
@@ -382,6 +383,7 @@ describe("FakeTracker", () => {
           conflict_on: [],
           effort_level: null,
           history: [],
+          db_updated_at: "",
         },
       ],
     });

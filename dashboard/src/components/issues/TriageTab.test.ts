@@ -39,7 +39,7 @@ function makeTriage(over: Partial<IssueTriage> = {}): IssueTriage {
 
 function makeIssue(triage: IssueTriage): IssueDetail {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -67,6 +67,7 @@ function makeIssue(triage: IssueTriage): IssueDetail {
     created_at: 0,
     raw_yaml: "",
     requires_human_child_count: 0,
+    db_updated_at: "",
   } as IssueDetail;
 }
 

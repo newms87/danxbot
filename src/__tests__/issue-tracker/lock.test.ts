@@ -41,7 +41,7 @@ const ALL_PIDS_DEAD = (): boolean => false;
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,

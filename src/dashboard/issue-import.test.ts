@@ -121,7 +121,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
   it("returns a single-issue payload for a leaf card", () => {
     writeIssueFixture(repoLocalPath, makeIssue());
     const payload = buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
-    expect(payload.schema_version).toBe(8);
+    expect(payload.schema_version).toBe(9);
     expect(payload.issues).toHaveLength(1);
     expect(payload.issues[0].id).toBe("DX-1");
     expect(payload.issues[0].title).toBe("Root card");
@@ -348,7 +348,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
 
 describe("applyIssueImport — happy paths", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 8, issues };
+    return { schema_version: 9, issues };
   }
 
   it("allocates a fresh id and writes the single-card YAML", async () => {
@@ -648,7 +648,7 @@ describe("applyIssueImport — happy paths", () => {
 
 describe("applyIssueImport — validation failures", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 8, issues };
+    return { schema_version: 9, issues };
   }
 
   it("rejects a non-object body with 400", async () => {
@@ -702,7 +702,7 @@ describe("applyIssueImport — validation failures", () => {
   it("rejects an issue whose id does not match <PREFIX>-N", async () => {
     await expect(
       applyIssueImport("danxbot", repoLocalPath, {
-        schema_version: 8,
+        schema_version: 9,
         issues: [{ id: "not-an-id" }],
       }),
     ).rejects.toMatchObject({ status: 400 });
@@ -759,7 +759,7 @@ describe("applyIssueImport — validation failures", () => {
 
 describe("handleImportIssues — HTTP route", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 8, issues };
+    return { schema_version: 9, issues };
   }
 
   function depsForRepo() {
@@ -874,7 +874,7 @@ describe("handleGetIssueSubtree — HTTP route", () => {
     await handleGetIssueSubtree(req, res, "DX-1", "danxbot", depsForRepo());
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody()) as IssueCopyPayload;
-    expect(body.schema_version).toBe(8);
+    expect(body.schema_version).toBe(9);
     expect(body.issues).toHaveLength(1);
     expect(body.issues[0].id).toBe("DX-1");
   });

@@ -165,7 +165,7 @@ describe("rewriteIdFields", () => {
   it("rewrites id, parent_id, children, waiting_on.by, action_item_ids", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 8,
+        schema_version: 9,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -212,6 +212,7 @@ describe("rewriteIdFields", () => {
         conflict_on: [],
         effort_level: null,
         history: [],
+        db_updated_at: "",
       }),
       { expectedPrefix: "ISS" },
     );
@@ -231,7 +232,7 @@ describe("rewriteIdFields", () => {
   it("leaves cross-prefix refs untouched (defensive)", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 8,
+        schema_version: 9,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -262,6 +263,7 @@ describe("rewriteIdFields", () => {
         conflict_on: [],
         effort_level: null,
         history: [],
+        db_updated_at: "",
       }),
       { expectedPrefix: "ISS" },
     );

@@ -129,7 +129,7 @@ const MarkdownEditorStub = defineComponent({
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -161,6 +161,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     effort_level: null,
     assigned_agent: null,
     ...overrides,
+    db_updated_at: "",
   };
 }
 

@@ -179,7 +179,7 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 const lastOpenCards: { value: IssueRef[] } = { value: [] };
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -203,6 +203,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     conflict_on: [],
     effort_level: null,
     history: [],
+    db_updated_at: "",
   };
 }
 // epic-status: queries the DB for parent + child rows since DX-155.
@@ -307,7 +308,7 @@ function seedDraft(
   ac: { check_item_id: string }[];
 }> {
   return tracker.createCard({
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,

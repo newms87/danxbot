@@ -76,9 +76,11 @@ const TRIAGE_HISTORY_CAP = 10;
  *  - v6: `requires_human` orthogonal indicator (DX-231).
  *  - v7: `conflict_on[]` two-way dispatch mutex.
  *  - v8: `effort_level` field (DX-508 / DX-511).
+ *  - v9: `db_updated_at` field (DX-545 / DX-546) — schema-only foundation
+ *    for the synchronous DB-mirror write Phase 2 ships.
  */
 export const KNOWN_SCHEMA_MIN = 3;
-export const KNOWN_SCHEMA_MAX = 8;
+export const KNOWN_SCHEMA_MAX = 9;
 
 /**
  * Set of `schema_version` values this process has already warned about.
@@ -198,7 +200,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 8
+ *  - schema_version: 9
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -211,6 +213,8 @@ function emptyTriage(): IssueTriage {
  *  - ac, comments: []
  *  - retro: { good: "", bad: "", action_item_ids: [], commits: [] }
  *  - effort_level: null (DX-508 — inherits agent default at dispatch)
+ *  - db_updated_at: <current ISO 8601> (DX-545 / DX-546 — Phase 2 wires
+ *    the synchronous DB upsert; Phase 1 just stamps creation time)
  */
 export function createEmptyIssue(
   seed: {
@@ -226,7 +230,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -251,6 +255,7 @@ export function createEmptyIssue(
     conflict_on: [],
     effort_level: seed.effort_level ?? null,
     history: [],
+    db_updated_at: new Date().toISOString(),
   };
 }
 
@@ -493,6 +498,14 @@ export function serializeIssue(issue: Issue): string {
     // null` (not optional), so we pass through verbatim — sibling fields
     // (`blocked`, `waiting_on`, `requires_human`) all use this discipline.
     effort_level: issue.effort_level,
+    // `db_updated_at` (v9) — ISO 8601 timestamp of the most recent DB
+    // upsert of this card's canonical content. Phase 2 wires the
+    // synchronous DB-mirror write; Phase 1 (DX-546) just lands the
+    // field on every save. Position at the end of the document so
+    // legacy v8 YAMLs that omit the key serialize stably (the field
+    // simply joins the canonical tail on first round-trip). Empty
+    // string serializes as YAML `""` — the "never-mirrored" sentinel.
+    db_updated_at: issue.db_updated_at,
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -589,7 +602,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -1022,6 +1035,26 @@ export function validateIssue(
     else conflictOnResult = r;
   }
 
+  // db_updated_at — optional field (v9). Missing / null → "" (the
+  // "never-mirrored" sentinel for legacy v8 YAMLs that round-trip
+  // through this validator before Phase 2 ships the synchronous
+  // DB-mirror write — DX-545 / DX-546). Present must be a string;
+  // anything else fails-loud (a numeric or boolean here would silently
+  // route the wrong value into the canonical hash + the DB column).
+  // No ISO 8601 shape check — same forgiving discipline as every
+  // other timestamp field on the schema (`triage.expires_at`,
+  // `dispatch.started_at`, `comments[].timestamp`).
+  let dbUpdatedAtResult = "";
+  if ("db_updated_at" in v && v.db_updated_at !== null && v.db_updated_at !== undefined) {
+    if (typeof v.db_updated_at !== "string") {
+      errors.push(
+        `db_updated_at must be a string or null (got ${JSON.stringify(v.db_updated_at)})`,
+      );
+    } else {
+      dbUpdatedAtResult = v.db_updated_at;
+    }
+  }
+
   // effort_level — optional field (v8). Missing / null → null. Present
   // must be one of the seven canonical EffortLevelName literals
   // (EFFORT_LEVEL_NAMES). Anything else fails-loud — a typo in a
@@ -1118,7 +1151,7 @@ export function validateIssue(
     // disk. Lockstep contract: when the writer bumps, bump this literal
     // AND KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 8,
+    schema_version: 9,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -1142,6 +1175,7 @@ export function validateIssue(
     conflict_on: conflictOnResult,
     effort_level: effortLevelResult,
     history: historyResult,
+    db_updated_at: dbUpdatedAtResult,
   };
   return { ok: true, issue };
 }

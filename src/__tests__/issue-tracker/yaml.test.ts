@@ -26,7 +26,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -59,6 +59,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     effort_level: null,
     history: [],
     ...overrides,
+    db_updated_at: "",
   };
 }
 
@@ -725,12 +726,17 @@ describe("validateIssue", () => {
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 8 is the current canonical version (DX-511 added effort_level)", () => {
+  it("schema_version: 9 is the current canonical version (DX-546 added db_updated_at)", () => {
+    const result = validateIssue(valid({ schema_version: 9 }));
+    expect(result.ok).toBe(true);
+  });
+
+  it("schema_version: 8 is still accepted (v8 → v9 forward migration, db_updated_at defaults to '')", () => {
     const result = validateIssue(valid({ schema_version: 8 }));
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 7 is still accepted (v7 → v8 forward migration, effort_level defaults to null)", () => {
+  it("schema_version: 7 is still accepted (v7 → v9 forward migration, effort_level defaults to null)", () => {
     const result = validateIssue(valid({ schema_version: 7 }));
     expect(result.ok).toBe(true);
   });
@@ -1145,7 +1151,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 8,
+      schema_version: 9,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1184,10 +1190,11 @@ describe("serializeIssue byte-stable snapshot", () => {
       conflict_on: [],
       effort_level: null,
       history: [],
+      db_updated_at: "",
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 8
+      "schema_version: 9
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1242,6 +1249,7 @@ describe("serializeIssue byte-stable snapshot", () => {
       requires_human: null
       conflict_on: []
       effort_level: null
+      db_updated_at: ""
       "
     `);
   });
@@ -1254,7 +1262,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     // — broken for diffing + git history. The companion test for the
     // `null` shape pins the same field's absence-from-payload contract.
     const fixture: Issue = {
-      schema_version: 8,
+      schema_version: 9,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1294,10 +1302,11 @@ describe("serializeIssue byte-stable snapshot", () => {
       conflict_on: [],
       effort_level: null,
       history: [],
+      db_updated_at: "",
     };
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 8
+      "schema_version: 9
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1342,6 +1351,7 @@ describe("serializeIssue byte-stable snapshot", () => {
         set_at: 2026-05-10T12:00:00.000Z
       conflict_on: []
       effort_level: null
+      db_updated_at: ""
       "
     `);
     // Round-trip — the snapshot is the canonical on-disk form; parsing

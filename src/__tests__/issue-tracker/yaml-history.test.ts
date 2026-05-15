@@ -26,7 +26,7 @@ import type {
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -58,6 +58,7 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     effort_level: null,
     history: [],
     ...overrides,
+    db_updated_at: "",
   };
 }
 

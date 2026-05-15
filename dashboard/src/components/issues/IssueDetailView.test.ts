@@ -41,7 +41,7 @@ const stubs = {
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -77,6 +77,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     raw_yaml: "",
     requires_human_child_count: 0,
     ...overrides,
+    db_updated_at: "",
   };
 }
 

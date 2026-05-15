@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { canonicalize, hashCanonical, sha256 } from "./canonicalize.js";
+import { createEmptyIssue } from "../issue-tracker/yaml.js";
 
 describe("canonicalize", () => {
   it("sorts top-level keys alphabetically", () => {
@@ -61,5 +62,19 @@ describe("hashCanonical", () => {
 
   it("produces different hashes for different inputs", () => {
     expect(hashCanonical({ a: 1 })).not.toBe(hashCanonical({ a: 2 }));
+  });
+
+  // DX-546 — `db_updated_at` participates in the canonical hash via the
+  // generic object walk. Pinning the behavior so a future allowlist
+  // refactor cannot accidentally exclude it. Phase 2 of the DB-mirror
+  // sync relies on the field being hashed so the mirror can detect that
+  // a save changed only the DB timestamp; an exclusion would mask
+  // legitimate first-mirror-after-upgrade upserts.
+  it("db_updated_at participates in Issue hash — differing values diverge", () => {
+    const base = createEmptyIssue({ id: "DX-1", title: "t" });
+    const a = { ...base, db_updated_at: "2026-01-01T00:00:00.000Z" };
+    const b = { ...base, db_updated_at: "2026-06-01T00:00:00.000Z" };
+    expect(canonicalize(a)).toContain("db_updated_at");
+    expect(hashCanonical(a)).not.toBe(hashCanonical(b));
   });
 });

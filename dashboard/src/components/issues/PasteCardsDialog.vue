@@ -166,7 +166,7 @@ function onClose(): void {
           required
           spellcheck="false"
           data-test="paste-cards-textarea"
-          placeholder='{"schema_version": 8, "issues": [...]}'
+          placeholder='{"schema_version": 9, "issues": [...]}'
         />
       </label>
       <p

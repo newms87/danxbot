@@ -84,7 +84,7 @@ if (handle) {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -116,6 +116,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     effort_level: null,
     history: [],
     ...overrides,
+    db_updated_at: "",
   };
   // Auto-populate the self-block record when caller sets status="Blocked"
   // without an explicit `blocked` override. Keeps the v4 invariant

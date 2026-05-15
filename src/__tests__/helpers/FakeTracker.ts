@@ -382,7 +382,7 @@ export class FakeTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 8,
+      schema_version: 9,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -438,6 +438,7 @@ export class FakeTracker implements IssueTracker {
       // the local YAML stays authoritative for the audit log.
       history: [],
       labels: { ...card.labels },
+      db_updated_at: "",
     };
   }
 

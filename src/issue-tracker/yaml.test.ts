@@ -388,7 +388,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
    */
   function legacyIssueWithoutRequiresHuman(): Issue {
     return {
-      schema_version: 8,
+      schema_version: 9,
       tracker: "memory",
       id: "DX-1",
       external_id: "",
@@ -420,6 +420,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
       assigned_agent: null,
       waiting_on: null,
       history: [],
+      db_updated_at: "",
     };
   }
 
@@ -838,11 +839,166 @@ describe("DX-511 — effort_level field (v8)", () => {
     expect(issueToCreateInput(withLevel).effort_level).toBe("very_high");
   });
 
-  it("KNOWN_SCHEMA_MAX bumped to 8 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
-    expect(KNOWN_SCHEMA_MAX).toBe(8);
+  it("KNOWN_SCHEMA_MAX bumped to 9 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
+    expect(KNOWN_SCHEMA_MAX).toBe(9);
     const fresh = createEmptyIssue();
     expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
     expect(issueToCreateInput(fresh).schema_version).toBe(KNOWN_SCHEMA_MAX);
+  });
+});
+
+/**
+ * DX-546 — `db_updated_at` field (schema v8 → v9 bump).
+ *
+ * Phase 1 of the DB-mirror sync (DX-545) introduces a string field that
+ * tracks when the canonical content was last upserted to the DB. Phase 1
+ * lands the schema only; Phase 2 wires the synchronous mirror write.
+ *
+ * Migration shape from v8: the field is optional on parse. v8 YAMLs
+ * without the key parse as `db_updated_at: ""` ("never-mirrored"
+ * sentinel) so legacy cards continue to load.
+ */
+describe("DX-546 — db_updated_at field (v9)", () => {
+  function yamlWithoutDbUpdatedAt(): string {
+    return `schema_version: 8
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+effort_level: null
+history: []
+`;
+  }
+
+  function yamlWithDbUpdatedAt(value: string): string {
+    return `schema_version: 9
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+effort_level: null
+history: []
+db_updated_at: ${value}
+`;
+  }
+
+  it("v8 fixture without db_updated_at parses with db_updated_at: '' (forward migration)", () => {
+    const issue = parseIssue(yamlWithoutDbUpdatedAt(), { expectedPrefix: "DX" });
+    expect(issue.db_updated_at).toBe("");
+  });
+
+  it("v9 fixture with explicit db_updated_at: null parses as ''", () => {
+    const issue = parseIssue(yamlWithDbUpdatedAt("null"), { expectedPrefix: "DX" });
+    expect(issue.db_updated_at).toBe("");
+  });
+
+  it("v9 fixture with ISO timestamp round-trips losslessly", () => {
+    const stamp = "2026-05-15T06:30:00.000Z";
+    const issue = parseIssue(yamlWithDbUpdatedAt(`"${stamp}"`), {
+      expectedPrefix: "DX",
+    });
+    expect(issue.db_updated_at).toBe(stamp);
+    const reSerialized = serializeIssue(issue);
+    expect(reSerialized).toContain(`db_updated_at: ${stamp}`);
+    const reparsed = parseIssue(reSerialized, { expectedPrefix: "DX" });
+    expect(reparsed.db_updated_at).toBe(stamp);
+  });
+
+  it("rejects non-string db_updated_at fail-loud (numeric / boolean / mapping)", () => {
+    expect(() =>
+      parseIssue(yamlWithDbUpdatedAt("42"), { expectedPrefix: "DX" }),
+    ).toThrow(/db_updated_at must be a string/);
+    expect(() =>
+      parseIssue(yamlWithDbUpdatedAt("true"), { expectedPrefix: "DX" }),
+    ).toThrow(/db_updated_at must be a string/);
+    expect(() =>
+      parseIssue(yamlWithDbUpdatedAt("{ts: 1}"), { expectedPrefix: "DX" }),
+    ).toThrow(/db_updated_at must be a string/);
+  });
+
+  it("serializeIssue emits db_updated_at on every save (no missing-key path)", () => {
+    const issue = parseIssue(yamlWithoutDbUpdatedAt(), { expectedPrefix: "DX" });
+    const yaml = serializeIssue(issue);
+    expect(yaml).toMatch(/db_updated_at:/);
+  });
+
+  it("createEmptyIssue stamps db_updated_at to current ISO 8601 timestamp", () => {
+    const before = Date.now();
+    const fresh = createEmptyIssue();
+    const after = Date.now();
+    expect(fresh.db_updated_at).toMatch(
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/,
+    );
+    const stamped = Date.parse(fresh.db_updated_at);
+    expect(stamped).toBeGreaterThanOrEqual(before);
+    expect(stamped).toBeLessThanOrEqual(after);
+  });
+
+  it("byte-stable round-trip with a non-empty db_updated_at value", () => {
+    // Pre-Phase-2 the field is stamped only by createEmptyIssue, but the
+    // serializer must still produce a byte-identical YAML on
+    // parse → serialize → parse → serialize. A regression that quotes
+    // the timestamp differently (single vs double quotes, timezone
+    // normalization, trailing newline drift) would diverge between
+    // round-trips and break diff hygiene for the per-card history.
+    const stamp = "2026-05-15T06:30:00.000Z";
+    const issue = parseIssue(yamlWithDbUpdatedAt(`"${stamp}"`), {
+      expectedPrefix: "DX",
+    });
+    const yaml1 = serializeIssue(issue);
+    const reparsed = parseIssue(yaml1, { expectedPrefix: "DX" });
+    const yaml2 = serializeIssue(reparsed);
+    expect(yaml2).toBe(yaml1);
   });
 });
 

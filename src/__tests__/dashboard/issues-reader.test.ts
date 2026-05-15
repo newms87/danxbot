@@ -59,7 +59,7 @@ let nextHistorySeq = 0;
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",
@@ -91,6 +91,7 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     requires_human: overrides.requires_human ?? null,
     conflict_on: overrides.conflict_on ?? [],
     effort_level: overrides.effort_level ?? null,
+    db_updated_at: "",
   };
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {

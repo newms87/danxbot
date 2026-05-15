@@ -311,7 +311,7 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
@@ -342,6 +342,7 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     conflict_on: [],
     effort_level: null,
     history: [],
+    db_updated_at: "",
   };
 }
 

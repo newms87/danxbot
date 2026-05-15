@@ -44,7 +44,7 @@ const TypeBadgeStub = defineComponent({
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -80,6 +80,7 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     raw_yaml: "",
     requires_human_child_count: 0,
     ...overrides,
+    db_updated_at: "",
   };
 }
 
@@ -355,7 +356,7 @@ describe("DrawerHeader Copy button (DX-519)", () => {
 
   function samplePayload(n: number) {
     return {
-      schema_version: 8 as const,
+      schema_version: 9 as const,
       issues: Array.from({ length: n }).map((_, i) => ({
         ...makeDetail({ id: `DX-${100 + i}` }),
         // IssueCopyPayload.issues is Issue[], drop the IssueDetail-only
@@ -380,7 +381,7 @@ describe("DrawerHeader Copy button (DX-519)", () => {
     });
     const writtenText = clip.writeText.mock.calls[0][0] as string;
     const parsed = JSON.parse(writtenText);
-    expect(parsed.schema_version).toBe(8);
+    expect(parsed.schema_version).toBe(9);
     expect(parsed.issues).toHaveLength(3);
 
     await vi.waitFor(() => {

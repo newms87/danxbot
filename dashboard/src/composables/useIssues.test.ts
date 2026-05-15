@@ -95,7 +95,7 @@ function makeIssueSnapshot(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 8,
+    schema_version: 9,
     tracker: "memory",
     id,
     external_id: "",
@@ -127,6 +127,7 @@ function makeIssueSnapshot(
     effort_level: null,
     assigned_agent: null,
     ...overrides,
+    db_updated_at: "",
   };
 }
 
