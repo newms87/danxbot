@@ -453,3 +453,60 @@ describe("startWorkerCronLoop — boot pass + 60s loop", () => {
     }
   });
 });
+
+describe("worker-loop — CronJobContext piping (DX-563)", () => {
+  it("passes {repoName, repoRoot} to every job's run(ctx) when repoName is provided", async () => {
+    const seen: Array<unknown> = [];
+    const job: CronJob = {
+      name: "ctx-spy",
+      intervalSec: 60,
+      run: async (ctx) => {
+        seen.push(ctx);
+      },
+    };
+    await runTick({
+      jobs: [job],
+      repoRoot: dir,
+      repoName: "danxbot",
+      now: Date.now(),
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ repoName: "danxbot", repoRoot: dir });
+  });
+
+  it("passes ctx=undefined when repoName is omitted (backward compat)", async () => {
+    const seen: Array<unknown> = [];
+    const job: CronJob = {
+      name: "ctx-omit",
+      intervalSec: 60,
+      run: async (ctx) => {
+        seen.push(ctx);
+      },
+    };
+    await runTick({ jobs: [job], repoRoot: dir, now: Date.now() });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeUndefined();
+  });
+
+  it("startWorkerCronLoop forwards repoName to ctx", async () => {
+    const seen: Array<unknown> = [];
+    const job: CronJob = {
+      name: "boot-ctx",
+      intervalSec: 60,
+      run: async (ctx) => {
+        seen.push(ctx);
+      },
+    };
+    const handle = await startWorkerCronLoop({
+      repoRoot: dir,
+      repoName: "danxbot",
+      jobs: [job],
+      intervalMs: 1_000_000,
+    });
+    try {
+      expect(seen[0]).toEqual({ repoName: "danxbot", repoRoot: dir });
+    } finally {
+      handle.stop();
+    }
+  });
+});

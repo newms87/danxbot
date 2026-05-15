@@ -684,6 +684,7 @@ async function startWorkerMode(): Promise<void> {
   try {
     workerCronLoop = await startWorkerCronLoop({
       repoRoot: repo.localPath,
+      repoName: repo.name,
     });
   } catch (err) {
     log.error(

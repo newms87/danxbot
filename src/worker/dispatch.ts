@@ -1539,7 +1539,7 @@ async function handleStopFromDb(
       });
       return;
     }
-    await autoSyncTrackedIssue(jobId, repo);
+    await autoSyncTrackedIssue(jobId, repo, undefined, summary ?? null);
     const terminatedAt = Date.now();
     const mappedStatus = mapCompleteToDispatchStatus(status);
     await updateDispatch(jobId, {
@@ -1570,7 +1570,7 @@ async function handleStopFromDb(
 
   // Non-critical terminal: sync the tracked YAML before marking the row
   // terminal, mirroring the in-memory path's ordering.
-  await autoSyncTrackedIssue(jobId, repo);
+  await autoSyncTrackedIssue(jobId, repo, undefined, summary ?? null);
   const terminatedAt = Date.now();
   const mappedStatus = mapCompleteToDispatchStatus(status);
   await updateDispatch(jobId, {
@@ -1725,7 +1725,7 @@ export async function handleStop(
         });
         return;
       }
-      await autoSyncTrackedIssue(jobId, repo);
+      await autoSyncTrackedIssue(jobId, repo, undefined, summary ?? null);
       await job.stop("failed", summary);
       onDispatchTerminated(repo.name);
       json(res, 200, { status });
@@ -1749,7 +1749,7 @@ export async function handleStop(
     // Errors are logged inside `autoSyncTrackedIssue` and swallowed; the
     // agent already passed `danxbot_complete`, so we must NEVER let a
     // reconcile bug or tracker hiccup turn a terminal state into a stall.
-    await autoSyncTrackedIssue(jobId, repo);
+    await autoSyncTrackedIssue(jobId, repo, undefined, summary ?? null);
 
     await job.stop(status, summary);
 

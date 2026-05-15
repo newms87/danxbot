@@ -144,7 +144,25 @@ export interface SettingsDisplay {
   github?: SettingsDisplaySection;
   db?: SettingsDisplaySection;
   links?: Record<string, string>;
+  /**
+   * DX-563 — Self-Repair display mirror for the dashboard. Worker-side
+   * write mirrors `Settings.selfRepair.threshold` here so the dashboard
+   * reads display-shape state from one section.
+   */
+  selfRepair?: SettingsDisplaySection;
 }
+
+/**
+ * DX-563 — Self-Repair Phase 3 runtime config. The dispatcher
+ * (`src/cron/jobs/self-repair-dispatch.ts`) reads `threshold` to decide
+ * when an open `system_errors` row's `count` clears the bar for an
+ * automated repair card. Default is 3 (see `DEFAULT_SELF_REPAIR_THRESHOLD`).
+ */
+export interface SelfRepairSettings {
+  threshold?: number;
+}
+
+export const DEFAULT_SELF_REPAIR_THRESHOLD = 3;
 
 export interface SettingsMeta {
   updatedAt: string;
@@ -511,6 +529,14 @@ export interface Settings {
    * type. Whole-string atomic replace via `writeSettings`.
    */
   effortAssignmentPrompt?: string;
+  /**
+   * DX-563 — Self-Repair runtime config (threshold for the dispatcher).
+   * Optional in the type; `normalize` always materializes `{}` so reads
+   * see a stable shape. `getSelfRepairThreshold` (in
+   * `system-repair/settings.ts`) is the canonical reader and falls back
+   * to {@link DEFAULT_SELF_REPAIR_THRESHOLD} when missing.
+   */
+  selfRepair?: SelfRepairSettings;
   meta: SettingsMeta;
 }
 
@@ -554,6 +580,12 @@ export interface WriteSettingsPatch {
    * on-disk value. Empty string normalizes to default on the next read.
    */
   effortAssignmentPrompt?: string;
+  /**
+   * DX-563 — atomic replace of the Self-Repair settings block.
+   * `undefined` (or omitted) preserves the existing on-disk block.
+   * Pass `{}` to clear the threshold back to its env default.
+   */
+  selfRepair?: SelfRepairSettings;
   writtenBy: SettingsWriter;
 }
 
@@ -592,6 +624,7 @@ export function defaultSettings(): Settings {
     agentDefaults: defaultAgentDefaults(),
     effortLevels: DEFAULT_EFFORT_LEVELS.map((r) => ({ ...r })),
     effortAssignmentPrompt: DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
+    selfRepair: {},
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
   };
 }
@@ -1070,8 +1103,18 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
     effortAssignmentPrompt: normalizeEffortAssignmentPrompt(
       partial.effortAssignmentPrompt,
     ),
+    selfRepair: normalizeSelfRepair(partial.selfRepair),
     meta,
   };
+}
+
+function normalizeSelfRepair(value: unknown): SelfRepairSettings {
+  if (typeof value !== "object" || value === null) return {};
+  const raw = (value as { threshold?: unknown }).threshold;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw >= 1) {
+    return { threshold: Math.floor(raw) };
+  }
+  return {};
 }
 
 /**
@@ -1207,6 +1250,13 @@ async function runWrite(
         patch.effortAssignmentPrompt !== undefined
           ? normalizeEffortAssignmentPrompt(patch.effortAssignmentPrompt)
           : existing.effortAssignmentPrompt!,
+      // DX-563 — atomic replace via normalize. `undefined` preserves the
+      // on-disk block; passing `{}` (the empty SelfRepairSettings)
+      // explicitly clears any prior threshold override.
+      selfRepair:
+        patch.selfRepair !== undefined
+          ? normalizeSelfRepair(patch.selfRepair)
+          : (existing.selfRepair ?? {}),
       meta: {
         updatedAt: new Date().toISOString(),
         updatedBy: patch.writtenBy,
@@ -1432,6 +1482,7 @@ export async function mutateAgents(
         // so both fields are always materialized — no fallback needed.
         effortLevels: existing.effortLevels!,
         effortAssignmentPrompt: existing.effortAssignmentPrompt!,
+        selfRepair: existing.selfRepair ?? {},
         meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
       };
       const body = JSON.stringify(merged, null, 2) + "\n";

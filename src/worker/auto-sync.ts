@@ -44,6 +44,8 @@
 
 import { reconcileIssue } from "../issue/reconcile.js";
 import { createLogger } from "../logger.js";
+import { getPool } from "../db/connection.js";
+import { finalizeSelfRepair } from "../system-repair/finalize.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 import type { ReconcileTrigger } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
@@ -80,6 +82,15 @@ export async function autoSyncTrackedIssue(
     getDispatch: defaultGetDispatch,
     reconcile: reconcileIssue,
   },
+  /**
+   * DX-563 — explicit summary override used by the Self-Repair finalize
+   * hook. The dispatch row's `summary` column is only stamped by
+   * `updateDispatch` AFTER `autoSyncTrackedIssue` runs, so reading it
+   * off `row.summary` here would always see the previous (or null)
+   * value. Callers in `handleStop` pass the just-received agent
+   * summary verbatim.
+   */
+  summaryOverride?: string | null,
 ): Promise<void> {
   try {
     const row = await deps.getDispatch(jobId);
@@ -97,6 +108,25 @@ export async function autoSyncTrackedIssue(
       row.issueId,
       "lifecycle",
     );
+    // DX-563 — Self-Repair Phase 3 finalize hook. No-op for any
+    // dispatch whose issueId does not match a `system_error_repairs`
+    // row; for matches, writes verdict + report_md + ended_at on the
+    // repair row and flips the linked `system_errors` row based on
+    // the parsed verdict. Errors are swallowed below — a finalize
+    // bug must NEVER block dispatch completion.
+    try {
+      await finalizeSelfRepair({
+        db: getPool(),
+        issueId: row.issueId,
+        summary: summaryOverride ?? row.summary ?? null,
+        repoLocalPath: repo.localPath,
+      });
+    } catch (err) {
+      log.error(
+        `[Dispatch ${jobId}] self-repair finalize failed (non-fatal)`,
+        err,
+      );
+    }
   } catch (err) {
     log.error(
       `[Dispatch ${jobId}] post-dispatch reconcile failed (non-fatal)`,

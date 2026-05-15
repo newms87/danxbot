@@ -41,7 +41,7 @@
 import { createLogger } from "../logger.js";
 import { jobs as defaultJobs } from "./jobs/index.js";
 import { readState, writeState, type CronTickState } from "./state.js";
-import type { CronJob } from "./types.js";
+import type { CronJob, CronJobContext } from "./types.js";
 
 const log = createLogger("cron-worker-loop");
 
@@ -51,6 +51,14 @@ export const DEFAULT_TICK_MS = 60_000;
 export interface RunTickArgs {
   readonly jobs: readonly CronJob[];
   readonly repoRoot: string;
+  /**
+   * DX-563 — repo name forwarded to each job's `run(ctx)` so per-repo
+   * jobs (self-repair dispatcher) can scope their work without each
+   * one re-reading `DANXBOT_REPO_NAME` from `process.env`. Tests that
+   * skip per-repo jobs may omit this field; existing jobs ignore the
+   * value entirely.
+   */
+  readonly repoName?: string;
   /** Defaults to `Date.now()`. Injected by tests. */
   readonly now?: number;
 }
@@ -73,6 +81,11 @@ export async function runTick(args: RunTickArgs): Promise<RunTickResult> {
   const skipped: string[] = [];
   const failed: Array<{ name: string; error: string }> = [];
 
+  const ctx: CronJobContext | undefined =
+    args.repoName !== undefined
+      ? { repoName: args.repoName, repoRoot: args.repoRoot }
+      : undefined;
+
   for (const job of args.jobs) {
     const lastRunMs = state[job.name];
     const elapsed =
@@ -83,7 +96,7 @@ export async function runTick(args: RunTickArgs): Promise<RunTickResult> {
     }
 
     try {
-      await job.run();
+      await job.run(ctx);
       state[job.name] = now;
       fired.push(job.name);
     } catch (err) {
@@ -104,6 +117,12 @@ export async function runTick(args: RunTickArgs): Promise<RunTickResult> {
 
 export interface StartWorkerCronLoopArgs {
   readonly repoRoot: string;
+  /**
+   * DX-563 — repo name piped through to every per-tick `runTick` so
+   * per-repo jobs see it on `ctx.repoName`. Optional for backward
+   * compatibility with tests that don't exercise per-repo jobs.
+   */
+  readonly repoName?: string;
   /** Override the registry; defaults to `./jobs/index.js`. */
   readonly jobs?: readonly CronJob[];
   /** Override the tick cadence; defaults to 60_000ms. */
@@ -134,7 +153,7 @@ export async function startWorkerCronLoop(
   // since the last worker stopped. A throw here propagates: the
   // caller decides whether a failed boot pass should halt worker
   // boot (today: log + continue is the chosen tradeoff in index.ts).
-  await runTick({ jobs, repoRoot: args.repoRoot, now: clock() });
+  await runTick({ jobs, repoRoot: args.repoRoot, repoName: args.repoName, now: clock() });
 
   let stopped = false;
   // Reentrancy guard. `setInterval` fires every `intervalMs` even if
@@ -148,7 +167,7 @@ export async function startWorkerCronLoop(
   const timer = setInterval(() => {
     if (stopped || inFlight) return;
     inFlight = true;
-    runTick({ jobs, repoRoot: args.repoRoot, now: clock() })
+    runTick({ jobs, repoRoot: args.repoRoot, repoName: args.repoName, now: clock() })
       .catch((err) => {
         // The setInterval callback fires `runTick`; per-job throws are
         // already isolated INSIDE runTick. A throw OUT OF runTick is

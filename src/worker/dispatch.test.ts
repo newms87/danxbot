@@ -702,7 +702,12 @@ describe("handleStop", () => {
     await handleStop(stopReq, stopRes, "job-1", MOCK_REPO);
 
     expect(mockAutoSyncTrackedIssue).toHaveBeenCalledTimes(1);
-    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith("job-1", MOCK_REPO);
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
+      "job-1",
+      MOCK_REPO,
+      undefined,
+      expect.any(String),
+    );
     expect(callOrder).toEqual(["autoSync", "stop"]);
   });
 
@@ -723,7 +728,12 @@ describe("handleStop", () => {
     });
     await handleStop(stopReq, createMockRes(), "job-2", MOCK_REPO);
     expect(mockAutoSyncTrackedIssue).toHaveBeenCalledTimes(1);
-    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith("job-2", MOCK_REPO);
+    expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
+      "job-2",
+      MOCK_REPO,
+      undefined,
+      expect.any(String),
+    );
   });
 
   it("Phase 3 AC #4: SKIPS autoSyncTrackedIssue for status=critical_failure (env blocker, agent did no real work)", async () => {
@@ -947,6 +957,8 @@ describe("handleStop", () => {
       expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
         "ghost-dispatch",
         MOCK_REPO,
+        undefined,
+        expect.anything(),
       );
       expect(mockUpdateDispatch).toHaveBeenCalledTimes(1);
       const [updateId, updates] = mockUpdateDispatch.mock.calls[0];
@@ -981,6 +993,8 @@ describe("handleStop", () => {
       expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
         "ghost-fail",
         MOCK_REPO,
+        undefined,
+        expect.anything(),
       );
       expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
       expect(mockUpdateDispatch.mock.calls[0][1].summary).toBe("boom");
@@ -1608,6 +1622,8 @@ describe("handleStop", () => {
       expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
         "job-559-violation",
         MOCK_REPO,
+        undefined,
+        expect.anything(),
       );
     });
 
