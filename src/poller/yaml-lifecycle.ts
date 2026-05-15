@@ -56,26 +56,7 @@ export { type IssueState, issuePath, ensureIssuesDirs } from "../issue-tracker/p
 import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import { parse as parseYamlText } from "yaml";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
-import { getMirrorByLocalPath } from "../db/issues-mirror.js";
-import { createLogger } from "../logger.js";
-
-const writeIssueLog = createLogger("write-issue");
-/**
- * `awaitMirror`'s read-your-writes budget. MUST exceed
- * `DEFAULT_AWAIT_WRITE_FINISH.stabilityThreshold` in
- * `src/db/issues-mirror.ts` (currently 5s) by enough margin to cover the
- * post-debounce chain — chokidar `change` emit → `processFileEvent` →
- * `parseYamlText` + canonicalize + hash → `upsert` → `resolvePending`.
- *
- * Equal values produced a tight race that the reject path consistently
- * won under write-bursts (boot reattach clearing 3-6 stale dispatches in
- * one shot), surfacing as `awaitMirror timed out for danxbot/<ID> — DB
- * will catch up via reconcile` warns even though the upsert landed a few
- * ms later. 3s margin is generous enough that a slow disk or load spike
- * doesn't tip the race back; not so generous that a genuinely-dropped
- * chokidar event leaves callers blocked for a noticeable interval.
- */
-const WRITE_ISSUE_AWAIT_TIMEOUT_MS = 8_000;
+import { upsertIssueRowNow } from "../db/issues-mirror.js";
 
 /**
  * Read the issue identified by `id`. Returns null when no row exists.
@@ -107,13 +88,13 @@ export async function loadLocal(
  *
  * Cleanup paths that fire IMMEDIATELY after a `writeIssue` (especially
  * `stampDispatchAndWrite` followed by a synchronous `dispatch()`
- * throw) MUST use this helper rather than `loadLocal`. `writeIssue`'s
- * mirror ack uses an 8-second `awaitMirror` timeout that frequently
- * lapses under chokidar pressure; when it does, `loadLocal` returns
- * the PRE-write DB shape, the cleanup's `if (fresh.dispatch !== null)`
- * guard evaluates false, the clear is skipped, and the orphan
- * `dispatch{pid:0}` block lives on disk forever — the symptom that
- * stuck the poller in DX-284.
+ * throw) read from disk so they observe the bytes the writer just
+ * laid down, not a stale `loadLocal` DB shape. Post-DX-547 the writer
+ * upserts the DB row BEFORE `writeFileSync`, so the DB IS consistent
+ * by the time `writeIssue`'s promise resolves — but disk reads remain
+ * the cleanup primitive because they sidestep any future regression
+ * in the writer's DB chain (a no-op fallback, an unregistered DB)
+ * that would otherwise leave the cleanup looking at stale state.
  *
  * Returns `null` when the file is missing (card moved to `closed/`,
  * was renamed, was never written). The caller treats null as "card
@@ -162,77 +143,74 @@ export async function findByExternalId(
  * (called by `persistAfterSync` in the worker's auto-sync path) when the
  * status reaches Done or Cancelled.
  *
- * Read-your-writes integration (DX-154): after `writeFileSync`, looks up
- * the registered mirror for this repoLocalPath via
- * `getMirrorByLocalPath`. If a mirror is active, awaits its
- * `awaitMirror(repoName, id, contentHash)` with a 5-second timeout.
- * Timeout logs a warning and returns successfully — the file IS on disk,
- * the periodic reconcile + boot scan will catch the DB up. If no mirror
- * is active (unit tests, dashboard mode, pre-Phase-4 paths), returns
- * immediately after the file write — that's the legacy file-only
- * behavior.
+ * Writer owns the DB write (DX-547 Phase 2). Order:
  *
- * The async signature applies even on the legacy path so callers don't
- * need to branch on whether the mirror is active. Phase 4+ readers
- * depend on the post-await guarantee that the DB reflects the just-
- * written hash.
+ *   1. Stamp `db_updated_at` with the current ISO 8601 timestamp on the
+ *      issue. The field is intentionally excluded from `canonicalize`
+ *      (see HASH_EXCLUDED_TOP_KEYS in `src/db/canonicalize.ts`), so the
+ *      stamp does NOT defeat the canonical no-op short-circuit in
+ *      `upsertIssueRowNow` — two back-to-back saves of identical content
+ *      still match on `existing.content_hash` and the second one skips
+ *      the upsert + history row. The stamp gives the file on disk a
+ *      "writer last touched at" signal for external readers; the DB
+ *      row's `data.db_updated_at` is refreshed only on real content
+ *      change (because the no-op branch skips the upsert).
+ *   2. Serialize via `serializeIssue`.
+ *   3. Round-trip through `yaml.parse` so the hash matches what the
+ *      chokidar watcher would compute on the same file (identical input
+ *      to canonicalize).
+ *   4. Compute the canonical content hash.
+ *   5. `await upsertIssueRowNow(...)` — synchronous DB upsert + history
+ *      row with `source: "writer"`. No-op when no writer DB is registered
+ *      for this repo (pure unit tests, dashboard-mode boot before the
+ *      mirror starts). When the DB is up but the upsert fails, the
+ *      helper writes CRITICAL_FAILURE and rethrows — the poller halts on
+ *      its next tick, the file is NEVER written, the YAML stays at its
+ *      prior state on disk.
+ *   6. `writeFileSync` — the file write propagates to external readers
+ *      (dispatched agents, dashboard reload, periodic reconcile). The
+ *      DB row already reflects the new content, so chokidar's later
+ *      event finds the hash matches and skips a duplicate upsert; its
+ *      `onWatcherUpsert` callback still fires so reconcile fans out as
+ *      normal.
+ *
+ * Returns a Promise that resolves once both the DB commit AND the file
+ * write have landed. Failures from either step propagate as a rejected
+ * promise so callers (poller, worker auto-sync, dispatched agents) see
+ * the error rather than a silent "writeIssue returned, but nothing
+ * happened" state.
  */
-export function writeIssue(
+export async function writeIssue(
   repoLocalPath: string,
   issue: Issue,
 ): Promise<void> {
-  // SYNC PHASE: file write throws synchronously. Callers wrapping
-  // `writeIssue(...)` in try/catch for fs errors keep working — the
-  // body before the first `return await` runs synchronously, and any
-  // throw from `writeFileSync` propagates up the stack as a sync error
-  // (NOT as a rejected promise).
   ensureIssuesDirs(repoLocalPath);
-  const path = issuePath(repoLocalPath, issue.id, "open");
-  const serialized = serializeIssue(issue);
-  writeFileSync(path, serialized);
-
-  // ASYNC PHASE: await the mirror's read-your-writes ack. Best-effort —
-  // the file is on disk regardless. Wrapped in a helper so the sync
-  // throw above can't be converted to a rejected promise by the
-  // surrounding async wrapper.
-  return awaitMirrorRoundtrip(repoLocalPath, issue, serialized);
-}
-
-async function awaitMirrorRoundtrip(
-  repoLocalPath: string,
-  issue: Issue,
-  serialized: string,
-): Promise<void> {
-  const mirror = getMirrorByLocalPath(repoLocalPath);
-  if (!mirror) return;
-
-  // The mirror canonicalizes parsed YAML data, not raw text. Round-trip
-  // through `yaml.parse` once so the writer's hash exactly matches what
-  // the watcher will compute on the same file.
-  let parsed: unknown;
-  try {
-    parsed = parseYamlText(serialized);
-  } catch {
-    // Should never happen — we just serialized through `serializeIssue`.
-    // If the round-trip parse fails, the mirror's awaitMirror would never
-    // resolve anyway; bail out and let reconcile catch up.
-    return;
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
-  const contentHash = sha256(canonicalize(parsed));
-  try {
-    await mirror.awaitMirror(mirror.repoName, issue.id, contentHash, {
-      timeoutMs: WRITE_ISSUE_AWAIT_TIMEOUT_MS,
-    });
-  } catch (err) {
-    // Best-effort by design — surface the timeout as a warning without
-    // failing the write. Reconcile will pick up the drift on the next
-    // tick.
-    writeIssueLog.warn(
-      `awaitMirror timed out for ${mirror.repoName}/${issue.id} — DB will catch up via reconcile`,
-      err,
+  const stamped: Issue = {
+    ...issue,
+    db_updated_at: new Date().toISOString(),
+  };
+  const serialized = serializeIssue(stamped);
+  const parsed = parseYamlText(serialized);
+  // `serializeIssue` produces an object-shaped YAML by construction; the
+  // round-trip parse therefore always yields a non-null record. Guard
+  // anyway so a future serializer refactor that changed the shape would
+  // fail loud here instead of silently shipping a garbage hash.
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      `writeIssue: serializeIssue produced non-object YAML for ${issue.id}`,
     );
   }
+  const contentHash = sha256(canonicalize(parsed));
+  await upsertIssueRowNow({
+    repoName: repoNameFromPath(repoLocalPath),
+    repoLocalPath,
+    id: stamped.id,
+    data: parsed as Record<string, unknown>,
+    contentHash,
+    source: "writer",
+  });
+  const path = issuePath(repoLocalPath, stamped.id, "open");
+  writeFileSync(path, serialized);
 }
 
 /**

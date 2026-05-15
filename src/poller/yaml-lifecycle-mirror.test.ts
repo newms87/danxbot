@@ -1,18 +1,29 @@
 /**
- * Phase 3 of the Issues DB Mirror epic (DX-154) — read-your-writes contract.
+ * writeIssue ↔ DB mirror contract.
  *
- * Pins the three writeIssue ↔ mirror behaviors:
- *   1. With a registered mirror: `writeIssue` returns only after the DB
- *      observably reflects the just-written hash.
- *   2. With no mirror registered: `writeIssue` returns immediately after
- *      the file write (legacy / pre-Phase-3 behavior preserved).
- *   3. With a mirror but a stuck DB (5s `awaitMirror` timeout): the
- *      function still returns successfully — the file IS on disk,
- *      reconcile catches up — and emits a warning.
+ * DX-547 Phase 2 reshaped the contract: the writer OWNS the DB write
+ * via a synchronous `upsertIssueRowNow` call BEFORE `writeFileSync`,
+ * so the DB row is consistent the moment `writeIssue` resolves. The
+ * mirror's `awaitMirror` chokidar-side ack is no longer on the
+ * writer's hot path; the watcher's later event finds the hash already
+ * matches and runs the existing skip-match branch (which fires
+ * `onWatcherUpsert` so reconcile fanout still happens exactly once).
+ *
+ * Behaviors pinned here:
+ *   1. With a registered mirror: `writeIssue` upserts the DB row
+ *      synchronously (before the file write) and resolves. No watcher
+ *      event needed for the writer's promise to settle.
+ *   2. With no mirror registered: `writeIssue` returns after the file
+ *      write (legacy path — no DB activity).
+ *
+ * The `awaitMirror` timeout case from the pre-DX-547 contract is
+ * scheduled for phase 4 cleanup (kept skipped here to preserve the
+ * scope contract — phase 2 wires the writer, phase 4 deletes the
+ * awaitMirror plumbing that backed the old test). Until phase 4 ships
+ * the deletion, the test stays as a `.skip` so the file documents the
+ * boundary.
  *
  * The mirror layer is mocked via `IssuesMirrorDb`; chokidar is disabled.
- * Tests drive watcher events through `simulateWatcherEvent` so the unit
- * suite has no chokidar/PG dependency.
  */
 
 import {
@@ -151,7 +162,7 @@ afterEach(() => {
 });
 
 describe("writeIssue ↔ mirror — read-your-writes", () => {
-  it("returns only after the mirror observes the hash (mirror active)", async () => {
+  it("upserts the DB row synchronously (writer owns the DB write)", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
     const mirror = await startIssuesMirror(
@@ -160,11 +171,13 @@ describe("writeIssue ↔ mirror — read-your-writes", () => {
     );
     try {
       const issue = makeIssue("DX-1");
-      const writePromise = writeIssue(repo.localPath, issue);
+      // DX-547 Phase 2: writer upserts BEFORE writeFileSync. After
+      // `writeIssue` resolves, the DB row is in place and the file is
+      // on disk. No watcher event needed — `startIssuesMirror` registered
+      // the writer DB, and `upsertIssueRowNow` ran the same transaction
+      // shape as the watcher's `mirrorOne`.
+      await writeIssue(repo.localPath, issue);
 
-      // Drive the watcher event AFTER the writer has written the file
-      // (same race window the production chokidar resolves). The
-      // returned Promise must not have resolved yet.
       const open = resolve(
         repo.localPath,
         ".danxbot",
@@ -172,16 +185,14 @@ describe("writeIssue ↔ mirror — read-your-writes", () => {
         "open",
         "DX-1.yml",
       );
-      // The file IS on disk now (writeIssue's sync phase ran).
       expect(readFileSync(open, "utf-8")).toContain("DX-1");
 
-      await mirror.simulateWatcherEvent({ event: "add", path: open });
-      await writePromise; // Should resolve without timeout.
-
-      // DB row reflects the same hash the writer computed.
+      // DB row carries the writer's content + the history row was
+      // tagged `source: "writer"`.
       const stored = db.rows.get("rw-repo|DX-1");
       expect(stored).not.toBeUndefined();
       expect(db.upserts).toHaveLength(1);
+      expect(db.upserts[0]!.source).toBe("writer");
     } finally {
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });
@@ -213,7 +224,14 @@ describe("writeIssue ↔ mirror — read-your-writes", () => {
     }
   });
 
-  it("returns successfully + warns when DB stuck (mirror timeout)", async () => {
+  // Scheduled for phase 4 cleanup (DX-545). The pre-DX-547 "stuck DB
+  // surfaces as awaitMirror timeout warning" behavior is no longer how
+  // the writer responds — post-DX-547 the writer's `upsertIssueRowNow`
+  // either succeeds or rethrows (CRITICAL_FAILURE), there is no
+  // best-effort warn-and-resolve path. Phase 4 deletes this skipped
+  // test alongside the `awaitMirror` plumbing in
+  // `src/db/issues-mirror.ts` it pinned.
+  it.skip("returns successfully + warns when DB stuck (mirror timeout) [DX-547: pre-Phase-2 contract; delete in phase 4]", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
     db.mode = "stuck";

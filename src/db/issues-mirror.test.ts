@@ -9,7 +9,11 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
   createPgIssuesMirrorDb,
+  getWriterDb,
+  registerWriterDb,
   startIssuesMirror,
+  unregisterWriterDb,
+  upsertIssueRowNow,
   type IssuesMirror,
   type IssuesMirrorDb,
   type UpsertArgs,
@@ -660,5 +664,116 @@ describe("issues-mirror — non-object YAML fall-through", () => {
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });
     }
+  });
+});
+
+// ----- DX-547 — upsertIssueRowNow (writer-side direct upsert) -----
+describe("upsertIssueRowNow (DX-547 — writer path)", () => {
+  let repo: ReturnType<typeof makeRepo>;
+
+  beforeEach(() => {
+    repo = makeRepo();
+  });
+
+  afterEach(() => {
+    unregisterWriterDb(repo.localPath);
+    rmSync(repo.tmpdir, { recursive: true, force: true });
+  });
+
+  it("no-ops when no writer DB is registered (legacy file-only path)", async () => {
+    // Pure unit-test scenario: nothing registered → upsert is a no-op
+    // that resolves cleanly. Defends the legacy yaml-lifecycle test
+    // suite which relies on `writeIssue` running without a DB.
+    await expect(
+      upsertIssueRowNow({
+        repoName: "no-db-repo",
+        repoLocalPath: repo.localPath,
+        id: "DX-99",
+        data: { id: "DX-99" },
+        contentHash: "abc",
+        source: "writer",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("selectExisting failure: writes CRITICAL_FAILURE + rethrows", async () => {
+    const db = createFakeDb();
+    const boom = new Error("pg connection lost");
+    db.fail = boom;
+    registerWriterDb(repo.localPath, db);
+
+    await expect(
+      upsertIssueRowNow({
+        repoName: repo.name,
+        repoLocalPath: repo.localPath,
+        id: "DX-1",
+        data: { id: "DX-1" },
+        contentHash: "h1",
+        source: "writer",
+      }),
+    ).rejects.toBe(boom);
+
+    // CRITICAL_FAILURE flag MUST be present so the next poller tick
+    // halts — the operator-facing safety net per `agent-dispatch.md`.
+    const flag = readFlag(repo.localPath);
+    expect(flag).not.toBeNull();
+    expect(flag!.reason).toContain("writer DB write failed");
+    expect(flag!.reason).toContain("select existing for DX-1");
+  });
+
+  it("upsertWithHistory failure: writes CRITICAL_FAILURE + rethrows", async () => {
+    const db = createFakeDb();
+    // Override upsertWithHistory in isolation so selectExisting still
+    // succeeds — targets the second try/catch branch in
+    // `upsertIssueRowNow`.
+    const boom = new Error("pg insert deadlock");
+    db.upsertWithHistory = async () => {
+      throw boom;
+    };
+    registerWriterDb(repo.localPath, db);
+
+    await expect(
+      upsertIssueRowNow({
+        repoName: repo.name,
+        repoLocalPath: repo.localPath,
+        id: "DX-2",
+        data: { id: "DX-2" },
+        contentHash: "h2",
+        source: "writer",
+      }),
+    ).rejects.toBe(boom);
+
+    const flag = readFlag(repo.localPath);
+    expect(flag).not.toBeNull();
+    expect(flag!.reason).toContain("writer DB write failed");
+    expect(flag!.reason).toContain("upsert DX-2");
+  });
+
+  it("registerWriterDb / unregisterWriterDb / getWriterDb round-trip (path normalization)", () => {
+    const db = createFakeDb();
+    // Register via the raw path; lookup via a path with redundant `./`
+    // segments — resolve() inside the registry MUST normalize both
+    // sides so the lookup hits.
+    registerWriterDb(repo.localPath, db);
+    expect(getWriterDb(repo.localPath)).toBe(db);
+    expect(getWriterDb(`${repo.localPath}/.`)).toBe(db);
+
+    unregisterWriterDb(repo.localPath);
+    expect(getWriterDb(repo.localPath)).toBeUndefined();
+  });
+
+  it("mirror.stop() unregisters the writer DB", async () => {
+    const db = createFakeDb();
+    const m = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    // startIssuesMirror registered the writer DB.
+    expect(getWriterDb(repo.localPath)).toBe(db);
+    await m.stop();
+    // stop() drops the registration so a subsequent unrelated test
+    // doesn't pick up a stale registration.
+    expect(getWriterDb(repo.localPath)).toBeUndefined();
   });
 });

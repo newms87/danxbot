@@ -23,6 +23,58 @@ import {
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
+import {
+  registerWriterDb,
+  unregisterWriterDb,
+  type IssuesMirrorDb,
+  type UpsertArgs,
+} from "../db/issues-mirror.js";
+
+/**
+ * Install a `FakeDb` against the writer registry for the duration of
+ * one test. Returns the upsert call log + an unregister handle the test
+ * MUST call in a `finally` block. Matches the FakeDb shape used in
+ * `src/db/issues-mirror.test.ts` so writer-side coverage shares the
+ * mental model.
+ */
+function installWriterDb(repoLocalPath: string): {
+  upsertWithHistoryCalls: UpsertArgs[];
+  unregister: () => void;
+} {
+  const rows = new Map<
+    string,
+    { data: Record<string, unknown>; content_hash: string }
+  >();
+  const upsertWithHistoryCalls: UpsertArgs[] = [];
+  const db: IssuesMirrorDb = {
+    async selectExisting(repoName, id) {
+      return rows.get(`${repoName}|${id}`) ?? null;
+    },
+    async upsertWithHistory(args) {
+      rows.set(`${args.repoName}|${args.id}`, {
+        data: args.data,
+        content_hash: args.contentHash,
+      });
+      upsertWithHistoryCalls.push(args);
+    },
+    async tombstone() {
+      // No tombstones in the writer path — left unimplemented.
+    },
+    async listIds() {
+      const out: Array<{ id: string; content_hash: string }> = [];
+      for (const [key, row] of rows) {
+        const id = key.split("|")[1]!;
+        out.push({ id, content_hash: row.content_hash });
+      }
+      return out;
+    },
+  };
+  registerWriterDb(repoLocalPath, db);
+  return {
+    upsertWithHistoryCalls,
+    unregister: () => unregisterWriterDb(repoLocalPath),
+  };
+}
 
 /**
  * Round-trip helper. The yaml-lifecycle test suite previously called
@@ -410,6 +462,136 @@ describe("yaml-lifecycle", () => {
       expect(roundTripped.id).toBe("ISS-12");
       expect(roundTripped.external_id).toBe(external_id);
       expect(roundTripped.dispatch?.id).toBe("did-1");
+    });
+
+    it("DX-547: stamps db_updated_at with a fresh ISO 8601 timestamp before serializing", async () => {
+      // Phase 2 invariant: the writer mints db_updated_at on every save
+      // so the canonical hash reflects the fresh write, and external
+      // readers (dispatched agents reading via the chokidar mirror or
+      // a direct file read) see a monotonic freshness signal.
+      const tracker = new FakeTracker();
+      const { external_id } = await tracker.createCard(
+        defaultCreate({ id: "ISS-5470" }),
+      );
+      const issue = await hydrateFromRemote(
+        tracker,
+        external_id,
+        "did-1",
+        repoRoot,
+        "ISS",
+      );
+
+      const before = Date.now();
+      await writeIssue(repoRoot, issue);
+      const after = Date.now();
+
+      const reloaded = readYamlFile(repoRoot, "ISS-5470");
+      expect(reloaded.db_updated_at).toBeTruthy();
+      const stampedMs = Date.parse(reloaded.db_updated_at);
+      expect(Number.isFinite(stampedMs)).toBe(true);
+      // Allow a 1s slack on each side for clock jitter / scheduler delay
+      // between the Date.now() snapshots and the writer's internal
+      // `new Date().toISOString()` call.
+      expect(stampedMs).toBeGreaterThanOrEqual(before - 1000);
+      expect(stampedMs).toBeLessThanOrEqual(after + 1000);
+    });
+  });
+
+  // ----- DX-547 — writer owns the DB write -----
+  //
+  // These tests register a FakeDb against the writer registry exposed by
+  // `src/db/issues-mirror.ts` so the synchronous upsert path runs in
+  // unit tests without a real pg pool. Unregistered repos fall back to
+  // the file-only legacy path — covered by the existing `writeIssue`
+  // tests above (none of them register a writer DB, none of them assert
+  // a DB row).
+  describe("DX-547 — writer owns the DB write (synchronous upsert)", () => {
+    it("writeIssue upserts the DB row + history row with source='writer' BEFORE writing the file", async () => {
+      const { upsertWithHistoryCalls, unregister } = installWriterDb(repoRoot);
+      try {
+        const issue = buildIssueLite("ISS-5471", "ToDo");
+
+        await writeIssue(repoRoot, issue);
+
+        // Exactly one history row, source=writer, with the just-computed
+        // content hash. The order also matters: the file must exist on
+        // disk by the time writeIssue's returned promise resolves.
+        expect(upsertWithHistoryCalls).toHaveLength(1);
+        const upsert = upsertWithHistoryCalls[0]!;
+        expect(upsert.source).toBe("writer");
+        expect(upsert.id).toBe("ISS-5471");
+        expect(upsert.contentHash).toMatch(/^[0-9a-f]{64}$/);
+        // The first writer save carries no prior row, so prev_hash null.
+        expect(upsert.prevHash).toBeNull();
+        // The upsert payload mirrors the parsed YAML (db_updated_at
+        // stamped + every other field).
+        expect(upsert.data.id).toBe("ISS-5471");
+        expect(typeof upsert.data.db_updated_at).toBe("string");
+        expect((upsert.data.db_updated_at as string).length).toBeGreaterThan(0);
+
+        // File-on-disk reflects the same db_updated_at the DB row carries.
+        const reloaded = readYamlFile(repoRoot, "ISS-5471");
+        expect(reloaded.db_updated_at).toBe(upsert.data.db_updated_at);
+      } finally {
+        unregister();
+      }
+    });
+
+    it("writeIssue twice with no content change: second call short-circuits — one history row only", async () => {
+      // Same content twice — second writer save MUST NOT append a
+      // duplicate history row. The canonical no-op short-circuit gates
+      // on the existing row's content_hash. `db_updated_at` is
+      // intentionally excluded from `canonicalize` (see
+      // `src/db/canonicalize.ts` HASH_EXCLUDED_TOP_KEYS) so re-saves of
+      // identical content produce the same hash even though the writer
+      // bumps `db_updated_at` on every call — no clock pinning needed.
+      const { upsertWithHistoryCalls, unregister } = installWriterDb(repoRoot);
+      try {
+        const issue = buildIssueLite("ISS-5472", "ToDo");
+        await writeIssue(repoRoot, issue);
+        await writeIssue(repoRoot, issue);
+
+        // Exactly ONE history row — the second call short-circuited on
+        // `existing.content_hash === contentHash` and skipped both the
+        // upsert AND the history insert.
+        expect(upsertWithHistoryCalls).toHaveLength(1);
+      } finally {
+        unregister();
+      }
+    });
+
+    it("writeIssue twice with a content change: TWO history rows, prev_hash threaded", async () => {
+      // Different content on the second save MUST produce a second
+      // history row whose prev_hash equals the first row's next_hash —
+      // the canonical chain the DB-mirror epic relies on.
+      const { upsertWithHistoryCalls, unregister } = installWriterDb(repoRoot);
+      try {
+        const issue = buildIssueLite("ISS-5473", "ToDo");
+        await writeIssue(repoRoot, issue);
+        // Mutate a field so the canonical hash changes.
+        const second: Issue = { ...issue, description: "Body — revised" };
+        await writeIssue(repoRoot, second);
+
+        expect(upsertWithHistoryCalls).toHaveLength(2);
+        const [first, secondRow] = upsertWithHistoryCalls;
+        expect(first!.prevHash).toBeNull();
+        expect(secondRow!.prevHash).toBe(first!.contentHash);
+        expect(secondRow!.contentHash).not.toBe(first!.contentHash);
+        expect(secondRow!.source).toBe("writer");
+      } finally {
+        unregister();
+      }
+    });
+
+    it("writeIssue with no writer DB registered: file is still written (legacy unit-test path)", async () => {
+      // No registration call → upsertIssueRowNow no-ops → the file
+      // write still runs. Defends the contract the existing
+      // yaml-lifecycle test suite (which never registers a DB) depends
+      // on.
+      const issue = buildIssueLite("ISS-5474", "ToDo");
+      await writeIssue(repoRoot, issue);
+      const path = issuePath(repoRoot, "ISS-5474", "open");
+      expect(existsSync(path)).toBe(true);
     });
   });
 

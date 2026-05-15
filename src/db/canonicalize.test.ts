@@ -64,17 +64,38 @@ describe("hashCanonical", () => {
     expect(hashCanonical({ a: 1 })).not.toBe(hashCanonical({ a: 2 }));
   });
 
-  // DX-546 — `db_updated_at` participates in the canonical hash via the
-  // generic object walk. Pinning the behavior so a future allowlist
-  // refactor cannot accidentally exclude it. Phase 2 of the DB-mirror
-  // sync relies on the field being hashed so the mirror can detect that
-  // a save changed only the DB timestamp; an exclusion would mask
-  // legitimate first-mirror-after-upgrade upserts.
-  it("db_updated_at participates in Issue hash — differing values diverge", () => {
+  // DX-547 Phase 2 — `db_updated_at` is EXCLUDED from the canonical
+  // hash at the top level (see HASH_EXCLUDED_TOP_KEYS in
+  // `src/db/canonicalize.ts`). The writer stamps `db_updated_at` on
+  // every save; including it in the hash would defeat the canonical
+  // no-op short-circuit in `upsertIssueRowNow` (every re-save of
+  // identical content would produce a new history row because the
+  // timestamp changed). Excluding lets the spec's
+  // `existing.content_hash === contentHash` check fire correctly on
+  // back-to-back identical saves.
+  //
+  // (The Phase 1 test in this file previously pinned the OPPOSITE
+  // behavior; that pin was inverted in Phase 2 because Phase 1's
+  // rationale — "Phase 2 needs db_updated_at hashed so the mirror can
+  // detect timestamp-only saves" — turned out to be backwards. Phase 2
+  // explicitly does NOT want timestamp-only saves to appear as content
+  // changes.)
+  it("db_updated_at is EXCLUDED from the top-level canonical hash", () => {
     const base = createEmptyIssue({ id: "DX-1", title: "t" });
     const a = { ...base, db_updated_at: "2026-01-01T00:00:00.000Z" };
     const b = { ...base, db_updated_at: "2026-06-01T00:00:00.000Z" };
-    expect(canonicalize(a)).toContain("db_updated_at");
+    expect(canonicalize(a)).not.toContain("db_updated_at");
+    expect(hashCanonical(a)).toBe(hashCanonical(b));
+  });
+
+  it("a nested `db_updated_at` field is NOT excluded (top-level filter only)", () => {
+    // Defends against an over-broad refactor that filters the key at
+    // every depth — only the top-level Issue.db_updated_at is the
+    // writer-bumped sentinel; any nested object that happens to use
+    // the same key (extremely unlikely but possible) MUST keep its
+    // hash contribution.
+    const a = { nested: { db_updated_at: "2026-01-01T00:00:00.000Z" } };
+    const b = { nested: { db_updated_at: "2026-06-01T00:00:00.000Z" } };
     expect(hashCanonical(a)).not.toBe(hashCanonical(b));
   });
 });
