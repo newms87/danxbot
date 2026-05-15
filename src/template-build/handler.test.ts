@@ -468,13 +468,24 @@ exit 0
 });
 
 describe("handleTemplateBuild (HTTP shell)", () => {
+  let savedSfcDepsBaseDir: string | undefined;
+
   beforeEach(() => {
     clearRecentBuilds();
     delete process.env.TEMPLATE_BUILD_TOKEN;
+    // Isolate from SFC_DEPS_BASE_DIR in .env so the handler sees
+    // deps_missing regardless of what the host has provisioned.
+    savedSfcDepsBaseDir = process.env.SFC_DEPS_BASE_DIR;
+    process.env.SFC_DEPS_BASE_DIR = "/does-not-exist-danxbot-test";
   });
 
   afterEach(() => {
     delete process.env.TEMPLATE_BUILD_TOKEN;
+    if (savedSfcDepsBaseDir === undefined) {
+      delete process.env.SFC_DEPS_BASE_DIR;
+    } else {
+      process.env.SFC_DEPS_BASE_DIR = savedSfcDepsBaseDir;
+    }
   });
 
   it("returns 401 when TEMPLATE_BUILD_TOKEN is set and bearer missing", async () => {

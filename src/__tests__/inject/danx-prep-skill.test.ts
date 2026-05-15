@@ -190,13 +190,13 @@ describe("danx-prep SKILL.md — verdict emission", () => {
 
   it("Step 2 conflict_on path emits conflict_with array — NOT a status: Blocked stamp", () => {
     const body = readSkill();
-    expect(body).toMatch(/file-scope overlap/i);
+    expect(body).toMatch(/file-overlap mutex/i);
     expect(body).toMatch(/conflict_on/);
   });
 
   it("Step 6 declares the verdict call is exactly-once", () => {
     const body = readSkill();
-    expect(body).toMatch(/exactly once/i);
+    expect(body).toMatch(/exactly one|once per verdict/i);
   });
 });
 
