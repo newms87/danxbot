@@ -525,4 +525,49 @@ publish-danx-issue-mcp: ## Publish @thehammer/danx-issue-mcp to npm (danxbot own
 # the same per-publish .npmrc pattern as publish-danx-issue-mcp; no
 # `npm login` step needed.
 publish-playwright-mcp: ## Publish @thehammer/danxbot-playwright-mcp-server to npm
-	@cd mcp-servers/playwright && npm install --no-save && npm run build && npm publish --access public
+	@if [ -z "$(NPM_TOKEN)" ]; then echo "ERROR: NPM_TOKEN missing from danxbot/.env"; exit 1; fi
+	@set -e; \
+	cd mcp-servers/playwright && npm install --no-save && npm run build; \
+	NEW_VERSION=$$(node -p "require('./package.json').version"); \
+	echo ""; \
+	echo ">>> Publishing @thehammer/danxbot-playwright-mcp-server@$$NEW_VERSION"; \
+	echo "//registry.npmjs.org/:_authToken=$(NPM_TOKEN)" > .npmrc; \
+	trap 'rm -f .npmrc' EXIT; \
+	unset npm_config_registry npm_config_user_agent; \
+	npm publish --access public --userconfig=.npmrc; \
+	echo ""; \
+	echo ">>> Waiting for npm registry propagation..."; \
+	LAST_ERR=""; \
+	for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+		if VIEW_OUT=$$(npm view @thehammer/danxbot-playwright-mcp-server@$$NEW_VERSION version 2>&1); then \
+			if [ "$$VIEW_OUT" = "$$NEW_VERSION" ]; then \
+				echo "    Registry sees $$NEW_VERSION (attempt $$i)"; \
+				break; \
+			fi; \
+		else \
+			case "$$VIEW_OUT" in \
+				*E404*|*"code E404"*|*"is not in this registry"*) LAST_ERR="$$VIEW_OUT" ;; \
+				*) echo "    ERROR: npm view failed unexpectedly:"; echo "$$VIEW_OUT"; exit 1 ;; \
+			esac; \
+		fi; \
+		if [ $$i -eq 15 ]; then \
+			echo "    ERROR: npm registry never surfaced $$NEW_VERSION after 15 attempts (~30s)"; \
+			[ -n "$$LAST_ERR" ] && echo "    Last response: $$LAST_ERR"; \
+			exit 1; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo ""; \
+	echo ">>> Clearing local npm manifest cache (stale cache causes ETARGET)"; \
+	npm cache clean --force; \
+	echo ""; \
+	echo ">>> Clearing stale ~/.npm/_npx/ caches so future invocations pull the new version"; \
+	for dir in $$HOME/.npm/_npx/*/; do \
+		if [ -d "$$dir/node_modules/@thehammer/danxbot-playwright-mcp-server" ]; then \
+			echo "    Clearing $$dir"; \
+			find "$$dir" -mindepth 1 -delete; \
+			rmdir "$$dir"; \
+		fi; \
+	done; \
+	echo ""; \
+	echo ">>> publish-playwright-mcp DONE. @thehammer/danxbot-playwright-mcp-server@$$NEW_VERSION is live on npm."
