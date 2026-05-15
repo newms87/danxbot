@@ -252,6 +252,16 @@ vi.mock("../issue/stamp-blocked.js", () => ({
   stampIssueBlocked: (...args: unknown[]) => mockStampIssueBlocked(...args),
 }));
 
+// DX-559: handleStop runs the commits-shipped enforcement before the
+// existing status branches. Mock it so tests can drive the violation /
+// no-violation path without setting up a real git repo per case (that
+// coverage lives in `enforce-commits-shipped.test.ts`).
+const mockEnforceCommitsShipped = vi.fn().mockResolvedValue(null);
+vi.mock("../issue/enforce-commits-shipped.js", () => ({
+  enforceCommitsShipped: (...args: unknown[]) =>
+    mockEnforceCommitsShipped(...args),
+}));
+
 // DX-365: handleStopFromDb fires `applyStrike` after each updateDispatch
 // branch (critical_failure → mapped failed, agent_blocked → mapped failed,
 // normal terminal). Mock the helper to assert call args without touching
@@ -302,6 +312,12 @@ beforeEach(() => {
   mockDispatchFn.mockReset();
   mockGetDispatchById.mockReset();
   mockUpdateDispatch.mockReset().mockResolvedValue(undefined);
+  mockEnforceCommitsShipped.mockReset().mockResolvedValue(null);
+  // Cross-test isolation: tests that exercise the stamp-throws path
+  // attach a throwing mockImplementation that survives clearAllMocks (only
+  // call history is cleared). Reset explicitly so the next test starts
+  // with the default no-op implementation.
+  mockStampIssueBlocked.mockReset();
 });
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
@@ -1334,6 +1350,100 @@ describe("handleStop", () => {
       expect(JSON.parse(stopRes._getBody()).error).toMatch(/db down/);
     });
 
+    it("DX-559: DB-fallback runs enforcement on status=completed + issueId; null violation proceeds normally", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-559-clean",
+        status: "running",
+        issueId: "DX-700",
+      });
+      mockEnforceCommitsShipped.mockResolvedValue(null);
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "clean across restart",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-559-clean", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).toHaveBeenCalledWith({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "DX-700",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+      });
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("completed");
+    });
+
+    it("DX-559: DB-fallback overrides status=completed → agent_blocked when commits are not on origin/main", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-559-violation",
+        status: "running",
+        issueId: "DX-800",
+      });
+      mockEnforceCommitsShipped.mockResolvedValue({
+        missingShas: ["abc123"],
+        unresolvedShas: [],
+        reason:
+          "DX-559 enforcement: commits in retro.commits[] are not on origin/main. Missing shas: abc123.",
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "lying about success",
+      });
+      const stopRes = createMockRes();
+
+      await handleStop(stopReq, stopRes, "ghost-559-violation", MOCK_REPO);
+
+      // Response surfaces the override so the agent learns.
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({
+        status: "agent_blocked",
+      });
+      // YAML stamped Blocked with the violation reason, NOT the agent's
+      // misleading summary.
+      expect(mockStampIssueBlocked).toHaveBeenCalledWith({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "DX-800",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+        reason: expect.stringContaining("DX-559 enforcement"),
+        timestamp: expect.stringMatching(
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
+        ),
+      });
+      // Dispatch row terminates as failed (agent_blocked collapses to
+      // failed via mapCompleteToDispatchStatus).
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
+      expect(mockUpdateDispatch.mock.calls[0][1].summary).toContain(
+        "DX-559 enforcement",
+      );
+    });
+
+    it("DX-559: DB-fallback skips enforcement when the dispatch row has no issueId", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-559-no-issue",
+        status: "running",
+        issueId: null,
+      });
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "slack reply",
+      });
+
+      await handleStop(
+        stopReq,
+        createMockRes(),
+        "ghost-559-no-issue",
+        MOCK_REPO,
+      );
+
+      expect(mockEnforceCommitsShipped).not.toHaveBeenCalled();
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("completed");
+    });
+
     it("DB-fallback critical_failure without summary returns 400 and does not write the flag", async () => {
       mockGetActiveJob.mockReturnValue(undefined);
       mockGetDispatchById.mockResolvedValue({
@@ -1378,6 +1488,264 @@ describe("handleStop", () => {
     expect(JSON.parse(stopRes._getBody()).error).toMatch(/Invalid status/);
     expect(mockStop).not.toHaveBeenCalled();
     expect(mockWriteFlag).not.toHaveBeenCalled();
+  });
+
+  describe("DX-559: commits-shipped enforcement on status=completed", () => {
+    function makeRunningJob(id: string, mockStop: ReturnType<typeof vi.fn>) {
+      return {
+        id,
+        status: "running",
+        summary: "",
+        startedAt: new Date(),
+        stop: mockStop,
+      };
+    }
+
+    it("skips enforcement when status=completed but the dispatch row has no issueId (Slack / ideator / api/launch)", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-no-issue",
+        status: "running",
+        issueId: null,
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-no-issue", mockStop),
+      );
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "no card",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "job-559-no-issue", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).not.toHaveBeenCalled();
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockStop).toHaveBeenCalledWith("completed", "no card");
+    });
+
+    it("runs enforcement for status=completed + issueId, then proceeds normally when no violation", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-clean",
+        status: "running",
+        issueId: "DX-100",
+      });
+      mockEnforceCommitsShipped.mockResolvedValue(null);
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-clean", mockStop),
+      );
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "all green",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "job-559-clean", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).toHaveBeenCalledWith({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "DX-100",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+      });
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
+      expect(mockStop).toHaveBeenCalledWith("completed", "all green");
+      expect(mockStampIssueBlocked).not.toHaveBeenCalled();
+    });
+
+    it("overrides status=completed → agent_blocked when retro.commits[] is not on origin/main", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-violation",
+        status: "running",
+        issueId: "DX-200",
+      });
+      mockEnforceCommitsShipped.mockResolvedValue({
+        missingShas: ["abc123"],
+        unresolvedShas: [],
+        reason:
+          "DX-559 enforcement: commits in retro.commits[] are not on origin/main. Missing shas: abc123.",
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-violation", mockStop),
+      );
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "all good (lying)",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "job-559-violation", MOCK_REPO);
+
+      // Response reflects the override so the agent learns its completion
+      // was rejected.
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({
+        status: "agent_blocked",
+      });
+      // Candidate YAML gets stamped with the missing-shas reason — the
+      // agent's misleading `summary` is dropped.
+      expect(mockStampIssueBlocked).toHaveBeenCalledWith({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "DX-200",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+        reason: expect.stringContaining("DX-559 enforcement"),
+        timestamp: expect.stringMatching(
+          /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
+        ),
+      });
+      // Dispatch row terminates as `failed` (the agent_blocked branch's
+      // documented mapping). The mocked `stamp-blocked` does not throw,
+      // so the agent_blocked branch reaches job.stop("failed", reason).
+      expect(mockStop).toHaveBeenCalledWith(
+        "failed",
+        expect.stringContaining("DX-559 enforcement"),
+      );
+      // autoSync still fires (push Blocked to tracker) — same ordering as
+      // the regular agent_blocked path.
+      expect(mockAutoSyncTrackedIssue).toHaveBeenCalledWith(
+        "job-559-violation",
+        MOCK_REPO,
+      );
+    });
+
+    it("does NOT run enforcement for status=failed (agent already failed; check is for completed-only)", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-failed",
+        status: "running",
+        issueId: "DX-300",
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-failed", mockStop),
+      );
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "failed",
+        summary: "tests broke",
+      });
+      await handleStop(stopReq, createMockRes(), "job-559-failed", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).not.toHaveBeenCalled();
+    });
+
+    it("does NOT run enforcement for status=critical_failure (env blocker; check is for completed-only)", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-cf",
+        status: "running",
+        issueId: "DX-400",
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(makeRunningJob("job-559-cf", mockStop));
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "critical_failure",
+        summary: "MCP failed",
+      });
+      await handleStop(stopReq, createMockRes(), "job-559-cf", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).not.toHaveBeenCalled();
+    });
+
+    it("DX-559 override survives stampIssueBlocked throwing — same 500 path as the regular agent_blocked branch", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-stamp-throws",
+        status: "running",
+        issueId: "DX-600",
+      });
+      mockEnforceCommitsShipped.mockResolvedValue({
+        missingShas: ["abc123"],
+        unresolvedShas: [],
+        reason: "DX-559 enforcement: missing abc123",
+      });
+      mockStampIssueBlocked.mockImplementation(() => {
+        throw new Error("filesystem read-only");
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-stamp-throws", mockStop),
+      );
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "ignored",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "job-559-stamp-throws", MOCK_REPO);
+
+      // Falls into the in-memory agent_blocked branch which lets the throw
+      // bubble to the outer try/catch — 500 with the underlying error.
+      expect(stopRes._getStatusCode()).toBe(500);
+      expect(JSON.parse(stopRes._getBody()).error).toMatch(
+        /filesystem read-only/,
+      );
+      expect(mockStop).not.toHaveBeenCalled();
+    });
+
+    it("DX-559 override never produces an empty summary (violation.reason is the source of truth)", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-no-summary",
+        status: "running",
+        issueId: "DX-650",
+      });
+      // Reason is non-empty per the contract — assert call-site shape.
+      mockEnforceCommitsShipped.mockResolvedValue({
+        missingShas: ["abc123"],
+        unresolvedShas: [],
+        reason:
+          "DX-559 enforcement: commits not on origin/main. Missing shas: abc123.",
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(
+        makeRunningJob("job-559-no-summary", mockStop),
+      );
+
+      // Agent sent NO summary on the original `completed` signal — the
+      // override fills it from violation.reason instead of inheriting the
+      // empty value, so the agent_blocked branch's "missing summary" 400
+      // gate cannot trigger via this path.
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "job-559-no-summary", MOCK_REPO);
+
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({
+        status: "agent_blocked",
+      });
+      expect(mockStampIssueBlocked).toHaveBeenCalledWith(
+        expect.objectContaining({
+          reason: expect.stringContaining("DX-559 enforcement"),
+        }),
+      );
+      expect(mockStop).toHaveBeenCalledWith(
+        "failed",
+        expect.stringContaining("DX-559 enforcement"),
+      );
+    });
+
+    it("does NOT run enforcement for status=agent_blocked (agent already self-blocked)", async () => {
+      mockGetDispatchById.mockResolvedValue({
+        id: "job-559-ab",
+        status: "running",
+        issueId: "DX-500",
+      });
+      const mockStop = vi.fn().mockResolvedValue(undefined);
+      mockGetActiveJob.mockReturnValue(makeRunningJob("job-559-ab", mockStop));
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "agent_blocked",
+        summary: "ambiguous spec",
+      });
+      await handleStop(stopReq, createMockRes(), "job-559-ab", MOCK_REPO);
+
+      expect(mockEnforceCommitsShipped).not.toHaveBeenCalled();
+      // Existing agent_blocked path still fires.
+      expect(mockStampIssueBlocked).toHaveBeenCalled();
+    });
   });
 });
 

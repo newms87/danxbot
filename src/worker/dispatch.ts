@@ -43,6 +43,7 @@ import {
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { applyStrike } from "../dashboard/dispatch-tracker.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
+import { enforceCommitsShipped } from "../issue/enforce-commits-shipped.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { onDispatchTerminated } from "../dispatch/scheduler.js";
 import { getSlackClientForRepo } from "../slack/listener.js";
@@ -1355,6 +1356,51 @@ function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
 }
 
 /**
+ * DX-559 — Pre-finalize gate for `danxbot_complete({status: "completed"})`.
+ *
+ * When the agent claims success on a card dispatch, the worker verifies
+ * every sha in the candidate YAML's `retro.commits[]` is an ancestor of
+ * `origin/main`. If any sha is missing — agent committed locally but
+ * never pushed to main — the gate overrides the response to
+ * `agent_blocked` with a missing-shas reason. The caller (`handleStop`,
+ * `handleStopFromDb`) then funnels through the existing `agent_blocked`
+ * branch, which stamps `status: Blocked` on the YAML and finalizes the
+ * dispatch row as `failed`.
+ *
+ * Exemptions: non-completed terminal statuses (failed, critical_failure,
+ * agent_blocked) skip the gate — they already encode the dispatch's
+ * outcome and the agent has not claimed success. Non-card dispatches
+ * (`issueId === null` — Slack chats, ideator, /api/launch without
+ * issue) skip too: there is no YAML to read.
+ *
+ * Returns the effective `{status, summary}` to use downstream. On
+ * pass-through (no enforcement OR no violation), returns the inputs
+ * unchanged.
+ */
+async function applyCommitsShippedGate(args: {
+  jobId: string;
+  repoLocalPath: string;
+  issuePrefix: string;
+  issueId: string | null;
+  status: CompleteStatus;
+  summary: string | undefined;
+}): Promise<{ status: CompleteStatus; summary: string | undefined }> {
+  if (args.status !== "completed" || !args.issueId) {
+    return { status: args.status, summary: args.summary };
+  }
+  const violation = await enforceCommitsShipped({
+    repoLocalPath: args.repoLocalPath,
+    candidateId: args.issueId,
+    expectedPrefix: args.issuePrefix,
+  });
+  if (!violation) return { status: args.status, summary: args.summary };
+  log.warn(
+    `[Dispatch ${args.jobId}] DX-559 commits-shipped violation on ${args.issueId}: ${violation.reason}`,
+  );
+  return { status: "agent_blocked", summary: violation.reason };
+}
+
+/**
  * ISS-68: DB-fallback path for `/api/stop/:jobId` when `activeJobs` has no
  * record of the dispatch (e.g. worker restart between spawn and the
  * agent's `danxbot_complete` call). The in-process `job.stop` lifecycle
@@ -1387,9 +1433,24 @@ async function handleStopFromDb(
   }
 
   const body = await parseBody(req);
-  const status = parseStopStatus(body, res);
-  if (!status) return;
-  const summary = typeof body.summary === "string" ? body.summary : undefined;
+  const parsedStatus = parseStopStatus(body, res);
+  if (!parsedStatus) return;
+  const parsedSummary =
+    typeof body.summary === "string" ? body.summary : undefined;
+
+  // DX-559 — pre-finalize gate (see `applyCommitsShippedGate` header for
+  // contract). Override-to-agent_blocked funnels through the existing
+  // `status === "agent_blocked"` block below for stamp + sync.
+  const gated = await applyCommitsShippedGate({
+    jobId,
+    repoLocalPath: repo.localPath,
+    issuePrefix: repo.issuePrefix,
+    issueId: dispatch.issueId,
+    status: parsedStatus,
+    summary: parsedSummary,
+  });
+  const status = gated.status;
+  const summary = gated.summary;
 
   if (status === "critical_failure") {
     if (!summary) {
@@ -1566,10 +1627,29 @@ export async function handleStop(
     }
 
     const body = await parseBody(req);
-    const status = parseStopStatus(body, res);
-    if (!status) return;
+    const parsedStatus = parseStopStatus(body, res);
+    if (!parsedStatus) return;
 
-    const summary = typeof body.summary === "string" ? body.summary : undefined;
+    const parsedSummary =
+      typeof body.summary === "string" ? body.summary : undefined;
+
+    // DX-559 — pre-finalize gate (see `applyCommitsShippedGate` header).
+    // Override-to-agent_blocked funnels through the existing
+    // `status === "agent_blocked"` block below for stamp + sync. Only
+    // hits the DB when status === "completed" (other terminal statuses
+    // do NOT need the dispatch row's issueId).
+    const dispatchRowForGate =
+      parsedStatus === "completed" ? await getDispatchById(jobId) : null;
+    const gated = await applyCommitsShippedGate({
+      jobId,
+      repoLocalPath: repo.localPath,
+      issuePrefix: repo.issuePrefix,
+      issueId: dispatchRowForGate?.issueId ?? null,
+      status: parsedStatus,
+      summary: parsedSummary,
+    });
+    const status = gated.status;
+    const summary = gated.summary;
 
     if (status === "critical_failure") {
       // The flag file is the operator's sole source of truth for what
