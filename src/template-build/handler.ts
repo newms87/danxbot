@@ -33,6 +33,7 @@ import {
 import {
   runViteBuild,
   writeDefaultViteConfig,
+  writeDefaultIndexHtml,
   ViteBuildError,
 } from "./vite-runner.js";
 
@@ -290,6 +291,11 @@ export async function runTemplateBuild(
 
     // Write the default vite.config.ts if the source tarball did not ship one.
     await writeDefaultViteConfig(scratchDir);
+
+    // Write the default index.html if the source tarball did not ship one
+    // (SG-173 — without it vite emits only JS/CSS and gpt-manager's
+    // SfcBuildTransport rejects the dist tarball as "invalid bundle").
+    await writeDefaultIndexHtml(scratchDir);
 
     let buildStderr = "";
     try {

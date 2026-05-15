@@ -6,6 +6,7 @@ import { join } from "path";
 import {
   runViteBuild,
   writeDefaultViteConfig,
+  writeDefaultIndexHtml,
   ViteBuildError,
 } from "./vite-runner.js";
 
@@ -113,6 +114,42 @@ exit 2
       expect(body).toContain('"lodash"');
       expect(body).toContain('"pinia"');
       expect(body).not.toContain('"vue"');
+    });
+
+    it("uses index.html as the rollup input so vite emits dist/index.html", async () => {
+      await writeDefaultViteConfig(workDir);
+      const body = (
+        await readFile(join(workDir, "vite.config.ts"))
+      ).toString();
+      expect(body).toContain('input: "index.html"');
+      expect(body).not.toContain('input: "App.vue"');
+    });
+  });
+
+  describe("writeDefaultIndexHtml", () => {
+    it("writes an index.html when none exists", async () => {
+      const wrote = await writeDefaultIndexHtml(workDir);
+      expect(wrote).toBe(true);
+
+      const body = (
+        await readFile(join(workDir, "index.html"))
+      ).toString();
+      expect(body).toContain('<div id="app"></div>');
+      expect(body).toContain('<script type="module" src="./main.ts"></script>');
+      expect(body).toContain("<!doctype html>");
+    });
+
+    it("does NOT overwrite an existing index.html", async () => {
+      const existing = "<!doctype html><html><body>custom shell</body></html>\n";
+      await writeFile(join(workDir, "index.html"), existing);
+
+      const wrote = await writeDefaultIndexHtml(workDir);
+      expect(wrote).toBe(false);
+
+      const body = (
+        await readFile(join(workDir, "index.html"))
+      ).toString();
+      expect(body).toBe(existing);
     });
   });
 });

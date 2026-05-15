@@ -10,8 +10,15 @@
  * `writeDefaultViteConfig` writes a minimal `vite.config.ts` into the
  * scratch dir when the source tarball did not ship one. The defaults
  * mirror what the gpt-manager build orchestrator (SG-150) expects: relative
- * asset base, App.vue entry, the shared-deps manifest list marked as
- * Rollup external so the bundle does NOT inline `vue` / `@thehammer/danx-ui`.
+ * asset base, `index.html` entry (so vite emits `dist/index.html` alongside
+ * the hashed JS + CSS — gpt-manager's `SfcBuildTransport` requires it), the
+ * shared-deps manifest list marked as Rollup external so the bundle does NOT
+ * inline `vue` / `@thehammer/danx-ui`.
+ *
+ * `writeDefaultIndexHtml` writes a minimal `index.html` into the scratch
+ * dir when the source tarball did not ship one. The body references the
+ * flat-layout `./main.ts` entry shipped by every gpt-manager SFC template
+ * source so vite-plugin-vue can resolve it. SG-173.
  */
 
 import { spawn } from "child_process";
@@ -152,11 +159,49 @@ export default defineConfig({
   build: {
     outDir: "dist",
     rollupOptions: {
-      input: "App.vue",
+      input: "index.html",
       external: ${externalList},
     },
   },
 });
+`;
+
+  await writeFile(path, body, "utf-8");
+  return true;
+}
+
+/**
+ * Generate a default `index.html` if the source tarball did not include
+ * one. The script tag references `./main.ts`, which every gpt-manager SFC
+ * template source ships at the flat root (alongside `App.vue`,
+ * `style.css`, `package.json`). gpt-manager's `SfcBuildTransport` rejects
+ * dist tarballs missing `index.html` with the "invalid bundle" error
+ * (SG-173); writing this default makes the tarball valid by default.
+ *
+ * Returns `true` if the file was written, `false` if a source-provided
+ * `index.html` was already present.
+ */
+export async function writeDefaultIndexHtml(cwd: string): Promise<boolean> {
+  const path = join(cwd, "index.html");
+  try {
+    await access(path);
+    return false;
+  } catch {
+    /* file missing — write defaults below */
+  }
+
+  const body = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Template</title>
+</head>
+<body>
+<div id="app"></div>
+<script type="module" src="./main.ts"></script>
+</body>
+</html>
 `;
 
   await writeFile(path, body, "utf-8");
