@@ -187,6 +187,41 @@ async function applyQueuedVerdict(
     writeFileSync(filePath, serializeIssue(next));
     return;
   }
+  if (payload.verdict === "waiting_on") {
+    if (!candidateId) {
+      throw new Error("waiting_on replay missing issue_id on dispatch row");
+    }
+    const filePath = issuePath(repo.localPath, candidateId, "open");
+    if (!existsSync(filePath)) {
+      throw new Error(`candidate YAML not found at ${filePath}`);
+    }
+    const issue = parseIssue(readFileSync(filePath, "utf-8"), {
+      expectedPrefix: repo.issuePrefix,
+    });
+    const existingBy = issue.waiting_on?.by ?? [];
+    const seen = new Set(existingBy);
+    const mergedBy = [...existingBy];
+    for (const id of payload.depends_on) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      mergedBy.push(id);
+    }
+    const noChange =
+      issue.waiting_on !== null &&
+      issue.waiting_on.reason === payload.reason &&
+      mergedBy.length === existingBy.length;
+    if (noChange) return;
+    const next: Issue = {
+      ...issue,
+      waiting_on: {
+        by: mergedBy,
+        reason: payload.reason,
+        timestamp: new Date().toISOString(),
+      },
+    };
+    writeFileSync(filePath, serializeIssue(next));
+    return;
+  }
   if (payload.verdict === "blocked") {
     if (!candidateId) {
       throw new Error("blocked replay missing issue_id on dispatch row");

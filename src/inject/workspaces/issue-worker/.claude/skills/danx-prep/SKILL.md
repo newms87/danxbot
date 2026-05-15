@@ -1,6 +1,6 @@
 ---
 name: danx-prep
-description: "MANDATORY when the dispatch prompt begins with `/danx-prep <PREFIX>-N`. Runs the pre-dispatch prep step on the agent's worktree — conflict check vs the in-progress sibling list the worker pre-resolved into the prompt, uncommitted-work recovery + assignment reshuffle (with a narrow orphan-discard exception), branch sync with conflict-resolve-in-place + push, card sanity check — then emits a verdict via `mcp__danxbot__danxbot_prep_verdict`. Destructive git ops (`git stash`, `git reset --hard`, `git checkout <ref>`, `git restore`, `git clean -f`) remain BANNED except in the one narrow orphan-discard window Step 3 spells out. Self-block via the `agent_blocked` status on `danxbot_complete` when the prep environment itself wedges and a human must intervene."
+description: "MANDATORY when the dispatch prompt begins with `/danx-prep <PREFIX>-N`. Runs the pre-dispatch prep step on the agent's worktree — sibling-relationship check that distinguishes ONE-WAY sequential dep (verdict `waiting_on` + `depends_on`) from SYMMETRIC file-overlap mutex (verdict `conflict_on` + `conflict_with`), uncommitted-work recovery + assignment reshuffle (with a narrow orphan-discard exception), branch sync with conflict-resolve-in-place + push, card sanity check — then emits one or more verdicts via `mcp__danxbot__danxbot_prep_verdict`. Destructive git ops (`git stash`, `git reset --hard`, `git checkout <ref>`, `git restore`, `git clean -f`) remain BANNED except in the one narrow orphan-discard window Step 3 spells out. Self-block via the `agent_blocked` status on `danxbot_complete` when the prep environment itself wedges and a human must intervene."
 ---
 
 # Danx Prep
@@ -57,14 +57,41 @@ This is read-only. No edits, no commits yet.
 
 ## Step 2 — Conflict check against in-progress siblings
 
-For each sibling YAML you read in Step 1, reason about file-scope overlap with the candidate:
+For each sibling YAML you read in Step 1, reason about the relationship with the candidate. **Two distinct gates** apply — pick the right primitive:
 
-- File paths mentioned in `description` / `ac[].title` / `comments[].text` of BOTH cards.
-- Module / domain proximity — same source file, same component, same generated artifact.
+### 2a — Sequential phase precedence → `waiting_on`
 
-**Overlap is mutual exclusion, NOT precedence.** Neither card consumes the other's output; they simply cannot both be In Progress on the same code region simultaneously.
+If the candidate sequentially depends on a sibling (Phase 2 cannot start until Phase 1 has SHIPPED — schema landed, package published, migration run), that is ONE-WAY precedence. The candidate needs the sibling's output to exist before its own work begins; the sibling does NOT need the candidate.
 
-If overlap is detected → emit verdict `conflict_on` IMMEDIATELY:
+Signals:
+
+- Candidate's `description` / `parent_id` shared-epic context says "Phase N — depends on Phase N-1" / "MUST be complete first" / "needs published validator".
+- Sibling card delivers a contract (schema, package, migration, API) the candidate consumes.
+- Reverse direction does NOT apply: sibling could ship without the candidate existing.
+
+Emit `waiting_on`:
+
+```
+mcp__danxbot__danxbot_prep_verdict({
+  verdict: "waiting_on",
+  reason: "<one sentence naming the sequential dependency>",
+  depends_on: ["<PREFIX>-X", ...],
+})
+```
+
+The worker stamps `waiting_on: {by: depends_on, reason, timestamp}` on the candidate YAML. The poller's `isEffectivelyWaitingOn` filter skips the candidate while any dep is non-terminal; the picker's Pass A also releases the agent (clear `assigned_agent` + flip status → ToDo) so the agent is free for other work.
+
+### 2b — Symmetric file-overlap mutex → `conflict_on`
+
+If the candidate and a sibling touch the same files / region but NEITHER waits on the other's output, that is symmetric mutual exclusion. Both could ship in either order; they just cannot run concurrently without git rebase carnage.
+
+Signals:
+
+- BOTH cards mention the same source file(s) / module / generated artifact.
+- Either could ship first; the second one rebases on the first.
+- No "phase ordering" / "must land first" framing in either description.
+
+Emit `conflict_on`:
 
 ```
 mcp__danxbot__danxbot_prep_verdict({
@@ -74,11 +101,17 @@ mcp__danxbot__danxbot_prep_verdict({
 })
 ```
 
-The worker appends one `{id, reason}` entry per partner to the candidate YAML's `conflict_on[]`. The poller's two-way `isAnyKindBlocked` filter then skips the candidate while any partner is non-terminal.
+The worker appends one `{id, reason}` entry per partner to the candidate YAML's `conflict_on[]`. The poller's two-way `isEffectivelyConflicted` filter then skips the candidate while any partner is non-terminal; the picker's Pass A releases the agent (same as waiting_on).
 
-**Abort the rest of this skill on `conflict_on`.** Do not touch any files, do not sync, do not commit. The worker stops the dispatch.
+### 2c — Both gates apply
 
-If no overlap → continue to Step 3.
+A candidate can be BOTH sequentially dependent on Phase 1 AND symmetrically file-overlapping with sibling Phase 3. Emit both verdicts — separate `danxbot_prep_verdict` calls, one per primitive, with the appropriate partner lists.
+
+### After the verdict
+
+**Abort the rest of this skill on `waiting_on` / `conflict_on`.** Do not touch any files, do not sync, do not commit. The worker stops the dispatch and releases the claim.
+
+If no gate applies → continue to Step 3.
 
 ---
 
@@ -194,25 +227,34 @@ Otherwise → continue to Step 6 with verdict `ok`.
 
 ## Step 6 — Emit verdict
 
-Call `mcp__danxbot__danxbot_prep_verdict` **exactly once**:
+Call `mcp__danxbot__danxbot_prep_verdict` **once per verdict**. Most preps emit exactly one; cards that hit BOTH gates from Step 2 (sequential dep + symmetric overlap) emit two separate calls.
 
 ```
 mcp__danxbot__danxbot_prep_verdict({
-  verdict: "ok" | "conflict_on" | "blocked" | "abort",
+  verdict: "ok" | "conflict_on" | "waiting_on" | "blocked" | "abort",
   reason: "<one-sentence justification — non-empty>",
   conflict_with: ["<PREFIX>-X"],           // REQUIRED iff verdict === "conflict_on"
+  depends_on:    ["<PREFIX>-Y"],           // REQUIRED iff verdict === "waiting_on"
   broken_details: { suggested_steps: [] }, // REQUIRED iff verdict === "abort"
 })
 ```
 
-The MCP tool requires the dispatch row's `issue_id` for `conflict_on` / `blocked`, and `agent_name` for `abort`. Both are populated by the poller. The route returns the applied side-effects (`conflict_on[]` entries appended, `blocked` record stamped, `agents.<name>.broken` stamped).
+The MCP tool requires the dispatch row's `issue_id` for `conflict_on` / `waiting_on` / `blocked`, and `agent_name` for `abort`. Both are populated by the poller. The route returns the applied side-effects (`conflict_on[]` entries appended, `waiting_on` stamped, `blocked` record stamped, `agents.<name>.broken` stamped).
+
+Picking the right verdict:
+
+- `conflict_on` — SYMMETRIC mutex (Step 2b). Both cards touch the same files; either could ship first.
+- `waiting_on` — ONE-WAY precedence (Step 2a). Candidate consumes the partner's output (schema, package, migration); reverse is not true.
+- `blocked` — the CARD ITSELF is stuck (spec ambiguous, AC contradictory, missing context). Distinct from `agent_blocked` (env-broken, see Step 5).
+- `abort` — the PREP environment is broken (Bash unavailable, MCP unreachable mid-prep). Operator must clear `agents.<name>.broken`.
+- `ok` — no gate fires; proceed to work.
 
 Reject-on-call patterns the tool surfaces back:
 
-- `verdict: "waiting_on"` → renamed `conflict_on`.
-- `blocked_by:` arg → renamed `conflict_with`.
+- `blocked_by:` arg → use `conflict_with` (symmetric) or `depends_on` (sequential) instead — error message lists both.
 - Empty `reason` → rejected.
 - Missing `conflict_with` when `verdict === "conflict_on"` → rejected.
+- Missing `depends_on` when `verdict === "waiting_on"` → rejected.
 - Missing `broken_details` when `verdict === "abort"` → rejected.
 
 ---
@@ -223,7 +265,7 @@ After the verdict ack returns:
 
 - **Combined mode** (prompt contained `/danx-next` after `/danx-prep`):
   - `ok` → proceed with `/danx-next`. Work dispatch continues in the same session.
-  - `conflict_on` / `blocked` / `abort` → DO NOT begin the work body. The worker already stopped the dispatch. Stop output here.
+  - `conflict_on` / `waiting_on` / `blocked` / `abort` → DO NOT begin the work body. The worker already stopped the dispatch (and on `conflict_on` / `waiting_on` the picker has released your `assigned_agent` claim — that is expected). Stop output here.
 
 - **Separate mode** (prompt contained only `/danx-prep`):
   - ANY verdict → call `danxbot_complete({status: "completed", summary: "prep <verdict>: <reason>"})` and exit.
@@ -244,7 +286,8 @@ After the verdict ack returns:
 | Enumerating `<worktree>/.danxbot/issues/open/*.yml` for the sibling list | The worker pre-resolved the list and injected `In Progress cards: [...]` into your prompt body. Parse the line; do not search. |
 | `mcp__trello__*` | Trello is background infrastructure. Issues are local YAMLs. |
 | Returning a verdict without inspecting the siblings in `In Progress cards: [...]` | Verdict accuracy is load-bearing for the poller's two-way conflict gate. |
-| Emitting `waiting_on` as the verdict for file-scope overlap | Verdict is `conflict_on`. `waiting_on` is the dep-chain field (one-way precedence) — different semantic. The MCP tool rejects the old verdict name. |
+| Emitting `conflict_on` for a sequential phase dep ("Phase 2 needs Phase 1 to ship first") | That is one-way precedence — emit `waiting_on` + `depends_on`. `conflict_on` is the SYMMETRIC mutex for same-file overlap. |
+| Emitting `waiting_on` for symmetric file overlap ("Phase 2 and Phase 3 touch the same files") | That is symmetric mutex — emit `conflict_on` + `conflict_with`. `waiting_on` is for sequential precedence. |
 
 ---
 
@@ -268,7 +311,7 @@ For card-itself stuckness (impossible AC, ambiguous spec) — use the `blocked` 
 
 Replaces the retired `runConflictCheck` + `dispatchInRecoveryMode` precursor pair (DX-297). Three failure modes those introduced:
 
-1. The conflict check ran in a separate 90s-capped session → timeouts produced false-positive `waiting_on` stamps (DX-273, DX-274).
+1. The conflict check ran in a separate 90s-capped session → timeouts produced false-positive partner stamps (DX-273, DX-274).
 2. The check ran in the shared `issue-worker` workspace cwd, not the agent's worktree — could not reason about branch state.
 3. Recovery was a destructive `git reset --hard` on every "clean" path → silent loss of work.
 

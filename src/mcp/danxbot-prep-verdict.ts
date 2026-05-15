@@ -36,15 +36,25 @@ import { join } from "node:path";
 import { writeAtomicJsonQueueEntry } from "./danxbot-stop-fallback.js";
 
 /**
- * Four-verdict surface produced by the prep agent. Renamed 2026-05-12:
- * `waiting_on` → `conflict_on` to match the v7 `Issue.conflict_on` field
- * (mutual exclusion, two-way enforcement, auto-resolves on partner
- * terminal). `waiting_on` is reserved for one-way precedence on the
- * Issue schema and was the wrong primitive here.
+ * Five-verdict surface produced by the prep agent.
+ *
+ * History:
+ *   - 2026-05-12: renamed `waiting_on` → `conflict_on` so the verdict
+ *     name matched the new `Issue.conflict_on` field (symmetric mutex).
+ *   - 2026-05-15: re-introduced `waiting_on` as a SEPARATE verdict
+ *     (NOT a rename back). The two primitives capture different ideas:
+ *     `waiting_on` = one-way precedence ("Phase 2 needs Phase 1 to land
+ *     first"), `conflict_on` = symmetric file-overlap mutex ("Phase 2
+ *     and Phase 3 touch the same files and cannot run concurrently").
+ *     A prep agent that detects a sequential phase ordering should
+ *     emit `waiting_on`; one that detects symmetric file overlap
+ *     should emit `conflict_on`. Both can be emitted on the same card
+ *     across separate verdict calls when both apply.
  */
 export const PREP_VERDICTS = [
   "ok",
   "conflict_on",
+  "waiting_on",
   "blocked",
   "abort",
 ] as const;
@@ -74,6 +84,11 @@ export type PrepVerdictPayload =
       reason: string;
       conflict_with: string[];
     }
+  | {
+      verdict: "waiting_on";
+      reason: string;
+      depends_on: string[];
+    }
   | { verdict: "blocked"; reason: string }
   | {
       verdict: "abort";
@@ -94,6 +109,7 @@ const ALLOWED_PREP_VERDICT_KEYS = new Set([
   "verdict",
   "reason",
   "conflict_with",
+  "depends_on",
   "broken_details",
 ]);
 
@@ -116,36 +132,69 @@ export interface ParsePrepVerdictOptions {
  * throw to a `-32000` error so the agent sees the message verbatim and
  * can self-correct.
  *
- * Rejects two stale shapes from BEFORE the 2026-05-12 rename:
- *   - `verdict === "waiting_on"` → tell the caller to use
- *     `conflict_on` instead.
- *   - `blocked_by` arg → tell the caller to use `conflict_with` instead.
+ * Rejects one stale shape:
+ *   - `blocked_by` arg → tell the caller to use `conflict_with`
+ *     (renamed 2026-05-12) or `depends_on` (the new `waiting_on`
+ *     verdict's partner-list arg). The error message lists both so an
+ *     agent stamped with stale skill text picks the right successor.
  *
- * Also rejects unknown keys outright (M4) — typos like
- * `conflict_With` would otherwise fall through silently and produce
- * an empty `conflict_on[]` write.
+ * (The 2026-05-12 `waiting_on → conflict_on` rename reject was removed
+ * 2026-05-15 when `waiting_on` was re-introduced as a separate verdict
+ * for one-way precedence — see the PREP_VERDICTS comment block.)
  *
- * Also validates `<PREFIX>-N` shape on each `conflict_with` entry
- * when `issuePrefix` is supplied (M3) — bogus ids would otherwise
- * round-trip through the YAML write and blow up on the NEXT parse
- * (next poller tick, chokidar mirror, etc.). Fail at the boundary the
- * agent can correct on the next turn, not silently land a corrupt YAML.
+ * Also rejects unknown keys outright — typos like `conflict_With`
+ * would otherwise fall through silently and produce an empty stamp.
+ *
+ * Also validates `<PREFIX>-N` shape on each `conflict_with` /
+ * `depends_on` entry when `issuePrefix` is supplied — bogus ids would
+ * otherwise round-trip through the YAML write and blow up on the NEXT
+ * parse. Fail at the boundary the agent can correct on the next turn.
  */
+/**
+ * Shared partner-id list validator. The conflict_on `conflict_with` arg
+ * and the waiting_on `depends_on` arg have identical shape constraints
+ * (non-empty array of non-blank strings, each matching the repo's
+ * `<PREFIX>-N` shape when prefix supplied). Sharing keeps the rules in
+ * lockstep — a fix to one applies to both. Throws on any violation.
+ */
+function parsePartnerIdList(
+  raw: unknown,
+  argName: "conflict_with" | "depends_on",
+  verdict: "conflict_on" | "waiting_on",
+  issuePrefix: string | undefined,
+): string[] {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(
+      `danxbot_prep_verdict: ${argName} must be a non-empty array of issue ids when verdict === "${verdict}"`,
+    );
+  }
+  // Build the prefix-shape regex once outside the entry loop so a
+  // 100-id list doesn't re-compile per entry.
+  const idShape = issuePrefix
+    ? new RegExp(`^${issuePrefix}-\\d+$`)
+    : null;
+  for (const entry of raw) {
+    if (typeof entry !== "string" || entry.trim() === "") {
+      throw new Error(
+        `danxbot_prep_verdict: every entry in ${argName} must be a non-empty issue id string`,
+      );
+    }
+    if (idShape && !idShape.test(entry)) {
+      throw new Error(
+        `danxbot_prep_verdict: ${argName} entry "${entry}" does not match the repo's <PREFIX>-N shape (expected ${issuePrefix}-N)`,
+      );
+    }
+  }
+  return raw as string[];
+}
+
 export function parsePrepVerdictArgs(
   args: Record<string, unknown>,
   options: ParsePrepVerdictOptions = {},
 ): PrepVerdictPayload {
-  // Legacy rename rejects — surface BEFORE the verdict enum check so an
-  // agent that sends both the wrong verdict AND the wrong arg name gets
-  // the rename hint, not a generic enum error.
-  if (args.verdict === "waiting_on") {
-    throw new Error(
-      'danxbot_prep_verdict: verdict "waiting_on" was renamed to "conflict_on" on 2026-05-12 — use verdict: "conflict_on" with conflict_with: ["<PREFIX>-N", ...]',
-    );
-  }
   if (args.blocked_by !== undefined) {
     throw new Error(
-      'danxbot_prep_verdict: arg "blocked_by" was renamed to "conflict_with" on 2026-05-12 — pass the partner ids as conflict_with: ["<PREFIX>-N", ...]',
+      'danxbot_prep_verdict: arg "blocked_by" was renamed 2026-05-12 — for a symmetric file-overlap mutex use verdict: "conflict_on" + conflict_with: ["<PREFIX>-N", ...]; for a sequential phase dep use verdict: "waiting_on" + depends_on: ["<PREFIX>-N", ...]',
     );
   }
 
@@ -179,31 +228,23 @@ export function parsePrepVerdictArgs(
   const reason = args.reason;
 
   if (verdict === "conflict_on") {
-    const raw = args.conflict_with;
-    if (!Array.isArray(raw) || raw.length === 0) {
-      throw new Error(
-        'danxbot_prep_verdict: conflict_with must be a non-empty array of issue ids when verdict === "conflict_on"',
-      );
-    }
-    // Build the prefix-shape regex once outside the entry loop so a
-    // 100-id list doesn't re-compile per entry. Skip when no prefix
-    // supplied — back-compat for callers without repo context.
-    const idShape = options.issuePrefix
-      ? new RegExp(`^${options.issuePrefix}-\\d+$`)
-      : null;
-    for (const entry of raw) {
-      if (typeof entry !== "string" || entry.trim() === "") {
-        throw new Error(
-          "danxbot_prep_verdict: every entry in conflict_with must be a non-empty issue id string",
-        );
-      }
-      if (idShape && !idShape.test(entry)) {
-        throw new Error(
-          `danxbot_prep_verdict: conflict_with entry "${entry}" does not match the repo's <PREFIX>-N shape (expected ${options.issuePrefix}-N)`,
-        );
-      }
-    }
-    return { verdict, reason, conflict_with: raw as string[] };
+    const partners = parsePartnerIdList(
+      args.conflict_with,
+      "conflict_with",
+      verdict,
+      options.issuePrefix,
+    );
+    return { verdict, reason, conflict_with: partners };
+  }
+
+  if (verdict === "waiting_on") {
+    const partners = parsePartnerIdList(
+      args.depends_on,
+      "depends_on",
+      verdict,
+      options.issuePrefix,
+    );
+    return { verdict, reason, depends_on: partners };
   }
 
   if (verdict === "abort") {
@@ -244,8 +285,10 @@ export function parsePrepVerdictArgs(
  * `prepMode` setting (DX-292), which the MCP server doesn't have
  * access to.
  *
- *   - `conflict_on` → `completed` (prep finished cleanly, partner
- *     conflict surfaced).
+ *   - `conflict_on` → `completed` (prep finished cleanly, symmetric
+ *     mutex surfaced).
+ *   - `waiting_on` → `completed` (prep finished cleanly, sequential
+ *     dep surfaced).
  *   - `blocked` → `completed` (prep finished cleanly, candidate must
  *     wait for a human).
  *   - `abort` → `failed` (the prep environment itself is broken — the

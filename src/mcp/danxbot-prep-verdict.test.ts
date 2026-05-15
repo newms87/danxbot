@@ -20,13 +20,17 @@ import {
 } from "./danxbot-prep-verdict.js";
 
 describe("PREP_VERDICTS — verdict literals", () => {
-  it("exposes the four expected values in declaration order", () => {
+  it("exposes the five expected values in declaration order", () => {
     // Pin the literal order so a future shrink (e.g. accidentally dropping
     // `abort`) surfaces here, not as a silent route mis-dispatch. Mirrors
     // the COMPLETE_STATUSES pinning test in danxbot-server.test.ts.
+    // waiting_on re-introduced 2026-05-15 as a separate verdict for
+    // one-way sequential precedence (distinct from conflict_on's
+    // symmetric file-overlap mutex).
     expect([...PREP_VERDICTS]).toEqual([
       "ok",
       "conflict_on",
+      "waiting_on",
       "blocked",
       "abort",
     ]);
@@ -36,7 +40,6 @@ describe("PREP_VERDICTS — verdict literals", () => {
     for (const v of PREP_VERDICTS) {
       expect(isPrepVerdict(v)).toBe(true);
     }
-    expect(isPrepVerdict("waiting_on")).toBe(false);
     expect(isPrepVerdict("")).toBe(false);
     expect(isPrepVerdict(undefined)).toBe(false);
     expect(isPrepVerdict(null)).toBe(false);
@@ -114,40 +117,33 @@ describe("parsePrepVerdictArgs — happy paths", () => {
     if (out.verdict !== "abort") throw new Error("expected abort verdict");
     expect(out.broken_details.suggested_steps).toEqual([]);
   });
+
+  it("accepts a waiting_on verdict with depends_on[]", () => {
+    const out = parsePrepVerdictArgs({
+      verdict: "waiting_on",
+      reason: "Phase 2 needs Phase 1 to land first",
+      depends_on: ["DX-200"],
+    });
+    expect(out).toEqual({
+      verdict: "waiting_on",
+      reason: "Phase 2 needs Phase 1 to land first",
+      depends_on: ["DX-200"],
+    });
+  });
 });
 
-describe("parsePrepVerdictArgs — legacy rename rejects (2026-05-12)", () => {
-  it("rejects verdict='waiting_on' with a rename hint", () => {
-    expect(() =>
-      parsePrepVerdictArgs({
-        verdict: "waiting_on",
-        reason: "x",
-        conflict_with: ["DX-1"],
-      }),
-    ).toThrow(/renamed to "conflict_on"/);
-  });
-
-  it("rejects blocked_by arg with a rename hint pointing at conflict_with", () => {
+describe("parsePrepVerdictArgs — legacy rename rejects", () => {
+  it("rejects blocked_by arg with a hint pointing at conflict_with AND depends_on", () => {
+    // 2026-05-15: blocked_by message now mentions both successor args
+    // since waiting_on is a real verdict again. Agent gets both targets
+    // listed so the right one matches their intent on the next turn.
     expect(() =>
       parsePrepVerdictArgs({
         verdict: "conflict_on",
         reason: "x",
         blocked_by: ["DX-1"],
       }),
-    ).toThrow(/renamed to "conflict_with"/);
-  });
-
-  it("legacy verdict + legacy arg → verdict-rename hint fires first", () => {
-    // Ordering matters — the agent's likely fix is "use the new verdict",
-    // and that hint subsumes the blocked_by fix. The verdict rename
-    // message must surface before the arg rename message.
-    expect(() =>
-      parsePrepVerdictArgs({
-        verdict: "waiting_on",
-        reason: "x",
-        blocked_by: ["DX-1"],
-      }),
-    ).toThrow(/renamed to "conflict_on"/);
+    ).toThrow(/conflict_with.*depends_on|depends_on.*conflict_with/);
   });
 });
 
@@ -176,8 +172,65 @@ describe("parsePrepVerdictArgs — unknown-key reject (M4)", () => {
       expect(msg).toMatch(/verdict/);
       expect(msg).toMatch(/reason/);
       expect(msg).toMatch(/conflict_with/);
+      expect(msg).toMatch(/depends_on/);
       expect(msg).toMatch(/broken_details/);
     }
+  });
+});
+
+describe("parsePrepVerdictArgs — waiting_on branch", () => {
+  it("rejects waiting_on without depends_on", () => {
+    expect(() =>
+      parsePrepVerdictArgs({ verdict: "waiting_on", reason: "x" }),
+    ).toThrow(/depends_on must be a non-empty array/);
+  });
+
+  it("rejects waiting_on with empty depends_on", () => {
+    expect(() =>
+      parsePrepVerdictArgs({
+        verdict: "waiting_on",
+        reason: "x",
+        depends_on: [],
+      }),
+    ).toThrow(/depends_on must be a non-empty array/);
+  });
+
+  it("rejects waiting_on with non-string depends_on entry", () => {
+    expect(() =>
+      parsePrepVerdictArgs({
+        verdict: "waiting_on",
+        reason: "x",
+        depends_on: ["DX-1", 42],
+      }),
+    ).toThrow(/every entry in depends_on must be a non-empty issue id/);
+  });
+
+  it("validates depends_on entries against the repo prefix when supplied", () => {
+    expect(() =>
+      parsePrepVerdictArgs(
+        {
+          verdict: "waiting_on",
+          reason: "x",
+          depends_on: ["banana"],
+        },
+        { issuePrefix: "DX" },
+      ),
+    ).toThrow(/does not match the repo's <PREFIX>-N shape/);
+  });
+
+  it("accepts a well-formed depends_on list under issuePrefix", () => {
+    const out = parsePrepVerdictArgs(
+      {
+        verdict: "waiting_on",
+        reason: "Phase 2 needs Phase 1",
+        depends_on: ["DX-1", "DX-42"],
+      },
+      { issuePrefix: "DX" },
+    );
+    if (out.verdict !== "waiting_on") {
+      throw new Error("expected waiting_on verdict");
+    }
+    expect(out.depends_on).toEqual(["DX-1", "DX-42"]);
   });
 });
 
@@ -326,6 +379,10 @@ describe("mapTerminalVerdictToDispatchStatus", () => {
 
   it("maps conflict_on → completed (prep finished cleanly — surfaced the overlap)", () => {
     expect(mapTerminalVerdictToDispatchStatus("conflict_on")).toBe("completed");
+  });
+
+  it("maps waiting_on → completed (prep finished cleanly — surfaced the sequential dep)", () => {
+    expect(mapTerminalVerdictToDispatchStatus("waiting_on")).toBe("completed");
   });
 
   it("maps blocked → completed (prep finished cleanly — candidate is self-stuck)", () => {
@@ -480,17 +537,17 @@ describe("callDanxbotPrepVerdict — happy path", () => {
 
   it("validates the payload BEFORE attempting the HTTP POST", async () => {
     // A bad payload must surface as a validation error, not a network
-    // error — the agent's next turn should see the rename hint.
+    // error — the agent's next turn should see the hint.
     await expect(
       callDanxbotPrepVerdict(
         {
-          verdict: "waiting_on",
+          verdict: "conflict_on",
           reason: "x",
-          conflict_with: ["DX-1"],
+          blocked_by: ["DX-1"],
         },
         { url: "http://localhost:5562/api/prep-verdict/job-1" },
       ),
-    ).rejects.toThrow(/renamed to "conflict_on"/);
+    ).rejects.toThrow(/conflict_with|depends_on/);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

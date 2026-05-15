@@ -353,20 +353,28 @@ export const TOOLS = [
     description:
       "Signal the result of a pre-dispatch prep step (DX-291 / DX-294). " +
       "Use exactly once at the END of a prep dispatch, BEFORE danxbot_complete. " +
-      "Four verdicts: \"ok\" (proceed with candidate), \"conflict_on\" " +
-      "(candidate has file-scope overlap with the cards in conflict_with — " +
+      "Five verdicts: \"ok\" (proceed with candidate); \"conflict_on\" " +
+      "(SYMMETRIC file-overlap mutex — candidate and the cards in " +
+      "conflict_with[] touch the same files and CANNOT run concurrently — " +
       "the worker appends {id, reason} entries to the candidate YAML's " +
-      "conflict_on[]), \"blocked\" (candidate is self-stuck — the worker " +
-      "stamps status: Blocked + blocked: {reason, timestamp} on the candidate " +
-      "YAML), \"abort\" (the prep environment itself is broken — the worker " +
-      "stamps agents.<name>.broken on settings.json so the picker skips " +
-      "this agent until cleared, and the dispatch finalizes as failed). " +
+      "conflict_on[]); \"waiting_on\" (ONE-WAY sequential dep — candidate " +
+      "needs the cards in depends_on[] to LAND FIRST before its own work " +
+      "can start; the worker stamps the candidate YAML's waiting_on field " +
+      "with {by: depends_on, reason, timestamp}); \"blocked\" (candidate " +
+      "is self-stuck — the worker stamps status: Blocked + blocked: " +
+      "{reason, timestamp}); \"abort\" (the prep environment itself is " +
+      "broken — the worker stamps agents.<name>.broken on settings.json " +
+      "so the picker skips this agent until cleared, and the dispatch " +
+      "finalizes as failed). " +
+      "PICK THE RIGHT PRIMITIVE: sequential phase ordering (Phase 2 needs " +
+      "Phase 1) → waiting_on. Symmetric file overlap between siblings → " +
+      "conflict_on. When both apply, emit both (separate calls). " +
       "ARGUMENTS: verdict (required); reason (required, non-empty); " +
       "conflict_with (required iff verdict=conflict_on) — array of partner " +
-      "ids; broken_details (required iff verdict=abort) — " +
-      "{suggested_steps: string[]}. The legacy \"waiting_on\" verdict + " +
-      "\"blocked_by\" arg names were renamed 2026-05-12 — calls using the " +
-      "old names are rejected with a hint pointing at the new names.",
+      "ids; depends_on (required iff verdict=waiting_on) — array of " +
+      "predecessor ids; broken_details (required iff verdict=abort) — " +
+      "{suggested_steps: string[]}. The legacy \"blocked_by\" arg name " +
+      "was renamed 2026-05-12 — calls using it are rejected with a hint.",
     inputSchema: {
       type: "object",
       properties: {
@@ -374,17 +382,18 @@ export const TOOLS = [
           type: "string",
           enum: [...PREP_VERDICTS],
           description:
-            "ok = proceed with candidate; conflict_on = candidate overlaps " +
-            "with conflict_with[] partners (mutual exclusion); blocked = " +
-            "candidate is self-stuck (human action needed); abort = the " +
-            "prep agent's own environment is broken.",
+            "ok = proceed with candidate; conflict_on = SYMMETRIC mutex " +
+            "with conflict_with[] partners (concurrent work on same files); " +
+            "waiting_on = ONE-WAY sequential dep, depends_on[] must land " +
+            "first; blocked = candidate is self-stuck (human action needed); " +
+            "abort = the prep agent's own environment is broken.",
         },
         reason: {
           type: "string",
           description:
             "Non-empty one-sentence justification. Surfaces in the dashboard " +
-            "drawer, the YAML's conflict_on/blocked record, and the " +
-            "settings.json broken record.",
+            "drawer, the YAML's conflict_on / waiting_on / blocked record, " +
+            "and the settings.json broken record.",
         },
         conflict_with: {
           type: "array",
@@ -393,6 +402,15 @@ export const TOOLS = [
             "Required iff verdict === 'conflict_on'. Each entry is a " +
             "<PREFIX>-N id of a card whose work overlaps with the candidate. " +
             "The worker appends {id, reason} to the candidate's conflict_on[].",
+        },
+        depends_on: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Required iff verdict === 'waiting_on'. Each entry is a " +
+            "<PREFIX>-N id of a card whose work the candidate sequentially " +
+            "depends on (predecessor must land first). The worker stamps the " +
+            "candidate's waiting_on = {by: depends_on, reason, timestamp}.",
         },
         broken_details: {
           type: "object",

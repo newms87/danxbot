@@ -105,6 +105,14 @@ interface PrepVerdictAck {
   status: "applied";
   verdict: PrepVerdict;
   conflictsAppended: number;
+  /**
+   * Whether the route stamped (or refreshed) the candidate's
+   * `waiting_on` record for a `waiting_on` verdict. Distinct from
+   * `conflictsAppended` because `waiting_on` is a single struct
+   * (not an array of entries) — the route either writes the full
+   * record or no-ops when an identical record already exists.
+   */
+  waitingOnStamped: boolean;
   candidateBlocked: boolean;
   agentMarkedBroken: boolean;
   dispatchTerminal?: "completed" | "failed";
@@ -157,6 +165,68 @@ function applyConflictOnVerdict(
   };
   writeFileSync(filePath, serializeIssue(next));
   return additions.length;
+}
+
+/**
+ * Apply the `waiting_on` verdict. Reads + parses the candidate YAML,
+ * stamps `waiting_on: {by, reason, timestamp: nowIso}`. Sequential
+ * phase ordering primitive — Phase N+1 waits on Phase N. Distinct
+ * from `conflict_on` (symmetric file-overlap mutex).
+ *
+ * Merge semantics: union the new `depends_on` ids with any existing
+ * `waiting_on.by` set, dedup, preserve order (existing first, then
+ * new additions in input order). When the result equals the
+ * existing record (same ids, dedup-stable, same reason) the write
+ * no-ops and the route's ack returns `waitingOnStamped: false`.
+ *
+ * Reason policy: on overwrite the new reason wins (mirrors
+ * `applyBlockedVerdict`'s timestamp bump; the prep agent has the
+ * freshest context). Timestamp ALWAYS updates on a state change.
+ *
+ * Status is NOT touched: `waiting_on` is independent of status (the
+ * picker's `listDispatchableYamls` filter treats waiting_on as a
+ * dispatch gate orthogonal to ToDo / In Progress / Blocked).
+ *
+ * Returns `true` when the YAML actually changed, `false` on no-op.
+ */
+function applyWaitingOnVerdict(
+  repo: RepoContext,
+  candidateId: string,
+  payload: Extract<PrepVerdictPayload, { verdict: "waiting_on" }>,
+  nowIso: string,
+): boolean {
+  const filePath = issuePath(repo.localPath, candidateId, "open");
+  if (!existsSync(filePath)) {
+    throw new Error(
+      `candidate YAML not found at ${filePath} — cannot stamp waiting_on`,
+    );
+  }
+  const issue = parseIssue(readFileSync(filePath, "utf-8"), {
+    expectedPrefix: repo.issuePrefix,
+  });
+  const existingBy = issue.waiting_on?.by ?? [];
+  const seen = new Set(existingBy);
+  const mergedBy = [...existingBy];
+  for (const id of payload.depends_on) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    mergedBy.push(id);
+  }
+  const noChange =
+    issue.waiting_on !== null &&
+    issue.waiting_on.reason === payload.reason &&
+    mergedBy.length === existingBy.length;
+  if (noChange) return false;
+  const next: Issue = {
+    ...issue,
+    waiting_on: {
+      by: mergedBy,
+      reason: payload.reason,
+      timestamp: nowIso,
+    },
+  };
+  writeFileSync(filePath, serializeIssue(next));
+  return true;
 }
 
 /**
@@ -218,7 +288,11 @@ function checkVerdictPreconditions(
   verdict: PrepVerdict,
   dispatch: Pick<Dispatch, "issueId" | "agentName">,
 ): { status: number; error: string } | null {
-  if (verdict === "conflict_on" || verdict === "blocked") {
+  if (
+    verdict === "conflict_on" ||
+    verdict === "waiting_on" ||
+    verdict === "blocked"
+  ) {
     if (!dispatch.issueId) {
       return {
         status: 400,
@@ -257,6 +331,7 @@ async function applyVerdictSideEffect(
     status: "applied",
     verdict: payload.verdict,
     conflictsAppended: 0,
+    waitingOnStamped: false,
     candidateBlocked: false,
     agentMarkedBroken: false,
   };
@@ -273,6 +348,14 @@ async function applyVerdictSideEffect(
         repo,
         dispatch.issueId!,
         payload,
+      );
+      return ack;
+    case "waiting_on":
+      ack.waitingOnStamped = applyWaitingOnVerdict(
+        repo,
+        dispatch.issueId!,
+        payload,
+        nowIso,
       );
       return ack;
     case "blocked":

@@ -104,15 +104,29 @@ function makeJobStub(dispatchKind?: "prep" | "work") {
 }
 
 /** Write a v7 Issue to `<root>/.danxbot/issues/open/<id>.yml`. */
-function writeIssue(root: string, id: string, status: "ToDo" | "Blocked" = "ToDo") {
+function writeIssue(
+  root: string,
+  id: string,
+  statusOrMutator:
+    | "ToDo"
+    | "Blocked"
+    | ((issue: ReturnType<typeof createEmptyIssue>) => void) = "ToDo",
+) {
   mkdirSync(join(root, ".danxbot", "issues", "open"), { recursive: true });
   // `title` is parser-required non-empty; use a stable test fixture body.
+  // Two-shape signature: a literal status keeps the original short-form,
+  // a callback lets tests stamp arbitrary fields (waiting_on, etc.).
+  const status =
+    typeof statusOrMutator === "string" ? statusOrMutator : "ToDo";
   const issue = createEmptyIssue({
     id,
     status,
     title: `Test issue ${id}`,
     description: "fixture",
   });
+  if (typeof statusOrMutator === "function") {
+    statusOrMutator(issue);
+  }
   writeFileSync(
     join(root, ".danxbot", "issues", "open", `${id}.yml`),
     serializeIssue(issue),
@@ -161,22 +175,7 @@ describe("handlePrepVerdict — request validation", () => {
     expect(JSON.parse(res._getBody()).error).toMatch(/verdict must be one of/);
   });
 
-  it("400s on legacy waiting_on verdict — rename hint", async () => {
-    const req = createMockReqWithBody("POST", {
-      verdict: "waiting_on",
-      reason: "x",
-      conflict_with: ["DX-1"],
-    });
-    const res = createMockRes();
-    await handlePrepVerdict(req, res, "dispatch-1", repo, {
-      getDispatch: vi.fn(),
-      getJob: vi.fn(),
-    });
-    expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/renamed to "conflict_on"/);
-  });
-
-  it("400s on legacy blocked_by arg — rename hint", async () => {
+  it("400s on legacy blocked_by arg — hint lists both successor args", async () => {
     const req = createMockReqWithBody("POST", {
       verdict: "conflict_on",
       reason: "x",
@@ -188,7 +187,9 @@ describe("handlePrepVerdict — request validation", () => {
       getJob: vi.fn(),
     });
     expect(res._getStatusCode()).toBe(400);
-    expect(JSON.parse(res._getBody()).error).toMatch(/renamed to "conflict_with"/);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /conflict_with.*depends_on|depends_on.*conflict_with/,
+    );
   });
 
   it("404s when the dispatch does not exist", async () => {
@@ -400,6 +401,124 @@ describe("handlePrepVerdict — conflict_on verdict", () => {
     });
     expect(res._getStatusCode()).toBe(500);
     expect(JSON.parse(res._getBody()).error).toMatch(/candidate YAML not found/);
+  });
+});
+
+describe("handlePrepVerdict — waiting_on verdict", () => {
+  let root: string;
+  let repo: ReturnType<typeof makeRepo>;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "prep-verdict-route-"));
+    repo = makeRepo(root);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("stamps waiting_on={by, reason, timestamp} on the candidate YAML and stops the dispatch", async () => {
+    writeIssue(root, "DX-100");
+    const { job, stop } = makeJobStub();
+    const req = createMockReqWithBody("POST", {
+      verdict: "waiting_on",
+      reason: "Phase 2 needs Phase 1 to land first",
+      depends_on: ["DX-200"],
+    });
+    const res = createMockRes();
+    await handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+      getJob: vi.fn().mockReturnValue(job),
+      now: () => new Date("2026-05-15T07:00:00Z").getTime(),
+    });
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.waitingOnStamped).toBe(true);
+    expect(body.dispatchTerminal).toBe("completed");
+    const yaml = readIssue(root, "DX-100");
+    expect(yaml.waiting_on).toEqual({
+      by: ["DX-200"],
+      reason: "Phase 2 needs Phase 1 to land first",
+      timestamp: "2026-05-15T07:00:00.000Z",
+    });
+    // Status untouched — waiting_on is orthogonal to status.
+    expect(yaml.status).toBe("ToDo");
+    expect(stop).toHaveBeenCalledWith(
+      "completed",
+      expect.stringMatching(/waiting_on/),
+    );
+  });
+
+  it("merges depends_on with an existing waiting_on.by — preserves existing first, appends new in input order", async () => {
+    writeIssue(root, "DX-100", (i) => {
+      i.waiting_on = {
+        by: ["DX-200"],
+        reason: "old reason",
+        timestamp: "2026-05-14T00:00:00.000Z",
+      };
+    });
+    const { job } = makeJobStub();
+    const req = createMockReqWithBody("POST", {
+      verdict: "waiting_on",
+      reason: "now also needs DX-201",
+      depends_on: ["DX-200", "DX-201"],
+    });
+    const res = createMockRes();
+    await handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+      getJob: vi.fn().mockReturnValue(job),
+      now: () => new Date("2026-05-15T07:00:00Z").getTime(),
+    });
+    const body = JSON.parse(res._getBody());
+    expect(body.waitingOnStamped).toBe(true);
+    const yaml = readIssue(root, "DX-100");
+    expect(yaml.waiting_on?.by).toEqual(["DX-200", "DX-201"]);
+    expect(yaml.waiting_on?.reason).toBe("now also needs DX-201");
+    expect(yaml.waiting_on?.timestamp).toBe("2026-05-15T07:00:00.000Z");
+  });
+
+  it("no-ops when re-POSTed with identical depends_on + reason (waitingOnStamped: false)", async () => {
+    writeIssue(root, "DX-100", (i) => {
+      i.waiting_on = {
+        by: ["DX-200"],
+        reason: "same reason",
+        timestamp: "2026-05-14T00:00:00.000Z",
+      };
+    });
+    const { job } = makeJobStub();
+    const req = createMockReqWithBody("POST", {
+      verdict: "waiting_on",
+      reason: "same reason",
+      depends_on: ["DX-200"],
+    });
+    const res = createMockRes();
+    await handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+      getJob: vi.fn().mockReturnValue(job),
+    });
+    const body = JSON.parse(res._getBody());
+    expect(body.waitingOnStamped).toBe(false);
+    const yaml = readIssue(root, "DX-100");
+    // Timestamp preserved on no-op.
+    expect(yaml.waiting_on?.timestamp).toBe("2026-05-14T00:00:00.000Z");
+  });
+
+  it("400s when the dispatch row has no issue_id", async () => {
+    const { job } = makeJobStub();
+    const req = createMockReqWithBody("POST", {
+      verdict: "waiting_on",
+      reason: "x",
+      depends_on: ["DX-1"],
+    });
+    const res = createMockRes();
+    await handlePrepVerdict(req, res, "dispatch-1", repo, {
+      getDispatch: vi.fn().mockResolvedValue(makeDispatch({ issueId: null })),
+      getJob: vi.fn().mockReturnValue(job),
+    });
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /waiting_on verdict requires.*issue_id/,
+    );
   });
 });
 

@@ -713,7 +713,7 @@ describe("danxbot_prep_verdict tool schema (DX-294)", () => {
     expect(tool).toBeDefined();
   });
 
-  it("exposes ok / conflict_on / blocked / abort as the verdict enum", () => {
+  it("exposes ok / conflict_on / waiting_on / blocked / abort as the verdict enum", () => {
     const schema = tool!.inputSchema as unknown as {
       properties: { verdict: { enum: string[] } };
       required: string[];
@@ -721,10 +721,13 @@ describe("danxbot_prep_verdict tool schema (DX-294)", () => {
     // Pin order — a future shrink (accidentally dropping `abort`) would
     // surface here as the picker silently regressing to "every prep
     // succeeds as ok" because the agent's tool schema would never
-    // accept abort.
+    // accept abort. waiting_on re-introduced 2026-05-15 as a SEPARATE
+    // verdict (sequential dep) — distinct from conflict_on (symmetric
+    // file-overlap mutex).
     expect(schema.properties.verdict.enum).toEqual([
       "ok",
       "conflict_on",
+      "waiting_on",
       "blocked",
       "abort",
     ]);
@@ -732,16 +735,17 @@ describe("danxbot_prep_verdict tool schema (DX-294)", () => {
     expect(schema.required).toContain("reason");
   });
 
-  it("description names the legacy waiting_on / blocked_by names so cached skill bodies see the rename hint", () => {
+  it("description distinguishes conflict_on (symmetric mutex) from waiting_on (sequential dep) and lists depends_on alongside conflict_with", () => {
     // The 2026-05-12 rename split `verdict: waiting_on` → `conflict_on`
-    // and `blocked_by` → `conflict_with`. The tool description tells
-    // the agent both — so an agent whose skill body predates the
-    // rename sees the new names in its own tool description and
-    // self-corrects. Surface-level pin so a future description rewrite
-    // can't silently drop the migration breadcrumb.
+    // and `blocked_by` → `conflict_with`. The 2026-05-15 re-introduction
+    // adds back `waiting_on` as a SEPARATE verdict; the description MUST
+    // tell the agent the difference so it picks the right primitive.
     expect(tool!.description).toMatch(/waiting_on/);
+    expect(tool!.description).toMatch(/depends_on/);
     expect(tool!.description).toMatch(/blocked_by/);
     expect(tool!.description).toMatch(/conflict_with/);
+    expect(tool!.description).toMatch(/SYMMETRIC|symmetric mutex/i);
+    expect(tool!.description).toMatch(/ONE-WAY|sequential/i);
   });
 });
 
@@ -760,19 +764,19 @@ describe("callTool — danxbot_prep_verdict (DX-294)", () => {
     ).rejects.toThrow(/DANXBOT_PREP_VERDICT_URL/);
   });
 
-  it("rejects the legacy waiting_on verdict with the rename hint", async () => {
-    // Wires the rename rejects through callTool so the failure path
+  it("rejects the legacy blocked_by arg with the rename hint via callTool", async () => {
+    // Wires the rename reject through callTool so the failure path
     // surfaces all the way up to the agent's tool result.
     await expect(
       callTool(
         "danxbot_prep_verdict",
-        { verdict: "waiting_on", reason: "x", conflict_with: ["DX-1"] },
+        { verdict: "conflict_on", reason: "x", blocked_by: ["DX-1"] },
         {
           stop: STOP_URL,
           prepVerdict: "http://localhost:5562/api/prep-verdict/job-xyz",
         },
       ),
-    ).rejects.toThrow(/renamed to "conflict_on"/);
+    ).rejects.toThrow(/conflict_with|depends_on/);
   });
 
   it("POSTs to the prepVerdict URL on a valid payload (happy path through callTool)", async () => {
