@@ -220,6 +220,8 @@ export function createEmptyIssue(
     type?: IssueType;
     title?: string;
     description?: string;
+    priority?: number;
+    blocked?: { reason: string; timestamp: string } | null;
     effort_level?: EffortLevelName | null;
   } = {},
 ): Issue {
@@ -235,7 +237,8 @@ export function createEmptyIssue(
     type: seed.type ?? "Feature",
     title: seed.title ?? "",
     description: seed.description ?? "",
-    priority: PRIORITY_DEFAULT,
+    priority:
+      seed.priority !== undefined ? clampPriority(seed.priority) : PRIORITY_DEFAULT,
     position: null,
     triage: emptyTriage(),
     ac: [],
@@ -243,7 +246,7 @@ export function createEmptyIssue(
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     assigned_agent: null,
     waiting_on: null,
-    blocked: null,
+    blocked: seed.blocked ?? null,
     requires_human: null,
     conflict_on: [],
     effort_level: seed.effort_level ?? null,

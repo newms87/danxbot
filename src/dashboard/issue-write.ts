@@ -1032,6 +1032,31 @@ export interface IssueCreateInput {
   description: string;
   status: IssueStatus;
   type: IssueType;
+  /**
+   * Optional operator-chosen priority (DX-544). Finite number; clamped on
+   * write into `[PRIORITY_MIN, PRIORITY_MAX]`. Omitted → writer falls back
+   * to `PRIORITY_DEFAULT`.
+   */
+  priority?: number;
+}
+
+/**
+ * Sentinel `blocked.reason` prefix stamped on every newly-created card
+ * (DX-544). The poller's `isAnyKindBlocked` filter excludes cards with
+ * non-null `blocked`, so the work-agent dispatch cannot claim the card
+ * before the flesh-out agent rewrites the description. The `danx-flesh-out`
+ * skill recognizes this exact prefix as the eligibility signal and clears
+ * `blocked: null` + restores the encoded starting status as its final
+ * YAML edit before `danxbot_complete`.
+ *
+ * The operator's chosen starting status (Review or ToDo) is encoded into
+ * the reason as the trailing ` start as <status>` token so the flesh-out
+ * agent can parse it back out without an out-of-band channel.
+ */
+export const FLESH_OUT_BLOCK_PREFIX = "Awaiting flesh-out";
+
+export function buildFleshOutBlockReason(startAs: IssueStatus): string {
+  return `${FLESH_OUT_BLOCK_PREFIX} — start as ${startAs}`;
 }
 
 function validateCreateShape(body: unknown): IssueCreateInput {
@@ -1068,11 +1093,22 @@ function validateCreateShape(body: unknown): IssueCreateInput {
       error: `type must be one of [${ISSUE_TYPES.join(", ")}]`,
     });
   }
+  let priority: number | undefined;
+  if ("priority" in raw && raw.priority !== undefined) {
+    const v = raw.priority;
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      throw new IssuePatchError(400, {
+        error: "priority must be a finite number",
+      });
+    }
+    priority = v;
+  }
   return {
     title: raw.title,
     description: raw.description,
     status: raw.status as IssueStatus,
     type: raw.type as IssueType,
+    ...(priority !== undefined ? { priority } : {}),
   };
 }
 
@@ -1104,12 +1140,24 @@ export async function createIssue(
     // both reads would see the same `max(N)` and both writes would race
     // for `<PREFIX>-N+1` (code-review C1).
     const newId = await nextIssueId(issuesRoot, expectedPrefix);
+    // DX-544 — close the create-flow race: every newly-created card lands
+    // with `status: "Blocked"` + a sentinel `blocked` record so the poller's
+    // `isAnyKindBlocked` filter cannot dispatch a work-agent before the
+    // flesh-out agent rewrites the description. The operator's chosen
+    // starting status is encoded into the sentinel reason; the
+    // `danxbot:danx-flesh-out` skill parses it back out and restores
+    // `status` (plus clears `blocked: null`) as its final YAML edit.
     const draft = createEmptyIssue({
       id: newId,
       title: input.title,
       description: input.description,
-      status: input.status,
+      status: "Blocked",
       type: input.type,
+      priority: input.priority,
+      blocked: {
+        reason: buildFleshOutBlockReason(input.status),
+        timestamp: new Date().toISOString(),
+      },
     });
 
     // Round-trip through the strict parser BEFORE writing so any

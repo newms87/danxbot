@@ -213,6 +213,12 @@ export interface IssueCreateInput {
   description: string;
   status: IssueCreateStatus;
   type: Issue["type"];
+  /**
+   * Optional operator-chosen priority (DX-544). Finite number; clamped on
+   * the server into `[PRIORITY_MIN, PRIORITY_MAX]`. Omitted → server falls
+   * back to `PRIORITY_DEFAULT` (3.0).
+   */
+  priority?: number;
 }
 
 /**

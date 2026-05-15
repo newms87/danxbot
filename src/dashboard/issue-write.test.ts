@@ -1439,7 +1439,14 @@ describe("createIssue — happy path", () => {
     expect(issue.id).toBe("DX-1");
     expect(issue.title).toBe("First card");
     expect(issue.description).toBe("Body");
-    expect(issue.status).toBe("Review");
+    // DX-544 — every new card lands in the flesh-out sentinel-block state;
+    // the operator's chosen starting status (Review) is encoded into the
+    // sentinel `blocked.reason` so the flesh-out agent can restore it.
+    expect(issue.status).toBe("Blocked");
+    expect(issue.blocked).toEqual({
+      reason: "Awaiting flesh-out — start as Review",
+      timestamp: expect.any(String),
+    });
     expect(issue.type).toBe("Feature");
     // YAML landed in open/ at the expected path
     const onDiskPath = issuePath(repoLocalPath, "DX-1", "open");
@@ -1484,24 +1491,29 @@ describe("createIssue — happy path", () => {
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(true);
   });
 
-  it("starts cards in Review when requested", async () => {
+  it("starts cards in Blocked + sentinel encoding Review when Review was requested", async () => {
     const issue = await createIssue("danxbot", repoLocalPath, {
       title: "Triage me",
       description: "Body",
       status: "Review",
       type: "Feature",
     });
-    expect(issue.status).toBe("Review");
+    // DX-544 — sentinel-block ride-along: status is Blocked, reason encodes
+    // the operator's chosen start (Review). The flesh-out agent parses the
+    // reason back out and restores `status: "Review"` on completion.
+    expect(issue.status).toBe("Blocked");
+    expect(issue.blocked?.reason).toBe("Awaiting flesh-out — start as Review");
   });
 
-  it("starts cards in ToDo when requested", async () => {
+  it("starts cards in Blocked + sentinel encoding ToDo when ToDo was requested", async () => {
     const issue = await createIssue("danxbot", repoLocalPath, {
       title: "Ready",
       description: "Body",
       status: "ToDo",
       type: "Feature",
     });
-    expect(issue.status).toBe("ToDo");
+    expect(issue.status).toBe("Blocked");
+    expect(issue.blocked?.reason).toBe("Awaiting flesh-out — start as ToDo");
   });
 
   it("respects all four valid types", async () => {
@@ -1517,7 +1529,7 @@ describe("createIssue — happy path", () => {
     }
   });
 
-  it("created card has empty ac[], empty children[], null waiting_on/blocked/requires_human", async () => {
+  it("created card has empty ac[], empty children[], null waiting_on/requires_human, sentinel blocked", async () => {
     const issue = await createIssue("danxbot", repoLocalPath, {
       title: "Defaults",
       description: "Body",
@@ -1527,8 +1539,48 @@ describe("createIssue — happy path", () => {
     expect(issue.ac).toEqual([]);
     expect(issue.children).toEqual([]);
     expect(issue.waiting_on).toBeNull();
-    expect(issue.blocked).toBeNull();
+    // DX-544 — sentinel-block ride-along (blocked is non-null on create).
+    expect(issue.blocked).toEqual({
+      reason: "Awaiting flesh-out — start as Review",
+      timestamp: expect.any(String),
+    });
     expect(issue.requires_human).toBeNull();
+  });
+
+  it("DX-544 — optional priority round-trips into Issue.priority", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Prio",
+      description: "Body",
+      status: "ToDo",
+      type: "Feature",
+      priority: 4.5,
+    });
+    expect(issue.priority).toBe(4.5);
+  });
+
+  it("DX-544 — omitted priority falls back to PRIORITY_DEFAULT (3.0)", async () => {
+    const issue = await createIssue("danxbot", repoLocalPath, {
+      title: "Prio",
+      description: "Body",
+      status: "ToDo",
+      type: "Feature",
+    });
+    expect(issue.priority).toBe(3.0);
+  });
+
+  it("DX-544 — non-finite priority is rejected with 400", async () => {
+    await expect(
+      createIssue("danxbot", repoLocalPath, {
+        title: "Prio",
+        description: "Body",
+        status: "ToDo",
+        type: "Feature",
+        priority: Number.NaN,
+      }),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "priority must be a finite number" },
+    });
   });
 });
 
@@ -1701,7 +1753,10 @@ describe("handlePostIssue — HTTP route", () => {
     const body = JSON.parse(res._getBody());
     expect(body.issue.id).toBe("DX-1");
     expect(body.issue.title).toBe("Test card");
-    expect(body.issue.status).toBe("Review");
+    // DX-544 — sentinel-block ride-along: the HTTP echo reflects the
+    // Blocked status with the encoded starting status in `blocked.reason`.
+    expect(body.issue.status).toBe("Blocked");
+    expect(body.issue.blocked.reason).toBe("Awaiting flesh-out — start as Review");
     expect(body.issue.type).toBe("Feature");
   });
 
