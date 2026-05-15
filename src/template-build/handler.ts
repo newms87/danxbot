@@ -211,7 +211,8 @@ export function checkAuth(
 }
 
 function defaultResolveDepsDir(shellVersion: string): string {
-  return `/srv/sfc-deps/${shellVersion}/node_modules`;
+  const base = process.env.SFC_DEPS_BASE_DIR ?? '/srv/sfc-deps';
+  return `${base}/${shellVersion}/node_modules`;
 }
 
 async function dirExists(path: string): Promise<boolean> {

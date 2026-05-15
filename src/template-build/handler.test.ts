@@ -419,6 +419,52 @@ describe("runTemplateBuild", () => {
     expect(recent.map((b) => b.build_id)).toEqual(["b1", "b2"]);
   });
 
+  it("respects SFC_DEPS_BASE_DIR env override in defaultResolveDepsDir", async () => {
+    const customBase = join(workDir, "custom-sfc-deps");
+    const depsDir = join(customBase, "1.0.0", "node_modules");
+    await mkdir(join(depsDir, ".bin"), { recursive: true });
+    const viteBin = join(depsDir, ".bin", "vite");
+    await writeFile(
+      viteBin,
+      `#!/bin/sh
+mkdir -p dist
+echo "<html><body>custom built</body></html>" > dist/index.html
+echo "custom vite build complete" 1>&2
+exit 0
+`,
+      { mode: 0o755 },
+    );
+
+    const sourceTar = await makeSourceTarball(workDir);
+    const { fetchImpl } = makeFetchImpl(sourceTar);
+
+    // Set the env var and verify it's honored
+    const origEnv = process.env.SFC_DEPS_BASE_DIR;
+    try {
+      process.env.SFC_DEPS_BASE_DIR = customBase;
+
+      const outcome = await runTemplateBuild(
+        makeInput({ shell_version: "1.0.0" }),
+        {
+          fetchImpl,
+          scratchRoot,
+          // No resolveDepsDir override — should use defaultResolveDepsDir which reads the env
+        },
+      );
+
+      expect(outcome.ok).toBe(true);
+      if (outcome.ok) {
+        expect(outcome.file_count).toBeGreaterThan(0);
+      }
+    } finally {
+      if (origEnv === undefined) {
+        delete process.env.SFC_DEPS_BASE_DIR;
+      } else {
+        process.env.SFC_DEPS_BASE_DIR = origEnv;
+      }
+    }
+  });
+
 });
 
 describe("handleTemplateBuild (HTTP shell)", () => {
