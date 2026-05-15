@@ -80,6 +80,7 @@ import {
 } from "./ttl-timer.js";
 import { watchSettingsFile } from "../settings-file.js";
 import { createLogger } from "../logger.js";
+import { reportSystemError } from "../system-repair/report.js";
 
 const log = createLogger("scheduler");
 
@@ -325,6 +326,12 @@ async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
         log.warn(
           `[${repo.name}] bootRehydrate: skipping malformed ${entry} — DB row carries _malformed marker (YAML parse failed at last mirror); fix the YAML so it round-trips`,
         );
+        void reportSystemError({
+          repo: repo.name,
+          component: "scheduler.bootRehydrate",
+          err: new Error(`bootRehydrate: skipping malformed ${entry} — _malformed marker`),
+          samplePayload: { path: entry, issue_id: stem },
+        });
         continue;
       }
       if (issue.dispatch != null) issues.push(issue);
@@ -334,6 +341,12 @@ async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+      void reportSystemError({
+        repo: repo.name,
+        component: "scheduler.bootRehydrate",
+        err,
+        samplePayload: { path: entry, issue_id: stem },
+      });
     }
   }
   return issues;

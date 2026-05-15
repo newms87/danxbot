@@ -34,6 +34,7 @@ import { join, basename } from "node:path";
 import { issuePath } from "../issue-tracker/paths.js";
 import { parseIssue, IssueParseError } from "../issue-tracker/yaml.js";
 import { createLogger } from "../logger.js";
+import { reportSystemError } from "../system-repair/report.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 
@@ -199,6 +200,12 @@ export function scanAndArmTriageTimers(args: {
         err instanceof Error ? err.message : String(err)
       })`,
     );
+    void reportSystemError({
+      repo: repo.name,
+      component: "triage-timer",
+      err,
+      samplePayload: { path: openDir },
+    });
     return;
   }
 
@@ -215,6 +222,12 @@ export function scanAndArmTriageTimers(args: {
           err instanceof Error ? err.message : String(err)
         })`,
       );
+      void reportSystemError({
+        repo: repo.name,
+        component: "triage-timer",
+        err,
+        samplePayload: { path, issue_id: cardId },
+      });
       continue;
     }
 
@@ -234,6 +247,12 @@ export function scanAndArmTriageTimers(args: {
           })`,
         );
       }
+      void reportSystemError({
+        repo: repo.name,
+        component: "triage-timer",
+        err,
+        samplePayload: { path, issue_id: cardId },
+      });
       continue;
     }
 

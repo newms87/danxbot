@@ -23,6 +23,7 @@
 
 import { createServer, type Server } from "http";
 import { createLogger } from "../logger.js";
+import { reportSystemError } from "../system-repair/report.js";
 import { json } from "../http/helpers.js";
 import { getHealthStatus } from "./health.js";
 import {
@@ -225,6 +226,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
         err instanceof Error ? err.message : String(err)
       }`,
     );
+    void reportSystemError({
+      repo: repo.name,
+      component: "worker-boot",
+      err,
+    });
   }
 
   return server;

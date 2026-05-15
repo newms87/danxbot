@@ -74,6 +74,7 @@ import { isPidAlive } from "../agent/host-pid.js";
 import { hostname as osHostname } from "node:os";
 import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
+import { reportSystemError } from "../system-repair/report.js";
 
 /**
  * One heal action recorded by `healLocalYamls`. The `direction` tag
@@ -471,12 +472,23 @@ export async function runOrphanInProgressHeal(
       orphanIpHealLog.warn(
         `[${repo.name}] heal: orphan IP scan error at ${e.path}: ${e.message}`,
       );
+      void reportSystemError({
+        repo: repo.name,
+        component: "orphan-ip-heal",
+        err: new Error(e.message),
+        samplePayload: { path: e.path },
+      });
     }
   } catch (err) {
     orphanIpHealLog.error(
       `[${repo.name}] Orphan IP heal (${label}) failed`,
       err,
     );
+    void reportSystemError({
+      repo: repo.name,
+      component: "orphan-ip-heal",
+      err,
+    });
   }
 }
 
@@ -520,12 +532,23 @@ export async function runInvariantHeal(
       invariantHealLog.warn(
         `[${repo.name}] heal: invariant scan error at ${e.path}: ${e.message}`,
       );
+      void reportSystemError({
+        repo: repo.name,
+        component: "invariant-heal",
+        err: new Error(e.message),
+        samplePayload: { path: e.path },
+      });
     }
   } catch (err) {
     invariantHealLog.error(
       `[${repo.name}] Invariant heal (${label}) failed`,
       err,
     );
+    void reportSystemError({
+      repo: repo.name,
+      component: "invariant-heal",
+      err,
+    });
   }
 }
 

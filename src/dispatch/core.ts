@@ -34,6 +34,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { config } from "../config.js";
 import { createLogger } from "../logger.js";
+import { reportSystemError } from "../system-repair/report.js";
 import type { RepoContext } from "../types.js";
 import type { Issue } from "../issue-tracker/interface.js";
 import {
@@ -1448,6 +1449,38 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
         );
       }
     }
+    // DX-562 Phase 2: categorize spawn-time failures into the durable
+    // system_errors table. The MCP probe failure surface produces a
+    // throw whose message starts with `MCP server probe failed` —
+    // route those to component `mcp-load` so the dispatcher can target
+    // them distinctly from a generic spawn failure (network blip,
+    // claude-auth, projects-dir, etc.). Classifier is extracted so the
+    // branch is unit-testable without spinning a real dispatch.
+    void reportSystemError({
+      repo: input.repo.name,
+      component: classifySpawnError(err),
+      err,
+      samplePayload: input.issueId ? { issue_id: input.issueId } : undefined,
+    });
     throw err;
   }
+}
+
+/**
+ * DX-562 — pick the durable `system_errors.component` for an error
+ * thrown out of `spawnForDispatch`. Exported for the unit test that
+ * pins both branches; the runtime callsite is in the outer catch
+ * above.
+ *
+ * Producer of the literal `MCP server probe failed` prefix is
+ * `src/agent/spawn-preflight.ts#runSpawnPreflight` (~line 203). If the
+ * producer ever drops the prefix, every probe failure silently
+ * miscategorizes as `dispatch.spawn` — the unit test pins the prefix
+ * so a future rename fails CI before that lands.
+ */
+export function classifySpawnError(err: unknown): "mcp-load" | "dispatch.spawn" {
+  const errMsg = err instanceof Error ? err.message : String(err);
+  return errMsg.startsWith("MCP server probe failed")
+    ? "mcp-load"
+    : "dispatch.spawn";
 }

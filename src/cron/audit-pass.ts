@@ -34,6 +34,7 @@ import {
   type ReconcileRepoContext,
 } from "../issue/reconcile.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
+import { reportSystemError } from "../system-repair/report.js";
 import { createLogger } from "../logger.js";
 import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 import type { RepoContext } from "../types.js";
@@ -137,6 +138,12 @@ export async function runAuditPass(
           err instanceof Error ? err.message : String(err)
         })`,
       );
+      void reportSystemError({
+        repo: repo.name,
+        component: "audit-pass",
+        err,
+        samplePayload: { issue_id: cardId },
+      });
     }
   }
 

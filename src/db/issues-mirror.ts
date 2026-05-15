@@ -40,6 +40,7 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalize, sha256 } from "./canonicalize.js";
 import { writeFlag } from "../critical-failure.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
+import { reportSystemError } from "../system-repair/report.js";
 import { createLogger } from "../logger.js";
 import { setRepoName, clearRepoName } from "../poller/repo-name.js";
 
@@ -321,7 +322,7 @@ interface ReadResult {
   data: Record<string, unknown>;
 }
 
-function readAndParse(path: string): ReadResult | null {
+function readAndParse(path: string, repoName: string): ReadResult | null {
   let text: string;
   try {
     text = readFileSync(path, "utf-8");
@@ -337,6 +338,12 @@ function readAndParse(path: string): ReadResult | null {
       `Parse error in ${path}: ${(err as Error).message} — storing as malformed`,
     );
     const stem = deriveIdFromPath(path);
+    void reportSystemError({
+      repo: repoName,
+      component: "issues-mirror",
+      err: err as Error,
+      samplePayload: { path, issue_id: stem },
+    });
     return {
       id: stem,
       // Stamp `id` into the jsonb so the generated column on the `issues`
@@ -354,6 +361,12 @@ function readAndParse(path: string): ReadResult | null {
   ) {
     log.warn(`Non-object YAML in ${path} — storing as malformed`);
     const stem = deriveIdFromPath(path);
+    void reportSystemError({
+      repo: repoName,
+      component: "issues-mirror",
+      err: new Error(`Non-object YAML in ${path}`),
+      samplePayload: { path, issue_id: stem },
+    });
     return {
       id: stem,
       data: { id: stem, _malformed: true, raw: text },
@@ -575,7 +588,7 @@ export async function startIssuesMirror(
     path: string,
     source: EventSource,
   ): Promise<string | null> {
-    const parsed = readAndParse(path);
+    const parsed = readAndParse(path, repoName);
     if (!parsed) return null; // ENOENT race — unlink will catch up
     const contentHash = sha256(canonicalize(parsed.data));
     let existing:
