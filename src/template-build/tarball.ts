@@ -97,13 +97,25 @@ export async function extractTarballToDir(
 
 /**
  * Create a gzipped tarball of `srcDir` (recursively) and return the bytes
- * as a Buffer. Uses `tar -cz -C srcDir .` so the archive entries are
- * relative paths starting with `./`.
+ * as a Buffer.
+ *
+ * Member names are stored WITHOUT a `./` prefix (`--transform 's,^\./,,'`).
+ * PHP's PharData — which gpt-manager's SfcBuildTransport uses to read the
+ * dist tarball back — silently iterates ZERO entries when archive members
+ * carry the `./` prefix that `tar -cz -C srcDir .` produces by default,
+ * so `index.html` lookup never matches and extraction fails with the
+ * cryptic "missing index.html — invalid bundle" (SG-174). The transform
+ * strips the prefix at tar-write time; the surviving `./` directory entry
+ * is harmless because consumers iterate file entries only.
  */
 export async function createTarballBuffer(srcDir: string): Promise<Buffer> {
-  const child = spawn("tar", ["-cz", "-C", srcDir, "."], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const child = spawn(
+    "tar",
+    ["-cz", "--transform", "s,^\\./,,", "-C", srcDir, "."],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
 
   const chunks: Buffer[] = [];
   let stderr = "";

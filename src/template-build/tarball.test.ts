@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtemp, rm, writeFile, readFile, mkdir } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
+import { spawn } from "child_process";
 import { Readable } from "stream";
 
 import {
@@ -10,6 +11,33 @@ import {
   countTarballFiles,
   TarballError,
 } from "./tarball.js";
+
+/**
+ * List entry names inside a gzipped tarball via `tar -tz`. Returned
+ * names are exactly the strings tar wrote to each member's header — the
+ * regression assertion below checks that NONE of them carry a `./`
+ * prefix, because PHP's PharData (which gpt-manager uses to extract the
+ * dist tarball) silently iterates ZERO entries when members are stored
+ * with that prefix (SG-174).
+ */
+async function listTarballEntries(buf: Buffer): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("tar", ["-tz"], { stdio: ["pipe", "pipe", "pipe"] });
+    let listing = "";
+    let stderr = "";
+    child.stdout.on("data", (c: Buffer) => (listing += c.toString()));
+    child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(`tar -tz exited ${code}: ${stderr}`));
+        return;
+      }
+      resolve(listing.split("\n").filter((l) => l.length > 0));
+    });
+    child.stdin.end(buf);
+  });
+}
 
 describe("tarball helpers", () => {
   let workDir: string;
@@ -40,6 +68,31 @@ describe("tarball helpers", () => {
       await expect(
         createTarballBuffer(join(workDir, "missing")),
       ).rejects.toBeInstanceOf(TarballError);
+    });
+
+    /**
+     * SG-174 regression. Production failure mode: tar entries written as
+     * `./index.html` are invisible to PHP's PharData, so gpt-manager's
+     * SfcBuildTransport::extractDistTarball iterates zero entries and
+     * throws "missing index.html — invalid bundle". Strip the prefix at
+     * tar-write time so PharData enumerates the members.
+     */
+    it("stores file entries WITHOUT a leading './' prefix (SG-174)", async () => {
+      const src = join(workDir, "src-sg174");
+      await mkdir(src, { recursive: true });
+      await writeFile(join(src, "index.html"), "<html></html>");
+      await mkdir(join(src, "assets"), { recursive: true });
+      await writeFile(join(src, "assets", "app.js"), "x");
+
+      const buf = await createTarballBuffer(src);
+      const entries = await listTarballEntries(buf);
+      const fileEntries = entries.filter((e) => !e.endsWith("/"));
+
+      expect(fileEntries).toContain("index.html");
+      expect(fileEntries).toContain("assets/app.js");
+      for (const entry of fileEntries) {
+        expect(entry).not.toMatch(/^\.\//);
+      }
     });
   });
 
