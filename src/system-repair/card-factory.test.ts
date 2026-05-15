@@ -5,6 +5,10 @@
 
 import { describe, it, expect } from "vitest";
 import { buildRepairCardDraft } from "./card-factory.js";
+import {
+  SELF_REPAIR_TITLE_PREFIX,
+  isSelfRepairCard,
+} from "./is-repair-card.js";
 import type { SystemErrorRow, SystemErrorRepairRow } from "./types.js";
 
 function row(overrides: Partial<SystemErrorRow> = {}): SystemErrorRow {
@@ -83,6 +87,25 @@ describe("buildRepairCardDraft", () => {
     ];
     const draft = buildRepairCardDraft({ errorRow: row(), priorAttempts: priors, attemptN: 2, epicId: "DX-560" });
     expect(draft.description).toContain("Attempt 1 (DX-700): verdict=pending");
+  });
+
+  it("title uses the shared SELF_REPAIR_TITLE_PREFIX constant (producer/consumer drift guard, DX-564)", () => {
+    // Producer-side anchor for the picker's title-prefix routing
+    // (`isSelfRepairCard`). If the producer drifts from the consumer
+    // — e.g. a refactor introduces a different prefix in
+    // `card-factory.ts` — every repair card silently routes to
+    // `issue-worker` instead of `self-repair` and the agent loads
+    // `/danx-next` instead of `/self-repair`. The constant import +
+    // these two asserts make that class of bug a one-line test
+    // failure instead of a multi-error production silent miss.
+    const draft = buildRepairCardDraft({
+      errorRow: row(),
+      priorAttempts: [],
+      attemptN: 1,
+      epicId: "DX-560",
+    });
+    expect(draft.title.startsWith(SELF_REPAIR_TITLE_PREFIX)).toBe(true);
+    expect(isSelfRepairCard({ title: draft.title })).toBe(true);
   });
 
   it("pretty-prints sample_payload as JSON", () => {

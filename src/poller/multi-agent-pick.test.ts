@@ -2436,4 +2436,153 @@ describe("tryMultiAgentDispatch", () => {
       expect(mockRecordSystemError).not.toHaveBeenCalled();
     });
   });
+
+  /**
+   * DX-564 — Phase-3 dispatcher (`src/cron/jobs/self-repair-dispatch.ts`)
+   * creates repair-attempt cards with the literal title prefix
+   * `Self-Repair > Attempt N: <category_key> (<signature_hash>)`. The
+   * picker detects that prefix via `isSelfRepairCard` and dispatches
+   * into the `self-repair` workspace + `/self-repair` slash command
+   * (the plugin skill) instead of the default `issue-worker` +
+   * `/danx-next` flow. Phase cards under epic DX-560 share the parent
+   * but use `Self-Repair > Phase N:` and MUST route normally.
+   */
+  describe("DX-564: self-repair workspace routing", () => {
+    it("routes a repair-attempt card to workspace=self-repair + /self-repair task body", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const repair = issue("DX-1", {
+        title: "Self-Repair > Attempt 1: worker:TypeError (abc123def456)",
+      });
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [repair],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      expect(result.dispatched).toBe(1);
+      const [input] = mockedDispatchWithRecovery.mock.calls[0];
+      expect(input.workspace).toBe("self-repair");
+      expect(input.task).toContain("/self-repair DX-1");
+      expect(input.task).not.toContain("/danx-next DX-1");
+      // Prep leg still fires — worktree recovery + branch sync are
+      // workspace-agnostic.
+      expect(input.task).toContain("/danx-prep DX-1");
+    });
+
+    it("phase cards under epic DX-560 (`Self-Repair > Phase N:`) route normally", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const phase = issue("DX-1", {
+        title: "Self-Repair > Phase 4: agent skill + workspace",
+        parent_id: "DX-560",
+      });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [phase],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      const [input] = mockedDispatchWithRecovery.mock.calls[0];
+      expect(input.workspace).toBe("issue-worker");
+      expect(input.task).toContain("/danx-next DX-1");
+      expect(input.task).not.toContain("/self-repair");
+    });
+
+    it("regular feature cards route to issue-worker", async () => {
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const generic = issue("DX-1", { title: "Feature: add foo" });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [generic],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      const [input] = mockedDispatchWithRecovery.mock.calls[0];
+      expect(input.workspace).toBe("issue-worker");
+      expect(input.task).toContain("/danx-next DX-1");
+    });
+
+    it("tracker-lock holder info reports `workspace: self-repair` for a repair-attempt card", async () => {
+      // Reviewer ask: the `buildLockHolderInfo({workspace: ...})` plumbing
+      // touches the operator-visible Trello lock comment + cross-environment
+      // dispatch lock; assert the lock body carries the routing decision
+      // verbatim so a regression that hardcodes `issue-worker` here would
+      // surface.
+      writeSettings({ alice: agentRecord("alice") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const addCommentCalls: string[] = [];
+      const tracker = {
+        ...fakeTracker(),
+        addComment: async (
+          _externalId: string,
+          text: string,
+        ): Promise<{ id: string; timestamp: string }> => {
+          addCommentCalls.push(text);
+          return { id: "lock-cmt", timestamp: "" };
+        },
+      } as IssueTracker;
+      const repair = issue("DX-1", {
+        title: "Self-Repair > Attempt 1: worker:TypeError (abc123def456)",
+      });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [repair],
+        tracker,
+        now: NOW,
+      });
+      // First addComment is the dispatch-lock body (renderLockComment).
+      // Workspace cell content is the routing-decision artifact.
+      expect(addCommentCalls.length).toBeGreaterThan(0);
+      expect(addCommentCalls[0]).toMatch(/workspace.*`self-repair`/);
+    });
+
+    it("reconcile-dispatch on a repair-titled card forces back to issue-worker (DX-501 + DX-564)", async () => {
+      // A repair card with duplicate ownership reaches the reconcile
+      // branch; the reconcile body delegates to `/danx-next <retained-id>`
+      // and expects the issue-worker plugin's tool surface. Forcing the
+      // dispatch back into `issue-worker` keeps reconcile body + tools
+      // consistent.
+      writeSettings({ dani: agentRecord("dani") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+      const a = issue("DX-1", {
+        title: "Self-Repair > Attempt 1: worker:TypeError (abc123)",
+        assigned_agent: "dani",
+      });
+      const b = issue("DX-2", {
+        title: "Self-Repair > Attempt 1: poller:ENOENT (deadbeef)",
+        assigned_agent: "dani",
+      });
+      await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [a, b],
+        openIssues: [a, b],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+      const [input] = mockedDispatchWithRecovery.mock.calls[0];
+      // Reconcile path: workspace returns to issue-worker even though
+      // both cards match isSelfRepairCard.
+      expect(input.workspace).toBe("issue-worker");
+      expect(input.task).toMatch(/Reconcile/);
+      // Reconcile body never references the self-repair slash command.
+      expect(input.task).not.toContain("/self-repair");
+    });
+  });
 });

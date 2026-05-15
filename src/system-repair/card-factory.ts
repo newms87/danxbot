@@ -20,6 +20,7 @@ import type {
   SystemErrorRepairRow,
   SystemErrorRepairVerdict,
 } from "./types.js";
+import { SELF_REPAIR_TITLE_PREFIX } from "./is-repair-card.js";
 
 /** Cap on a prior-attempt's `report_md` excerpt rendered into the new card. */
 const REPORT_EXCERPT_LIMIT = 200;
@@ -49,8 +50,11 @@ export function buildRepairCardDraft(
 ): RepairCardDraft {
   const { errorRow, priorAttempts, attemptN, epicId } = input;
 
+  // Producer side of the picker's routing contract (DX-564). Consumer
+  // side is `isSelfRepairCard` in `is-repair-card.ts`; the title prefix
+  // lives in one place so a rename surfaces as a one-line diff.
   const title =
-    `Self-Repair > Attempt ${attemptN}: ${errorRow.category_key} ` +
+    `${SELF_REPAIR_TITLE_PREFIX}${attemptN}: ${errorRow.category_key} ` +
     `(${errorRow.signature_hash})`;
 
   const samplePayloadJson = JSON.stringify(errorRow.sample_payload, null, 2);
