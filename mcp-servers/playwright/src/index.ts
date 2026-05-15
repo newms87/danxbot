@@ -37,6 +37,12 @@
 
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import {
+  HostedDistRegistry,
+  installTeardownHandlers,
+  resolveWorkspaceRoot,
+} from "./host-static.js";
+import { vueBuildAndPreview } from "./vue-build-and-preview.js";
 
 /** Default per-request overall timeout. */
 export const PLAYWRIGHT_DEFAULT_TIMEOUT_MS = 30_000;
@@ -46,6 +52,8 @@ export interface PlaywrightDeps {
   url: string;
   /** Per-request timeout in milliseconds. */
   timeoutMs: number;
+  /** Registry that owns hosted static-file servers for this MCP process. */
+  hostRegistry: HostedDistRegistry;
 }
 
 /**
@@ -59,6 +67,77 @@ export type ContentBlock =
   | { type: "image"; data: string; mimeType: string };
 
 export const TOOLS = [
+  {
+    name: "playwright_host_static",
+    description:
+      "Host a directory of static files on an ephemeral 127.0.0.1 port and " +
+      "return the URL the agent's navigation tool (playwright_screenshot, " +
+      "mcp__claude-in-chrome__navigate, etc.) should hit. Required: dist_path " +
+      "(absolute path to a directory containing index.html + assets). The " +
+      "path is realpath-resolved and required to be inside the workspace " +
+      "root (path-traversal refusal). Concurrent hosted dirs capped at 4 " +
+      "per MCP session — LRU evicts the oldest on overflow. Pair with " +
+      "playwright_host_static_stop to free the server explicitly; otherwise " +
+      "the MCP process shutdown auto-tears every server down. Returns " +
+      "{ url, server_id } — pass server_id to the stop tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dist_path: {
+          type: "string",
+          description:
+            "Absolute path to the directory to host. Must be inside the workspace root.",
+        },
+      },
+      required: ["dist_path"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "playwright_host_static_stop",
+    description:
+      "Stop a static-file server previously started by playwright_host_static. " +
+      "Required: server_id (string returned by the start call). Returns " +
+      "{ stopped: true } on success, { stopped: false } if the server_id is " +
+      "unknown (already stopped or never started — both are no-ops, not " +
+      "errors). Auto-teardown on MCP exit means agents that forget to stop " +
+      "do not leak ports between sessions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        server_id: {
+          type: "string",
+          description: "server_id returned by playwright_host_static.",
+        },
+      },
+      required: ["server_id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "vue_build_and_preview",
+    description:
+      "Convenience orchestrator that hosts a freshly-built Vue dist on " +
+      "127.0.0.1 for visual preview. Required: dist_path (absolute path to " +
+      "the dist/ directory, typically the output of a danxbot " +
+      "POST /api/template-build pipeline that the agent has already " +
+      "downloaded + extracted under the workspace root). Same path-traversal " +
+      "+ LRU + auto-teardown contract as playwright_host_static. Returns " +
+      "{ url, server_id } — pass the URL to a navigation tool to render the " +
+      "SPA, pass server_id to playwright_host_static_stop when done.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dist_path: {
+          type: "string",
+          description:
+            "Absolute path to the built dist/ directory. Must be inside the workspace root.",
+        },
+      },
+      required: ["dist_path"],
+      additionalProperties: false,
+    },
+  },
   {
     name: "playwright_screenshot",
     description:
@@ -290,6 +369,36 @@ export async function callTool(
         requireObjectArgs("playwright_html", args),
         deps,
       );
+    case "playwright_host_static": {
+      const a = requireObjectArgs("playwright_host_static", args);
+      const distPath = requireNonBlankString(
+        "playwright_host_static",
+        "dist_path",
+        a.dist_path,
+      );
+      const result = await deps.hostRegistry.start(distPath);
+      return [{ type: "text", text: JSON.stringify(result) }];
+    }
+    case "playwright_host_static_stop": {
+      const a = requireObjectArgs("playwright_host_static_stop", args);
+      const serverId = requireNonBlankString(
+        "playwright_host_static_stop",
+        "server_id",
+        a.server_id,
+      );
+      const stopped = await deps.hostRegistry.stop(serverId);
+      return [{ type: "text", text: JSON.stringify({ stopped }) }];
+    }
+    case "vue_build_and_preview": {
+      const a = requireObjectArgs("vue_build_and_preview", args);
+      const distPath = requireNonBlankString(
+        "vue_build_and_preview",
+        "dist_path",
+        a.dist_path,
+      );
+      const result = await vueBuildAndPreview({ dist_path: distPath }, deps.hostRegistry);
+      return [{ type: "text", text: JSON.stringify(result) }];
+    }
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -333,7 +442,7 @@ export function main(deps: PlaywrightDeps): void {
           respond(id, {
             protocolVersion: "2024-11-05",
             capabilities: { tools: {} },
-            serverInfo: { name: "danxbot-playwright", version: "0.1.0" },
+            serverInfo: { name: "danxbot-playwright", version: "0.2.0" },
           });
         } else if (method === "ping") {
           respond(id, {});
@@ -385,5 +494,8 @@ if (import.meta.url === entryUrl) {
     );
     process.exit(1);
   }
-  main({ url, timeoutMs });
+  const workspaceRoot = resolveWorkspaceRoot();
+  const hostRegistry = new HostedDistRegistry({ workspaceRoot });
+  installTeardownHandlers(hostRegistry);
+  main({ url, timeoutMs, hostRegistry });
 }

@@ -5,6 +5,9 @@ import {
   PLAYWRIGHT_DEFAULT_TIMEOUT_MS,
 } from "./index.js";
 import type { PlaywrightDeps } from "./index.js";
+import { HostedDistRegistry } from "./host-static.js";
+import { tmpdir } from "node:os";
+import { realpathSync } from "node:fs";
 
 const PLAYWRIGHT_URL = "http://playwright.test:3000";
 
@@ -12,6 +15,9 @@ function deps(over: Partial<PlaywrightDeps> = {}): PlaywrightDeps {
   return {
     url: PLAYWRIGHT_URL,
     timeoutMs: PLAYWRIGHT_DEFAULT_TIMEOUT_MS,
+    hostRegistry: new HostedDistRegistry({
+      workspaceRoot: realpathSync(tmpdir()),
+    }),
     ...over,
   };
 }
@@ -19,10 +25,13 @@ function deps(over: Partial<PlaywrightDeps> = {}): PlaywrightDeps {
 // ── Tool schema ─────────────────────────────────────────────────────────
 
 describe("TOOLS — tool schema", () => {
-  it("registers exactly playwright_screenshot and playwright_html", () => {
+  it("registers the five public tools", () => {
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
+      "playwright_host_static",
+      "playwright_host_static_stop",
       "playwright_html",
       "playwright_screenshot",
+      "vue_build_and_preview",
     ]);
   });
 
@@ -74,7 +83,7 @@ describe("entrypoint gating", () => {
     // assertion would never run. The existence of a running test body
     // IS the assertion; the line below is the formal check.
     expect(typeof callTool).toBe("function");
-    expect(TOOLS.length).toBe(2);
+    expect(TOOLS.length).toBe(5);
   });
 });
 

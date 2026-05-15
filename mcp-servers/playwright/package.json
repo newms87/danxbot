@@ -1,8 +1,7 @@
 {
   "name": "@thehammer/danxbot-playwright-mcp-server",
-  "version": "0.1.0",
-  "private": true,
-  "description": "MCP server exposing playwright_screenshot and playwright_html tools to Claude Code agents dispatched by danxbot.",
+  "version": "0.2.0",
+  "description": "MCP server exposing playwright_screenshot, playwright_html, playwright_host_static, playwright_host_static_stop, and vue_build_and_preview tools to Claude Code agents dispatched by danxbot.",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
