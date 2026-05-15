@@ -1,17 +1,24 @@
 /**
- * Phase 3 of the Issues DB Mirror epic (DX-151 / DX-154).
+ * DB mirror for `<repo>/.danxbot/issues/{open,closed}/*.yml` (epic DX-545,
+ * post-phase-4 contract).
  *
- * Watches `<repo>/.danxbot/issues/{open,closed}/*.yml` with one chokidar
- * instance per repo, mirrors every observed YAML into the `issues` table
- * (Phase 2 schema), and appends an immutable RFC 6902 patch to
- * `issue_history` whenever the canonicalized content hash changes.
+ * Two write paths reach the `issues` table:
  *
- * The mirror is the SOLE write path to the DB. `writeIssue` (internal
- * Node) writes the YAML and awaits an in-process ack from the mirror;
- * external writers (agents, operator hand-edits, git pull) reach the DB
- * through the same per-event flow. Either way the DB stays content-
- * addressed: a no-op write that produces the same canonical bytes
- * generates no new history row.
+ *   1. Writer-owned synchronous upsert — `writeIssue`
+ *      (`src/poller/yaml-lifecycle.ts`) calls `upsertIssueRowNow` BEFORE
+ *      `writeFileSync`. By the time the writer's promise resolves, the
+ *      DB row is current. DB-backed `loadLocal` returns fresh state
+ *      immediately for callers in the same process.
+ *   2. Chokidar watcher backstop — covers external writers (operator
+ *      hand-edits, `git pull`, agents in dispatched workspaces) and
+ *      catches anything path (1) might have skipped. Own-writes from
+ *      path (1) hit the canonical-no-op short-circuit (`existing.
+ *      content_hash === contentHash`) and skip the upsert + history
+ *      row, so the watcher path stays consistent with no duplicate
+ *      writes.
+ *
+ * Both paths share the canonical content-hash dedup: a no-op write that
+ * produces the same canonical bytes generates no new history row.
  *
  * Failure model: any uncaught error from the upsert / history transaction
  * writes `<repo>/.danxbot/CRITICAL_FAILURE` via the existing helper. The
@@ -22,13 +29,6 @@
  * restart, NFS-style watch race, deploy gap). Boot scan blocks
  * `startIssuesMirror`'s returned Promise so callers see a consistent DB
  * before they start serving reads.
- *
- * Read-your-writes: `awaitMirror(repoName, id, contentHash)` returns a
- * Promise that resolves when the mirror upserts a row whose
- * `content_hash` matches the supplied hash — or immediately if the most
- * recent upsert (within `recentTtlMs`) already carries that hash. This
- * closes the race where the writer's `await` is registered AFTER the
- * watcher's upsert has already landed.
  */
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -46,9 +46,6 @@ import { setRepoName, clearRepoName } from "../poller/repo-name.js";
 const log = createLogger("issues-mirror");
 
 const DEFAULT_RECONCILE_MS = 600_000;
-const DEFAULT_AWAIT_TIMEOUT_MS = 5_000;
-const DEFAULT_RECENT_TTL_MS = 10_000;
-const DEFAULT_RECENT_CAPACITY = 256;
 const DEFAULT_AWAIT_WRITE_FINISH = {
   // 5s debounce — wait until the file size has been stable for this
   // long before emitting add/change. Smooths over the create-then-edit
@@ -105,13 +102,6 @@ export interface IssuesMirror {
   readonly repoName: string;
   readonly repoLocalPath: string;
 
-  awaitMirror(
-    repoName: string,
-    id: string,
-    contentHash: string,
-    opts?: { timeoutMs?: number },
-  ): Promise<void>;
-
   simulateWatcherEvent(opts: SimulateOpts): Promise<void>;
 
   /** Trigger the same logic the periodic timer runs. Tests + ops only. */
@@ -123,10 +113,6 @@ export interface IssuesMirror {
 export interface StartIssuesMirrorOptions {
   /** Period for the open/-only reconcile timer; default 600_000ms. */
   reconcileIntervalMs?: number;
-  /** Default timeout for awaitMirror callers that omit it. */
-  awaitTimeoutMs?: number;
-  /** TTL for the recent-upserts cache used by late awaiters. */
-  recentTtlMs?: number;
   /** Inject a custom DB layer (unit tests). Production: omitted, built from pool. */
   db?: IssuesMirrorDb;
   /** Inject a Pool (integration tests). Production: getPool(). */
@@ -168,12 +154,6 @@ export interface StartIssuesMirrorOptions {
 export interface RepoContextLike {
   name: string;
   localPath: string;
-}
-
-interface PendingResolver {
-  resolve: () => void;
-  reject: (err: Error) => void;
-  timer: NodeJS.Timeout;
 }
 
 const mirrorRegistry = new Map<string, IssuesMirror>();
@@ -541,8 +521,6 @@ export async function startIssuesMirror(
   const repoLocalPath = ctx.localPath;
   const reconcileIntervalMs =
     options.reconcileIntervalMs ?? DEFAULT_RECONCILE_MS;
-  const awaitTimeoutMs = options.awaitTimeoutMs ?? DEFAULT_AWAIT_TIMEOUT_MS;
-  const recentTtlMs = options.recentTtlMs ?? DEFAULT_RECENT_TTL_MS;
 
   if (!options.db && !options.pool) {
     throw new Error(
@@ -553,69 +531,19 @@ export async function startIssuesMirror(
   const db: IssuesMirrorDb =
     options.db ?? createPgIssuesMirrorDb(options.pool!);
 
-  const pendingResolvers = new Map<string, PendingResolver[]>();
-  const recentUpserts = new Map<string, number>();
-
   let watcher: FSWatcher | null = null;
   let reconcileTimer: NodeJS.Timeout | null = null;
   let stopped = false;
   // Track in-flight processing promises so `stop()` can drain them
-  // before tearing down the watcher / cache. Without this, an upsert
-  // running concurrently with `stop()` would mutate the DB AFTER the
-  // mirror believes it has shut down — at best harmless (no resolver
-  // map to update), at worst masking a regression.
+  // before tearing down the watcher. Without this, an upsert running
+  // concurrently with `stop()` would mutate the DB AFTER the mirror
+  // believes it has shut down — at best harmless, at worst masking a
+  // regression.
   const inFlight = new Set<Promise<unknown>>();
   function trackInFlight<T>(p: Promise<T>): Promise<T> {
     inFlight.add(p);
     p.finally(() => inFlight.delete(p));
     return p;
-  }
-
-  function rememberRecent(repoName: string, id: string, hash: string): void {
-    const key = pendingKey(repoName, id, hash);
-    recentUpserts.set(key, Date.now() + recentTtlMs);
-    if (recentUpserts.size > DEFAULT_RECENT_CAPACITY) {
-      const now = Date.now();
-      // Full expiry sweep first.
-      for (const [k, exp] of recentUpserts) {
-        if (exp <= now) recentUpserts.delete(k);
-      }
-      // Still over capacity? Drop oldest entries (Map preserves
-      // insertion order, so the first keys are the longest-resident).
-      if (recentUpserts.size > DEFAULT_RECENT_CAPACITY) {
-        const overflow = recentUpserts.size - DEFAULT_RECENT_CAPACITY;
-        let dropped = 0;
-        for (const k of recentUpserts.keys()) {
-          recentUpserts.delete(k);
-          if (++dropped >= overflow) break;
-        }
-      }
-    }
-  }
-
-  function isRecentlySeen(key: string): boolean {
-    const exp = recentUpserts.get(key);
-    if (exp === undefined) return false;
-    if (exp <= Date.now()) {
-      recentUpserts.delete(key);
-      return false;
-    }
-    return true;
-  }
-
-  function resolvePending(
-    repoName: string,
-    id: string,
-    hash: string,
-  ): void {
-    const key = pendingKey(repoName, id, hash);
-    const queue = pendingResolvers.get(key);
-    if (!queue) return;
-    pendingResolvers.delete(key);
-    for (const r of queue) {
-      clearTimeout(r.timer);
-      r.resolve();
-    }
   }
 
   function reportFailure(reason: string, err: unknown): void {
@@ -638,11 +566,10 @@ export async function startIssuesMirror(
 
   /**
    * Single-file mirror step shared by `processFileEvent`, `bootScan`,
-   * and `periodicReconcile`. Reads + hashes + dedup-skips + upserts +
-   * resolves pending awaiters, in that order. Returns the parsed id on
-   * success (so the boot scan can mark it as "seen on disk") or null
-   * when the file was missing / a DB read failed (already routed
-   * through CRITICAL_FAILURE).
+   * and `periodicReconcile`. Reads + hashes + dedup-skips + upserts, in
+   * that order. Returns the parsed id on success (so the boot scan can
+   * mark it as "seen on disk") or null when the file was missing / a DB
+   * read failed (already routed through CRITICAL_FAILURE).
    */
   async function mirrorOne(
     path: string,
@@ -661,21 +588,17 @@ export async function startIssuesMirror(
       return null;
     }
     if (existing && existing.content_hash === contentHash) {
-      // Same content — DB already reflects this hash. Resolve any late
-      // awaiter that registered after a previous watcher tick processed
-      // the file; skip the upsert + history insert.
-      rememberRecent(repoName, parsed.id, contentHash);
-      resolvePending(repoName, parsed.id, contentHash);
-      // DX-548: post phase 2, the writer pre-populates the DB row before
-      // the file write — so for own-writes this branch is the dominant
-      // case. The skip-match log lets the operator confirm the
-      // external-vs-own write distribution from a worker log scan.
+      // Same content — DB already reflects this hash. Skip the upsert +
+      // history insert. Post phase 2, the writer pre-populates the DB
+      // row before the file write — so for own-writes this branch is
+      // the dominant case. The skip-match log lets the operator confirm
+      // the external-vs-own write distribution from a worker log scan.
       log.debug(
         `[${repoName}] mirrored ${parsed.id} (source=${source}, action=skip-match)`,
       );
       // The DB row is in place (from a prior tick). The fs event still
-      // reached us, so reconcile MUST fire — its fanout (Phase 2+) is
-      // independent of whether THIS tick wrote a row.
+      // reached us, so reconcile MUST fire — its fanout is independent
+      // of whether THIS tick wrote a row.
       await fireOnWatcherUpsert(parsed.id, source);
       return parsed.id;
     }
@@ -693,8 +616,6 @@ export async function startIssuesMirror(
       reportFailure(`upsert ${parsed.id}`, err);
       return null;
     }
-    rememberRecent(repoName, parsed.id, contentHash);
-    resolvePending(repoName, parsed.id, contentHash);
     log.debug(
       `[${repoName}] mirrored ${parsed.id} (source=${source}, action=upsert)`,
     );
@@ -902,36 +823,6 @@ export async function startIssuesMirror(
     repoName,
     repoLocalPath,
 
-    async awaitMirror(awRepo, id, contentHash, awOpts) {
-      if (awRepo !== repoName) {
-        throw new Error(
-          `awaitMirror: repoName mismatch (mirror=${repoName}, requested=${awRepo})`,
-        );
-      }
-      const key = pendingKey(repoName, id, contentHash);
-      if (isRecentlySeen(key)) return;
-      const timeoutMs = awOpts?.timeoutMs ?? awaitTimeoutMs;
-      return new Promise<void>((resolve, reject) => {
-        const queue = pendingResolvers.get(key) ?? [];
-        const timer = setTimeout(() => {
-          const current = pendingResolvers.get(key);
-          if (current) {
-            const idx = current.findIndex((r) => r.timer === timer);
-            if (idx >= 0) current.splice(idx, 1);
-            if (current.length === 0) pendingResolvers.delete(key);
-          }
-          reject(
-            new Error(
-              `awaitMirror timeout after ${timeoutMs}ms for ${repoName}/${id}@${contentHash.slice(0, 8)}`,
-            ),
-          );
-        }, timeoutMs);
-        if (typeof timer.unref === "function") timer.unref();
-        queue.push({ resolve, reject, timer });
-        pendingResolvers.set(key, queue);
-      });
-    },
-
     async simulateWatcherEvent({ event, path }) {
       if (event === "unlink") {
         await processUnlink(path);
@@ -956,20 +847,12 @@ export async function startIssuesMirror(
         watcher = null;
       }
       // Drain in-flight processing so the mirror's DB writes complete
-      // (or fail loudly via CRITICAL_FAILURE) before we tear down the
-      // resolver map. `allSettled` so a single failure doesn't block
-      // the rest of cleanup.
+      // (or fail loudly via CRITICAL_FAILURE) before we tear down. Use
+      // `allSettled` so a single failure doesn't block the rest of
+      // cleanup.
       if (inFlight.size > 0) {
         await Promise.allSettled([...inFlight]);
       }
-      // Reject any still-pending awaiters so callers don't hang.
-      for (const queue of pendingResolvers.values()) {
-        for (const r of queue) {
-          clearTimeout(r.timer);
-          r.reject(new Error("Issues mirror stopped"));
-        }
-      }
-      pendingResolvers.clear();
       mirrorRegistry.delete(resolve(repoLocalPath));
       unregisterWriterDb(repoLocalPath);
       clearRepoName(repoLocalPath);

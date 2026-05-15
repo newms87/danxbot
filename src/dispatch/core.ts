@@ -78,7 +78,6 @@ import { reconcileIssue } from "../issue/reconcile.js";
 import {
   clearDispatchAndWrite,
   loadLocal,
-  loadLocalFromDisk,
   stampStatusAndWrite,
 } from "../poller/yaml-lifecycle.js";
 import { resolveEffortToFlags } from "../settings-file.js";
@@ -1338,7 +1337,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   let priorStatus: Issue["status"] | undefined;
   let candidateEffortLevel: Issue["effort_level"] | undefined;
   if (input.issueId) {
-    const candidate = loadLocalFromDisk(
+    const candidate = await loadLocal(
       input.repo.localPath,
       input.issueId,
       input.repo.issuePrefix,
@@ -1424,7 +1423,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     // not mask the original spawn error.
     if (priorStatus !== undefined && input.issueId) {
       try {
-        const candidate = loadLocalFromDisk(
+        const candidate = await loadLocal(
           input.repo.localPath,
           input.issueId,
           input.repo.issuePrefix,

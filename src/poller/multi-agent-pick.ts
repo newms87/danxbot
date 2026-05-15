@@ -159,7 +159,7 @@ import {
 } from "./dispatch-liveness-yaml.js";
 import {
   clearDispatchAndWrite,
-  loadLocalFromDisk,
+  loadLocal,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
@@ -686,18 +686,13 @@ export async function tryMultiAgentDispatch(
               ? { tracker, externalId: stamped.external_id }
               : undefined,
           pairedWriteYaml: {
-            // DX-284: cleanup paths re-read the YAML from DISK, not
-            // the DB-backed `loadLocal`. `writeIssue`'s mirror ack
-            // uses an 8s `awaitMirror` timeout that frequently lapses
-            // under chokidar pressure (observed: "awaitMirror timed
-            // out for danxbot/DX-260"). When it does, `loadLocal`
-            // returns the PRE-stamp DB shape, the `fresh.dispatch !==
-            // null` guard evaluates false, the clear is skipped, and
-            // the orphan `dispatch{pid:0}` block accumulates on disk.
-            // Disk reads bypass the mirror entirely.
+            // Cleanup paths re-read the YAML so they observe the
+            // post-stamp state. Post-DX-547 the writer upserts the DB
+            // row BEFORE `writeFileSync`, so DB-backed `loadLocal`
+            // returns the freshly-stamped shape immediately.
             write: async (pid: number) => {
               const enriched: IssueDispatch = { ...startStamp, pid };
-              const fresh = loadLocalFromDisk(
+              const fresh = await loadLocal(
                 repo.localPath,
                 stamped.id,
                 repo.issuePrefix,
@@ -710,7 +705,7 @@ export async function tryMultiAgentDispatch(
               await stampDispatchAndWrite(repo.localPath, fresh, enriched);
             },
             clear: async () => {
-              const fresh = loadLocalFromDisk(
+              const fresh = await loadLocal(
                 repo.localPath,
                 stamped.id,
                 repo.issuePrefix,
@@ -725,9 +720,7 @@ export async function tryMultiAgentDispatch(
             // sees a clean slate. The `assigned_agent` stamp survives
             // (the next dispatch by the same agent re-claims it via
             // pickCardForAgent's "self-claim allowed" branch).
-            //
-            // DX-284: disk read (see pairedWriteYaml.write comment).
-            const fresh = loadLocalFromDisk(
+            const fresh = await loadLocal(
               repo.localPath,
               stamped.id,
               repo.issuePrefix,
@@ -840,12 +833,11 @@ export async function tryMultiAgentDispatch(
       // permanently. The accumulated stale blocks were the root cause of
       // a poller-idle-with-ToDo-queue stall seen 2026-05-11.
       try {
-        // DX-284: disk read instead of `loadLocal`. The
-        // `stampDispatchAndWrite` we just ran above may have lost its
-        // `awaitMirror` race (the very symptom that gets us here
-        // — `dispatch()` throwing post-stamp). Reading from disk
-        // bypasses the DB-mirror lag so the clear actually runs.
-        const fresh = loadLocalFromDisk(
+        // Re-read post-stamp state and clear the dispatch block. The
+        // synchronous writer (DX-547) leaves the DB row consistent the
+        // moment `stampDispatchAndWrite` resolves, so DB-backed
+        // `loadLocal` returns the right shape with no race.
+        const fresh = await loadLocal(
           repo.localPath,
           stamped.id,
           repo.issuePrefix,

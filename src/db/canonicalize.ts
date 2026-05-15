@@ -11,8 +11,9 @@ import { createHash } from "node:crypto";
  *
  * Splitting these out of `issues-mirror.ts` lets the writer side
  * (`writeIssue` in `src/poller/yaml-lifecycle.ts`) compute the same hash
- * the watcher will compute, so both can key into the in-process
- * `awaitMirror` registry without re-importing the mirror module.
+ * the watcher will compute, so the watcher's skip-match dedup
+ * recognises the writer's own pre-populated row without re-importing
+ * the mirror module.
  *
  * Hashing canonical bytes (not raw YAML text) means same-data + reordered
  * keys + reformatted whitespace all collapse to one row — exactly what

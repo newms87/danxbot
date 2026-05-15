@@ -120,7 +120,6 @@ vi.mock("./settings-file.js", async () => {
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
   repoName: "mock",
   repoLocalPath: "/mock",
-  awaitMirror: vi.fn().mockResolvedValue(undefined),
   simulateWatcherEvent: vi.fn().mockResolvedValue(undefined),
   reconcileNow: vi.fn().mockResolvedValue(undefined),
   stop: vi.fn().mockResolvedValue(undefined),

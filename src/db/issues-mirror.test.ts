@@ -142,7 +142,6 @@ describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () =
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      awaitTimeoutMs: 50,
     });
   });
 
@@ -240,29 +239,6 @@ describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () =
     expect(db.rows.has(rowKey("test-repo", "DX-7"))).toBe(true);
   });
 
-  it("awaitMirror resolves when matching upsert lands; rejects on timeout", async () => {
-    const path = writeYaml(repo.localPath, "open", "DX-8", SAMPLE_YAML("DX-8"));
-    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-8")));
-
-    const awaited = mirror.awaitMirror("test-repo", "DX-8", expectedHash);
-    await mirror.simulateWatcherEvent({ event: "add", path });
-    await expect(awaited).resolves.toBeUndefined();
-
-    // Timeout case: a hash we never produce.
-    await expect(
-      mirror.awaitMirror("test-repo", "DX-8", "0".repeat(64), { timeoutMs: 30 }),
-    ).rejects.toThrow(/timeout/);
-  });
-
-  it("two pending awaitMirror calls for same key are both resolved by one upsert", async () => {
-    const path = writeYaml(repo.localPath, "open", "DX-9", SAMPLE_YAML("DX-9"));
-    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-9")));
-
-    const a = mirror.awaitMirror("test-repo", "DX-9", expectedHash);
-    const b = mirror.awaitMirror("test-repo", "DX-9", expectedHash);
-    await mirror.simulateWatcherEvent({ event: "add", path });
-    await expect(Promise.all([a, b])).resolves.toEqual([undefined, undefined]);
-  });
 });
 
 describe("issues-mirror — boot scan", () => {
@@ -360,47 +336,12 @@ describe("issues-mirror — public-API contract", () => {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      awaitTimeoutMs: 50,
     });
   });
 
   afterEach(async () => {
     await mirror.stop();
     rmSync(repo.tmpdir, { recursive: true, force: true });
-  });
-
-  it("awaitMirror short-circuits when the upsert was already observed within recentTtlMs", async () => {
-    // Simulate the late-await race: watcher fires before the writer
-    // registers awaitMirror. The mirror's recent-upserts cache should
-    // resolve the late awaiter immediately.
-    const path = writeYaml(
-      repo.localPath,
-      "open",
-      "DX-30",
-      SAMPLE_YAML("DX-30"),
-    );
-    await mirror.simulateWatcherEvent({ event: "add", path });
-    const expectedHash = sha256(canonicalize(PARSED_SAMPLE("DX-30")));
-
-    // Register AFTER the upsert: should resolve immediately, no waiting.
-    const start = Date.now();
-    await mirror.awaitMirror("test-repo", "DX-30", expectedHash);
-    expect(Date.now() - start).toBeLessThan(20);
-  });
-
-  it("awaitMirror throws on repoName mismatch", async () => {
-    await expect(
-      mirror.awaitMirror("wrong-repo", "DX-31", "0".repeat(64)),
-    ).rejects.toThrow(/repoName mismatch/);
-  });
-
-  it("stop() rejects pending awaiters with 'Issues mirror stopped'", async () => {
-    const pending = mirror.awaitMirror("test-repo", "DX-32", "1".repeat(64), {
-      timeoutMs: 60_000,
-    });
-    // Don't await yet — stop() must reject this in-flight Promise.
-    await mirror.stop();
-    await expect(pending).rejects.toThrow(/Issues mirror stopped/);
   });
 
   it("hasAnyMirror reflects registry state", async () => {
@@ -795,7 +736,6 @@ describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () =
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      awaitTimeoutMs: 50,
     });
   });
 

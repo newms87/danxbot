@@ -116,7 +116,6 @@ vi.mock("../../poller/yaml-lifecycle.js", async () => {
       dispatch: null,
     })),
     loadLocal: vi.fn(async () => null),
-    loadLocalFromDisk: vi.fn(() => null),
     writeIssue: vi.fn(async () => undefined),
   };
 });

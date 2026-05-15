@@ -131,8 +131,8 @@ describe("reconcileIssue — Phase 1 chokepoint", () => {
     const path = writeYaml(ctx.openDir, "DX-1", issue);
     // Mirror's hash recipe: parse the on-disk text via parseYamlText,
     // canonicalize the resulting object, sha256. Reconcile MUST agree
-    // on this byte sequence so `awaitMirror` lookups + content-hash
-    // dedupes cross-reference correctly across the two modules.
+    // on this byte sequence so the chokidar watcher's content-hash
+    // dedup correctly skips the writer's own pre-populated row.
     const { parse: parseYamlText } = await import("yaml");
     const onDiskText = readFileSync(path, "utf-8");
     const expectedHash = sha256(
@@ -152,8 +152,8 @@ describe("reconcileIssue — Phase 1 chokepoint", () => {
       dispatchableChanged: true,
     });
     // The hash MUST match what the mirror would compute on the same
-    // file — parity is load-bearing for `awaitMirror` round-trips in
-    // later phases.
+    // file — parity is load-bearing for the watcher's hash-dedup
+    // skip-match path.
     expect(result.prevHash).toBe(expectedHash);
     expect(result.nextHash).toBe(result.prevHash);
     // File is unchanged on disk (no write happened).

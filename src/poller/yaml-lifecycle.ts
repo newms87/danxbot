@@ -32,7 +32,6 @@ import { dirname, resolve } from "node:path";
 import {
   appendHistory,
   createEmptyIssue,
-  parseIssue,
   serializeIssue,
   validateIssue,
 } from "../issue-tracker/yaml.js";
@@ -79,44 +78,6 @@ export async function loadLocal(
 ): Promise<Issue | null> {
   const repoName = repoNameFromPath(repoLocalPath);
   return dbSelectIssueById(repoName, id);
-}
-
-/**
- * Disk-backed counterpart to `loadLocal`. Reads `open/<id>.yml`
- * directly via the file system and `parseIssue`s the bytes — no DB
- * round-trip, no mirror dependency.
- *
- * Cleanup paths that fire IMMEDIATELY after a `writeIssue` (especially
- * `stampDispatchAndWrite` followed by a synchronous `dispatch()`
- * throw) read from disk so they observe the bytes the writer just
- * laid down, not a stale `loadLocal` DB shape. Post-DX-547 the writer
- * upserts the DB row BEFORE `writeFileSync`, so the DB IS consistent
- * by the time `writeIssue`'s promise resolves — but disk reads remain
- * the cleanup primitive because they sidestep any future regression
- * in the writer's DB chain (a no-op fallback, an unregistered DB)
- * that would otherwise leave the cleanup looking at stale state.
- *
- * Returns `null` when the file is missing (card moved to `closed/`,
- * was renamed, was never written). The caller treats null as "card
- * not in the open bucket, nothing to clear here."
- */
-export function loadLocalFromDisk(
-  repoLocalPath: string,
-  id: string,
-  prefix: string,
-): Issue | null {
-  const path = issuePath(repoLocalPath, id, "open");
-  let text: string;
-  try {
-    text = readFileSync(path, "utf-8");
-  } catch {
-    return null;
-  }
-  try {
-    return parseIssue(text, { expectedPrefix: prefix });
-  } catch {
-    return null;
-  }
 }
 
 /**

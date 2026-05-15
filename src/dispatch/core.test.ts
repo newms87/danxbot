@@ -84,6 +84,40 @@ vi.mock("../agent/stall-detector.js", () => ({
   DEFAULT_MAX_NUDGES: 3,
 }));
 
+// `dispatch()` reads the candidate via DB-backed `loadLocal`. These
+// integration tests run without a Postgres pool, so route the read
+// through a disk-backed parse instead — same observable shape as the
+// production DB read for these fixtures.
+vi.mock("../poller/yaml-lifecycle.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../poller/yaml-lifecycle.js")
+  >("../poller/yaml-lifecycle.js");
+  const { readFileSync: readFs } = await import("node:fs");
+  const { parseIssue } = await import("../issue-tracker/yaml.js");
+  const { issuePath } = await import("../issue-tracker/paths.js");
+  return {
+    ...actual,
+    loadLocal: async (
+      repoLocalPath: string,
+      id: string,
+      prefix: string,
+    ) => {
+      const path = issuePath(repoLocalPath, id, "open");
+      let text: string;
+      try {
+        text = readFs(path, "utf-8");
+      } catch {
+        return null;
+      }
+      try {
+        return parseIssue(text, { expectedPrefix: prefix });
+      } catch {
+        return null;
+      }
+    },
+  };
+});
+
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";

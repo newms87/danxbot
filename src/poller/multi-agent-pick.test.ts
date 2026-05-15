@@ -102,7 +102,6 @@ vi.mock("./yaml-lifecycle.js", async () => {
       // on the next tick (see yaml-lifecycle.ts#clearDispatchAndWrite).
     })),
     loadLocal: vi.fn(async () => null),
-    loadLocalFromDisk: vi.fn(() => null),
     writeIssue: vi.fn(async () => undefined),
   };
 });
@@ -116,7 +115,7 @@ import {
 } from "../dispatch/scheduler.js";
 import {
   clearDispatchAndWrite,
-  loadLocalFromDisk,
+  loadLocal,
 } from "./yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
@@ -423,54 +422,6 @@ describe("tryMultiAgentDispatch", () => {
     expect(mockedDispatchWithRecovery.mock.calls[0][1].agentName).toBe("alice");
   });
 
-  it("DX-284: catch-cleanup uses loadLocalFromDisk so awaitMirror lag doesn't strand the orphan pre-stamp", async () => {
-    // Specific to the DX-284 regression: when `awaitMirror` times out
-    // inside the just-fired `stampDispatchAndWrite`, the DB lags the
-    // YAML. The old code re-read via `loadLocal` (DB), saw `dispatch:
-    // null`, and skipped the clear → orphan pre-stamp persisted. The
-    // fix swaps the cleanup re-read to `loadLocalFromDisk`.
-    //
-    // Setup: simulate the race by making `loadLocal` return the stale
-    // (pre-stamp) shape — the old code would have followed this path
-    // and skipped the clear. `loadLocalFromDisk` returns the post-
-    // stamp shape — the fixed code follows THIS path and clears.
-    writeSettings({ alice: agentRecord("alice") });
-    mockedDispatchWithRecovery.mockRejectedValueOnce(
-      new Error("dispatch failed post-stamp"),
-    );
-    const lifecycle = await import("./yaml-lifecycle.js");
-    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce(
-      issue("DX-1", { dispatch: null }), // stale DB shape
-    );
-    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce(
-      issue("DX-1", {
-        dispatch: {
-          id: "stamp-uuid",
-          pid: 0,
-          host: "test",
-          kind: "work" as const,
-          started_at: "",
-          ttl_seconds: 7200,
-        },
-      }),
-    );
-    const clearMock = vi.mocked(lifecycle.clearDispatchAndWrite);
-    clearMock.mockClear();
-
-    const result = await tryMultiAgentDispatch({
-      repo: fakeRepo(),
-      cards: [issue("DX-1")],
-      tracker: fakeTracker(),
-      now: NOW,
-    });
-
-    expect(result.dispatched).toBe(0);
-    // Cleared via the disk-read path even though the DB still showed
-    // dispatch: null.
-    expect(clearMock).toHaveBeenCalledTimes(1);
-    expect(clearMock.mock.calls[0][1].id).toBe("DX-1");
-  });
-
   it("dispatchWithRecovery throws AFTER YAML stamp → clearDispatchAndWrite fires so the stamp doesn't persist", async () => {
     /**
      * Regression for the poller-idle-with-ToDo-queue bug seen on
@@ -483,7 +434,7 @@ describe("tryMultiAgentDispatch", () => {
       new Error("dispatch failed post-stamp"),
     );
     const lifecycle = await import("./yaml-lifecycle.js");
-    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
+    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce({
       ...issue("DX-1"),
       dispatch: {
         id: "stamp-uuid",
@@ -782,7 +733,7 @@ describe("tryMultiAgentDispatch", () => {
       job: {} as never,
     });
     vi.mocked(runPostDispatchProgressCheck).mockResolvedValue(undefined);
-    vi.mocked(loadLocalFromDisk).mockReturnValueOnce(
+    vi.mocked(loadLocal).mockResolvedValueOnce(
       issue("DX-1", {
         dispatch: {
           id: "old-did",
@@ -1329,7 +1280,7 @@ describe("tryMultiAgentDispatch", () => {
       new Error("dispatch failed post-stamp"),
     );
     const lifecycle = await import("./yaml-lifecycle.js");
-    vi.mocked(lifecycle.loadLocalFromDisk).mockReturnValueOnce({
+    vi.mocked(lifecycle.loadLocal).mockResolvedValueOnce({
       ...issue("DX-1"),
       assigned_agent: "alice",
       dispatch: {

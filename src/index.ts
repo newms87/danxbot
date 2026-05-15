@@ -403,9 +403,10 @@ async function startWorkerMode(): Promise<void> {
   //
   // Failure here is fatal — the mirror MUST be running before the poller
   // dispatches anything that writes a YAML. Falling through with a
-  // dead mirror would leave every subsequent `writeIssue` racing the
-  // 5s `awaitMirror` timeout and the DB drifting silently. The mirror's
-  // own `reportFailure` writes CRITICAL_FAILURE on per-event errors;
+  // dead mirror would leave every subsequent `writeIssue` either
+  // skipping the DB upsert silently (no writer registration) or
+  // racing the chokidar backstop alone. The mirror's own
+  // `reportFailure` writes CRITICAL_FAILURE on per-event errors;
   // a boot-scan failure that propagates here is a hard wiring bug.
   // Reconcile cadence is overridable via env for test fixtures + ops
   // tooling. Production runs the default 10-minute cadence; the
@@ -455,8 +456,9 @@ async function startWorkerMode(): Promise<void> {
   // unscoped pre-stamp path; worker crash mid-spawn). Liveness gate via
   // `checkYamlDispatchLiveness` skips dispatches caught genuinely
   // mid-spawn (alive PID, within TTL, on this host). Runs AFTER the
-  // mirror is up (so `writeIssue` awaitMirror resolves) and BEFORE
-  // the first poll tick. The same scan runs per-tick from
+  // mirror is up (so `writeIssue`'s synchronous DB upsert has a
+  // registered writer DB to target) and BEFORE the first poll tick.
+  // The same scan runs per-tick from
   // `src/cron/sync-and-audit.ts` for ongoing self-heal.
   await runInvariantHeal(repo, "boot");
 

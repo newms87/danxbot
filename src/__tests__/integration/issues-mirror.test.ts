@@ -136,11 +136,27 @@ async function clearTables(pool: TestDbHandle["pool"]): Promise<void> {
   await pool.query("DELETE FROM issues");
 }
 
-async function awaitOrTimeout(promise: Promise<void>, ms = 5000): Promise<void> {
-  await promise;
-  // Yield once to let any post-resolve microtasks settle before assertions.
-  await new Promise((r) => setTimeout(r, 0));
-  void ms;
+/**
+ * Poll for a row whose `content_hash` matches `expectedHash`. The
+ * watcher path's only proof-of-landing is the DB row itself, so the
+ * test polls the DB directly with a 5s budget.
+ */
+async function waitForRow(
+  pool: TestDbHandle["pool"],
+  repoName: string,
+  issueId: string,
+  expectedHash: string,
+  timeoutMs = 5000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const row = await fetchRow(pool, repoName, issueId);
+    if (row && row.content_hash === expectedHash) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(
+    `waitForRow timeout after ${timeoutMs}ms for ${repoName}/${issueId}@${expectedHash.slice(0, 8)}`,
+  );
 }
 
 async function startMirror(
@@ -151,7 +167,6 @@ async function startMirror(
     {
       pool: handle!.pool,
       reconcileIntervalMs: 0,
-      awaitTimeoutMs: 5000,
       // Production's 5000ms stabilityThreshold ties with vitest's default
       // 5000ms test timeout — every chokidar-driven test would time out.
       // Tests write complete buffers in one syscall, so the mid-write
@@ -177,9 +192,8 @@ describe("issues-mirror — real chokidar + real PG", () => {
       const mirror = await startMirror(repo.localPath);
       try {
         const expectedHash = sha256(canonicalize(PARSED("DX-100")));
-        const awaited = mirror.awaitMirror(REPO_NAME, "DX-100", expectedHash);
         writeIssueFile(repo.localPath, "open", "DX-100", SAMPLE("DX-100"));
-        await awaitOrTimeout(awaited);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-100", expectedHash);
         const row = await fetchRow(handle!.pool, REPO_NAME, "DX-100");
         expect(row).not.toBeNull();
         expect(row!.data).toMatchObject(PARSED("DX-100"));
@@ -204,15 +218,14 @@ describe("issues-mirror — real chokidar + real PG", () => {
           SAMPLE("DX-101"),
         );
         const firstHash = sha256(canonicalize(PARSED("DX-101")));
-        await mirror.awaitMirror(REPO_NAME, "DX-101", firstHash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-101", firstHash);
 
         const before = await countHistory(handle!.pool, REPO_NAME, "DX-101");
         const secondHash = sha256(
           canonicalize(PARSED("DX-101", "In Progress")),
         );
-        const awaited = mirror.awaitMirror(REPO_NAME, "DX-101", secondHash);
         writeFileSync(path, SAMPLE("DX-101", "In Progress"));
-        await awaitOrTimeout(awaited);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-101", secondHash);
         const after = await countHistory(handle!.pool, REPO_NAME, "DX-101");
         expect(after).toBe(before + 1);
         const row = await fetchRow(handle!.pool, REPO_NAME, "DX-101");
@@ -237,14 +250,15 @@ describe("issues-mirror — real chokidar + real PG", () => {
           SAMPLE("DX-102"),
         );
         const hash = sha256(canonicalize(PARSED("DX-102")));
-        await mirror.awaitMirror(REPO_NAME, "DX-102", hash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-102", hash);
         const before = await countHistory(handle!.pool, REPO_NAME, "DX-102");
 
         // Re-write same content — chokidar fires a `change` event but
         // content hash is unchanged, so no history row should be added.
-        const awaited = mirror.awaitMirror(REPO_NAME, "DX-102", hash);
+        // No new hash to wait on; sleep past chokidar's debounce + a
+        // generous tail so any spurious upsert would have landed by now.
         writeFileSync(path, SAMPLE("DX-102"));
-        await awaitOrTimeout(awaited);
+        await new Promise((r) => setTimeout(r, 500));
         const after = await countHistory(handle!.pool, REPO_NAME, "DX-102");
         expect(after).toBe(before);
       } finally {
@@ -267,7 +281,7 @@ describe("issues-mirror — real chokidar + real PG", () => {
           SAMPLE("DX-103"),
         );
         const hash = sha256(canonicalize(PARSED("DX-103")));
-        await mirror.awaitMirror(REPO_NAME, "DX-103", hash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-103", hash);
 
         const before = await countHistory(handle!.pool, REPO_NAME, "DX-103");
         unlinkSync(path);
@@ -305,9 +319,8 @@ describe("issues-mirror — real chokidar + real PG", () => {
       const mirror = await startMirror(repo.localPath);
       try {
         const expectedHash = sha256(canonicalize(PARSED("DX-104")));
-        const awaited = mirror.awaitMirror(REPO_NAME, "DX-104", expectedHash);
         writeIssueFile(repo.localPath, "open", "DX-104", SAMPLE("DX-104"));
-        await awaitOrTimeout(awaited);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-104", expectedHash);
         const src = await lastSource(handle!.pool, REPO_NAME, "DX-104");
         expect(src).toBe("watcher");
       } finally {
@@ -363,7 +376,7 @@ describe("issues-mirror — real chokidar + real PG", () => {
           SAMPLE("DX-110"),
         );
         const firstHash = sha256(canonicalize(PARSED("DX-110")));
-        await mirror.awaitMirror(REPO_NAME, "DX-110", firstHash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-110", firstHash);
 
         // First-create patch must be a sequence of `add` ops against `{}`
         // — no `replace` / `remove` (those would imply prev had keys).
@@ -389,9 +402,8 @@ describe("issues-mirror — real chokidar + real PG", () => {
         const secondHash = sha256(
           canonicalize(PARSED("DX-110", "In Progress")),
         );
-        const awaited = mirror.awaitMirror(REPO_NAME, "DX-110", secondHash);
         writeFileSync(path, SAMPLE("DX-110", "In Progress"));
-        await awaitOrTimeout(awaited);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-110", secondHash);
         const second = await handle!.pool.query<{
           prev_hash: string | null;
           next_hash: string;
@@ -450,15 +462,12 @@ describe("issues-mirror — real chokidar + real PG", () => {
             triage: { expires_at: "not-a-real-date" },
           }),
         );
-        const awaitEmpty = mirror.awaitMirror(REPO_NAME, "DX-700", emptyHash);
-        const awaitValid = mirror.awaitMirror(REPO_NAME, "DX-701", validHash);
-        const awaitGarbage = mirror.awaitMirror(REPO_NAME, "DX-702", garbageHash);
         writeIssueFile(repo.localPath, "open", "DX-700", empty);
         writeIssueFile(repo.localPath, "open", "DX-701", valid);
         writeIssueFile(repo.localPath, "open", "DX-702", garbage);
-        await awaitOrTimeout(awaitEmpty);
-        await awaitOrTimeout(awaitValid);
-        await awaitOrTimeout(awaitGarbage);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-700", emptyHash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-701", validHash);
+        await waitForRow(handle!.pool, REPO_NAME, "DX-702", garbageHash);
 
         const result = await handle!.pool.query<{
           id: string;

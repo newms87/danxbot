@@ -62,7 +62,6 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYamlText } from "yaml";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
-import { getMirrorByLocalPath } from "../db/issues-mirror.js";
 import {
   appendHistory,
   parseIssue,
@@ -99,8 +98,6 @@ import { createLogger } from "../logger.js";
 import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 
 const log = createLogger("reconcile");
-
-const RECONCILE_AWAIT_MIRROR_TIMEOUT_MS = 5_000;
 
 /**
  * Recursion depth cap. Reconciles triggered transitively from steps 9 +
@@ -560,26 +557,15 @@ async function reconcileBody(
       )
     : prevHash;
 
-  // ---- Step 6: await DB mirror upsert ----
-  // Only when step 5 wrote. A no-op reconcile already saw the watcher
-  // upsert (it's the trigger that called us); awaiting again would
-  // wait on an upsert that already happened.
-  if (reconcileMutated) {
-    const mirror = getMirrorByLocalPath(repo.localPath);
-    if (mirror) {
-      try {
-        await mirror.awaitMirror(repo.name, id, nextHash, {
-          timeoutMs: RECONCILE_AWAIT_MIRROR_TIMEOUT_MS,
-        });
-      } catch (err) {
-        errors.push({
-          step: "await-mirror",
-          message: (err as Error).message,
-          fatal: false,
-        });
-      }
-    }
-  }
+  // ---- Step 6 (retired DX-549): no DB-mirror await ----
+  // Pre-DX-549 this step awaited chokidar's mirror upsert before
+  // running step 7. With the writer-owned DB upsert (DX-547) the
+  // synchronous writers leave the DB consistent the moment they
+  // resolve, and step 7 below reads its inputs from the in-memory
+  // mutated Issue + per-card lastPushedHash cache — neither needs the
+  // DB row. The chokidar watcher backstop will catch up on its own
+  // 5s debounce; downstream readers either query through the writer
+  // path or tolerate the eventual-consistency window.
 
   // ---- Step 7: outbound tracker push ----
   // Push to the tracker when the on-disk hash differs from what we last

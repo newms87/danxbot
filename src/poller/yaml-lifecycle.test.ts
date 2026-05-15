@@ -18,7 +18,6 @@ import {
   hydrateFromRemote,
   issuePath,
   moveToClosedIfTerminal,
-  loadLocalFromDisk,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
@@ -911,64 +910,4 @@ describe("yaml-lifecycle", () => {
     });
   });
 
-  describe("loadLocalFromDisk (DX-284 — DB-mirror-bypass cleanup reader)", () => {
-    it("returns the parsed Issue when the open YAML exists", async () => {
-      const tracker = new FakeTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "ISS-400" }),
-      );
-      const created = await hydrateFromRemote(
-        tracker,
-        external_id,
-        null,
-        repoRoot, "ISS",
-      );
-      await writeIssue(repoRoot, created);
-      const loaded = loadLocalFromDisk(repoRoot, "ISS-400", "ISS");
-      expect(loaded).not.toBeNull();
-      expect(loaded?.id).toBe("ISS-400");
-    });
-
-    it("returns null when the YAML is missing", () => {
-      const loaded = loadLocalFromDisk(repoRoot, "ISS-999", "ISS");
-      expect(loaded).toBeNull();
-    });
-
-    it("returns null when the YAML is malformed (doesn't throw past the caller)", () => {
-      const path = issuePath(repoRoot, "ISS-401", "open");
-      ensureIssuesDirs(repoRoot);
-      writeFileSync(path, "not: valid: yaml: :::");
-      const loaded = loadLocalFromDisk(repoRoot, "ISS-401", "ISS");
-      expect(loaded).toBeNull();
-    });
-
-    it("returns the post-write shape WITHOUT needing the mirror — load happens via file read", async () => {
-      // Core DX-284 invariant: loadLocalFromDisk must see the byte
-      // pattern written by `writeIssue` even with NO mirror active.
-      // The yaml-lifecycle test suite runs without `startIssuesMirror`,
-      // so `loadLocal` (DB-backed) would return null here. This test
-      // documents the contract that the cleanup path now depends on.
-      const tracker = new FakeTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "ISS-402" }),
-      );
-      const created = await hydrateFromRemote(
-        tracker,
-        external_id,
-        "did-mirror-bypass",
-        repoRoot, "ISS",
-      );
-      const stamped = await stampDispatchAndWrite(repoRoot, created, {
-        id: "did-mirror-bypass",
-        pid: 0,
-        host: "h",
-        kind: "work",
-        started_at: "2026-05-11T00:00:00.000Z",
-        ttl_seconds: 7200,
-      });
-      expect(stamped.dispatch).not.toBeNull();
-      const loaded = loadLocalFromDisk(repoRoot, "ISS-402", "ISS");
-      expect(loaded?.dispatch?.id).toBe("did-mirror-bypass");
-    });
-  });
 });
