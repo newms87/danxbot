@@ -1,5 +1,5 @@
 /**
- * spawnAgent() preflight — input validation, auth + projects-dir checks,
+ * spawnAgent() preflight — input validation, projects-dir check,
  * MCP server probe, jobId allocation, AgentJob skeleton construction,
  * and `claude` invocation building.
  *
@@ -20,10 +20,6 @@ import { createLogger } from "../logger.js";
 import { buildCleanEnv, logPromptToDisk } from "./process-utils.js";
 import { buildClaudeInvocation } from "./claude-invocation.js";
 import { probeAllMcpServers } from "./mcp-server-probe.js";
-import {
-  preflightClaudeAuth,
-  ClaudeAuthError,
-} from "./claude-auth-preflight.js";
 import {
   preflightProjectsDir,
   ProjectsDirError,
@@ -53,9 +49,15 @@ export interface PreflightResult {
  *
  * Throws:
  *   - Plain `Error` — invalid options (e.g., parentJobId without dispatch).
- *   - `ClaudeAuthError` — broken claude-auth chain (RO bind, expired token).
  *   - `ProjectsDirError` — `~/.claude/projects/` not writable by the worker.
  *   - Plain `Error` — MCP probe failed for any configured server.
+ *
+ * Claude-auth expiry/RO checks intentionally NOT performed here. Claude's
+ * own SDK handles credential refresh at spawn time (host TUI + docker `-p`
+ * both go through the same OAuth refresh path). The previous preflight
+ * produced false-positive rejections when a worker dispatched after creds
+ * had expired but before any claude process had refreshed them — claude
+ * itself can refresh on launch, so gating on a stat-only check was wrong.
  *
  * On MCP probe failure the function self-cleans the prompt temp dir before
  * throwing — the caller's catch in `dispatch()` only knows about the MCP
@@ -71,18 +73,6 @@ export async function runSpawnPreflight(
     throw new Error(
       "spawnAgent: parentJobId requires dispatch metadata — a resume without a dispatch row silently drops lineage",
     );
-  }
-
-  // Claude-auth preflight (Trello 3l2d7i46). RO bind / expired token / missing
-  // credentials all surface as silent dispatch timeouts — `claude -p` exits
-  // 0 with empty stdout, the watcher never attaches, and the worker reports
-  // "Agent timed out after N seconds of inactivity" pointing at network
-  // instead of at the actual broken auth chain. Run this BEFORE
-  // `buildClaudeInvocation` (which writes a prompt temp dir) so the early
-  // failure path needs no cleanup. Cheap — single stat + read on the bind.
-  const authPreflight = await preflightClaudeAuth();
-  if (!authPreflight.ok) {
-    throw new ClaudeAuthError(authPreflight);
   }
 
   // Trello cjAyJpgr-followup: parallel silent-failure mode on the projects

@@ -1,8 +1,7 @@
 /**
  * Projects-dir preflight — Trello cjAyJpgr-followup.
  *
- * Sister of `claude-auth-preflight.ts`. Same failure shape (silent dispatch
- * timeout) caused by a different broken-bind class:
+ * Silent-dispatch-timeout class caused by a broken-bind on the JSONL dir:
  *
  *   `~/.claude/projects/` (the dir claude writes session JSONL into) is
  *   bound from `<repo>/claude-projects/` on the host. When Docker
@@ -23,10 +22,9 @@
  * real `/api/launch` populates the DB row + writes JSONL + the dashboard
  * endpoint returns the timeline.
  *
- * This preflight runs alongside `preflightClaudeAuth` in `spawnAgent` so
- * the dispatch fails LOUD at launch with an actionable summary instead of
- * silently waiting out the inactivity timeout. Cost: one `access(W_OK)`
- * call — well under 1ms.
+ * This preflight runs in `spawnAgent` so the dispatch fails LOUD at launch
+ * with an actionable summary instead of silently waiting out the inactivity
+ * timeout. Cost: one `access(W_OK)` call — well under 1ms.
  */
 
 import { access } from "node:fs/promises";
@@ -101,9 +99,9 @@ export async function preflightProjectsDir(
 /**
  * Throw-shaped wrapper for callers that prefer typed errors over union
  * results. Used by `spawnAgent` so `dispatch.ts` can `catch
- * (ProjectsDirError)` and map to a 503 response — same shape as
- * `ClaudeAuthError`. External dispatchers see a single concise reason
- * instead of "Agent timed out after N seconds of inactivity".
+ * (ProjectsDirError)` and map to a 503 response. External dispatchers see
+ * a single concise reason instead of "Agent timed out after N seconds of
+ * inactivity".
  */
 export class ProjectsDirError extends Error {
   readonly reason: ProjectsDirFailureReason;

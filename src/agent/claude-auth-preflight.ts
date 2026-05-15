@@ -1,30 +1,26 @@
 /**
  * Claude-auth preflight (Trello 3l2d7i46).
  *
- * Three claude-auth misconfigurations all surface as the SAME silent dispatch
- * timeout — `claude -p` exits 0 with empty stdout, the watcher never attaches,
- * the worker eventually times out with a useless "Agent timed out after N
- * seconds of inactivity" summary that points at network/model/dispatch
- * instead of at the actual problem (broken auth files):
+ * Reports auth-chain status for the worker `/health` endpoint's
+ * `claude_auth` field. NOT used to gate dispatch — claude itself handles
+ * OAuth refresh at spawn time (host TUI + docker `-p` both go through the
+ * SDK's refresh path), so stat-only rejection produced false-positives
+ * when a dispatch landed between expiry and the next claude run. The
+ * health endpoint still surfaces the same shape so the dashboard can
+ * warn the operator when the auth chain looks broken; an unhealthy
+ * report no longer aborts dispatches.
+ *
+ * Three misconfigurations it classifies:
  *
  *   1. Read-only bind mount on `~/.claude.json` or `~/.claude/.credentials.json`
  *      — claude tries to rewrite session metadata or rotate the OAuth token,
- *      the write fails, `-p` mode exits silently. Original incident: PHevzRil.
- *   2. Expired OAuth token — snapshot dir that never rotated, `expiresAt` is
- *      in the past. Refresh attempt fails inside `-p` mode, exits silently.
+ *      the write fails. Original incident: PHevzRil.
+ *   2. Expired OAuth token — `expiresAt` in the past. Claude refreshes on
+ *      next launch; reporting here is informational.
  *   3. Half-configured layout — one of the auth files missing entirely
  *      (e.g. dev shell that ran `cp` for the config but skipped the creds).
  *
- * This preflight runs before `spawnAgent` actually forks claude and
- * before the more expensive MCP probe, so a broken auth chain fails the
- * dispatch loudly at launch instead of burning N seconds of inactivity
- * timeout. Cost is bounded by file IO on the bind — well under 1ms.
- *
- * The summary strings reference the actual misconfiguration AND the trail
- * back to the operator action that fixes it (compose mount for RO, host
- * claude refresh / worker redeploy for expiry). They are surfaced verbatim
- * to the dispatch caller as the launch-failure error string AND to the
- * operator via the worker `/health` endpoint's `claude_auth.summary` field.
+ * Cost is bounded by file IO on the bind — well under 1ms.
  */
 
 import { access, readFile } from "node:fs/promises";
@@ -195,18 +191,4 @@ function extractExpiresAt(parsed: unknown): number | null {
   const expiresAt = (oauth as Record<string, unknown>).expiresAt;
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return null;
   return expiresAt;
-}
-
-/**
- * Throw-shaped wrapper for callers that prefer typed errors over union
- * results. Used by `spawnAgent` so the dispatch path can `catch
- * (ClaudeAuthError)` and map to a 503 response without re-classifying.
- */
-export class ClaudeAuthError extends Error {
-  readonly reason: PreflightFailureReason;
-  constructor(result: Extract<PreflightResult, { ok: false }>) {
-    super(result.summary);
-    this.name = "ClaudeAuthError";
-    this.reason = result.reason;
-  }
 }

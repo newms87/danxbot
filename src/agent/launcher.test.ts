@@ -69,22 +69,6 @@ vi.mock("./mcp-server-probe.js", () => ({
   probeAllMcpServers: (...args: unknown[]) => mockProbeAllMcpServers(...args),
 }));
 
-// Mock the claude-auth preflight so launcher tests never touch ~/.claude/*.
-// Default to a healthy response; tests override per-call to assert the
-// failure path (Trello 3l2d7i46). The real ClaudeAuthError class is kept
-// so `instanceof` checks in spawnAgent still discriminate correctly.
-const mockPreflightClaudeAuth = vi.fn().mockResolvedValue({ ok: true });
-vi.mock("./claude-auth-preflight.js", async () => {
-  const actual = await vi.importActual<
-    typeof import("./claude-auth-preflight.js")
-  >("./claude-auth-preflight.js");
-  return {
-    ...actual,
-    preflightClaudeAuth: (...args: unknown[]) =>
-      mockPreflightClaudeAuth(...args),
-  };
-});
-
 // Same shape for the projects-dir preflight (Trello cjAyJpgr-followup).
 // Default healthy; tests override per-call to assert the silent-failure
 // path. ProjectsDirError is kept real so `instanceof` checks still work.
@@ -1954,106 +1938,6 @@ describe("spawnAgent", () => {
     });
   });
 
-  describe("claude-auth preflight (Trello 3l2d7i46)", () => {
-    it("throws ClaudeAuthError when preflight fails — no MCP probe, no claude spawn", async () => {
-      mockPreflightClaudeAuth.mockResolvedValueOnce({
-        ok: false,
-        reason: "readonly",
-        summary:
-          "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only — see compose.yml CLAUDE_CREDS_DIR mount; PHevzRil",
-      });
-
-      await expect(
-        spawnAgent({
-          prompt: "/danx-next",
-          repoName: "platform",
-          timeoutMs: 300_000,
-          cwd: "/tmp/test-workspace",
-          mcpConfigPath: "/tmp/mcp/settings.json",
-        }),
-      ).rejects.toThrow(/read-only/);
-
-      // The preflight runs BEFORE buildClaudeInvocation, the MCP probe,
-      // and any spawn — burning zero downstream work when auth is broken.
-      expect(mockProbeAllMcpServers).not.toHaveBeenCalled();
-      expect(mockSpawn).not.toHaveBeenCalled();
-    });
-
-    it("rejects with the typed ClaudeAuthError so dispatch can map to a 503", async () => {
-      // The dispatch handler discriminates with `instanceof ClaudeAuthError`
-      // (not by string-matching the message) — this test guards the type.
-      const { ClaudeAuthError } = await import("./claude-auth-preflight.js");
-
-      mockPreflightClaudeAuth.mockResolvedValueOnce({
-        ok: false,
-        reason: "expired",
-        summary:
-          "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z — host claude needs to refresh, or worker needs a redeploy",
-      });
-
-      await expect(
-        spawnAgent({
-          prompt: "/danx-next",
-          repoName: "platform",
-          timeoutMs: 300_000,
-          cwd: "/tmp/test-workspace",
-        }),
-      ).rejects.toBeInstanceOf(ClaudeAuthError);
-    });
-
-    it("proceeds when preflight returns ok", async () => {
-      // Sanity-check the default path — if the preflight integration accidentally
-      // throws on healthy auth, every existing launcher test would fail with the
-      // same symptom. This test isolates "healthy preflight → proceed" from the
-      // 90+ existing assertions.
-      mockPreflightClaudeAuth.mockResolvedValueOnce({ ok: true });
-      const child = createMockChildProcess();
-      mockSpawn.mockReturnValue(child);
-
-      const job = await spawnAgent({
-        prompt: "/danx-next",
-        repoName: "platform",
-        timeoutMs: 300_000,
-        cwd: "/tmp/test-workspace",
-      });
-
-      expect(job.status).toBe("running");
-      expect(mockSpawn).toHaveBeenCalled();
-    });
-
-    it("does not allocate a prompt temp dir when preflight fails (no leak on broken-auth worker)", async () => {
-      // The preflight runs BEFORE buildClaudeInvocation specifically so the
-      // early failure path needs no cleanup. A future refactor that moves
-      // mkdtempSync above the preflight would leak a /tmp/danxbot-prompt-*
-      // dir on EVERY dispatch from a broken-auth worker — this test locks
-      // the ordering invariant.
-      mockMkdtempSync.mockImplementation(routeMkdtempByPrefix);
-      mockPreflightClaudeAuth.mockResolvedValueOnce({
-        ok: false,
-        reason: "expired",
-        summary: "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z",
-      });
-
-      // Use a prompt that exceeds the inline threshold so buildClaudeInvocation
-      // would normally allocate a temp dir — that's the only condition under
-      // which the leak this test guards against could happen.
-      await expect(
-        spawnAgent({
-          prompt: "x".repeat(3000),
-          repoName: "platform",
-          timeoutMs: 300_000,
-          cwd: "/tmp/test-workspace",
-        }),
-      ).rejects.toThrow();
-
-      const promptTempCall = mockMkdtempSync.mock.calls.find(
-        (c: unknown[]) =>
-          typeof c[0] === "string" &&
-          (c[0] as string).includes("danxbot-prompt-"),
-      );
-      expect(promptTempCall).toBeUndefined();
-    });
-  });
 });
 
 // Route mkdtempSync by prefix so the three callers (mcp settings, prompt dir,

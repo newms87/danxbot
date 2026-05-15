@@ -3,7 +3,6 @@ import { config } from "../config.js";
 import { json, parseBody } from "../http/helpers.js";
 import { cancelJob, getJobStatus, type AgentJob } from "../agent/launcher.js";
 import { McpResolveError } from "../agent/mcp-types.js";
-import { ClaudeAuthError } from "../agent/claude-auth-preflight.js";
 import { ProjectsDirError } from "../agent/projects-dir-preflight.js";
 import { dispatch, getActiveJob, listActiveJobs } from "../dispatch/core.js";
 import {
@@ -492,11 +491,6 @@ function mapDispatchError(
   res: ServerResponse,
   opName: string,
 ): boolean {
-  if (err instanceof ClaudeAuthError) {
-    log.error(`${opName} failed: claude-auth preflight (${err.reason})`, err);
-    json(res, 503, { error: err.message });
-    return true;
-  }
   if (err instanceof ProjectsDirError) {
     log.error(`${opName} failed: projects-dir preflight (${err.reason})`, err);
     json(res, 503, { error: err.message });
@@ -576,10 +570,10 @@ export async function handleLaunch(
 
     json(res, 200, { job_id: dispatchId, status: "launched" });
   } catch (err) {
-    // Shared 4xx/5xx mapping for ClaudeAuthError / ProjectsDirError /
-    // McpResolveError / WorkspaceGateUnknownError / workspace caller
-    // errors. `handleLaunch` adds the StagedFilesError branch on top
-    // (the staged-files-aware route is the only one that maps it).
+    // Shared 4xx/5xx mapping for ProjectsDirError / McpResolveError /
+    // WorkspaceGateUnknownError / workspace caller errors. `handleLaunch`
+    // adds the StagedFilesError branch on top (the staged-files-aware
+    // route is the only one that maps it).
     if (mapDispatchError(err, res, "Launch")) return;
     if (err instanceof StagedFilesError) {
       // validation = caller body bug → 400; write = worker IO → 500.

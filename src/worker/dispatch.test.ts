@@ -330,91 +330,6 @@ describe("handleLaunch — dispatchApi feature toggle", () => {
   });
 });
 
-describe("handleLaunch / handleResume — claude-auth preflight (Trello 3l2d7i46)", () => {
-  // Hoisted lazily so the import doesn't pay the cost on every test file load.
-  let ClaudeAuthError: typeof import("../agent/claude-auth-preflight.js").ClaudeAuthError;
-
-  beforeEach(async () => {
-    ({ ClaudeAuthError } = await import("../agent/claude-auth-preflight.js"));
-  });
-
-  it("handleLaunch maps ClaudeAuthError to 503 with the preflight summary as the error string", async () => {
-    // Worker-config issue, not a caller bug — same shape as the dispatchApi-
-    // disabled branch so external dispatchers (gpt-manager) handle both with
-    // identical "back off and retry later" logic.
-    const summary =
-      "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only — fix the bind mount in compose.yml";
-    mockDispatchFn.mockRejectedValueOnce(
-      new ClaudeAuthError({ ok: false, reason: "readonly", summary }),
-    );
-
-    const req = createMockReqWithBody("POST", {
-      workspace: "system-test",
-      task: "do thing",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
-  });
-
-  it("handleResume maps ClaudeAuthError to 503 with the preflight summary", async () => {
-    // Twin coverage of the dispatch.ts catch arm — without it, a future
-    // refactor that DRYs the two handlers can drop one branch and only the
-    // launch test fails, hiding the resume regression.
-    const summary =
-      "claude-auth OAuth token expired at 2026-01-01T00:00:00.000Z — host claude needs to refresh, or worker needs a redeploy";
-    mockDispatchFn.mockRejectedValueOnce(
-      new ClaudeAuthError({ ok: false, reason: "expired", summary }),
-    );
-
-    // Set up the resume parent-session lookup to succeed so the failure path
-    // we exercise is the dispatch() call, not a missing-parent 404.
-    mockFindSessionFileByDispatchId.mockResolvedValueOnce(
-      "/fake/projects/parent.jsonl",
-    );
-
-    const req = createMockReqWithBody("POST", {
-      job_id: "parent-job-123",
-      workspace: "system-test",
-      task: "continue",
-    });
-    const res = createMockRes();
-
-    await handleResume(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
-  });
-
-  it("ClaudeAuthError 503 takes precedence over the catch-all 500 in handleLaunch", async () => {
-    // The instanceof chain in handleLaunch is order-sensitive. If a future
-    // refactor swaps the order or replaces it with a switch on err.name,
-    // ClaudeAuthError (a subclass of Error) would silently fall through to
-    // the generic 500 branch and external callers would lose the worker-
-    // config signal.
-    const authErr = new ClaudeAuthError({
-      ok: false,
-      reason: "missing",
-      summary: "claude-auth file .credentials.json is missing",
-    });
-    mockDispatchFn.mockRejectedValueOnce(authErr);
-
-    const req = createMockReqWithBody("POST", {
-      workspace: "system-test",
-      task: "do thing",
-    });
-    const res = createMockRes();
-
-    await handleLaunch(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(res._getStatusCode()).not.toBe(500);
-  });
-});
-
 describe("handleStatus", () => {
   it("returns 404 for unknown job", () => {
     const res = createMockRes();
@@ -2184,8 +2099,8 @@ describe("handleLaunch — callerIp extraction", () => {
  *   - 400 when body.repo names a different worker.
  *   - 200 happy path — captured dispatch() call carries the right workspace,
  *     task, issueId, and apiDispatchMeta endpoint.
- *   - ClaudeAuthError / WorkspaceCallerError map to the same status codes
- *     as `handleLaunch` (test pins ClaudeAuthError → 503 + MCP resolve → 400
+ *   - ProjectsDirError / WorkspaceCallerError map to the same status codes
+ *     as `handleLaunch` (test pins ProjectsDirError → 503 + MCP resolve → 400
  *     so the error-mapping chain doesn't silently drop a branch).
  */
 describe("handleFleshOut — body validation + dispatch wiring", () => {
@@ -2342,28 +2257,6 @@ describe("handleFleshOut — body validation + dispatch wiring", () => {
     expect(res._getStatusCode()).toBe(200);
     const input = mockDispatchFn.mock.calls[0][0] as { issueId?: string };
     expect(input.issueId).toBe("DX-42");
-  });
-
-  it("maps ClaudeAuthError from dispatch() to 503 (worker-config issue)", async () => {
-    const { ClaudeAuthError } = await import(
-      "../agent/claude-auth-preflight.js"
-    );
-    const summary =
-      "claude-auth file .claude.json at /home/danxbot/.claude.json is read-only";
-    mockDispatchFn.mockRejectedValueOnce(
-      new ClaudeAuthError({ ok: false, reason: "readonly", summary }),
-    );
-
-    const req = createMockReqWithBody("POST", {
-      repo: MOCK_REPO.name,
-      issue_id: "DX-349",
-    });
-    const res = createMockRes();
-
-    await handleFleshOut(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody())).toEqual({ error: summary });
   });
 
   it("maps ProjectsDirError from dispatch() to 503 (worker-config issue)", async () => {
@@ -2531,7 +2424,7 @@ describe("handleFleshOut — body validation + dispatch wiring", () => {
  *   - 200 with-notes path — task body appends the marked block verbatim
  *     to make the SKILL.md contract observable in `prompt.md`.
  *   - 200 with exactly 2000-char instructions (boundary).
- *   - Default error mapping (ClaudeAuthError → 503, McpResolveError →
+ *   - Default error mapping (ProjectsDirError → 503, McpResolveError →
  *     400, unknown → 500) matches the other dispatch routes.
  *
  * The `buildTriageTaskBody` helper is exercised separately so the
@@ -2750,29 +2643,6 @@ describe("handleTriage — body validation + dispatch wiring", () => {
     expect(input.dispatchKind).toBe("triage");
   });
 
-  it("maps ClaudeAuthError from dispatch() to 503 (worker-config signal)", async () => {
-    // Pin the error-mapping chain so a future refactor that drops the
-    // shared mapDispatchError branch surfaces immediately.
-    const { ClaudeAuthError } = await import(
-      "../agent/claude-auth-preflight.js"
-    );
-    mockDispatchFn.mockRejectedValueOnce(
-      new ClaudeAuthError({
-        ok: false,
-        reason: "readonly",
-        summary: "claude-auth file read-only",
-      }),
-    );
-
-    const req = createMockReqWithBody("POST", { repo: MOCK_REPO.name });
-    const res = createMockRes();
-
-    await handleTriage(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody()).error).toMatch(/claude-auth/);
-  });
-
   it("maps McpResolveError from dispatch() to 400 (caller-fixable)", async () => {
     const { McpResolveError } = await import("../agent/mcp-types.js");
     mockDispatchFn.mockRejectedValueOnce(
@@ -2821,7 +2691,7 @@ describe("handleTriage — body validation + dispatch wiring", () => {
  *   - 200 FRESH path when chat-sessions exists but the prior session uuid
  *     can't be resolved (stale record after worker move / claude purge).
  *   - chat-sessions write happens AFTER dispatch returns, with the new id.
- *   - error-mapping chain matches handleFleshOut (ClaudeAuthError → 503, etc.)
+ *   - error-mapping chain matches handleFleshOut (ProjectsDirError → 503, etc.)
  */
 describe("handleChat — body validation + fresh/resume routing", () => {
   beforeEach(() => {
@@ -3174,34 +3044,6 @@ describe("handleChat — body validation + fresh/resume routing", () => {
     };
     expect(input.apiToken).toBe("bearer-xyz");
     expect(input.statusUrl).toBe("https://laravel.example.com/agent/status");
-  });
-
-  it("maps ClaudeAuthError from dispatch() to 503", async () => {
-    const { ClaudeAuthError } = await import(
-      "../agent/claude-auth-preflight.js"
-    );
-    mockReadChatSession.mockResolvedValue(null);
-    mockDispatchFn.mockRejectedValueOnce(
-      new ClaudeAuthError({
-        ok: false,
-        reason: "readonly",
-        summary: "claude-auth read-only",
-      }),
-    );
-    const req = createMockReqWithBody("POST", {
-      repo: MOCK_REPO.name,
-      issue_id: "DX-351",
-      text: "hi",
-    });
-    const res = createMockRes();
-
-    await handleChat(req, res, MOCK_REPO);
-
-    expect(res._getStatusCode()).toBe(503);
-    expect(JSON.parse(res._getBody()).error).toBe("claude-auth read-only");
-    // No write on failure — the chat-sessions record only advances
-    // when a dispatch actually launched.
-    expect(mockWriteChatSession).not.toHaveBeenCalled();
   });
 
   it("maps generic dispatch() failure to 500", async () => {
