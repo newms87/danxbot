@@ -2114,11 +2114,14 @@ describe("tryMultiAgentDispatch", () => {
       expect(mockRecordSystemError).not.toHaveBeenCalled();
     });
 
-    it("RECORDS a system error when alice (first by name) cannot claim but bob can — picker did not converge", async () => {
-      // The bug shape DX-368 exposes: pickFreeAgent returns alice
-      // alphabetically. alice can't claim the only card (owned by bob).
-      // Loop's `if (card === null) break` exits without trying bob,
-      // even though bob has a self-claim on the card and is free.
+    it("DX-369: card-first picker dispatches a bob-owned card to bob even when alice (alphabetically first) is also free — no system error", async () => {
+      // Regression test for the SG-151 stall (gpt-manager 04:03–04:09
+      // UTC 2026-05-15). Pre-DX-369 the agent-first outer loop returned
+      // alice first by name, `pickCardForAgent("alice", [bobOwned])`
+      // returned null, the loop `break`d before trying bob — the
+      // DX-368 invariant fired but no dispatch happened. After DX-369
+      // the card-first outer loop reads `card.assigned_agent` directly
+      // and routes to bob.
       writeSettings({
         alice: agentRecord("alice"),
         bob: agentRecord("bob"),
@@ -2128,11 +2131,8 @@ describe("tryMultiAgentDispatch", () => {
         job: {} as never,
       });
 
-      // openIssues = [] (no findOwnedCard hit for either agent), so
-      // alice's fresh pickCardForAgent path runs and returns null
-      // (card is owned by bob — different agent name).
       const bobOwned = issue("DX-1", { assigned_agent: "bob" });
-      await tryMultiAgentDispatch({
+      const result = await tryMultiAgentDispatch({
         repo: fakeRepo(),
         cards: [bobOwned],
         openIssues: [],
@@ -2140,26 +2140,78 @@ describe("tryMultiAgentDispatch", () => {
         now: NOW,
       });
 
-      expect(mockRecordSystemError).toHaveBeenCalledTimes(1);
-      const errArg = mockRecordSystemError.mock.calls[0]?.[0] as {
-        source: string;
-        severity?: string;
-        repo: string;
-        message: string;
-        details: { freeAgents: string[]; dispatchableCards: string[] };
+      expect(result.dispatched).toBe(1);
+      expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
+      const arg = mockedDispatchWithRecovery.mock.calls[0]?.[0] as {
+        agent?: { name: string };
+        issueId?: string;
       };
-      expect(errArg.source).toBe("poller");
-      // `severity` is omitted → defaults to "error" inside
-      // recordSystemError. The banner only renders warn+error so this
-      // is the intended path.
-      expect(errArg.severity).toBeUndefined();
-      expect(errArg.repo).toBe("danxbot");
-      expect(errArg.message).toContain("dispatch invariant violated");
-      expect(errArg.message).toContain("alice");
-      expect(errArg.message).toContain("bob");
-      expect(errArg.message).toContain("DX-1");
-      expect(errArg.details.freeAgents).toEqual(["alice", "bob"]);
-      expect(errArg.details.dispatchableCards).toEqual(["DX-1"]);
+      expect(arg.agent?.name).toBe("bob");
+      expect(arg.issueId).toBe("DX-1");
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("DX-369: card owned by a BUSY agent is deferred to the next tick — picker does NOT re-route to a free agent and does NOT fire the invariant", async () => {
+      // User-spec'd behavior: when the named owner is unavailable
+      // (busy, broken, out-of-schedule), the card stays parked. Re-
+      // routing to a different free agent would steal the assignment.
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob"),
+      });
+      setAgentLocksQueryFn(async (sql) => {
+        if (sql.includes("FROM dispatches")) {
+          return [{ agent_name: "bob" }] as never;
+        }
+        return [] as never;
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const bobOwned = issue("DX-1", { assigned_agent: "bob" });
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [bobOwned],
+        openIssues: [bobOwned],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
+    });
+
+    it("DX-369: card owned by a BROKEN agent is deferred to the next tick — operator clears broken → card dispatches", async () => {
+      writeSettings({
+        alice: agentRecord("alice"),
+        bob: agentRecord("bob", {
+          broken: {
+            reason: "prep abort",
+            suggested_steps: [],
+            set_at: "2026-04-20T14:00:00Z",
+          },
+        }),
+      });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      const bobOwned = issue("DX-1", { assigned_agent: "bob" });
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [bobOwned],
+        openIssues: [bobOwned],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+      expect(mockRecordSystemError).not.toHaveBeenCalled();
     });
 
     it("idempotent — two consecutive tryMultiAgentDispatch calls produce 1 dispatch total, not 2", async () => {

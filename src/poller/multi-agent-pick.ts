@@ -369,98 +369,62 @@ export async function tryMultiAgentDispatch(
     return combined;
   };
 
-  // DX-360 — loop iterates agents (not cards). Each iteration may
-  // dispatch an owned-card resume (card NOT in `remainingCards`) OR a
-  // fresh ToDo pick (card from `remainingCards`). The loop exits when
-  // `pickFreeAgent` returns null (every eligible agent is busy / broken /
-  // tracker-skipped) OR when neither owned-card nor fresh ToDo is
-  // available for the next free agent.
-  while (true) {
-    const agent = pickFreeAgent({
-      roster,
+  // Card-first picker (DX-369 — replaces the pre-DX-369 agent-first
+  // outer loop). Two passes share the per-dispatch `attemptDispatch`
+  // helper below.
+  //
+  //   Pass A — owned-card resume / reconcile. Walk the roster; for each
+  //   eligible agent, `findOwnedCard(agent, openIssues)` decides
+  //   ownership state. A `single` match dispatches the owned card with
+  //   `--resume <sessionUuid>` (DX-360). A `duplicates` match dispatches
+  //   a reconcile body (DX-501) so the agent self-heals (release extras
+  //   → finish one).
+  //
+  //   Pass B — card-first fresh pick. Walk `remainingCards` in canonical
+  //   pick order. If a card carries an `assigned_agent` stamp (or the
+  //   DB-side `assigned` map agrees), route it to THAT agent only — if
+  //   the owner is busy / broken / out-of-schedule / already-dispatched
+  //   this tick, defer the card to the next tick. Re-routing to a
+  //   different free agent would steal the assignment. Unowned cards
+  //   fall through to `pickFreeAgent` (alphabetical tiebreak preserved).
+  //
+  // Why card-first: the pre-DX-369 outer loop iterated agents and
+  // filtered cards through `pickCardForAgent(agent)`. When the
+  // alphabetically-first free agent could not claim a card owned by a
+  // later-named agent, the inner `break` exited the loop before the
+  // owner was tried — the DX-368 invariant fired but no dispatch
+  // happened (observed: gpt-manager SG-151 stuck behind harry while
+  // sage was free, 04:03–04:09 UTC 2026-05-15). The card-first model
+  // is structurally immune: each card directly names its own owner so
+  // the picker never needs an alphabetical-agent fallback to find them.
+  //
+  // The DX-368 convergence invariant below is retained as defense-in-
+  // depth: it should not fire after this refactor; if it does, the
+  // operator gets a loud signal that a new bug has surfaced.
+
+  type DispatchAttempt = "dispatched" | "skipped";
+
+  /**
+   * Check whether the agent is eligible to take a dispatch right now —
+   * enabled, has the issue-worker capability, not in `busy` or
+   * `skipAgents`, not broken, in-schedule. Re-derived per call because
+   * `pickerSkipSet()` mutates as Pass A / Pass B dispatches land.
+   */
+  const isAgentEligibleThisTick = (a: AgentRecordWithName): boolean =>
+    pickFreeAgentCandidates({
+      roster: [a],
       busy: pickerSkipSet(),
       now,
       repoName: repo.name,
-    });
-    if (agent === null) break;
+    }).length === 1;
 
-    // DX-360 — resume-existing-card pre-check. Before offering this
-    // agent any fresh ToDo from `remainingCards`, scan every open YAML
-    // for a card whose `assigned_agent` names this agent. The picker's
-    // first obligation is to put the agent BACK on that card so the
-    // agent decides how to finish or escalate; ICE-sort ToDo only
-    // applies when the agent has no open assignment.
-    //
-    // DX-501 — duplicate ownership (>1 open card stamped to the same
-    // agent) is no longer punted to operator intervention. The picker
-    // dispatches a **reconcile** task body so the agent self-heals
-    // (release extras → resume on the retained card). The first card
-    // in the duplicates list is the dispatch target (the dispatch row +
-    // lock have to hang on SOME YAML); the agent decides in-session
-    // which card to keep and may release the target too.
-    let card: Issue | null = null;
-    let resumeSessionId: string | undefined;
-    let reconcileOwnedCards: readonly Issue[] = [];
-    const owned = findOwnedCard(agent.name, openIssues);
-    if (owned.kind === "single") {
-      card = owned.card;
-      // Latest dispatch's session UUID, newest-first. Skip rows whose
-      // sessionUuid is empty/null (failed-before-session-create rows).
-      // A missing UUID degrades to a fresh session — claude --resume
-      // is the optimisation, not a hard requirement.
-      try {
-        const prior = await listDispatchesByIssueId(owned.card.id);
-        const withSession = prior.find(
-          (d) => d.sessionUuid !== null && d.sessionUuid !== "",
-        );
-        resumeSessionId = withSession?.sessionUuid ?? undefined;
-      } catch (err) {
-        log.warn(
-          `[${repo.name}] resume-lookup failed for ${owned.card.id}: ${err instanceof Error ? err.message : String(err)} — proceeding without --resume`,
-        );
-      }
-      log.info(
-        `[${repo.name}] multi-agent pick (resume): ${agent.name} → ${owned.card.id} (status=${owned.card.status})${resumeSessionId ? ` --resume ${resumeSessionId.slice(0, 8)}` : ""}`,
-      );
-    } else if (owned.kind === "duplicates") {
-      reconcileOwnedCards = owned.cards;
-      // DX-501: dispatch target is the first duplicate in input order.
-      // The picker only ever dispatches cards in ToDo (fresh) or In
-      // Progress (resume — DX-360); a `Blocked` / `Review` / non-null
-      // `waiting_on` / non-null `requires_human` card with an
-      // `assigned_agent` stamp is an INVALID state — the agent should
-      // have nulled the stamp when it escalated, but didn't. The
-      // reconcile body enumerates ALL duplicates regardless of target,
-      // so the agent walks every card and recovers the invalid ones
-      // in-session. No status-rank heuristic on the dispatch target
-      // (the target is just the YAML the dispatch row + tracker lock
-      // hang on; agent may release it).
-      card = owned.cards[0];
-      log.warn(
-        `[${repo.name}] multi-agent pick (reconcile): ${agent.name} owns ${owned.cards.length} open cards (${owned.cards.map((c) => c.id).join(", ")}) — dispatching reconcile task on ${card.id} (status=${card.status})`,
-      );
-    }
-
-    if (card === null) {
-      card = pickCardForAgent({
-        cards: remainingCards,
-        agentName: agent.name,
-        assigned,
-      });
-      if (card === null) {
-        // This agent has no claimable card. Other agents in the roster
-        // might — `pickCardForAgent` filters by `assigned_agent`, so a
-        // bob-owned card is visible to bob but invisible to alice. The
-        // loop here exits without trying bob; the DX-368 post-loop
-        // invariant assertion catches the resulting non-convergence
-        // (free agent + claimable card both still present at exit) so
-        // the operator sees the divergence on the dashboard banner. A
-        // future card may convert this `break` into a per-agent skip
-        // that retries the next free agent before bailing — the
-        // invariant assertion is the safety net until then.
-        break;
-      }
-    }
+  async function attemptDispatch(args: {
+    agent: AgentRecordWithName;
+    card: Issue;
+    resumeSessionId: string | undefined;
+    reconcileOwnedCards: readonly Issue[];
+  }): Promise<DispatchAttempt> {
+    const { agent, card, resumeSessionId, reconcileOwnedCards } = args;
     const isReconcileDispatch = reconcileOwnedCards.length > 0;
 
     log.info(
@@ -488,7 +452,7 @@ export async function tryMultiAgentDispatch(
           `[${repo.name}] multi-agent pre-claim guard: card ${card.id} (${card.external_id}) has a live PID dispatch — skipping ${agent.name}`,
         );
         removeFromRemaining(card);
-        continue;
+        return "skipped";
       }
     }
 
@@ -581,7 +545,7 @@ export async function tryMultiAgentDispatch(
         );
         skipAgents.add(agent.name);
         removeFromRemaining(card);
-        continue;
+        return "skipped";
       }
       if (!lockResult.acquired) {
         const held = lockResult.existing!;
@@ -592,7 +556,7 @@ export async function tryMultiAgentDispatch(
           `[${repo.name}] multi-agent lock held by ${held.holder}@${held.host} (dispatch ${held.dispatchId}, ${ageM}m old) — skipping ${card.id}`,
         );
         removeFromRemaining(card);
-        continue;
+        return "skipped";
       }
       if (lockResult.reclaimed) {
         log.info(
@@ -622,7 +586,7 @@ export async function tryMultiAgentDispatch(
         err,
       );
       removeFromRemaining(card);
-      continue;
+      return "skipped";
     }
 
     // DX-296 — task body branches on the dispatch shape:
@@ -895,12 +859,12 @@ export async function tryMultiAgentDispatch(
         );
       }
       removeFromRemaining(card);
-      continue;
+      return "skipped";
     }
 
-    // Mark this slot taken so the next iteration picks a different
-    // agent + card. The DB-side `busyAgents` lookup will see the same
-    // value on the NEXT tick (the dispatch row was inserted by
+    // Mark this slot taken so the next pass / iteration picks a
+    // different agent + card. The DB-side `busyAgents` lookup will see
+    // the same value on the NEXT tick (the dispatch row was inserted by
     // `dispatch()` synchronously).
     busy.add(agent.name);
     assigned.set(stamped.id, agent.name);
@@ -912,6 +876,156 @@ export async function tryMultiAgentDispatch(
     const idx = remainingCards.indexOf(card);
     if (idx !== -1) remainingCards.splice(idx, 1);
     dispatched++;
+    return "dispatched";
+  }
+
+  // Pass A — owned-card resume / reconcile.
+  //
+  // Walk the roster (NOT the dispatchable cards list) so an agent
+  // whose owned card is non-dispatchable (status=In Progress / Blocked
+  // / Review / waiting_on / requires_human) still gets resumed. The
+  // agent itself decides on resumption whether to finish, escalate, or
+  // cancel — see `findOwnedCard`'s doc block.
+  //
+  // `handledOwnedCardIds` tracks every card touched here (resume
+  // target, reconcile target, reconcile siblings) so Pass B does not
+  // double-consider them.
+  const handledOwnedCardIds = new Set<string>();
+  for (const member of roster) {
+    if (!isAgentEligibleThisTick(member)) continue;
+    const owned = findOwnedCard(member.name, openIssues);
+    if (owned.kind === "none") continue;
+    let card: Issue;
+    let reconcileOwnedCards: readonly Issue[] = [];
+    let resumeSessionId: string | undefined;
+    if (owned.kind === "single") {
+      card = owned.card;
+      // Latest dispatch's session UUID, newest-first. Skip rows whose
+      // sessionUuid is empty/null (failed-before-session-create rows).
+      // A missing UUID degrades to a fresh session — claude --resume
+      // is the optimisation, not a hard requirement.
+      try {
+        const prior = await listDispatchesByIssueId(owned.card.id);
+        const withSession = prior.find(
+          (d) => d.sessionUuid !== null && d.sessionUuid !== "",
+        );
+        resumeSessionId = withSession?.sessionUuid ?? undefined;
+      } catch (err) {
+        log.warn(
+          `[${repo.name}] resume-lookup failed for ${owned.card.id}: ${err instanceof Error ? err.message : String(err)} — proceeding without --resume`,
+        );
+      }
+      log.info(
+        `[${repo.name}] multi-agent pick (resume): ${member.name} → ${owned.card.id} (status=${owned.card.status})${resumeSessionId ? ` --resume ${resumeSessionId.slice(0, 8)}` : ""}`,
+      );
+    } else {
+      // DX-501 — duplicate ownership: dispatch a reconcile body so the
+      // agent self-heals. Dispatch target is the first duplicate in
+      // input order; the reconcile body enumerates ALL duplicates so
+      // the agent walks every card and recovers the invalid ones in-
+      // session.
+      reconcileOwnedCards = owned.cards;
+      card = owned.cards[0];
+      log.warn(
+        `[${repo.name}] multi-agent pick (reconcile): ${member.name} owns ${owned.cards.length} open cards (${owned.cards.map((c) => c.id).join(", ")}) — dispatching reconcile task on ${card.id} (status=${card.status})`,
+      );
+    }
+    handledOwnedCardIds.add(card.id);
+    for (const c of reconcileOwnedCards) handledOwnedCardIds.add(c.id);
+    await attemptDispatch({
+      agent: member,
+      card,
+      resumeSessionId,
+      reconcileOwnedCards,
+    });
+  }
+
+  // Pass B — card-first fresh pick.
+  //
+  // Iterate `remainingCards` in canonical pick order (priority DESC +
+  // ICE total DESC + FIFO — `listDispatchableYamls`). For each card:
+  //   - already-touched by Pass A → drop and continue.
+  //   - has a named owner → route to that owner only. If owner is busy
+  //     / broken / out-of-schedule / already-dispatched-this-tick,
+  //     defer the card to the next tick. NEVER re-route to a different
+  //     free agent.
+  //   - no owner → pick the first eligible agent (alphabetical).
+  //   - no free agents → break (next tick will retry).
+  //
+  // The snapshot iteration (`[...remainingCards]`) lets
+  // `attemptDispatch`'s success path mutate `remainingCards` in place
+  // without disrupting iteration order.
+  for (const card of [...remainingCards]) {
+    if (!remainingCards.includes(card)) {
+      // attemptDispatch already removed this card (success or guard
+      // skip in a prior Pass B iteration / Pass A).
+      continue;
+    }
+    if (handledOwnedCardIds.has(card.id)) {
+      // Pass A already touched this card (resume target, reconcile
+      // target, or reconcile sibling). Drop so it is not re-considered.
+      removeFromRemaining(card);
+      continue;
+    }
+    const yamlOwner = card.assigned_agent ?? null;
+    const dbOwner = assigned.get(card.id) ?? null;
+    if (
+      yamlOwner !== null &&
+      dbOwner !== null &&
+      yamlOwner !== dbOwner
+    ) {
+      // YAML and DB disagree on owner — usually a chokidar read-your-
+      // writes race. Defer this tick; the next tick reads a settled
+      // state.
+      log.warn(
+        `[${repo.name}] card ${card.id} has conflicting ownership claims (yaml=${yamlOwner}, db=${dbOwner}) — skipping this tick`,
+      );
+      removeFromRemaining(card);
+      continue;
+    }
+    const owner = yamlOwner ?? dbOwner;
+
+    let agent: AgentRecordWithName | null;
+    if (owner !== null) {
+      const ownerRecord = roster.find((r) => r.name === owner) ?? null;
+      if (ownerRecord === null) {
+        // The orphan-`assigned_agent` heal pass above should have
+        // cleared this. Belt-and-braces — if the heal missed (race
+        // with operator settings edit, agent deleted mid-tick), defer
+        // and let the next tick re-heal.
+        log.warn(
+          `[${repo.name}] card ${card.id} owned by ${owner} (not in roster) — skipping this tick`,
+        );
+        removeFromRemaining(card);
+        continue;
+      }
+      if (!isAgentEligibleThisTick(ownerRecord)) {
+        // Owner busy / broken / out-of-schedule / already-dispatched
+        // this tick → card waits. Operator action (clear broken,
+        // re-enable agent, etc.) unblocks the next tick.
+        log.info(
+          `[${repo.name}] card ${card.id} owned by ${ownerRecord.name} but agent unavailable this tick — deferring`,
+        );
+        removeFromRemaining(card);
+        continue;
+      }
+      agent = ownerRecord;
+    } else {
+      agent = pickFreeAgent({
+        roster,
+        busy: pickerSkipSet(),
+        now,
+        repoName: repo.name,
+      });
+      if (agent === null) break;
+    }
+
+    await attemptDispatch({
+      agent,
+      card,
+      resumeSessionId: undefined,
+      reconcileOwnedCards: [],
+    });
   }
 
   // DX-368 — post-loop convergence invariant. The loop's exit
