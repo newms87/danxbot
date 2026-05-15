@@ -197,7 +197,7 @@ Touched files (sample, not exhaustive — implementation plan enumerates all):
 - `src/poller/epic-status.ts` — children lookup → SQL on `parent_id`
 - `src/poller/index.ts` — every place that constructs lists from `local-issues` helpers (already covered by the helpers being rewritten)
 - `src/dashboard/server.ts` — every endpoint listing/filtering issues → SQL with index hits
-- MCP `danx_issue_get` and any new `danx_issue_query` query helper exposed on the danxbot MCP server
+- MCP `danx_issue_list` and any new `danx_issue_query` query helper exposed on the danxbot MCP server
 
 Each rewrite preserves the existing return type (Issue / IssueRef) so callers do not need to change.
 

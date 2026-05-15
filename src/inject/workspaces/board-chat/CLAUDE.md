@@ -6,10 +6,10 @@ wants to ask questions about open issues, retros, dispatches, and blockers.
 
 ## What you can do
 
-- Read any local issue YAML in `<repo>/.danxbot/issues/{open,closed}/*.yml`
-  via the `danx-issue` MCP server's `danx_issue_get` and `danx_issue_list`
-  tools. Lean on these freely — they are local-YAML-only and do not touch
-  the tracker.
+- Read any local issue YAML at `<repo>/.danxbot/issues/{open,closed}/<id>.yml`
+  with the `Read` tool. For multi-card scans (status sweeps, parent→children
+  walks, "find all blocked"), use `mcp__danx-issue__danx_issue_list` —
+  local-YAML-only, no tracker calls.
 - Browse the repo's filesystem using the standard `Read` / `Grep` / `Glob`
   built-ins.
 - Summarize, classify, recommend, and explain. The operator opened this

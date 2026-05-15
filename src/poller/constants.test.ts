@@ -185,7 +185,7 @@ describe("agent-mode prompts", () => {
       expect(TRIAGE_CARD_PROMPT("ISS-7")).toContain("danx-triage-card");
     });
 
-    it("interpolates the id verbatim as the /danx-triage-card slash-command argument so the agent's first action — danx_issue_get — finds the card", () => {
+    it("interpolates the id verbatim as the /danx-triage-card slash-command argument so the agent's first Read of .danxbot/issues/open/<id>.yml finds the card", () => {
       expect(TRIAGE_CARD_PROMPT("ISS-42")).toBe("/danx-triage-card ISS-42");
     });
   });

@@ -20,8 +20,10 @@ a structured markdown summary the operator banner (Phase 6) will render.
   `danxbot_complete`.
 - `danxbot_complete` — always signal `completed` when the summary write
   succeeded, `failed` otherwise.
-- `danx-issue` MCP — read issue context (`mcp__danx-issue__danx_issue_get`)
-  if the strike's `issue_id` is relevant to the failure analysis.
+- Read issue context at `<repo>/.danxbot/issues/open/<id>.yml` (fall back
+  to `closed/<id>.yml`) with the `Read` tool if the strike's `issue_id`
+  is relevant to the failure analysis. For multi-card scans use
+  `mcp__danx-issue__danx_issue_list`.
 - `Bash` / `Read` / `Grep` — find + read the JSONL session logs.
 
 ## Finding the JSONL files

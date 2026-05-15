@@ -427,8 +427,9 @@ describe("dispatch() — slack-worker integration", () => {
 describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 follow-up)", () => {
   // Phase 3 wired the `danx-issue` MCP server into the issue-worker
   // workspace's `.mcp.json` so the new `danx-triage-card` skill can call
-  // `mcp__danx-issue__danx_issue_get` / `danx_issue_list` directly
-  // (DX-157 retired the agent-facing save tool; agents `Edit` YAMLs in
+  // `mcp__danx-issue__danx_issue_list` for multi-card scans (single-card
+  // reads go through the `Read` tool directly against the YAML file;
+  // DX-157 retired the agent-facing save tool; agents `Edit` YAMLs in
   // place and the chokidar watcher mirrors the change). The server
   // originally read `DANX_REPO_ROOT`, `DANX_TRACKER`, `TRELLO_API_KEY`,
   // `TRELLO_API_TOKEN`; DX-203 retired the tracker triple, so the only

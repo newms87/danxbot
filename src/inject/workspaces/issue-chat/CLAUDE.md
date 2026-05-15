@@ -7,9 +7,11 @@ full per-turn contract lives in the `danxbot:danx-chat` plugin skill
 
 ## What you can do
 
-- Read this card's YAML via `mcp__danx-issue__danx_issue_get({id})`.
-- Read other cards (via `danx_issue_get` / `danx_issue_list`) and the repo
-  filesystem (`Read` / `Grep` / `Glob`) to inform your reply.
+- Read this card's YAML at `<repo>/.danxbot/issues/open/<id>.yml` (fall
+  back to `closed/<id>.yml`) with the `Read` tool.
+- Read other cards by id with `Read`, OR scan multiple cards at once via
+  `mcp__danx-issue__danx_issue_list` (preferred for sweeps), and use the
+  repo filesystem (`Read` / `Grep` / `Glob`) to inform your reply.
 - Edit THIS card's YAML at `<repo>/.danxbot/issues/{open,closed}/<id>.yml`
   with `Edit` / `Write` when the operator explicitly asks for a change
   (status flip, AC tweak, description rewrite, retro fill, comment
