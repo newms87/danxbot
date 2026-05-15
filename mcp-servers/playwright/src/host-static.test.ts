@@ -263,8 +263,16 @@ describe("HostedDistRegistry — start + stop + serve", () => {
     for (let i = 1; i < entries.length; i++) {
       expect(registry.get(entries[i].server_id)).toBeDefined();
     }
-    // Evicted server's port is closed.
-    await expect(fetch(entries[0].url + "/")).rejects.toThrow();
+    // DX-567: do NOT assert `fetch(entries[0].url + "/")` rejects here.
+    // The LRU contract is "evicted entry removed from registry" — already
+    // proved above. Asserting the URL is dead races Linux's ephemeral
+    // port allocator: when `stop()` closes the evicted server its port
+    // returns to the pool, and the IMMEDIATELY following `listen(0)` for
+    // the new entry can rebind the same port (~2% under load —
+    // instrumented 11 flakes / 500 iters; every flake had the evicted
+    // port present in the surviving registry entries' port set). Port
+    // closure is verified deterministically by the `stop()` test below
+    // (single server, no subsequent listen → no recycling possible).
   });
 
   it("stopAll() closes every active server", async () => {
