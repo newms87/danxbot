@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
   createPgIssuesMirrorDb,
+  DEFAULT_RECONCILE_MS,
   getWriterDb,
   registerWriterDb,
   startIssuesMirror,
@@ -277,6 +278,12 @@ describe("issues-mirror — boot scan", () => {
   });
 });
 
+describe("issues-mirror — DEFAULT_RECONCILE_MS constant", () => {
+  it("equals 60_000 ms (DX-550 cadence drop from 600_000)", () => {
+    expect(DEFAULT_RECONCILE_MS).toBe(60_000);
+  });
+});
+
 describe("issues-mirror — reconcileNow (periodic timer logic)", () => {
   it("re-scans open/ only and tags drift with source=reconcile", async () => {
     const repo = makeRepo();
@@ -303,6 +310,37 @@ describe("issues-mirror — reconcileNow (periodic timer logic)", () => {
         .slice(before)
         .filter((h) => h.source === "reconcile");
       expect(reconcileRows.map((r) => r.id)).toEqual(["DX-20"]);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("perf: 100 open cards — reconcileNow completes under 500 ms (hash-skip path)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    // Pre-populate DB so every card hash-matches (0 upserts during reconcile).
+    for (let i = 1; i <= 100; i++) {
+      const id = `DX-${i}`;
+      const content = SAMPLE_YAML(id);
+      const canonical = canonicalize(PARSED_SAMPLE(id));
+      const hash = sha256(canonical);
+      db.rows.set(`test-repo|${id}`, { data: PARSED_SAMPLE(id), content_hash: hash });
+      writeYaml(repo.localPath, "open", id, content);
+    }
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    try {
+      const start = Date.now();
+      await mirror.reconcileNow();
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(500);
+      // All cards were hash-matched; no new history rows from reconcile.
+      const reconcileUpserts = db.history.filter((h) => h.source === "reconcile");
+      expect(reconcileUpserts).toHaveLength(0);
     } finally {
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });

@@ -25,7 +25,7 @@
  * mirror keeps running so the next operator-fixed write recovers, but the
  * poller halts on its next tick. Active dispatches finish naturally.
  *
- * Boot scan + 10-min reconcile cover anything chokidar misses (worker
+ * Boot scan + 60-s reconcile cover anything chokidar misses (worker
  * restart, NFS-style watch race, deploy gap). Boot scan blocks
  * `startIssuesMirror`'s returned Promise so callers see a consistent DB
  * before they start serving reads.
@@ -45,7 +45,7 @@ import { setRepoName, clearRepoName } from "../poller/repo-name.js";
 
 const log = createLogger("issues-mirror");
 
-const DEFAULT_RECONCILE_MS = 600_000;
+export const DEFAULT_RECONCILE_MS = 60_000;
 const DEFAULT_AWAIT_WRITE_FINISH = {
   // 5s debounce — wait until the file size has been stable for this
   // long before emitting add/change. Smooths over the create-then-edit
