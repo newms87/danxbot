@@ -41,6 +41,7 @@ import {
   handlePatchIssue,
   handlePostIssue,
   IssuePatchError,
+  moveAcrossDevices,
   type IssuePatch,
 } from "./issue-write.js";
 import { serializeIssue, createEmptyIssue } from "../issue-tracker/yaml.js";
@@ -1834,23 +1835,12 @@ describe("handlePostIssue — HTTP route", () => {
   });
 });
 
-describe("deleteIssue — soft-delete via /tmp trash", () => {
-  function trashPath(repoName: string, id: string): string {
-    return resolve(tmpdir(), "danxbot", repoName, "issues", `${id}.yml`);
+describe("deleteIssue — soft-delete via <repo>/.danxbot/trash/", () => {
+  function trashPath(id: string): string {
+    return resolve(repoLocalPath, ".danxbot", "trash", `${id}.yml`);
   }
 
-  function clearTrash(repoName: string): void {
-    rmSync(resolve(tmpdir(), "danxbot", repoName), {
-      recursive: true,
-      force: true,
-    });
-  }
-
-  afterEach(() => {
-    clearTrash("danxbot");
-  });
-
-  it("moves the YAML out of open/ into /tmp/danxbot/<repo>/issues/<id>.yml", async () => {
+  it("moves the YAML out of open/ into <repoLocalPath>/.danxbot/trash/<id>.yml", async () => {
     const source = writeFixture(makeIssue(), "open");
     expect(existsSync(source)).toBe(true);
 
@@ -1858,7 +1848,44 @@ describe("deleteIssue — soft-delete via /tmp trash", () => {
 
     expect(result.removed).toEqual(["DX-1"]);
     expect(existsSync(source)).toBe(false);
-    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
+    expect(existsSync(trashPath("DX-1"))).toBe(true);
+  });
+
+  it("moveAcrossDevices falls back to copy+unlink when rename raises EXDEV", () => {
+    const source = resolve(tmpRoot, "exdev-src.yml");
+    const dest = resolve(tmpRoot, "exdev-dest.yml");
+    writeFileSync(source, "payload: hello\n");
+
+    let attempted = false;
+    moveAcrossDevices(source, dest, () => {
+      attempted = true;
+      const err = new Error(
+        "EXDEV: cross-device link not permitted, rename",
+      ) as NodeJS.ErrnoException;
+      err.code = "EXDEV";
+      throw err;
+    });
+
+    expect(attempted).toBe(true);
+    expect(existsSync(source)).toBe(false);
+    expect(existsSync(dest)).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe("payload: hello\n");
+  });
+
+  it("moveAcrossDevices propagates non-EXDEV errors verbatim", () => {
+    const source = resolve(tmpRoot, "eacces-src.yml");
+    const dest = resolve(tmpRoot, "eacces-dest.yml");
+    writeFileSync(source, "x: 1\n");
+    expect(() =>
+      moveAcrossDevices(source, dest, () => {
+        const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        err.code = "EACCES";
+        throw err;
+      }),
+    ).toThrowError(/EACCES/);
+    // Source still present — fallback was NOT engaged.
+    expect(existsSync(source)).toBe(true);
+    expect(existsSync(dest)).toBe(false);
   });
 
   it("returns 404 IssuePatchError when the id has no YAML on disk", async () => {
@@ -1897,7 +1924,7 @@ describe("deleteIssue — soft-delete via /tmp trash", () => {
     );
     for (const id of ["DX-1", "DX-2", "DX-3", "DX-4"]) {
       expect(existsSync(issuePath(repoLocalPath, id, "open"))).toBe(false);
-      expect(existsSync(trashPath("danxbot", id))).toBe(true);
+      expect(existsSync(trashPath(id))).toBe(true);
     }
   });
 
@@ -1912,20 +1939,20 @@ describe("deleteIssue — soft-delete via /tmp trash", () => {
 
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(false);
     expect(existsSync(issuePath(repoLocalPath, "DX-2", "open"))).toBe(true);
-    expect(existsSync(trashPath("danxbot", "DX-2"))).toBe(false);
+    expect(existsSync(trashPath("DX-2"))).toBe(false);
   });
 
   it("appends a timestamp suffix when the trash dir already holds a YAML for the same id (recreate → re-delete cycle)", async () => {
     writeFixture(makeIssue(), "open");
     await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
-    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
+    expect(existsSync(trashPath("DX-1"))).toBe(true);
 
     // Recreate + re-delete — second pass must NOT clobber the first.
     writeFixture(makeIssue({ title: "second" }), "open");
     await deleteIssue("danxbot", repoLocalPath, "DX-1", false);
 
-    expect(existsSync(trashPath("danxbot", "DX-1"))).toBe(true);
-    const trashDir = resolve(tmpdir(), "danxbot", "danxbot", "issues");
+    expect(existsSync(trashPath("DX-1"))).toBe(true);
+    const trashDir = resolve(repoLocalPath, ".danxbot", "trash");
     const entries = readdirSync(trashDir);
     const suffixed = entries.filter((n) => n.startsWith("DX-1.yml."));
     expect(suffixed.length).toBe(1);

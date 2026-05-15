@@ -9,6 +9,7 @@ agents/
 worktrees/
 .trello-retry/
 issues/
+trash/
 workspaces/*/.claude/rules/danx-*.md
 workspaces/*/.claude/hooks/worktree-guard.mjs
 workspaces/*/.claude/scheduled_tasks.lock

@@ -34,6 +34,7 @@
  */
 
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   renameSync,
@@ -41,8 +42,7 @@ import {
   writeFileSync,
   readFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
-import { resolve, dirname, join } from "node:path";
+import { resolve, dirname } from "node:path";
 import type { IncomingMessage, ServerResponse } from "http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
@@ -836,13 +836,24 @@ export async function handlePatchIssue(
 
 /**
  * Soft-delete a card by moving its YAML out of the watched
- * `<repo>/.danxbot/issues/{open,closed}/` tree into a trash dir under
- * `/tmp/danxbot/<repo>/issues/`. Chokidar's `unlink` event flips the
- * DB row to `is_deleted=true` (issues-mirror tombstone path); the SPA's
- * `issue:updated` `removed: true` SSE payload drops the row from every
- * subscriber. The on-disk file survives in `/tmp` until the OS reaper
- * sweeps it — operators can recover a wrongly-deleted card by hand for
- * the next ~10 days on most distros.
+ * `<repo>/.danxbot/issues/{open,closed}/` tree into a sibling trash dir
+ * at `<repoLocalPath>/.danxbot/trash/`. Chokidar's `unlink` event flips
+ * the DB row to `is_deleted=true` (issues-mirror tombstone path); the
+ * SPA's `issue:updated` `removed: true` SSE payload drops the row from
+ * every subscriber. The on-disk file survives in `<repo>/.danxbot/trash/`
+ * until the operator clears the dir or the next git cleanup pass — host-
+ * visible via the bind mount, so an operator can recover a wrongly-deleted
+ * card directly via `ls <repo>/.danxbot/trash/<id>.yml*` on the host (no
+ * `docker exec` required).
+ *
+ * Why same-filesystem trash: `renameSync` is implemented via the POSIX
+ * `rename(2)` syscall, which raises `EXDEV` across mounts. Inside a docker
+ * container, `/tmp` lives on overlayfs/tmpfs while `.danxbot/issues/` is
+ * a bind mount of a host directory; the prior `os.tmpdir()` location was
+ * silently broken on every container target. The new location shares a
+ * filesystem with the source YAML by construction. As defense-in-depth
+ * against future cross-device misconfigurations, `moveAcrossDevices`
+ * falls back to `copyFileSync` + `unlinkSync` on `EXDEV`.
  *
  * Cascade semantics: when `cascade=true`, the BFS walks `children[]`
  * recursively (same shape as `buildIssueSubtreePayload` in
@@ -857,14 +868,39 @@ export async function handlePatchIssue(
  * operators deleting different cards on different repos never serialize
  * against each other.
  */
-const TRASH_ROOT = join(tmpdir(), "danxbot");
-
 export interface DeleteIssueResult {
   removed: string[];
 }
 
-function trashPathFor(repoName: string, id: string): string {
-  return resolve(TRASH_ROOT, repoName, "issues", `${id}.yml`);
+function trashPathFor(repoLocalPath: string, id: string): string {
+  return resolve(repoLocalPath, ".danxbot", "trash", `${id}.yml`);
+}
+
+/**
+ * Move `source` → `dest` across filesystems. Tries the cheap atomic
+ * `renameSync` first; on `EXDEV` (cross-device link not permitted) falls
+ * back to `copyFileSync` + `unlinkSync`. Other errors propagate. The
+ * fallback is not atomic — a crash between copy + unlink leaves the file
+ * at both paths; the next delete operation overwrites the trash copy
+ * (or the timestamp-suffix path in `moveYamlToTrash` resolves it).
+ *
+ * The `renameImpl` parameter is a test seam — ESM spy restrictions prevent
+ * mocking the `node:fs` `renameSync` binding directly, so the EXDEV branch
+ * is exercised by passing a throwing stub from the unit suite. Production
+ * callers leave it defaulted.
+ */
+export function moveAcrossDevices(
+  source: string,
+  dest: string,
+  renameImpl: (from: string, to: string) => void = renameSync,
+): void {
+  try {
+    renameImpl(source, dest);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+    copyFileSync(source, dest);
+    unlinkSync(source);
+  }
 }
 
 function collectDescendants(
@@ -900,22 +936,21 @@ function collectDescendants(
 
 function moveYamlToTrash(
   sourcePath: string,
-  repoName: string,
+  repoLocalPath: string,
   id: string,
 ): void {
-  const dest = trashPathFor(repoName, id);
+  const dest = trashPathFor(repoLocalPath, id);
   mkdirSync(dirname(dest), { recursive: true });
   // Stamp the trash filename with a timestamp suffix so a second delete
   // of the same id (recreate → re-delete cycle) does not clobber the
   // first trashed copy. The operator's "undelete by hand" play remains
-  // tractable — `ls /tmp/danxbot/<repo>/issues/DX-N*` lists every prior
+  // tractable — `ls <repo>/.danxbot/trash/<id>.yml*` lists every prior
   // version.
-  if (existsSync(dest)) {
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    renameSync(sourcePath, `${dest}.${stamp}`);
-  } else {
-    renameSync(sourcePath, dest);
-  }
+  const target =
+    existsSync(dest)
+      ? `${dest}.${new Date().toISOString().replace(/[:.]/g, "-")}`
+      : dest;
+  moveAcrossDevices(sourcePath, target);
 }
 
 /**
@@ -951,7 +986,7 @@ export async function deleteIssue(
       const source = locateIssueFile(repoLocalPath, targetId);
       if (!source) return;
       try {
-        moveYamlToTrash(source.path, repoName, targetId);
+        moveYamlToTrash(source.path, repoLocalPath, targetId);
         removed.push(targetId);
       } catch (err) {
         throw new IssuePatchError(500, {
