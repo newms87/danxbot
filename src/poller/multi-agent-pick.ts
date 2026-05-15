@@ -142,6 +142,7 @@ import {
 } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
 import { isEffectivelyConflicted } from "../issue/effective-conflict-on.js";
+import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
 import type { RepoContext } from "../types.js";
 import type { DispatchKind } from "../agent/agent-types.js";
 import {
@@ -892,20 +893,44 @@ export async function tryMultiAgentDispatch(
     let reconcileOwnedCards: readonly Issue[] = [];
     let resumeSessionId: string | undefined;
     if (owned.kind === "single") {
-      // conflict_on partner-terminal gate. Symmetric with the
-      // listDispatchableYamls filter that gates Pass B fresh picks
-      // (`isEffectivelyConflicted` in `src/poller/local-issues.ts`).
-      // Without this check, an agent owning a card whose conflict_on
-      // partner is non-terminal gets re-resumed every tick; the prep
-      // skill re-emits the `conflict_on` verdict, dispatch ends,
-      // next tick repeats — infinite loop burning tokens (observed on
-      // murphy DX-547 / phil DX-548 vs dani DX-546, 2026-05-15). The
-      // duplicates branch below intentionally skips this gate: the
-      // reconcile body's purpose is to RELEASE excess `assigned_agent`
-      // stamps, which is valuable even when a partner is non-terminal.
-      if (isEffectivelyConflicted(owned.card, openIssues)) {
+      // Release-on-gate (Option 1). When the owned card's dispatch
+      // gates (conflict_on partner non-terminal, OR waiting_on dep
+      // non-terminal) are active, the agent CANNOT make progress on
+      // it AND no other agent could either. Pre-Option-1 the picker
+      // re-resumed every tick → prep re-emitted the same verdict →
+      // dispatch ended → loop (murphy DX-547 / phil DX-548 vs dani
+      // DX-546, 2026-05-15). Pre-Option-1 also kept the claim glued
+      // to the card so the operator inventory looked busy.
+      //
+      // The fix mutates the YAML: clear `assigned_agent` + `dispatch`
+      // + flip `status` → ToDo. Card re-enters the fresh-pick pool;
+      // `listDispatchableYamls` already filters it by the same gate
+      // helpers, so it remains undispatchable until the gate clears.
+      // When the gate clears, Pass B picks it fresh via
+      // `pickFreeAgent` (alphabetical) — `--resume` continuity is
+      // intentionally lost because the gate window can be long and
+      // the work hasn't materially started.
+      //
+      // The agent is NOT added to `busy` or `skipAgents`, so Pass B
+      // can still route an unowned fresh ToDo to them this same tick.
+      //
+      // The duplicates branch below intentionally skips this gate:
+      // the reconcile body's purpose is to RELEASE excess
+      // `assigned_agent` stamps, valuable even when a gate is active.
+      const byId = new Map<string, Issue>();
+      for (const i of openIssues) byId.set(i.id, i);
+      const conflicted = isEffectivelyConflicted(owned.card, openIssues);
+      const waiting = isEffectivelyWaitingOn(owned.card, byId);
+      if (conflicted || waiting) {
+        const released: Issue = {
+          ...owned.card,
+          assigned_agent: null,
+          dispatch: null,
+          status: "ToDo",
+        };
+        await writeIssue(repo.localPath, released);
         log.info(
-          `[${repo.name}] multi-agent pick (defer resume): ${member.name} → ${owned.card.id} — conflict_on partner non-terminal; skipping this tick`,
+          `[${repo.name}] multi-agent pick (release on gate): ${member.name} → ${owned.card.id} — ${conflicted ? "conflict_on" : "waiting_on"} non-terminal; cleared assigned_agent + status → ToDo`,
         );
         continue;
       }

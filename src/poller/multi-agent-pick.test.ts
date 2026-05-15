@@ -116,6 +116,7 @@ import {
 import {
   clearDispatchAndWrite,
   loadLocal,
+  writeIssue,
 } from "./yaml-lifecycle.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
@@ -763,9 +764,9 @@ describe("tryMultiAgentDispatch", () => {
 
     expect(clearDispatchAndWrite).toHaveBeenCalledTimes(1);
     expect(runPostDispatchProgressCheck).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0].cardId).toBe(
-      "ext-DX-1",
-    );
+    expect(
+      vi.mocked(runPostDispatchProgressCheck).mock.calls[0][0].cardId,
+    ).toBe("ext-DX-1");
   });
 
   /**
@@ -1183,23 +1184,22 @@ describe("tryMultiAgentDispatch", () => {
     });
 
     expect(result.dispatched).toBe(1);
-    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe(
-      "DX-351",
-    );
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-351");
   });
 
-  it("does NOT resume an owned card when any conflict_on partner is In Progress (loop-prevention)", async () => {
-    // Symmetric with `listDispatchableYamls`' conflict_on gate. The
-    // Pass A resume path used to bypass this filter — an owned card
-    // whose partner was non-terminal was re-dispatched every tick,
-    // the prep agent emitted `conflict_on` verdict, dispatch ended,
-    // next tick re-dispatched: infinite loop burning tokens (observed
-    // on murphy/phil 2026-05-15).
+  it("releases the agent and flips the card back to ToDo when a conflict_on partner is In Progress", async () => {
+    // Loop prevention (observed murphy/phil 2026-05-15). Pre-Option-1
+    // behavior: Pass A re-resumed murphy on DX-547 every tick; prep
+    // re-stamped same conflict_on partners; dispatch ended; loop. The
+    // resume retention also kept the agent claim-glued to the card,
+    // making the agent appear "busy" to operators inspecting state.
+    //
+    // Option-1 behavior: clear `assigned_agent` + flip status →
+    // ToDo. Card re-enters fresh-pick pool, which `listDispatchableYamls`
+    // already filters on conflict_on. Agent stays eligible (no busy /
+    // skipAgents stamp) so Pass B fresh-pick can route them onto any
+    // unowned ToDo whose gates are clear.
     writeSettings({ murphy: agentRecord("murphy") });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
 
     const owned = issue("DX-547", {
       assigned_agent: "murphy",
@@ -1221,9 +1221,56 @@ describe("tryMultiAgentDispatch", () => {
 
     expect(result.dispatched).toBe(0);
     expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    // Card mutated: claim cleared + status flipped.
+    expect(writeIssue).toHaveBeenCalledTimes(1);
+    const [, writtenIssue] = vi.mocked(writeIssue).mock.calls[0];
+    expect(writtenIssue.id).toBe("DX-547");
+    expect(writtenIssue.assigned_agent).toBeNull();
+    expect(writtenIssue.status).toBe("ToDo");
+    expect(writtenIssue.dispatch).toBeNull();
   });
 
-  it("resumes an owned card once its conflict_on partner reaches a terminal status (Done unblocks resume)", async () => {
+  it("releases the agent and flips the card back to ToDo when a waiting_on dependency is non-terminal", async () => {
+    // Symmetric to the conflict_on release. The same Pass A bypass
+    // affected waiting_on — an owned card with a non-terminal dep
+    // would re-resume every tick. waiting_on is the canonical
+    // primitive for sequential phase ordering; the same gate applies.
+    writeSettings({ murphy: agentRecord("murphy") });
+
+    const owned = issue("DX-547", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+      waiting_on: {
+        by: ["DX-546"],
+        reason: "Phase 2 depends on Phase 1",
+        timestamp: "2026-05-15T06:20:00Z",
+      },
+    });
+    const dep = issue("DX-546", {
+      assigned_agent: "dani",
+      status: "In Progress",
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [owned, dep],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    expect(writeIssue).toHaveBeenCalledTimes(1);
+    const [, writtenIssue] = vi.mocked(writeIssue).mock.calls[0];
+    expect(writtenIssue.id).toBe("DX-547");
+    expect(writtenIssue.assigned_agent).toBeNull();
+    expect(writtenIssue.status).toBe("ToDo");
+  });
+
+  it("resumes an owned card (no release) when conflict_on partners are all terminal", async () => {
+    // Regression guard: do NOT release the claim when gates are
+    // already effectively clear (terminal partner). The agent picks
+    // up its session via --resume and continues.
     writeSettings({ murphy: agentRecord("murphy") });
     mockedDispatchWithRecovery.mockResolvedValue({
       dispatchId: "did",
@@ -1235,7 +1282,6 @@ describe("tryMultiAgentDispatch", () => {
       status: "In Progress",
       conflict_on: [{ id: "DX-546", reason: "needs schema first" }],
     });
-    // Partner Done — `isEffectivelyConflicted` ignores terminal partners.
     const partner = issue("DX-546", {
       assigned_agent: "dani",
       status: "Done",
@@ -1251,6 +1297,13 @@ describe("tryMultiAgentDispatch", () => {
 
     expect(result.dispatched).toBe(1);
     expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-547");
+    // No release write — only the picker's normal dispatch stamp path.
+    const releaseCall = vi
+      .mocked(writeIssue)
+      .mock.calls.find(
+        ([, i]) => i.id === "DX-547" && i.assigned_agent === null,
+      );
+    expect(releaseCall).toBeUndefined();
   });
 
   it("falls through to fresh ToDo pick when the agent has no open assigned card", async () => {
@@ -1639,9 +1692,7 @@ describe("tryMultiAgentDispatch", () => {
       });
       expect(tick2.dispatched).toBe(1);
       expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(2);
-      expect(mockedDispatchWithRecovery.mock.calls[1][1].agentName).toBe(
-        "bob",
-      );
+      expect(mockedDispatchWithRecovery.mock.calls[1][1].agentName).toBe("bob");
     });
   });
 
@@ -1667,7 +1718,9 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.task).toBe(
+        "In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1",
+      );
       expect(dispatchInput.dispatchKind).toBe("work");
     });
 
@@ -1687,7 +1740,9 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1");
+      expect(dispatchInput.task).toBe(
+        "In Progress cards: []\n\n/danx-prep DX-1",
+      );
       expect(dispatchInput.dispatchKind).toBe("prep");
     });
 
@@ -1719,7 +1774,9 @@ describe("tryMultiAgentDispatch", () => {
 
       expect(result.dispatched).toBe(1);
       const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(dispatchInput.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(dispatchInput.task).toBe(
+        "In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1",
+      );
       expect(dispatchInput.dispatchKind).toBe("work");
     });
 
@@ -1797,7 +1854,9 @@ describe("tryMultiAgentDispatch", () => {
       });
       expect(tick1Result.dispatched).toBe(1);
       const tick1Dispatch = mockedDispatchWithRecovery.mock.calls[0][0];
-      expect(tick1Dispatch.task).toBe("In Progress cards: []\n\n/danx-prep DX-1");
+      expect(tick1Dispatch.task).toBe(
+        "In Progress cards: []\n\n/danx-prep DX-1",
+      );
       expect(tick1Dispatch.dispatchKind).toBe("prep");
 
       // Tick 2 — assigned_agent stamp survived. The DB assignedCards
@@ -1818,7 +1877,9 @@ describe("tryMultiAgentDispatch", () => {
       expect(tick2Result.dispatched).toBe(1);
       // Second call to dispatchWithRecovery — index 1.
       const tick2Dispatch = mockedDispatchWithRecovery.mock.calls[1][0];
-      expect(tick2Dispatch.task).toBe("In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1");
+      expect(tick2Dispatch.task).toBe(
+        "In Progress cards: []\n\n/danx-prep DX-1\n\n/danx-next DX-1",
+      );
       expect(tick2Dispatch.dispatchKind).toBe("work");
     });
   });
