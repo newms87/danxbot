@@ -141,6 +141,7 @@ import {
   type AgentRecordWithName,
 } from "../settings-file.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import { isEffectivelyConflicted } from "../issue/effective-conflict-on.js";
 import type { RepoContext } from "../types.js";
 import type { DispatchKind } from "../agent/agent-types.js";
 import {
@@ -899,6 +900,23 @@ export async function tryMultiAgentDispatch(
     let reconcileOwnedCards: readonly Issue[] = [];
     let resumeSessionId: string | undefined;
     if (owned.kind === "single") {
+      // conflict_on partner-terminal gate. Symmetric with the
+      // listDispatchableYamls filter that gates Pass B fresh picks
+      // (`isEffectivelyConflicted` in `src/poller/local-issues.ts`).
+      // Without this check, an agent owning a card whose conflict_on
+      // partner is non-terminal gets re-resumed every tick; the prep
+      // skill re-emits the `conflict_on` verdict, dispatch ends,
+      // next tick repeats — infinite loop burning tokens (observed on
+      // murphy DX-547 / phil DX-548 vs dani DX-546, 2026-05-15). The
+      // duplicates branch below intentionally skips this gate: the
+      // reconcile body's purpose is to RELEASE excess `assigned_agent`
+      // stamps, which is valuable even when a partner is non-terminal.
+      if (isEffectivelyConflicted(owned.card, openIssues)) {
+        log.info(
+          `[${repo.name}] multi-agent pick (defer resume): ${member.name} → ${owned.card.id} — conflict_on partner non-terminal; skipping this tick`,
+        );
+        continue;
+      }
       card = owned.card;
       // Latest dispatch's session UUID, newest-first. Skip rows whose
       // sessionUuid is empty/null (failed-before-session-create rows).

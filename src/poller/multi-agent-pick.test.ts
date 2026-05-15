@@ -1237,6 +1237,71 @@ describe("tryMultiAgentDispatch", () => {
     );
   });
 
+  it("does NOT resume an owned card when any conflict_on partner is In Progress (loop-prevention)", async () => {
+    // Symmetric with `listDispatchableYamls`' conflict_on gate. The
+    // Pass A resume path used to bypass this filter — an owned card
+    // whose partner was non-terminal was re-dispatched every tick,
+    // the prep agent emitted `conflict_on` verdict, dispatch ended,
+    // next tick re-dispatched: infinite loop burning tokens (observed
+    // on murphy/phil 2026-05-15).
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const owned = issue("DX-547", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+      conflict_on: [{ id: "DX-546", reason: "needs schema first" }],
+    });
+    const partner = issue("DX-546", {
+      assigned_agent: "dani",
+      status: "In Progress",
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [owned, partner],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+  });
+
+  it("resumes an owned card once its conflict_on partner reaches a terminal status (Done unblocks resume)", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    mockedDispatchWithRecovery.mockResolvedValue({
+      dispatchId: "did",
+      job: {} as never,
+    });
+
+    const owned = issue("DX-547", {
+      assigned_agent: "murphy",
+      status: "In Progress",
+      conflict_on: [{ id: "DX-546", reason: "needs schema first" }],
+    });
+    // Partner Done — `isEffectivelyConflicted` ignores terminal partners.
+    const partner = issue("DX-546", {
+      assigned_agent: "dani",
+      status: "Done",
+    });
+
+    const result = await tryMultiAgentDispatch({
+      repo: fakeRepo(),
+      cards: [],
+      openIssues: [owned, partner],
+      tracker: fakeTracker(),
+      now: NOW,
+    });
+
+    expect(result.dispatched).toBe(1);
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-547");
+  });
+
   it("falls through to fresh ToDo pick when the agent has no open assigned card", async () => {
     writeSettings({ alice: agentRecord("alice") });
     mockedDispatchWithRecovery.mockResolvedValue({
