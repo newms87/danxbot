@@ -70,6 +70,19 @@ const mockSyncRepoFiles = vi.fn();
 vi.mock("./cron/sync-and-audit.js", () => ({
   start: mockStartPoller,
 }));
+
+// DX-551 — `startWorkerCronLoop` would otherwise hit the real
+// `reap-orphan-dispatches` env asserts (DANXBOT_DB_USER missing in the
+// unit test env) and throw on the boot pass. Stub it with a no-op
+// handle so worker-mode tests reason about the shutdown wiring
+// deterministically.
+const mockWorkerCronLoopStop = vi.fn();
+const mockStartWorkerCronLoop = vi
+  .fn()
+  .mockResolvedValue({ stop: mockWorkerCronLoopStop });
+vi.mock("./cron/worker-loop.js", () => ({
+  startWorkerCronLoop: mockStartWorkerCronLoop,
+}));
 vi.mock("./inject/sync.js", () => ({
   syncRepoFiles: mockSyncRepoFiles,
 }));
@@ -472,7 +485,11 @@ describe("worker mode startup flow", { timeout: 15_000 }, () => {
   it("registers shutdown handlers in worker mode", async () => {
     await importIndex();
 
-    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({});
+    // DX-551 — worker mode passes the in-worker cron loop handle to
+    // the shutdown handler so SIGTERM clears the interval.
+    expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
+      workerCronLoop: { stop: mockWorkerCronLoopStop },
+    });
   });
 
   it("throws when no repo context is loaded", async () => {

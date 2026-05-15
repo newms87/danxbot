@@ -1,8 +1,9 @@
 /**
- * Registry of jobs the system cron tick dispatcher (`src/cron/tick.ts`)
- * fires every minute. DX-324 ships the dispatcher with zero jobs;
- * Phase 4 (DX-327 — reap-orphan-dispatches) registers the first
- * concrete job here.
+ * Registry of jobs the in-worker cron dispatcher (`src/cron/worker-loop.ts`)
+ * fires on boot + every 60s. DX-324 introduced the registry via the
+ * retired system-cron `tick.ts` entry; DX-551 folded the dispatcher
+ * INTO the worker. The registry is unchanged — each job's `intervalSec`
+ * still gates its own dispatch via `lastRunMs`.
  *
  * Append-only API: every entry MUST satisfy the `CronJob` contract
  * in `../types.ts`. Renaming a `name` field forfeits the prior

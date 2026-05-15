@@ -1,16 +1,17 @@
 /**
- * System cron tick dispatcher — job contract.
+ * In-worker cron tick dispatcher — job contract.
  *
- * DX-324: a single crontab entry runs `npx tsx src/cron/tick.ts` every
- * minute. The dispatcher iterates the `jobs[]` registry from
- * `src/cron/jobs/index.ts` and fires every job whose `intervalSec`
- * has elapsed since its last successful run. This file is the
+ * DX-324 introduced the registry; DX-551 folded the dispatcher into
+ * the running worker. `src/cron/worker-loop.ts` fires every job whose
+ * `intervalSec` has elapsed since its last successful run, both on
+ * boot (one-shot) and on a 60s `setInterval`. This file is the
  * contract every registered job must satisfy.
  *
  * Distinct from the in-process per-tick sweep in `sync-and-audit.ts`
- * which runs inside the long-running worker. The system cron path
- * exists so jobs that must survive worker death (orphan reaper,
- * future stale-worktree GC) keep firing without the worker process.
+ * which also runs inside the worker but owns the per-tick poller +
+ * audit pass. The cron dispatcher exists so longer-cadence jobs
+ * (orphan reaper, SFC-deps provision/prune) hang off ONE shared
+ * tick rather than each carrying its own setInterval.
  */
 
 export interface CronJob {

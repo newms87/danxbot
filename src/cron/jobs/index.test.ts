@@ -1,9 +1,9 @@
 /**
  * Registry assertion for `src/cron/jobs/index.ts` — DX-327 AC9.
  *
- * `tick.ts#runTick` imports `defaultJobs` from this index. Removing or
- * renaming an entry here silently disables the reaper. Pin the
- * presence of `reapOrphanDispatches` so a regression fails CI.
+ * `worker-loop.ts#runTick` imports `defaultJobs` from this index.
+ * Removing or renaming an entry here silently disables the reaper.
+ * Pin the presence of `reapOrphanDispatches` so a regression fails CI.
  */
 
 import { describe, expect, it } from "vitest";

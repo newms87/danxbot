@@ -9,6 +9,7 @@ import { stopAllIssuesWatchers } from "./dashboard/issues-watcher.js";
 import { stopAllAgentsWatchers } from "./dashboard/agents-watcher.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
+import type { WorkerCronLoopHandle } from "./cron/worker-loop.js";
 
 const log = createLogger("shutdown");
 
@@ -16,10 +17,16 @@ interface ShutdownOptions {
   exitProcess?: boolean;
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
+  workerCronLoop?: WorkerCronLoopHandle | null;
 }
 
 export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
-  const { exitProcess = true, threadCleanupInterval, retentionInterval } = options;
+  const {
+    exitProcess = true,
+    threadCleanupInterval,
+    retentionInterval,
+    workerCronLoop,
+  } = options;
 
   log.info("Shutdown signal received, stopping new message processing...");
 
@@ -50,6 +57,13 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 
   if (retentionInterval) {
     stopRetentionCron(retentionInterval);
+  }
+
+  // DX-551 — clear the worker-internal cron loop's setInterval. The
+  // handle is null in dashboard mode (no worker cron) and in worker
+  // mode when the boot pass threw.
+  if (workerCronLoop) {
+    workerCronLoop.stop();
   }
 
   // Clear per-job cleanup intervals from worker dispatch
@@ -88,12 +102,14 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
 export function initShutdownHandlers(options: {
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
+  workerCronLoop?: WorkerCronLoopHandle | null;
 }): void {
   const handleShutdown = () => {
     shutdown({
       exitProcess: true,
       threadCleanupInterval: options.threadCleanupInterval,
       retentionInterval: options.retentionInterval,
+      workerCronLoop: options.workerCronLoop,
     }).catch((error) => {
       log.error("Error during shutdown", error);
       process.exit(1);

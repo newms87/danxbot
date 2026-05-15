@@ -236,6 +236,35 @@ describe("shutdown", () => {
 });
 
 // ============================================================
+// DX-551 — workerCronLoop handle propagation
+// ============================================================
+
+describe("shutdown — workerCronLoop", () => {
+  beforeEach(() => {
+    mockListActiveJobs.mockReturnValue([]);
+  });
+
+  it("calls workerCronLoop.stop() when handle is provided", async () => {
+    const stop = vi.fn();
+    await shutdown({
+      exitProcess: false,
+      workerCronLoop: { stop },
+    });
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("tolerates null workerCronLoop (dashboard-mode + boot-pass-threw)", async () => {
+    await expect(
+      shutdown({ exitProcess: false, workerCronLoop: null }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("tolerates omitted workerCronLoop (dashboard-mode default)", async () => {
+    await expect(shutdown({ exitProcess: false })).resolves.toBeUndefined();
+  });
+});
+
+// ============================================================
 // Signal handler registration tests
 // ============================================================
 
@@ -258,5 +287,33 @@ describe("initShutdownHandlers", () => {
     });
 
     expect(mockOn).toHaveBeenCalledWith("SIGINT", expect.any(Function));
+  });
+
+  it("forwards workerCronLoop to the registered signal handler", async () => {
+    const stop = vi.fn();
+    const mockExit = vi
+      .spyOn(process, "exit")
+      .mockImplementation((() => undefined) as never);
+    let captured: (() => void) | undefined;
+    vi.spyOn(process, "on").mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === "SIGTERM") {
+        captured = listener as () => void;
+      }
+      return process;
+    }) as never);
+
+    initShutdownHandlers({ workerCronLoop: { stop } });
+    expect(captured).toBeDefined();
+
+    // Invoke the captured handler. The handler calls `shutdown()`
+    // with `exitProcess: true` — the mocked `process.exit` keeps
+    // vitest alive while the shutdown body still runs.
+    captured!();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(stop).toHaveBeenCalled();
+    mockExit.mockRestore();
   });
 });

@@ -47,6 +47,10 @@ import {
 } from "./agent/agent-locks.js";
 import { readAgents } from "./settings-file.js";
 import { start as startCronSync } from "./cron/sync-and-audit.js";
+import {
+  startWorkerCronLoop,
+  type WorkerCronLoopHandle,
+} from "./cron/worker-loop.js";
 import { syncRepoFiles } from "./inject/sync.js";
 import {
   getIssuePollerPickupPrefix,
@@ -665,6 +669,27 @@ async function startWorkerMode(): Promise<void> {
     }
   }
 
+  // DX-551 — worker-internal cron dispatcher. Replaces the retired
+  // system-cron `tick.ts` + `make install-cron` install surface.
+  // `startWorkerCronLoop` awaits the boot one-shot pass before
+  // returning so leaked systemd scopes (DX-323 reaper, DX-540 SFC-deps
+  // provision/prune) get cleaned BEFORE the HTTP listener starts
+  // accepting fresh dispatches. Subsequent ticks fire every 60s on
+  // `setInterval` while the worker is alive; the same `cron-state.json`
+  // file persists per-job lastRunMs across restarts so a worker bounce
+  // inside an interval window does not double-fire a job.
+  let workerCronLoop: WorkerCronLoopHandle | null = null;
+  try {
+    workerCronLoop = await startWorkerCronLoop({
+      repoRoot: repo.localPath,
+    });
+  } catch (err) {
+    log.error(
+      `[${repo.name}] Worker cron boot pass failed`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);
 
@@ -692,7 +717,7 @@ async function startWorkerMode(): Promise<void> {
   // chain).
   await startCronSync();
 
-  initShutdownHandlers({});
+  initShutdownHandlers({ workerCronLoop });
 
   log.info(`Worker mode ready for repo: ${repo.name}`);
 }

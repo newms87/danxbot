@@ -1,7 +1,7 @@
 /**
  * DX-540 — hourly SFC-deps provisioning cron job.
  *
- * Runs every 1h via `src/cron/tick.ts` (installed by `make install-cron`).
+ * Runs every 1h via the in-worker cron loop (`src/cron/worker-loop.ts`, DX-551).
  * Resolves the manifest source from env (`SFC_DEPS_LOCAL_MANIFEST_DIR`
  * for dev, `SFC_DEPS_S3_BUCKET` for prod), iterates manifests, and
  * materializes `/srv/sfc-deps/<shell_version>/node_modules/` per

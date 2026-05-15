@@ -18,7 +18,7 @@ import {
   type ReapDeps,
 } from "./reap-orphan-dispatches.js";
 import type { DispatchScopeUnit } from "../scope-list.js";
-import { runTick } from "../tick.js";
+import { runTick } from "../worker-loop.js";
 import type { CronJob } from "../types.js";
 
 const ENV_KEYS = ["DANXBOT_DB_USER", "DANXBOT_DB_PASSWORD"];

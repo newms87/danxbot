@@ -83,14 +83,16 @@ active versions, then fetches each `shared_deps_lock.json`.
 | Trigger | File | Frequency |
 |---|---|---|
 | `make deploy` post-hook | `deploy/hooks/post-deploy-provision-deps.sh` | Once per deploy |
-| Host system cron | `src/cron/jobs/provision-sfc-deps.ts` | Every 1h |
-| Stale-dir prune cron | `src/cron/jobs/prune-sfc-deps.ts` | Every 24h |
+| In-worker cron | `src/cron/jobs/provision-sfc-deps.ts` | Every 1h |
+| In-worker cron (prune) | `src/cron/jobs/prune-sfc-deps.ts` | Every 24h |
 | Operator ad-hoc | `npx tsx scripts/provision-sfc-deps.ts` | Manual |
 
-Cron jobs fire from `src/cron/tick.ts`, which is wired into the
-host crontab by `make install-cron`. On a fresh prod host, run
-`make install-cron` once after the first deploy to register the
-per-minute tick.
+Cron jobs fire from the in-worker dispatcher (`src/cron/worker-loop.ts`,
+DX-551): a one-shot pass on worker boot + a 60s `setInterval` while
+the worker is alive. Per-job `intervalSec` gates dispatch via the
+`lastRunMs` map in `<repo>/.danxbot/cron-state.json`, so a hourly
+provision + daily prune both ride the same 60s tick without re-firing
+early. No host crontab install step is required.
 
 ## Environment variables
 

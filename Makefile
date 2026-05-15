@@ -30,8 +30,7 @@ TARGET_REPO_NAMES = $(shell DANXBOT_TARGET="$(DANXBOT_TARGET)" npx tsx src/cli/l
        test-system-multi-worker test-system-slack test-system-agent-creation test-system-prep test-system-flesh-out test-system-chat test-system-orphan-reap \
        deploy deploy-status deploy-destroy deploy-ssh deploy-logs deploy-secrets-push deploy-smoke \
        create-user ensure-root-user reset-data \
-       publish-danx-issue-mcp publish-playwright-mcp \
-       install-cron uninstall-cron
+       publish-danx-issue-mcp publish-playwright-mcp
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
@@ -151,40 +150,20 @@ logs: ## Tail logs for infra or a worker (usage: make logs or make logs REPO=pla
 		docker compose -p "danxbot-worker-$(REPO)" logs -f; \
 	fi
 
-# System cron tick dispatcher — DX-324 / parent epic DX-323.
+# DX-551 — system-cron entry retired. The per-minute `tick.ts` job
+# dispatcher moved INTO the running worker (see
+# `src/cron/worker-loop.ts`). The same `jobs[]` registry fires on
+# boot + every 60s while the worker is alive; `cron-state.json`
+# persists per-job lastRunMs across restarts so a bounce inside an
+# interval does not double-fire.
 #
-# Installs ONE crontab line that fires `src/cron/tick.ts` every minute.
-# `tick.ts` iterates `src/cron/jobs/index.ts` and runs each due job in
-# isolation. Phase 1 ships an empty registry; later phases (DX-327
-# reap-orphan-dispatches) register jobs here. The single crontab entry
-# never changes — we add jobs in the registry, not in cron.
+# Upgrade note: a previously-installed crontab line still works (the
+# script entry `src/cron/tick.ts` is gone, so the line errors silently
+# every minute). One-shot cleanup:
 #
-# Idempotent: removes any prior line ending in `# danxbot-cron` before
-# appending so repeated `make install-cron` invocations converge on
-# exactly one entry. The marker-comment filter is fixed-string (`-F`)
-# + the literal `# ` prefix so we never accidentally match an unrelated
-# line that happens to contain the substring `danxbot-cron`. `crontab
-# -l` exits 1 when the user has no crontab yet — the `|| true` keeps
-# the pipeline from short-circuiting on first install.
+#     crontab -l | grep -v '# danxbot-cron' | crontab -
 #
-# `$(CURDIR)` resolves at `make` invocation time. Running install-cron
-# from a git worktree (e.g. `.danxbot/worktrees/<agent>/`) pins cron
-# to that worktree's path — invoke from the main clone for the
-# intended persistent install.
-CRON_LINE := * * * * * cd $(CURDIR) && /usr/bin/env npx tsx src/cron/tick.ts >> /tmp/danxbot-cron.log 2>&1 \# danxbot-cron
-
-install-cron: ## Install/replace the per-minute danxbot system cron entry
-	@( crontab -l 2>/dev/null || true ) | grep -vF '# danxbot-cron' | { cat; echo '$(CRON_LINE)'; } | crontab -
-	@echo "Installed cron line: $(CRON_LINE)"
-	@echo "Stderr lands in /tmp/danxbot-cron.log"
-
-uninstall-cron: ## Remove the danxbot system cron entry (no-op when absent)
-	@if crontab -l 2>/dev/null | grep -q 'danxbot-cron'; then \
-		crontab -l 2>/dev/null | grep -vF '# danxbot-cron' | crontab -; \
-		echo "Removed danxbot-cron line"; \
-	else \
-		echo "No danxbot-cron line installed; nothing to remove"; \
-	fi
+# Fresh installs require no cron action at all.
 
 validate-repos: ## Check host prerequisites for all connected repos before launching workers
 	@NAMES="$(TARGET_REPO_NAMES)"; \

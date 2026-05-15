@@ -26,8 +26,9 @@ Source of truth = `Makefile` (`make help`). Always `cd /home/newms/web/danxbot` 
 | `make launch-infra` | Start shared MySQL + dashboard |
 | `make stop-infra` | Stop shared infra |
 | `make logs [REPO=<name>]` | Tail infra or worker logs |
-| `make install-cron` | Install/replace the per-minute system cron line (DX-324) — fires `src/cron/tick.ts` which runs every registered job (`src/cron/jobs/index.ts`, e.g. DX-327 `reap-orphan-dispatches`). User-scoped (no sudo); pins `$(CURDIR)` so invoke from the main clone, not a worktree. Idempotent — filters any prior `# danxbot-cron`-marked line before appending. Stderr → `/tmp/danxbot-cron.log`. |
-| `make uninstall-cron` | Remove the danxbot cron line. No-op when absent. User-scoped. |
+
+
+> **DX-551 — `make install-cron` / `make uninstall-cron` retired.** The per-minute `tick.ts` dispatcher folded INTO the running worker (`src/cron/worker-loop.ts`): the same `jobs[]` registry fires on boot + every 60s while the worker is alive, with `lastRunMs` persisted in `<repo>/.danxbot/cron-state.json`. If you upgraded over an install that previously ran `make install-cron`, run `crontab -e` once and delete the `# danxbot-cron` line — the now-missing `src/cron/tick.ts` script will error silently every minute otherwise. Fresh installs require no cron action.
 
 ## Worker / Deploy Launch (STRICTLY PROHIBITED w/o user auth)
 

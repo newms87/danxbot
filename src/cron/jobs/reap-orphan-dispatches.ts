@@ -2,7 +2,7 @@
  * DX-327 / DX-323 Phase 4 — orphan dispatch reaper.
  *
  * A cron job (registered in `./index.ts`, fired every 60s by
- * `src/cron/tick.ts`) that joins live `danxbot-dispatch-<id>.scope`
+ * `src/cron/worker-loop.ts`) that joins live `danxbot-dispatch-<id>.scope`
  * systemd transient units with the `dispatches` Postgres table and
  * `systemctl --user stop`s every scope whose dispatch row is
  * terminal-or-missing AND whose scope age clears the 60s race-window
@@ -160,12 +160,12 @@ function buildDefaultReap(exec: ExecFn | undefined): ReapFn {
 }
 
 function defaultLog(line: ReapLogLine): void {
-  // Structured JSON line to stdout — the canonical crontab line in
-  // `make install-cron` pipes stdout into `/tmp/danxbot-cron.log` for
-  // operator visibility. Other danxbot modules use `createLogger`, but
-  // the cron tick already isolates failures at the per-job boundary
-  // and we want the operator-facing log line to be plain JSON, not
-  // the logger's wrapper shape.
+  // Structured JSON line to stdout — DX-551 folded the cron tick
+  // into the worker, so this writes into the worker's stdout (visible
+  // via `make logs REPO=<name>`). Other danxbot modules use
+  // `createLogger`, but the cron tick already isolates failures at
+  // the per-job boundary and we want the operator-facing log line to
+  // be plain JSON, not the logger's wrapper shape.
   process.stdout.write(`${JSON.stringify(line)}\n`);
 }
 
