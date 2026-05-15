@@ -38,6 +38,12 @@ import {
   clearReconcileSchedulerHookForRepo,
   type ReconcileRepoContext,
 } from "./reconcile.js";
+import {
+  registerWriterDb,
+  unregisterWriterDb,
+  type IssuesMirrorDb,
+  type UpsertArgs,
+} from "../db/issues-mirror.js";
 import { ReconcileValidationError, type ReconcileResult } from "./reconcile-types.js";
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
@@ -1664,5 +1670,118 @@ describe("reconcileIssue — YAML-only mode (no tracker registered, DX-342)", ()
     expect(result.errors).toEqual([]);
     expect(result.changed).toBe(false);
     expect(result.fanout.parentId).toBeNull();
+  });
+});
+
+// DX-555: reconcile step-5 writes go through writeIssue → upsertIssueRowNow
+describe("reconcileIssue — synchronous DB upsert via writeIssue (DX-555)", () => {
+  let ctx: ReturnType<typeof makeRepoCtx>;
+
+  function installFakeWriterDb(repoLocalPath: string): {
+    calls: UpsertArgs[];
+    unregister: () => void;
+  } {
+    const rows = new Map<string, { data: Record<string, unknown>; content_hash: string }>();
+    const calls: UpsertArgs[] = [];
+    const db: IssuesMirrorDb = {
+      async selectExisting(repoName, id) {
+        return rows.get(`${repoName}|${id}`) ?? null;
+      },
+      async upsertWithHistory(args) {
+        rows.set(`${args.repoName}|${args.id}`, {
+          data: args.data,
+          content_hash: args.contentHash,
+        });
+        calls.push(args);
+      },
+      async tombstone() {},
+      async listIds() {
+        return [...rows.entries()].map(([key, row]) => ({
+          id: key.split("|")[1]!,
+          content_hash: row.content_hash,
+        }));
+      },
+    };
+    registerWriterDb(repoLocalPath, db);
+    return { calls, unregister: () => unregisterWriterDb(repoLocalPath) };
+  }
+
+  beforeEach(() => {
+    ctx = makeRepoCtx();
+  });
+
+  afterEach(() => {
+    ctx.cleanup();
+  });
+
+  it("lands a writer-source DB row synchronously when reconcile mutates the issue (open→closed)", async () => {
+    // A Done issue in open/ triggers the heal bucket-move (step 3b:
+    // decideFileMove → open→closed). bucketChanged=true → reconcileMutated=true
+    // → writeIssue fires upsertIssueRowNow with source:"writer". No real DB
+    // needed; the FakeDb captures the upsert call.
+    const issue = makeIssue("DX-5550", "Done");
+    writeYaml(ctx.openDir, "DX-5550", issue);
+
+    const { calls, unregister } = installFakeWriterDb(ctx.repo.localPath);
+    try {
+      await reconcileIssue(ctx.repo, "DX-5550", "watcher");
+    } finally {
+      unregister();
+    }
+
+    const writerCall = calls.find(
+      (c) => c.id === "DX-5550" && c.source === "writer",
+    );
+    expect(writerCall).toBeDefined();
+    expect(writerCall!.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    // The closed/ copy must carry db_updated_at (written from the stamped
+    // issue returned by writeIssue — not the un-stamped mutated issue).
+    const closedPath = resolve(ctx.closedDir, "DX-5550.yml");
+    expect(existsSync(closedPath)).toBe(true);
+    const closedIssue = parseIssue(readFileSync(closedPath, "utf-8"), {
+      expectedPrefix: "DX",
+    });
+    expect(closedIssue.db_updated_at).toBeTruthy();
+  });
+
+  it("lands a writer-source DB row and unlinks the closed copy on closed→open heal", async () => {
+    // A non-terminal issue in closed/ triggers closed→open heal (step 3b:
+    // decideFileMove → closed→open). bucketChanged=true → reconcileMutated=true
+    // → writeIssue writes to open/ + fires DB upsert; old closed/ file unlinked.
+    const issue = makeIssue("DX-5553", "In Progress");
+    writeYaml(ctx.closedDir, "DX-5553", issue);
+
+    const { calls, unregister } = installFakeWriterDb(ctx.repo.localPath);
+    try {
+      await reconcileIssue(ctx.repo, "DX-5553", "watcher");
+    } finally {
+      unregister();
+    }
+
+    const writerCall = calls.find(
+      (c) => c.id === "DX-5553" && c.source === "writer",
+    );
+    expect(writerCall).toBeDefined();
+    // Old closed copy must be gone; open copy must exist.
+    expect(existsSync(resolve(ctx.closedDir, "DX-5553.yml"))).toBe(false);
+    expect(existsSync(resolve(ctx.openDir, "DX-5553.yml"))).toBe(true);
+  });
+
+  it("does NOT fire a writer-source DB row when reconcile produces no mutation (no-op)", async () => {
+    // Pure ToDo with no children — step 3 produces no mutation.
+    const issue = makeIssue("DX-5552");
+    writeYaml(ctx.openDir, "DX-5552", issue);
+
+    const { calls, unregister } = installFakeWriterDb(ctx.repo.localPath);
+    try {
+      await reconcileIssue(ctx.repo, "DX-5552", "watcher");
+    } finally {
+      unregister();
+    }
+
+    const writerCall = calls.find(
+      (c) => c.id === "DX-5552" && c.source === "writer",
+    );
+    expect(writerCall).toBeUndefined();
   });
 });

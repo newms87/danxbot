@@ -144,7 +144,7 @@ export async function findByExternalId(
 export async function writeIssue(
   repoLocalPath: string,
   issue: Issue,
-): Promise<void> {
+): Promise<Issue> {
   ensureIssuesDirs(repoLocalPath);
   const stamped: Issue = {
     ...issue,
@@ -172,6 +172,7 @@ export async function writeIssue(
   });
   const path = issuePath(repoLocalPath, stamped.id, "open");
   writeFileSync(path, serialized);
+  return stamped;
 }
 
 /**

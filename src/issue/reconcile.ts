@@ -58,7 +58,7 @@
  * cost of a missed guard is a runaway cascade in production.
  */
 
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYamlText } from "yaml";
 import { canonicalize, sha256 } from "../db/canonicalize.js";
@@ -68,7 +68,11 @@ import {
   serializeIssue,
   IssueParseError,
 } from "../issue-tracker/yaml.js";
-import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
+import { issuePath } from "../issue-tracker/paths.js";
+import {
+  writeIssue,
+  moveToClosedIfTerminal,
+} from "../poller/yaml-lifecycle.js";
 import {
   dbListChildrenByParent,
   dbListDependentsByWaitingOnId,
@@ -523,18 +527,20 @@ async function reconcileBody(
   // because writing identical bytes is a no-op and recursing on
   // identical state is wasted work.
 
-  // ---- Step 5: atomic write YAML + bucket move ----
-  // Pure-bucket-move (terminal status with no content delta) writes the
-  // existing serialized body to the target dir; mutated cards re-
-  // serialize. Either way, after the write we unlink the previous
-  // location if it differs from the target.
+  // ---- Step 5: write YAML via writeIssue + bucket move ----
+  // `writeIssue` always writes to `open/` and performs `upsertIssueRowNow`
+  // BEFORE the file write (DX-555 — closes the async-DB-mirror gap where
+  // reconcile's bare `writeFileSync` bypassed the synchronous-DB invariant).
+  // For terminal status the file then moves to `closed/` via
+  // `moveToClosedIfTerminal`. For the heal direction (`closed/ → open/`)
+  // we unlink the old closed copy manually after `writeIssue`.
   const reconcileMutated = mutatedFlag || bucketChanged;
   const nextSerialized = mutatedFlag ? serializeIssue(mutated) : loaded.text;
   if (reconcileMutated) {
-    ensureIssuesDirs(repo.localPath);
-    const targetPath = issuePath(repo.localPath, mutated.id, targetBucket);
-    writeFileSync(targetPath, nextSerialized);
-    if (resolve(targetPath) !== resolve(loaded.path)) {
+    const stamped = await writeIssue(repo.localPath, mutated);
+    const movedToClosed = moveToClosedIfTerminal(repo.localPath, stamped);
+    if (!movedToClosed && loaded.bucket === "closed") {
+      // Healed from closed → open; unlink the stale closed copy.
       try {
         unlinkSync(loaded.path);
       } catch (err) {
@@ -557,15 +563,14 @@ async function reconcileBody(
       )
     : prevHash;
 
-  // ---- Step 6 (retired DX-549): no DB-mirror await ----
-  // Pre-DX-549 this step awaited chokidar's mirror upsert before
-  // running step 7. With the writer-owned DB upsert (DX-547) the
-  // synchronous writers leave the DB consistent the moment they
-  // resolve, and step 7 below reads its inputs from the in-memory
-  // mutated Issue + per-card lastPushedHash cache — neither needs the
-  // DB row. The chokidar watcher backstop will catch up on its own
-  // 5s debounce; downstream readers either query through the writer
-  // path or tolerate the eventual-consistency window.
+  // ---- Step 6 (retired DX-549, gap closed DX-555): DB is synchronous ----
+  // Pre-DX-549 this step awaited chokidar's mirror upsert. Post-DX-549
+  // the comment noted reconcile's writeFileSync bypassed the synchronous-DB
+  // invariant. DX-555 routes step 5 through writeIssue, which calls
+  // upsertIssueRowNow BEFORE writeFileSync — DB is current the moment step
+  // 5 resolves. Step 7 reads in-memory Issue + per-card lastPushedHash, so
+  // it still does not need the DB row, but any future reader that queries
+  // DB right after reconcileIssue resolves sees fresh state immediately.
 
   // ---- Step 7: outbound tracker push ----
   // Push to the tracker when the on-disk hash differs from what we last
