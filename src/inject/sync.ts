@@ -27,11 +27,15 @@
  * gets workspaces provisioned at start.
  */
 
+import { execFileSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
+  rmdirSync,
   statSync,
 } from "node:fs";
 import { resolve } from "node:path";
@@ -163,6 +167,13 @@ export function syncRepoFiles(repo: RepoContext): void {
  * re-run against each worktree's workspaces tree so worktree-scoped
  * skills + per-repo rules + tools docs resolve cwd-relatively when the
  * agent is sitting inside the worktree.
+ *
+ * DX-525: only registered git worktrees are mirrored. The producer of
+ * stale root-owned orphans (sibling-package compose stacks that use
+ * relative bind mounts) is external to danxbot; auditing against
+ * `git worktree list --porcelain` ensures we never `mkdir` into a
+ * non-registered subdir (root-owned EACCES warn-spam) and reaps empty
+ * orphans the parent dir's permissions allow us to remove.
  */
 function mirrorWorkspacesIntoWorktrees(
   repo: RepoContext,
@@ -181,13 +192,39 @@ function mirrorWorkspacesIntoWorktrees(
     return;
   }
 
+  const registered = listRegisteredWorktreeBasenames(
+    repo.localPath,
+    worktreesRoot,
+  );
+  if (registered === null) {
+    // Registry unavailable (git missing, repoRoot not a git repo). Skip the
+    // whole worktree mirror this tick — without the registry we can't tell
+    // a real worktree from an orphan, and we MUST NOT fall back to "mirror
+    // every subdir" (that's the pre-DX-525 behavior that produced the
+    // EACCES warn-spam loop on root-owned siblings).
+    return;
+  }
+
   for (const agentName of agentDirs) {
     const worktree = resolve(worktreesRoot, agentName);
+    // Use lstat — a symlink under `worktrees/` is operator-placed (rare but
+    // legal) and MUST NOT be follow-stat'd into a real dir we then `rmdir`
+    // (rmdir on a symlink unlinks the symlink itself, leaving the target).
+    // Skip symlinks entirely; the registry will never list them as worktrees.
+    let lst;
     try {
-      if (!statSync(worktree).isDirectory()) continue;
+      lst = lstatSync(worktree);
     } catch {
       continue;
     }
+    if (lst.isSymbolicLink()) continue;
+    if (!lst.isDirectory()) continue;
+
+    if (!registered.has(agentName)) {
+      reapOrSkipOrphanWorktreeDir(repo.name, worktree, agentName, lst.mtimeMs);
+      continue;
+    }
+
     // Isolate per-worktree errors so one unwritable worktree (e.g. a
     // worktree dir owned by a different uid from a prior container run)
     // does not abort the entire `_sync` tick — that previously took
@@ -223,5 +260,128 @@ function mirrorWorkspacesIntoWorktrees(
         details: { agent: agentName, worktree, error: message },
       });
     }
+  }
+}
+
+/**
+ * Parse `git worktree list --porcelain` and return the basenames of every
+ * worktree registered as a direct child of `worktreesRoot`. Returns `null`
+ * when the registry is unavailable (git missing, repoRoot not a git repo)
+ * so the caller can fail loud (skip the mirror) rather than silently fall
+ * back to "every subdir is a worktree."
+ *
+ * IMPORTANT — symlink resolution: connected-repo dirs at
+ * `<danxbot>/repos/<name>/` are symlinks (per `repo-context.ts`), but
+ * `git worktree list --porcelain` emits realpath. We MUST realpath the
+ * prefix before comparing or every registered worktree string-mismatches
+ * the prefix → empty set → every real worktree falsely classified as
+ * orphan → the caller's reap pass nukes live agent dirs. The realpath
+ * call is best-effort: if the dir doesn't yet exist (first tick), fall
+ * back to the canonical input string.
+ */
+export function listRegisteredWorktreeBasenames(
+  repoRoot: string,
+  worktreesRoot: string,
+): Set<string> | null {
+  let stdout: string;
+  try {
+    stdout = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: repoRoot,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch (err) {
+    log.warn(
+      `[${repoRoot}] worktree-registry query failed — skipping worktree mirror this tick: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return null;
+  }
+
+  let realRoot = worktreesRoot;
+  try {
+    realRoot = realpathSync(worktreesRoot);
+  } catch {
+    // Dir doesn't exist yet (first tick, or just deleted) — fall through with
+    // the canonical input. The caller's existsSync gate makes this branch
+    // unreachable in steady state.
+  }
+  const prefix = realRoot.endsWith("/") ? realRoot : `${realRoot}/`;
+  const names = new Set<string>();
+  for (const line of stdout.split("\n")) {
+    const m = line.match(/^worktree\s+(.+)$/);
+    if (!m) continue;
+    const p = m[1].trim();
+    if (!p.startsWith(prefix)) continue;
+    const rest = p.slice(prefix.length);
+    // Direct child only — porcelain output should never produce nested
+    // worktrees under our worktrees root, but guard regardless.
+    if (rest.length === 0 || rest.includes("/")) continue;
+    names.add(rest);
+  }
+  return names;
+}
+
+/**
+ * Non-registered subdir under `worktrees/`. Try a non-recursive rmdir —
+ * succeeds when the dir is empty AND the parent dir's permissions allow
+ * us to remove it (the common case: stale empty root-owned orphan from
+ * a sibling-package compose stack's relative bind mount).
+ *
+ * Race guard — if the dir's mtime is younger than `REAP_AGE_FLOOR_MS` we
+ * skip the rmdir entirely. This protects against a concurrent
+ * `git worktree add <name>` race where the dir exists on disk but the
+ * `git worktree list` snapshot we took was older than the registry
+ * write. The cron tick that runs after the worktree is fully registered
+ * will see it in the registry and never reach this branch.
+ *
+ * Expected error codes branch by intent:
+ *   - ENOTEMPTY / ENOENT  → empty-target assumption was wrong (race) → debug
+ *   - EACCES / EPERM      → permission to remove from parent denied → debug
+ *   - anything else       → unexpected → warn (re-introducing fail-silent in
+ *                            the very change that exists to kill fail-silent
+ *                            is forbidden)
+ */
+export const REAP_AGE_FLOOR_MS = 60_000;
+export function reapOrSkipOrphanWorktreeDir(
+  repoName: string,
+  worktree: string,
+  agentName: string,
+  mtimeMs: number,
+): void {
+  const ageMs = Date.now() - mtimeMs;
+  if (ageMs < REAP_AGE_FLOOR_MS) {
+    log.debug(
+      `[${repoName}] skipping fresh non-registered worktree subdir ${agentName} — younger than ${REAP_AGE_FLOOR_MS}ms (possible mid-bootstrap race)`,
+    );
+    return;
+  }
+  try {
+    // rmdirSync is the precise primitive — refuses to remove non-empty
+    // dirs (ENOTEMPTY) and never recurses. rmSync({recursive:false}) on a
+    // directory throws on every Node version regardless of contents.
+    rmdirSync(worktree);
+    log.info(
+      `[${repoName}] reaped orphan worktree dir ${agentName} (not in git worktree registry, was empty)`,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (
+      code === "ENOTEMPTY" ||
+      code === "ENOENT" ||
+      code === "EACCES" ||
+      code === "EPERM"
+    ) {
+      log.debug(
+        `[${repoName}] skipping orphan worktree dir ${agentName} (${code}) — not in git worktree registry`,
+      );
+      return;
+    }
+    log.warn(
+      `[${repoName}] orphan worktree dir ${agentName} rmdir failed unexpectedly (${code ?? "no-code"}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
