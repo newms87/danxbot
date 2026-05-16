@@ -217,7 +217,7 @@ function fakeRepo(): RepoContext {
 
 function issue(id: string, overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -250,7 +250,13 @@ function issue(id: string, overrides: Partial<Issue> = {}): Issue {
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 
 beforeEach(() => {
@@ -1178,7 +1184,7 @@ describe("tryMultiAgentDispatch", () => {
       status: "Blocked",
       blocked: {
         reason: "stale spec",
-        timestamp: "2026-05-13T00:00:00Z",
+        at: "2026-05-13T00:00:00Z",
       },
     });
 

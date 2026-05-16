@@ -714,7 +714,7 @@ function applyValidatedPatch(
     if (next.status === "Blocked" && next.blocked === null) {
       next.blocked = {
         reason: "Manually moved to Blocked via dashboard",
-        timestamp: nowIso,
+        at: nowIso,
       };
     } else if (next.status !== "Blocked" && next.blocked !== null) {
       next.blocked = null;
@@ -1216,7 +1216,7 @@ export async function createIssue(
       priority: input.priority,
       blocked: {
         reason: buildFleshOutBlockReason(input.status),
-        timestamp: new Date().toISOString(),
+        at: new Date().toISOString(),
       },
     });
 

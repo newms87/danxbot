@@ -301,7 +301,7 @@ describe("TrelloTracker", () => {
 
     const tracker = new TrelloTracker(TRELLO);
     const result = await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "trello",
       id: "ISS-1",
       parent_id: null,
@@ -817,7 +817,7 @@ describe("TrelloTracker", () => {
     });
     const tracker = new TrelloTracker(TRELLO);
     await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "trello",
       id: "ISS-9",
       parent_id: null,

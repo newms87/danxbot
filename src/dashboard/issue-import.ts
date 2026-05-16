@@ -134,7 +134,7 @@ export function buildIssueSubtreePayload(
       if (!visited.has(childId)) queue.push(childId);
     }
   }
-  return { schema_version: 9, issues: out };
+  return { schema_version: 10, issues: out };
 }
 
 /**
@@ -174,7 +174,7 @@ export function buildIssueSubtreePayload(
  */
 function stripIssueForCopy(issue: Issue): Issue {
   const stripped: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: issue.id,
     external_id: "",
@@ -227,7 +227,7 @@ function stripIssueForCopy(issue: Issue): Issue {
         ? null
         : {
             reason: issue.blocked.reason,
-            timestamp: issue.blocked.timestamp,
+            at: issue.blocked.at,
           },
     requires_human:
       issue.requires_human === null
@@ -245,6 +245,15 @@ function stripIssueForCopy(issue: Issue): Issue {
     effort_level: issue.effort_level,
     history: [],
     db_updated_at: "",
+    // v10 (DX-592) — carry the source's lifecycle timestamps through
+    // the strip so the clipboard payload round-trips byte-stable; the
+    // paste handler (`forkIssueForImport`) decides whether to keep or
+    // reset each field on the paste target.
+    archived_at: issue.archived_at,
+    ready_at: issue.ready_at,
+    completed_at: issue.completed_at,
+    cancelled_at: issue.cancelled_at,
+    list_name: issue.list_name,
   };
   return stripped;
 }
@@ -497,7 +506,7 @@ function rewriteForImport(
     .filter((id): id is string => id !== null);
 
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: newId,
     external_id: "",
@@ -541,7 +550,7 @@ function rewriteForImport(
         ? null
         : {
             reason: src.blocked.reason,
-            timestamp: src.blocked.timestamp,
+            at: src.blocked.at,
           },
     requires_human:
       src.requires_human === null
@@ -556,6 +565,15 @@ function rewriteForImport(
     effort_level: src.effort_level,
     history: [],
     db_updated_at: "",
+    // v10 (DX-592). Carried verbatim from the source — these are
+    // lifecycle-timestamp projections; a paste reproduces the source's
+    // state at copy time. Future stamping logic (downstream of DX-575)
+    // will refresh them on the paste-target's own lifecycle events.
+    archived_at: src.archived_at,
+    ready_at: src.ready_at,
+    completed_at: src.completed_at,
+    cancelled_at: src.cancelled_at,
+    list_name: src.list_name,
   };
 }
 

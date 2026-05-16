@@ -1,5 +1,5 @@
 /**
- * Stamp `status: "Blocked"` + `blocked: {reason, timestamp}` on a
+ * Stamp `status: "Blocked"` + `blocked: {reason, at}` on a
  * candidate YAML at `<repo>/.danxbot/issues/open/<id>.yml`.
  *
  * Single source for the self-block YAML mutation. Two callers:
@@ -29,8 +29,12 @@ export interface StampIssueBlockedInput {
   /** `<PREFIX>` for `parseIssue` validation (e.g. `"DX"`). Required — parseIssue rejects empty. */
   expectedPrefix: string;
   reason: string;
-  /** ISO 8601 timestamp string. Caller controls so the same value lands on the row + the YAML. */
-  timestamp: string;
+  /**
+   * ISO 8601 timestamp string. Caller controls so the same value lands
+   * on the row + the YAML. Stored on `Issue.blocked.at` (v10 — renamed
+   * from `Issue.blocked.timestamp` in DX-592).
+   */
+  at: string;
 }
 
 // DX-552 — writes go through `writeIssue` so the synchronous DB upsert
@@ -43,7 +47,7 @@ export async function stampIssueBlocked({
   candidateId,
   expectedPrefix,
   reason,
-  timestamp,
+  at,
 }: StampIssueBlockedInput): Promise<void> {
   const filePath = issuePath(repoLocalPath, candidateId, "open");
   if (!existsSync(filePath)) {
@@ -57,7 +61,7 @@ export async function stampIssueBlocked({
   const next: Issue = {
     ...issue,
     status: "Blocked",
-    blocked: { reason, timestamp },
+    blocked: { reason, at },
   };
   await writeIssue(repoLocalPath, next);
 }

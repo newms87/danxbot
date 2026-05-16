@@ -837,7 +837,7 @@ describe("handleDeleteAgent", () => {
     const issuesOpen = resolvePath(tmpRepoDir, ".danxbot/issues/open");
     mkdirSync(issuesOpen, { recursive: true });
     const claimedA = [
-      "schema_version: 7",
+      "schema_version: 10",
       "tracker: memory",
       "id: ISS-500",
       "external_id: ''",

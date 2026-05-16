@@ -7,7 +7,7 @@ function makeIssue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -33,7 +33,7 @@ function makeIssue(
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
     blocked:
       status === "Blocked"
-        ? { reason: "self-block", timestamp: "2026-01-01T00:00:00.000Z" }
+        ? { reason: "self-block", at: "2026-01-01T00:00:00.000Z" }
         : null,
     assigned_agent: null,
     waiting_on: null,
@@ -43,7 +43,13 @@ function makeIssue(
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 
 describe("decideFileMove — pure helper (DX-217)", () => {

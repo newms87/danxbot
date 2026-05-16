@@ -26,6 +26,7 @@ import {
   type RequiresHuman,
   type ConflictOnEntry,
 } from "./interface.js";
+import { migrateForward } from "./migrations/registry.js";
 
 const EFFORT_LEVEL_SET: ReadonlySet<EffortLevelName> = new Set(EFFORT_LEVEL_NAMES);
 
@@ -78,9 +79,29 @@ const TRIAGE_HISTORY_CAP = 10;
  *  - v8: `effort_level` field (DX-508 / DX-511).
  *  - v9: `db_updated_at` field (DX-545 / DX-546) — schema-only foundation
  *    for the synchronous DB-mirror write Phase 2 ships.
+ *  - v10 (DX-592, parent epic DX-591): five computed-timestamp fields
+ *    (`archived_at`, `ready_at`, `completed_at`, `cancelled_at`,
+ *    `list_name`) + `blocked.timestamp` renamed to `blocked.at`. v9 →
+ *    v10 conversion is delegated to
+ *    `src/issue-tracker/migrations/registry.ts#migrateForward` — the
+ *    validator invokes it before per-field validation when it sees a
+ *    v9 input (single-version tolerance window; P2's boot sweep
+ *    migrates every on-disk YAML forward; P3 removes the inline
+ *    tolerance once that sweep guarantees canonical-on-disk).
+ *
+ * Single-version tolerance rule:
+ *   `KNOWN_SCHEMA_MIN === KNOWN_SCHEMA_MAX - 1`. The validator accepts
+ *   exactly the canonical version and its immediate predecessor; the
+ *   boot sweep handles the rest. Pinned by the migration registry's
+ *   `MIN == MAX - 1 invariant` unit test.
+ *
+ * The literal values live in `./schema-versions.ts` so the migration
+ * registry can import them without creating a yaml.ts ↔ registry.ts
+ * cycle. We re-export here so existing imports (`import { KNOWN_SCHEMA_MAX }
+ * from "./yaml.js"`) keep working.
  */
-export const KNOWN_SCHEMA_MIN = 3;
-export const KNOWN_SCHEMA_MAX = 9;
+export { KNOWN_SCHEMA_MIN, KNOWN_SCHEMA_MAX } from "./schema-versions.js";
+import { KNOWN_SCHEMA_MIN, KNOWN_SCHEMA_MAX } from "./schema-versions.js";
 
 /**
  * Set of `schema_version` values this process has already warned about.
@@ -200,7 +221,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 9
+ *  - schema_version: 10 (v10 — DX-592)
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -215,6 +236,10 @@ function emptyTriage(): IssueTriage {
  *  - effort_level: null (DX-508 — inherits agent default at dispatch)
  *  - db_updated_at: <current ISO 8601> (DX-545 / DX-546 — Phase 2 wires
  *    the synchronous DB upsert; Phase 1 just stamps creation time)
+ *  - archived_at / ready_at / completed_at / cancelled_at / list_name:
+ *    null (v10 fields, DX-592 — downstream of DX-575 wires the
+ *    poller/picker/dispatch code that stamps these timestamps; this
+ *    phase only lands the on-disk shape).
  */
 export function createEmptyIssue(
   seed: {
@@ -225,12 +250,12 @@ export function createEmptyIssue(
     title?: string;
     description?: string;
     priority?: number;
-    blocked?: { reason: string; timestamp: string } | null;
+    blocked?: { reason: string; at: string } | null;
     effort_level?: EffortLevelName | null;
   } = {},
 ): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -256,6 +281,11 @@ export function createEmptyIssue(
     effort_level: seed.effort_level ?? null,
     history: [],
     db_updated_at: new Date().toISOString(),
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
 }
 
@@ -463,7 +493,9 @@ export function serializeIssue(issue: Issue): string {
         ? null
         : {
             reason: issue.blocked.reason,
-            timestamp: issue.blocked.timestamp,
+            // v10 — DX-592 renamed `timestamp` → `at` for consistency
+            // with every other timestamp field on the schema.
+            at: issue.blocked.at,
           },
     // `requires_human` is the orthogonal "this card needs a human"
     // indicator (DX-231 — replaces the retired `"Needs Approval"`
@@ -506,6 +538,19 @@ export function serializeIssue(issue: Issue): string {
     // simply joins the canonical tail on first round-trip). Empty
     // string serializes as YAML `""` — the "never-mirrored" sentinel.
     db_updated_at: issue.db_updated_at,
+    // v10 (DX-592) computed-timestamp fields. Position at the tail of
+    // the document so v9 YAMLs migrated forward via
+    // `migrations/registry.ts#migrateForward` re-serialize stably (the
+    // new keys simply append to the existing structure). Each is
+    // `string | null`; null is the "never-recorded" sentinel for
+    // cards that pre-date the field. Downstream (DX-575 phase cards
+    // gated by parent epic DX-591) wires the dispatch/picker/poller
+    // code that stamps these on the appropriate lifecycle events.
+    archived_at: issue.archived_at,
+    ready_at: issue.ready_at,
+    completed_at: issue.completed_at,
+    cancelled_at: issue.cancelled_at,
+    list_name: issue.list_name,
   };
 
   return stringifyYaml(doc, { lineWidth: 0 });
@@ -602,7 +647,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -679,7 +724,41 @@ export function validateIssue(
   if (!isPlainObject(value)) {
     return { ok: false, errors: ["Issue must be a YAML mapping"] };
   }
-  const v = value as Record<string, unknown>;
+  let v = value as Record<string, unknown>;
+
+  // v9 → v10 forward migration via the registry (DX-592, parent epic
+  // DX-591). The validator accepts MIN-version (v9) input and migrates
+  // it to canonical (v10) in place — `migrateForward` is a pure clone,
+  // so the caller's input is never mutated. This is the registry-based
+  // path the parent epic mandates ("keeps v9 readable through the
+  // registry, not through inline tolerance"). v3-v8 inputs fail the
+  // schema_version range check below (MIN=9) and never reach the
+  // registry; the inline tolerance branches for those older versions
+  // become unreachable dead code, kept in place until P3 deletes them.
+  if (
+    typeof v.schema_version === "number" &&
+    Number.isInteger(v.schema_version) &&
+    v.schema_version >= KNOWN_SCHEMA_MIN &&
+    v.schema_version < KNOWN_SCHEMA_MAX
+  ) {
+    try {
+      const migrated = migrateForward(v);
+      if (isPlainObject(migrated)) {
+        v = migrated as Record<string, unknown>;
+      }
+    } catch (err) {
+      // Registry-level failure (e.g. a buggy migration step). Surface
+      // as a validation error so the caller sees a consistent
+      // `{ok: false, errors}` shape — never propagate a raw throw
+      // through what callers treat as a validator.
+      return {
+        ok: false,
+        errors: [
+          `schema migration failed: ${err instanceof Error ? err.message : String(err)}`,
+        ],
+      };
+    }
+  }
 
   // schema_version — v3 through v6 (KNOWN_SCHEMA_MIN..KNOWN_SCHEMA_MAX),
   // with forward-compat for any integer > KNOWN_SCHEMA_MAX (DX-280).
@@ -966,7 +1045,7 @@ export function validateIssue(
       blockedResult = {
         reason:
           "(no recorded reason — migrated from legacy v3 'Needs Help' status; agent should overwrite on next pickup)",
-        timestamp: "1970-01-01T00:00:00.000Z",
+        at: "1970-01-01T00:00:00.000Z",
       };
     }
   } else {
@@ -1132,6 +1211,19 @@ export function validateIssue(
     }
   }
 
+  // v10 (DX-592) — five computed-timestamp / projection fields. Each
+  // is `string | null`; missing defaults to `null`. Anything that is
+  // NOT a string and NOT `null` / `undefined` pushes onto `errors[]`
+  // via the shared helper. Hoisted ABOVE the post-validation early-
+  // return so the gate at the end sees the same errors[] shape as
+  // every sibling field — mirrors the validate-into-local-→-early-
+  // return-→-build-issue idiom the rest of the function uses.
+  const archivedAtResult = optionalNullableStringResult(v, "archived_at", errors);
+  const readyAtResult = optionalNullableStringResult(v, "ready_at", errors);
+  const completedAtResult = optionalNullableStringResult(v, "completed_at", errors);
+  const cancelledAtResult = optionalNullableStringResult(v, "cancelled_at", errors);
+  const listNameResult = optionalNullableStringResult(v, "list_name", errors);
+
   if (errors.length > 0) {
     return { ok: false, errors };
   }
@@ -1151,7 +1243,7 @@ export function validateIssue(
     // disk. Lockstep contract: when the writer bumps, bump this literal
     // AND KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 9,
+    schema_version: 10,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -1176,8 +1268,49 @@ export function validateIssue(
     effort_level: effortLevelResult,
     history: historyResult,
     db_updated_at: dbUpdatedAtResult,
+    // v10 (DX-592). Missing on disk → null (the "never-recorded"
+    // sentinel for v9 cards migrated forward via the registry, and
+    // for fresh v10 cards that have not yet hit the lifecycle event
+    // that stamps the field). Validated above via
+    // `optionalNullableStringResult` so a hand-typo (number/boolean)
+    // fails loud rather than silently routing the wrong value into
+    // the canonical hash.
+    archived_at: archivedAtResult,
+    ready_at: readyAtResult,
+    completed_at: completedAtResult,
+    cancelled_at: cancelledAtResult,
+    list_name: listNameResult,
   };
   return { ok: true, issue };
+}
+
+/**
+ * Parse-time helper for v10's five computed-timestamp / projection
+ * fields (`archived_at`, `ready_at`, `completed_at`, `cancelled_at`,
+ * `list_name`). Shape: `string | null` with `null` as the default for
+ * missing keys. Anything that is NOT a string and NOT `null` /
+ * `undefined` fails loud — same forgiving discipline as
+ * `db_updated_at` (v9) which already uses the same defaulting shape.
+ *
+ * Errors are pushed onto the caller's `errors[]` so the validator can
+ * surface every defect in one pass; the returned value is `null` on
+ * error so the type checker sees a valid `string | null` regardless.
+ * The caller is responsible for the `errors.length > 0` early-return
+ * gate AFTER all five fields are read.
+ */
+function optionalNullableStringResult(
+  v: Record<string, unknown>,
+  key: string,
+  errors: string[],
+): string | null {
+  if (!(key in v)) return null;
+  const raw = v[key];
+  if (raw === null || raw === undefined) return null;
+  if (typeof raw !== "string") {
+    errors.push(`${key} must be a string or null (got ${JSON.stringify(raw)})`);
+    return null;
+  }
+  return raw;
 }
 
 /**
@@ -1617,10 +1750,13 @@ function validateWaitingOn(
 }
 
 /**
- * Validate the v4 `blocked` self-block field. Shape: `{reason, timestamp}`.
+ * Validate the v10 `blocked` self-block field. Shape: `{reason, at}`.
  * NO `by[]` (that's `waiting_on.by`). A v3 file's `blocked:` carries a
  * `by[]` and is mapped to `waiting_on:` upstream — `validateBlocked` is
- * only called on v4 input.
+ * only called on v4+ input. v9 inputs reach this function via
+ * `migrateForward` (in `validateIssue`), which renames `.timestamp` →
+ * `.at` before per-field validation, so by the time control lands here
+ * the `at` field is always populated and `.timestamp` is gone.
  */
 function validateBlocked(value: unknown): Blocked | null | string {
   if (value === null || value === undefined) return null;
@@ -1631,13 +1767,13 @@ function validateBlocked(value: unknown): Blocked | null | string {
   if (typeof v.reason !== "string" || v.reason.length === 0) {
     return "blocked.reason must be a non-empty string";
   }
-  if (typeof v.timestamp !== "string" || v.timestamp.length === 0) {
-    return "blocked.timestamp must be a non-empty string";
+  if (typeof v.at !== "string" || v.at.length === 0) {
+    return "blocked.at must be a non-empty string";
   }
   if ("by" in v) {
     return "blocked must NOT carry 'by' — use 'waiting_on' for dep-chain queues";
   }
-  return { reason: v.reason, timestamp: v.timestamp };
+  return { reason: v.reason, at: v.at };
 }
 
 function validateRetro(

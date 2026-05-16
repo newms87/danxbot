@@ -84,7 +84,7 @@ if (handle) {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -117,7 +117,13 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   // Auto-populate the self-block record when caller sets status="Blocked"
   // without an explicit `blocked` override. Keeps the v4 invariant
   // `status === "Blocked" ⟺ blocked !== null` without forcing every
@@ -125,7 +131,7 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "test self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;
@@ -460,7 +466,7 @@ describe("local-issues — DB-backed", () => {
             requires_human: REQUIRES_HUMAN_FIXTURE,
             blocked: {
               reason: "Self-block placeholder",
-              timestamp: "2026-01-01T00:00:00Z",
+              at: "2026-01-01T00:00:00Z",
             },
           }),
           1000,

@@ -65,7 +65,7 @@ const DanxDialogStub = defineComponent({
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -98,6 +98,11 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     assigned_agent: null,
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
 }
 
@@ -146,7 +151,7 @@ describe("PasteCardsDialog (DX-519)", () => {
     await flushPromises();
 
     const payload: IssueCopyPayload = {
-      schema_version: 9,
+      schema_version: 10,
       issues: [makeIssue({ id: "DX-100" }), makeIssue({ id: "DX-101" })],
     };
     await w
@@ -159,7 +164,7 @@ describe("PasteCardsDialog (DX-519)", () => {
     });
     expect(importMock).toHaveBeenCalledWith(
       "danxbot",
-      expect.objectContaining({ schema_version: 9 }),
+      expect.objectContaining({ schema_version: 10 }),
     );
 
     await vi.waitFor(() => {
@@ -218,7 +223,7 @@ describe("PasteCardsDialog (DX-519)", () => {
 
   it("auto-fills the textarea from the clipboard when the read returns a shaped payload", async () => {
     const text = JSON.stringify({
-      schema_version: 9,
+      schema_version: 10,
       issues: [makeIssue()],
     });
     installClipboardStub(() => Promise.resolve(text));

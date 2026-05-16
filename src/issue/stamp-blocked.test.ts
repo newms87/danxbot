@@ -39,7 +39,7 @@ describe("stampIssueBlocked", () => {
     );
   }
 
-  it("stamps status: Blocked + blocked.reason + blocked.timestamp on the candidate YAML", async () => {
+  it("stamps status: Blocked + blocked.reason + blocked.at on the candidate YAML", async () => {
     writeFixture("DX-1");
     const ts = "2026-05-14T00:00:00.000Z";
     await stampIssueBlocked({
@@ -47,7 +47,7 @@ describe("stampIssueBlocked", () => {
       candidateId: "DX-1",
       expectedPrefix: "DX",
       reason: "agent cannot proceed",
-      timestamp: ts,
+      at: ts,
     });
 
     const parsed = parseIssue(
@@ -57,7 +57,7 @@ describe("stampIssueBlocked", () => {
     expect(parsed.status).toBe("Blocked");
     expect(parsed.blocked).toEqual({
       reason: "agent cannot proceed",
-      timestamp: ts,
+      at: ts,
     });
   });
 
@@ -68,14 +68,14 @@ describe("stampIssueBlocked", () => {
       candidateId: "DX-1",
       expectedPrefix: "DX",
       reason: "first reason",
-      timestamp: "2026-05-14T00:00:00.000Z",
+      at: "2026-05-14T00:00:00.000Z",
     });
     await stampIssueBlocked({
       repoLocalPath: root,
       candidateId: "DX-1",
       expectedPrefix: "DX",
       reason: "second reason",
-      timestamp: "2026-05-14T01:00:00.000Z",
+      at: "2026-05-14T01:00:00.000Z",
     });
     const parsed = parseIssue(
       readFileSync(join(root, ".danxbot/issues/open/DX-1.yml"), "utf-8"),
@@ -83,7 +83,7 @@ describe("stampIssueBlocked", () => {
     );
     expect(parsed.status).toBe("Blocked");
     expect(parsed.blocked?.reason).toBe("second reason");
-    expect(parsed.blocked?.timestamp).toBe("2026-05-14T01:00:00.000Z");
+    expect(parsed.blocked?.at).toBe("2026-05-14T01:00:00.000Z");
   });
 
   it("throws when the candidate YAML does not exist", async () => {
@@ -93,7 +93,7 @@ describe("stampIssueBlocked", () => {
         candidateId: "DX-999",
         expectedPrefix: "DX",
         reason: "not gonna land",
-        timestamp: "2026-05-14T00:00:00.000Z",
+        at: "2026-05-14T00:00:00.000Z",
       }),
     ).rejects.toThrow(/candidate YAML not found/);
   });
@@ -117,7 +117,7 @@ describe("stampIssueBlocked", () => {
       candidateId: "DX-2",
       expectedPrefix: "DX",
       reason: "agent self-block",
-      timestamp: "2026-05-14T00:00:00.000Z",
+      at: "2026-05-14T00:00:00.000Z",
     });
 
     const parsed = parseIssue(readFileSync(yamlPath, "utf-8"), {

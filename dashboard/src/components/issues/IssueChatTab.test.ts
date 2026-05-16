@@ -30,7 +30,7 @@ import IssueChatTab from "./IssueChatTab.vue";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "DX-352",
     external_id: "",

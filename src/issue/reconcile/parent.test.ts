@@ -4,7 +4,7 @@ import { applyParentDeriveMutation, deriveParentStatus } from "./parent.js";
 
 function child(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -36,11 +36,17 @@ function child(id: string, status: IssueStatus): Issue {
     effort_level: null,
     history: [],
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "test self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;
@@ -177,7 +183,7 @@ function makeParent(
   overrides: Partial<Issue> = {},
 ): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -210,11 +216,17 @@ function makeParent(
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;
@@ -251,7 +263,7 @@ describe("applyParentDeriveMutation — shared mutation helper (DX-217)", () => 
     expect(updated.blocked).not.toBeNull();
     expect(updated.blocked!.reason).toContain("Auto-derived from children");
     expect(updated.blocked!.reason).toContain("Blocked");
-    expect(updated.blocked!.timestamp).toBe(NOW);
+    expect(updated.blocked!.at).toBe(NOW);
   });
 
   it("clears blocked record when derived from Blocked → non-Blocked (invariant maintenance)", () => {
@@ -268,7 +280,7 @@ describe("applyParentDeriveMutation — shared mutation helper (DX-217)", () => 
 
   it("preserves an EXISTING blocked record on Blocked → Blocked re-derive (no rewrite)", () => {
     const issue = makeParent("Blocked", {
-      blocked: { reason: "manual operator block", timestamp: "2026-01-01T00:00:00.000Z" },
+      blocked: { reason: "manual operator block", at: "2026-01-01T00:00:00.000Z" },
     });
     const updated = applyParentDeriveMutation(
       issue,

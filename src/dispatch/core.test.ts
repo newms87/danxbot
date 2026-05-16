@@ -788,7 +788,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
           }),
           blocked: {
             reason: "concurrent stamp by prep-verdict route",
-            timestamp: "2026-05-14T00:00:00.000Z",
+            at: "2026-05-14T00:00:00.000Z",
           },
         };
         writeFileSync(
@@ -2008,7 +2008,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -2088,7 +2088,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -2161,7 +2161,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,
@@ -2257,7 +2257,7 @@ describe("dispatch() — lockRelease wiring (DX-241)", () => {
 
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard({
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "ISS-1",
       parent_id: null,

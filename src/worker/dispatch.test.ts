@@ -822,7 +822,7 @@ describe("handleStop", () => {
       candidateId: "DX-42",
       expectedPrefix: MOCK_REPO.issuePrefix,
       reason: "Rebase conflict in src/foo.ts:42 — cannot reconcile",
-      timestamp: expect.stringMatching(
+      at: expect.stringMatching(
         /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
       ),
     });
@@ -1403,7 +1403,7 @@ describe("handleStop", () => {
         candidateId: "DX-800",
         expectedPrefix: MOCK_REPO.issuePrefix,
         reason: expect.stringContaining("DX-559 enforcement"),
-        timestamp: expect.stringMatching(
+        at: expect.stringMatching(
           /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
         ),
       });
@@ -1586,7 +1586,7 @@ describe("handleStop", () => {
         candidateId: "DX-200",
         expectedPrefix: MOCK_REPO.issuePrefix,
         reason: expect.stringContaining("DX-559 enforcement"),
-        timestamp: expect.stringMatching(
+        at: expect.stringMatching(
           /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z$/,
         ),
       });

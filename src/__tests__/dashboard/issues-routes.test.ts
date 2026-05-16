@@ -162,7 +162,7 @@ describe("handleGetIssue", () => {
 
   it("returns the full detail body verbatim", async () => {
     const detail = {
-      schema_version: 4,
+      schema_version: 10,
       id: "ISS-1",
       title: "t",
       description: "body",

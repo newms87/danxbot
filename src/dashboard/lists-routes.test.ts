@@ -353,12 +353,12 @@ describe("DELETE /api/lists/:id", () => {
     mkdirSync(openDir, { recursive: true });
     writeFileSync(
       resolve(openDir, "DX-99.yml"),
-      `id: DX-99\nschema_version: 9\nlist_name: Second Review\ntitle: Card\n`,
+      `id: DX-99\nschema_version: 10\nlist_name: Second Review\ntitle: Card\n`,
     );
     // Seed another whose list_name does NOT match — must NOT be touched.
     writeFileSync(
       resolve(openDir, "DX-100.yml"),
-      `id: DX-100\nschema_version: 9\nlist_name: Review\ntitle: Other\n`,
+      `id: DX-100\nschema_version: 10\nlist_name: Review\ntitle: Other\n`,
     );
 
     const res = createMockRes();

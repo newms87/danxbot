@@ -9,7 +9,7 @@ const patchMock = vi.mocked(patchIssue);
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -46,6 +46,11 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     requires_human_child_count: 0,
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
 }
 
@@ -81,7 +86,7 @@ describe("DispatchGatesSection", () => {
   it("banner starts collapsed and expands on click", async () => {
     const w = mountSection(
       makeDetail({
-        blocked: { reason: "needs creds", timestamp: "2026-05-12T00:00:00Z" },
+        blocked: { reason: "needs creds", at: "2026-05-12T00:00:00Z" },
       }),
     );
     expect(w.find('[data-test="gate-blocked-body"]').exists()).toBe(false);
@@ -93,7 +98,7 @@ describe("DispatchGatesSection", () => {
     patchMock.mockResolvedValue(makeDetail() as never);
     const w = mountSection(
       makeDetail({
-        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+        blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
       }),
     );
     await w.find('[data-test="gate-blocked-toggle"]').trigger("click");

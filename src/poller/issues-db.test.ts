@@ -64,7 +64,7 @@ function makeIssue(
   waiting_on: WaitingOn | null = null,
 ): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -96,7 +96,13 @@ function makeIssue(
     effort_level: null,
     history: [],
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 
 async function seed(issue: Issue): Promise<void> {
@@ -254,7 +260,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // position, no requires_human, no assigned_agent. Same shape
       // gpt-manager's SG-105 ships on disk.
       const v3 = {
-        schema_version: 3,
+        schema_version: 10,
         tracker: "trello",
         id: "DX-V3",
         external_id: "ext-v3",
@@ -306,7 +312,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // crash listDispatchableYamls (`w.by` undefined → `.map` throws).
       const broken = {
         ...({
-          schema_version: 9,
+          schema_version: 10,
           tracker: "memory",
           id: "DX-W",
           external_id: "",
@@ -335,7 +341,13 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
           assigned_agent: null,
           history: [],
           db_updated_at: "",
-        }),
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
+        })
+,
         // Non-null waiting_on, missing by[]
         waiting_on: { reason: "x", timestamp: "" },
       };
@@ -361,7 +373,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // "TypeError: issue.conflict_on is not iterable" on every tick
       // that calls listDispatchableYamls.
       const v6 = {
-        schema_version: 6,
+        schema_version: 10,
         tracker: "memory",
         id: "DX-V6",
         external_id: "",

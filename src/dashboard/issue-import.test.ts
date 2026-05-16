@@ -121,7 +121,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
   it("returns a single-issue payload for a leaf card", () => {
     writeIssueFixture(repoLocalPath, makeIssue());
     const payload = buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
-    expect(payload.schema_version).toBe(9);
+    expect(payload.schema_version).toBe(10);
     expect(payload.issues).toHaveLength(1);
     expect(payload.issues[0].id).toBe("DX-1");
     expect(payload.issues[0].title).toBe("Root card");
@@ -239,7 +239,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
         status: "Blocked",
         blocked: {
           reason: "Need a credential rotation",
-          timestamp: "2026-05-14T01:00:00Z",
+          at: "2026-05-14T01:00:00Z",
         },
         waiting_on: null,
         requires_human: {
@@ -262,7 +262,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
     expect(issue.status).toBe("Blocked");
     expect(issue.blocked).toEqual({
       reason: "Need a credential rotation",
-      timestamp: "2026-05-14T01:00:00Z",
+      at: "2026-05-14T01:00:00Z",
     });
     expect(issue.requires_human?.reason).toBe("Operator must do X");
     expect(issue.requires_human?.steps).toEqual(["step 1", "step 2"]);
@@ -348,7 +348,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
 
 describe("applyIssueImport — happy paths", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 9, issues };
+    return { schema_version: 10, issues };
   }
 
   it("allocates a fresh id and writes the single-card YAML", async () => {
@@ -505,7 +505,7 @@ describe("applyIssueImport — happy paths", () => {
       status: "Blocked",
       blocked: {
         reason: "Original blocker text",
-        timestamp: "2026-05-14T00:00:00Z",
+        at: "2026-05-14T00:00:00Z",
       },
     });
     const result = await applyIssueImport(
@@ -516,7 +516,7 @@ describe("applyIssueImport — happy paths", () => {
     expect(result.issues[0].status).toBe("Blocked");
     expect(result.issues[0].blocked).toEqual({
       reason: "Original blocker text",
-      timestamp: "2026-05-14T00:00:00Z",
+      at: "2026-05-14T00:00:00Z",
     });
   });
 
@@ -648,7 +648,7 @@ describe("applyIssueImport — happy paths", () => {
 
 describe("applyIssueImport — validation failures", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 9, issues };
+    return { schema_version: 10, issues };
   }
 
   it("rejects a non-object body with 400", async () => {
@@ -702,7 +702,7 @@ describe("applyIssueImport — validation failures", () => {
   it("rejects an issue whose id does not match <PREFIX>-N", async () => {
     await expect(
       applyIssueImport("danxbot", repoLocalPath, {
-        schema_version: 9,
+        schema_version: 10,
         issues: [{ id: "not-an-id" }],
       }),
     ).rejects.toMatchObject({ status: 400 });
@@ -759,7 +759,7 @@ describe("applyIssueImport — validation failures", () => {
 
 describe("handleImportIssues — HTTP route", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 9, issues };
+    return { schema_version: 10, issues };
   }
 
   function depsForRepo() {
@@ -874,7 +874,7 @@ describe("handleGetIssueSubtree — HTTP route", () => {
     await handleGetIssueSubtree(req, res, "DX-1", "danxbot", depsForRepo());
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody()) as IssueCopyPayload;
-    expect(body.schema_version).toBe(9);
+    expect(body.schema_version).toBe(10);
     expect(body.issues).toHaveLength(1);
     expect(body.issues[0].id).toBe("DX-1");
   });

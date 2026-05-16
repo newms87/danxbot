@@ -168,7 +168,7 @@ function seedHydratedCard(externalId: string, title: string): void {
   // `getCard(externalId)` and `getComments(externalId)`. Seed both with
   // the synthetic Issue the poller will see on this dispatch.
   trackerMock.getCard.mockResolvedValue({
-    schema_version: 3 as const,
+    schema_version: 10 as const,
     tracker: "memory",
     id: "ISS-1",
     external_id: externalId,
@@ -679,7 +679,7 @@ describe("Integration: critical-failure end-to-end (Trello AC12)", () => {
     writeFileSync(
       join(issuesDir, "ISS-1.yml"),
       [
-        "schema_version: 3",
+        "schema_version: 10",
         "tracker: trello",
         "id: ISS-1",
         `external_id: ${STUCK_CARD_ID}`,

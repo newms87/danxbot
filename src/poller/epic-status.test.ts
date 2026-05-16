@@ -29,7 +29,7 @@ import { ensureIssuesDirs } from "../issue-tracker/paths.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",
@@ -62,11 +62,17 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "test self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;

@@ -743,7 +743,7 @@ describe("handlePrepVerdict — blocked verdict", () => {
     expect(yaml.status).toBe("Blocked");
     expect(yaml.blocked).toEqual({
       reason: "spec ambiguous",
-      timestamp: new Date(fixedNow).toISOString(),
+      at: new Date(fixedNow).toISOString(),
     });
     expect(stop).toHaveBeenCalledWith(
       "completed",
@@ -1072,7 +1072,7 @@ describe("handlePrepVerdict — DB writer consistency (DX-552 regression)", () =
       expect(last.data.status).toBe("Blocked");
       expect(last.data.blocked).toEqual({
         reason: "spec ambiguous",
-        timestamp: "2026-05-15T07:00:00.000Z",
+        at: "2026-05-15T07:00:00.000Z",
       });
     } finally {
       writerDb.unregister();

@@ -48,7 +48,7 @@ import { ReconcileValidationError, type ReconcileResult } from "./reconcile-type
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: "",
@@ -80,7 +80,13 @@ function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
     effort_level: null,
     history: [],
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 
 function makeRepoCtx(): {
@@ -757,7 +763,7 @@ describe("reconcileIssue — Phase 2 parent-derive (DX-217)", () => {
         blocked: {
           reason:
             "Auto-derived from children: Any child Blocked — parent Blocked",
-          timestamp: "2026-01-01T00:00:00.000Z",
+          at: "2026-01-01T00:00:00.000Z",
         },
       };
       writeYaml(dbCtx.openDir, "DX-550", parent);
@@ -1154,7 +1160,7 @@ describe("reconcileIssue — fanout.dispatchableChanged (Phase 4b.1 / DX-288)", 
       ...makeIssue("DX-1003", "Blocked"),
       blocked: {
         reason: "Awaiting design decision",
-        timestamp: "2026-05-11T10:00:00Z",
+        at: "2026-05-11T10:00:00Z",
       },
     };
     writeYaml(ctx.openDir, "DX-1003", issue);
@@ -1253,7 +1259,7 @@ describe("reconcileIssue — fanout.dispatchableChanged (Phase 4b.1 / DX-288)", 
   it("flips true when blocked clears (Blocked → ToDo)", async () => {
     const blockedIssue: Issue = {
       ...makeIssue("DX-1009", "Blocked"),
-      blocked: { reason: "Initial block", timestamp: "2026-05-11T10:00:00Z" },
+      blocked: { reason: "Initial block", at: "2026-05-11T10:00:00Z" },
     };
     writeYaml(ctx.openDir, "DX-1009", blockedIssue);
     await reconcileIssue(ctx.repo, "DX-1009", "watcher"); // prime: non-dispatchable

@@ -278,7 +278,7 @@ const conflictSummary = computed(() => {
         <span class="gate-glyph" aria-hidden="true">🔒</span>
         <span class="gate-label">Blocked</span>
         <span class="gate-summary">{{ blockedSummary }}</span>
-        <span class="gate-meta">{{ selfBlocked.timestamp }}</span>
+        <span class="gate-meta">{{ selfBlocked.at }}</span>
       </button>
       <div v-if="expanded.blocked" class="gate-body" data-test="gate-blocked-body">
         <p class="gate-reason">{{ selfBlocked.reason }}</p>

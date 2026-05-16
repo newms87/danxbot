@@ -205,7 +205,7 @@ describe("YAML invariant: (dispatch !== null) === (assigned_agent !== null) — 
       }),
       blocked: {
         reason: "test",
-        timestamp: "2026-05-11T07:00:00Z",
+        at: "2026-05-11T07:00:00Z",
       },
     };
 

@@ -60,7 +60,7 @@ function writeIssue(
 ): string {
   const path = join(dir, `${issue.id}.yml`);
   const lines: string[] = [
-    "schema_version: 3",
+    "schema_version: 10",
     "tracker: trello",
     `id: ${issue.id}`,
     'external_id: ""',
@@ -113,16 +113,19 @@ function writeIssue(
   } else {
     lines.push("  commits: []");
   }
-  // Blocked
+  // waiting_on (the v4+ dep-chain field — was the v3 `blocked.by[]`,
+  // renamed in the v3 → v4 schema bump). `blocked` is always the
+  // self-block record in v10; carry only `waiting_on.by[]` here.
   if (issue.blocked_by && issue.blocked_by.length > 0) {
-    lines.push("blocked:");
+    lines.push("waiting_on:");
     lines.push('  reason: "test reason"');
     lines.push('  timestamp: "2026-01-01T00:00:00Z"');
     lines.push("  by:");
     for (const id of issue.blocked_by) lines.push(`    - ${id}`);
   } else {
-    lines.push("blocked: null");
+    lines.push("waiting_on: null");
   }
+  lines.push("blocked: null");
   // Build cleaned (drop the duplicate "children: []" insertion path)
   // The lines array above accidentally produces the children: list followed by
   // an extra "children: []" — so re-build via parseIssue + serializeIssue for
@@ -165,7 +168,7 @@ describe("rewriteIdFields", () => {
   it("rewrites id, parent_id, children, waiting_on.by, action_item_ids", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 9,
+        schema_version: 10,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -213,7 +216,13 @@ describe("rewriteIdFields", () => {
         effort_level: null,
         history: [],
         db_updated_at: "",
-      }),
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
+      })
+,
       { expectedPrefix: "ISS" },
     );
     const out = rewriteIdFields(issue, "ISS", "DX");
@@ -232,7 +241,7 @@ describe("rewriteIdFields", () => {
   it("leaves cross-prefix refs untouched (defensive)", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 9,
+        schema_version: 10,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -264,7 +273,13 @@ describe("rewriteIdFields", () => {
         effort_level: null,
         history: [],
         db_updated_at: "",
-      }),
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
+      })
+,
       { expectedPrefix: "ISS" },
     );
     const out = rewriteIdFields(issue, "ISS", "DX");

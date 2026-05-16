@@ -88,7 +88,7 @@ interface StoredCard {
     commits: string[];
   };
   waiting_on: { reason: string; timestamp: string; by: string[] } | null;
-  blocked: { reason: string; timestamp: string } | null;
+  blocked: { reason: string; at: string } | null;
   requires_human: RequiresHuman | null;
   conflict_on: { id: string; reason: string }[];
   effort_level: import("../../issue-tracker/interface.js").EffortLevelName | null;
@@ -382,7 +382,7 @@ export class FakeTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 9,
+      schema_version: 10,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -421,7 +421,7 @@ export class FakeTracker implements IssueTracker {
       blocked:
         card.blocked === null
           ? null
-          : { reason: card.blocked.reason, timestamp: card.blocked.timestamp },
+          : { reason: card.blocked.reason, at: card.blocked.at },
       requires_human:
         card.requires_human === null
           ? null
@@ -439,6 +439,12 @@ export class FakeTracker implements IssueTracker {
       history: [],
       labels: { ...card.labels },
       db_updated_at: "",
+      // v10 (DX-592) — same null-on-read discipline as Trello.getCard.
+      archived_at: null,
+      ready_at: null,
+      completed_at: null,
+      cancelled_at: null,
+      list_name: null,
     };
   }
 
@@ -476,7 +482,7 @@ export class FakeTracker implements IssueTracker {
       blocked:
         issue.blocked === null
           ? null
-          : { reason: issue.blocked.reason, timestamp: issue.blocked.timestamp },
+          : { reason: issue.blocked.reason, at: issue.blocked.at },
       requires_human:
         issue.requires_human === null
           ? null

@@ -95,7 +95,7 @@ function makeIssueSnapshot(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: "",
@@ -128,6 +128,11 @@ function makeIssueSnapshot(
     assigned_agent: null,
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
 }
 

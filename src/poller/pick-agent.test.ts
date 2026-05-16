@@ -47,7 +47,7 @@ function issue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: "",
@@ -80,7 +80,13 @@ function issue(
     history: [],
     ...overrides,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 
 const NOW = new Date("2026-04-20T15:00:00Z"); // Mon 10:00 CDT
@@ -403,7 +409,7 @@ describe("findOwnedCard", () => {
       issue("DX-1", {
         assigned_agent: "alice",
         status: "Blocked",
-        blocked: { reason: "x", timestamp: "2026-04-20T00:00:00Z" },
+        blocked: { reason: "x", at: "2026-04-20T00:00:00Z" },
       }),
     ];
     const out = findOwnedCard("alice", open);

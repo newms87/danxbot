@@ -1527,7 +1527,7 @@ async function handleStopFromDb(
         candidateId: dispatch.issueId,
         expectedPrefix: repo.issuePrefix,
         reason: summary,
-        timestamp: nowIso,
+        at: nowIso,
       });
     } catch (err) {
       log.error(
@@ -1688,7 +1688,7 @@ export async function handleStop(
       // Self-block: same asymmetry as critical_failure. Response
       // advertises "agent_blocked", but `job.stop("failed", ...)` ends
       // the row as failed — the self-block signal lives on the
-      // candidate YAML (status: Blocked + blocked: {reason, timestamp}).
+      // candidate YAML (status: Blocked + blocked: {reason, at}).
       // Stamp the YAML BEFORE job.stop so the auto-sync inside job.stop
       // pushes the Blocked record to the tracker.
       if (!summary) {
@@ -1713,7 +1713,7 @@ export async function handleStop(
           candidateId: dispatchRow.issueId,
           expectedPrefix: repo.issuePrefix,
           reason: summary,
-          timestamp: nowIso,
+          at: nowIso,
         });
       } catch (err) {
         log.error(

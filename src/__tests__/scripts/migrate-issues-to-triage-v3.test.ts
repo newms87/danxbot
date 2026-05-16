@@ -33,7 +33,7 @@ function legacyYaml(opts: {
   const ex = opts.triagedExplain ?? "";
   const dispatch = opts.dispatchId === undefined ? "null" : JSON.stringify(opts.dispatchId);
   return [
-    "schema_version: 3",
+    "schema_version: 2",
     "tracker: trello",
     `id: ${opts.id}`,
     'external_id: ""',
@@ -60,7 +60,13 @@ function legacyYaml(opts: {
   ].join("\n");
 }
 
-describe("migrate-issues-to-triage-v3", () => {
+// Skipped under DX-592 / parent epic DX-591 single-version tolerance
+// (MIN=9, MAX=10). This one-shot script migrates v1/v2 → v3 YAMLs;
+// its output (`schema_version: 3`) no longer parses through the strict
+// validator. The script + its tests get deleted wholesale in P4 of
+// the epic ("Delete one-shot migration scripts"). Skipping rather
+// than deleting here keeps P1's scope tight.
+describe.skip("migrate-issues-to-triage-v3", () => {
   it("migrates a legacy YAML to the new schema and copies triaged values to triage.history[0] + last_*", () => {
     const repo = setupRepo();
     try {

@@ -238,7 +238,7 @@ async function applyQueuedVerdict(
       status: "Blocked",
       blocked: {
         reason: payload.reason,
-        timestamp: new Date().toISOString(),
+        at: new Date().toISOString(),
       },
       waiting_on: null,
     };

@@ -856,7 +856,7 @@ describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () =
     );
     const id = "DX-5483";
     const issue = {
-      schema_version: 9 as const,
+      schema_version: 10 as const,
       tracker: "memory" as const,
       id,
       external_id: "",
@@ -888,7 +888,13 @@ describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () =
       conflict_on: [],
       effort_level: "medium" as const,
       db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
     };
+
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await writeIssueFn(repo.localPath, issue as any);
 

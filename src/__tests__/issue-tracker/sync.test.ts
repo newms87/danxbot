@@ -18,7 +18,7 @@ import type {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -190,7 +190,7 @@ describe("syncIssue", () => {
   describe("orphan recovery (empty external_id → createCard)", () => {
     function orphan(): Issue {
       return {
-        schema_version: 9,
+        schema_version: 10,
         tracker: "memory",
         id: "ISS-1",
         external_id: "",
@@ -215,7 +215,13 @@ describe("syncIssue", () => {
         effort_level: null,
         history: [],
         db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
       };
+
     }
 
     it("calls tracker.createCard exactly once and never calls getCard/getComments with empty id", async () => {
@@ -380,7 +386,7 @@ describe("syncIssue", () => {
       status: "Blocked",
       blocked: {
         reason: "self-blocked",
-        timestamp: "2026-05-04T18:00:00.000Z",
+        at: "2026-05-04T18:00:00.000Z",
       },
     };
     tracker.clearRequestLog();
@@ -496,7 +502,7 @@ describe("syncIssue", () => {
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
       status: "Blocked",
-      blocked: { reason: "self-block", timestamp: "2026-05-10T00:00:00.000Z" },
+      blocked: { reason: "self-block", at: "2026-05-10T00:00:00.000Z" },
       requires_human: {
         reason: "Need Stripe API key rotated",
         steps: ["Roll the Stripe secret"],
@@ -527,7 +533,7 @@ describe("syncIssue", () => {
       status: "Blocked",
       blocked: {
         reason: "self-blocked",
-        timestamp: "2026-05-04T18:00:00.000Z",
+        at: "2026-05-04T18:00:00.000Z",
       },
     };
     tracker.clearRequestLog();
@@ -579,7 +585,7 @@ describe("syncIssue", () => {
     // Build a tracker pre-seeded with a card whose triage record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "ISS-2",
       external_id: "card-triaged",
@@ -619,7 +625,13 @@ describe("syncIssue", () => {
       effort_level: null,
       history: [],
       db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
     };
+
     const tracker = new FakeTracker({ seed: [seed] });
     const local: Issue = {
       ...(await tracker.getCard("card-triaged")),
@@ -1325,7 +1337,7 @@ describe("syncIssue", () => {
       status: "Blocked",
       blocked: {
         reason: "Self-blocked",
-        timestamp: "2026-05-05T00:00:00Z",
+        at: "2026-05-05T00:00:00Z",
       },
     };
     const first = await syncIssue(tracker, blocked);
@@ -1337,7 +1349,7 @@ describe("syncIssue", () => {
       ...first.updatedLocal,
       blocked: {
         reason: "Different reason — same blocked semantics",
-        timestamp: "2026-05-06T00:00:00Z",
+        at: "2026-05-06T00:00:00Z",
       },
     };
     const second = await syncIssue(tracker, reworded);

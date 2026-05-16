@@ -776,7 +776,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       expect(issue.status).toBe("Blocked");
       expect(issue.blocked).not.toBeNull();
       expect(issue.blocked!.reason).toBe("Manually moved to Blocked via dashboard");
-      expect(issue.blocked!.timestamp).toBe(frozen.toISOString());
+      expect(issue.blocked!.at).toBe(frozen.toISOString());
     } finally {
       vi.useRealTimers();
     }
@@ -786,7 +786,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     writeFixture(
       makeIssue({
         status: "Blocked",
-        blocked: { reason: "old reason", timestamp: "2026-04-20T00:00:00Z" },
+        blocked: { reason: "old reason", at: "2026-04-20T00:00:00Z" },
       }),
       "open",
     );
@@ -1284,7 +1284,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
     writeFixture(
       makeIssue({
         status: "Blocked",
-        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+        blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
       }),
       "open",
     );
@@ -1306,7 +1306,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
         "danxbot",
         repoLocalPath,
         "DX-1",
-        { blocked: { reason: "fake", timestamp: "2026-05-12T00:00:00Z" } } as unknown as IssuePatch,
+        { blocked: { reason: "fake", at: "2026-05-12T00:00:00Z" } } as unknown as IssuePatch,
         "alice",
       ),
     ).rejects.toMatchObject({ status: 400 });
@@ -1475,7 +1475,7 @@ describe("createIssue — happy path", () => {
     expect(issue.status).toBe("Blocked");
     expect(issue.blocked).toEqual({
       reason: "Awaiting flesh-out — start as Review",
-      timestamp: expect.any(String),
+      at: expect.any(String),
     });
     expect(issue.type).toBe("Feature");
     // YAML landed in open/ at the expected path
@@ -1572,7 +1572,7 @@ describe("createIssue — happy path", () => {
     // DX-544 — sentinel-block ride-along (blocked is non-null on create).
     expect(issue.blocked).toEqual({
       reason: "Awaiting flesh-out — start as Review",
-      timestamp: expect.any(String),
+      at: expect.any(String),
     });
     expect(issue.requires_human).toBeNull();
   });

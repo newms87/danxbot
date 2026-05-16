@@ -86,7 +86,7 @@ export interface PrepVerdictDeps {
   getJob?: (id: string) => AgentJob | undefined;
   setBroken?: typeof setAgentBroken;
   /**
-   * Wall-clock used to stamp `blocked.timestamp` + `broken.set_at`.
+   * Wall-clock used to stamp `blocked.at` + `broken.set_at`.
    * Defaults to `Date.now()`. Tests inject a frozen clock so
    * assertions stay deterministic across the route's reads/writes.
    */
@@ -236,7 +236,7 @@ async function applyWaitingOnVerdict(
 
 /**
  * Apply the `blocked` verdict. Reads + parses the candidate YAML,
- * stamps `status: "Blocked"` + `blocked: {reason, timestamp: nowIso}`,
+ * stamps `status: "Blocked"` + `blocked: {reason, at: nowIso}`,
  * writes back. Idempotent — re-POSTs bump the timestamp but leave the
  * card in Blocked. Any pre-existing `waiting_on` record is preserved
  * (independent durable dep-chain note; not coupled to status).
@@ -252,7 +252,7 @@ async function applyBlockedVerdict(
     candidateId,
     expectedPrefix: repo.issuePrefix,
     reason: payload.reason,
-    timestamp: nowIso,
+    at: nowIso,
   });
 }
 

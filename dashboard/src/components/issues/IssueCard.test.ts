@@ -259,7 +259,7 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
     const w = mountCard(
       makeListItem({
         status: "Blocked",
-        blocked: { reason: "needs ops token", timestamp: "2026-05-12T00:00:00Z" },
+        blocked: { reason: "needs ops token", at: "2026-05-12T00:00:00Z" },
       }),
     );
     const pill = w.get("[data-test='blocked-pill']");
@@ -308,7 +308,7 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
     const w = mountCard(
       makeListItem({
         status: "Blocked",
-        blocked: { reason: "x", timestamp: "2026-05-12T00:00:00Z" },
+        blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
         waiting_on: true,
         waiting_on_reason: "y",
         waiting_on_by: ["DX-3"],

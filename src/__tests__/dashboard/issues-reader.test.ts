@@ -59,7 +59,7 @@ let nextHistorySeq = 0;
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",
@@ -92,11 +92,17 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     conflict_on: overrides.conflict_on ?? [],
     effort_level: overrides.effort_level ?? null,
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "test self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;
@@ -2201,7 +2207,7 @@ describe("child_assignments rollup (DX-524)", () => {
         title: "Phase 3",
         status: "Blocked",
         assigned_agent: "phil",
-        blocked: { reason: "needs key", timestamp: "2026-01-01T00:00:00Z" },
+        blocked: { reason: "needs key", at: "2026-01-01T00:00:00Z" },
       }),
       1_700_000_000_000,
     );

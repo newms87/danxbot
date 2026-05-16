@@ -179,7 +179,7 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 const lastOpenCards: { value: IssueRef[] } = { value: [] };
 function refToFakeIssue(ref: IssueRef): Issue {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -204,7 +204,13 @@ function refToFakeIssue(ref: IssueRef): Issue {
     effort_level: null,
     history: [],
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
 }
 // epic-status: queries the DB for parent + child rows since DX-155.
 // The unit mock-suite has no live PG, so stub the recompute pass to a
@@ -308,7 +314,7 @@ function seedDraft(
   ac: { check_item_id: string }[];
 }> {
   return tracker.createCard({
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -424,7 +430,7 @@ describe("Integration: poller hot path against FakeTracker", () => {
     );
     mockHydrateFromRemote.mockImplementation(
       async (_t: unknown, externalId: string, dispatchId: string) => ({
-        schema_version: 3 as const,
+        schema_version: 10 as const,
         tracker: "memory",
         id: "ISS-1",
         external_id: externalId,
@@ -494,7 +500,7 @@ describe("Integration: poller hot path against FakeTracker", () => {
     let allocCounter = 0;
     mockHydrateFromRemote.mockImplementation(
       async (_t: unknown, externalId: string, dispatchId: string | null) => ({
-        schema_version: 3 as const,
+        schema_version: 10 as const,
         tracker: "memory",
         id: `ISS-${++allocCounter}`,
         external_id: externalId,
@@ -570,7 +576,7 @@ describe("Integration: poller hot path against FakeTracker", () => {
           throw new Error("Trello API error: 401 Unauthorized");
         }
         return {
-          schema_version: 3 as const,
+          schema_version: 10 as const,
           tracker: "memory",
           id: "ISS-2",
           external_id: externalId,
@@ -606,7 +612,7 @@ describe("Integration: poller hot path against FakeTracker", () => {
     mockFindByExternalId.mockImplementation(async (_repo: string, eid: string) => {
       if (eid === "mem-1") {
         return {
-          schema_version: 3 as const,
+          schema_version: 10 as const,
           tracker: "memory",
           id: "ISS-1",
           external_id: "mem-1",
@@ -628,7 +634,7 @@ describe("Integration: poller hot path against FakeTracker", () => {
 
     mockHydrateFromRemote.mockImplementation(
       async (_t: unknown, externalId: string, dispatchId: string | null) => ({
-        schema_version: 3 as const,
+        schema_version: 10 as const,
         tracker: "memory",
         id: "ISS-2",
         external_id: externalId,

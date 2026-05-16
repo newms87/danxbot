@@ -197,7 +197,7 @@ export async function replayStopQueue(
               candidateId: dispatch.issueId,
               expectedPrefix: repo.issuePrefix,
               reason: entry.summary,
-              timestamp: new Date(terminatedAt).toISOString(),
+              at: new Date(terminatedAt).toISOString(),
             });
           } catch (err) {
             log.error(

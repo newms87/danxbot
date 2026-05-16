@@ -129,7 +129,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 9,
+      schema_version: 10,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -190,6 +190,15 @@ export class TrelloTracker implements IssueTracker {
       // the canonical "never-mirrored" sentinel until a save passes
       // through the DB-mirror upsert (Phase 2 wires that path).
       db_updated_at: "",
+      // v10 (DX-592) — Trello has no native field for the lifecycle
+      // timestamp projections. Always emit null on read so the local
+      // YAML stays authoritative once it gets stamped downstream of
+      // DX-575.
+      archived_at: null,
+      ready_at: null,
+      completed_at: null,
+      cancelled_at: null,
+      list_name: null,
       labels,
     };
   }

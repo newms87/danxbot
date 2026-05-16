@@ -134,7 +134,7 @@ export function applyParentDeriveMutation(
   if (derived.status === "Blocked" && issue.blocked === null) {
     updatedBlocked = {
       reason: `Auto-derived from children: ${derived.rule}`,
-      timestamp: now,
+      at: now,
     };
   } else if (derived.status !== "Blocked" && issue.blocked !== null) {
     updatedBlocked = null;

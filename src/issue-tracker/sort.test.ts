@@ -47,7 +47,7 @@ function mkIssue(k: Knobs): Issue {
     i.status = "Blocked";
     i.blocked = {
       reason: k.blockedReason,
-      timestamp: "2030-01-01T00:00:00.000Z",
+      at: "2030-01-01T00:00:00.000Z",
     };
   }
   if (k.position !== undefined) i.position = k.position;

@@ -98,7 +98,7 @@ import type { CreateCardInput, Issue, IssueStatus } from "../issue-tracker/inter
 
 function buildIssueLite(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id,
     external_id: "",
@@ -130,11 +130,17 @@ function buildIssueLite(id: string, status: IssueStatus): Issue {
     effort_level: null,
     history: [],
     db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
   };
+
   if (merged.status === "Blocked" && merged.blocked === null) {
     merged.blocked = {
       reason: "test self-block",
-      timestamp: "2026-01-01T00:00:00.000Z",
+      at: "2026-01-01T00:00:00.000Z",
     };
   }
   return merged;
@@ -144,7 +150,7 @@ function defaultCreate(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 9,
+    schema_version: 10,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -291,7 +297,7 @@ describe("yaml-lifecycle", () => {
       // (not just well-typed) so a hydration regression that drops a
       // remote field's content (e.g. returns `[]` for a non-empty AC
       // list) fails loudly here.
-      expect(issue.schema_version).toBe(9);
+      expect(issue.schema_version).toBe(10);
       expect(issue.id).toBe("ISS-200");
       expect(issue.external_id).toBe(external_id);
       expect(issue.parent_id).toBeNull();

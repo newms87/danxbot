@@ -22,7 +22,7 @@ import {
 } from "./yaml.js";
 import type { Issue } from "./interface.js";
 
-const BASE = `schema_version: 4
+const BASE = `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -133,7 +133,7 @@ describe("AGENT_NAME_SHAPE — local copy stays in sync with settings-file", () 
     // exported regex source string so we compare structurally.
     const expected = settings.AGENT_NAME_SHAPE.source;
     // Round-trip a known-good value to exercise the local copy:
-    const txt = `schema_version: 5
+    const txt = `schema_version: 10
 tracker: trello
 id: DX-7
 external_id: ""
@@ -172,7 +172,7 @@ history: []
   });
 
   it("rejects an assigned_agent value that violates the shape", () => {
-    const txt = `schema_version: 5
+    const txt = `schema_version: 10
 tracker: trello
 id: DX-7
 external_id: ""
@@ -229,7 +229,7 @@ history: []
  */
 describe("validateAcList — DX-347 check_item_id auto-heal", () => {
   function yamlWithAc(acBlock: string): string {
-    return `schema_version: 7
+    return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -388,7 +388,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
    */
   function legacyIssueWithoutRequiresHuman(): Issue {
     return {
-      schema_version: 9,
+      schema_version: 10,
       tracker: "memory",
       id: "DX-1",
       external_id: "",
@@ -421,7 +421,13 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
       waiting_on: null,
       history: [],
       db_updated_at: "",
+    archived_at: null,
+    ready_at: null,
+    completed_at: null,
+    cancelled_at: null,
+    list_name: null,
     };
+
   }
 
   it("serializes an Issue with `requires_human: undefined` as `null` (round-trips)", () => {
@@ -661,7 +667,7 @@ describe("DX-280 — schema_version forward-compat bound", () => {
  * sees the healed value without re-running the migration.
  */
 function yamlV7WithoutEffortLevel(): string {
-  return `schema_version: 7
+  return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -696,7 +702,7 @@ history: []
 }
 
 function yamlV8WithEffortLevel(value: string): string {
-  return `schema_version: 8
+  return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -839,8 +845,8 @@ describe("DX-511 — effort_level field (v8)", () => {
     expect(issueToCreateInput(withLevel).effort_level).toBe("very_high");
   });
 
-  it("KNOWN_SCHEMA_MAX bumped to 9 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
-    expect(KNOWN_SCHEMA_MAX).toBe(9);
+  it("KNOWN_SCHEMA_MAX bumped to 10 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
+    expect(KNOWN_SCHEMA_MAX).toBe(10);
     const fresh = createEmptyIssue();
     expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
     expect(issueToCreateInput(fresh).schema_version).toBe(KNOWN_SCHEMA_MAX);
@@ -860,7 +866,7 @@ describe("DX-511 — effort_level field (v8)", () => {
  */
 describe("DX-546 — db_updated_at field (v9)", () => {
   function yamlWithoutDbUpdatedAt(): string {
-    return `schema_version: 8
+    return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -896,7 +902,7 @@ history: []
   }
 
   function yamlWithDbUpdatedAt(value: string): string {
-    return `schema_version: 9
+    return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
@@ -1004,7 +1010,7 @@ db_updated_at: ${value}
 
 describe("parseIssue — priority bounds widened to (0.01, 5.99) (DX-521)", () => {
   function withPriority(priorityYamlLiteral: string): string {
-    return `schema_version: 8
+    return `schema_version: 10
 tracker: trello
 id: DX-1
 external_id: ""
