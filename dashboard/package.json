@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@thehammer/danx-ui": "^0.7.3",
+    "@thehammer/danx-ui": "^0.7.4",
     "@vueuse/core": "^14.3.0",
     "danx-icon": "^1.0.6",
     "luxon": "^3.7.2",

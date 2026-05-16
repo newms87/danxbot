@@ -26,13 +26,13 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   DanxButton,
+  DanxColorPicker,
   DanxDialog,
   DanxTooltip,
   useDialog,
 } from "@thehammer/danx-ui";
 import { createList, deleteList, patchList } from "../../api";
 import { useListColors } from "../../composables/useListColors";
-import HexColorInput from "./HexColorInput.vue";
 import { LIST_TYPE_LABELS, LIST_TYPE_LADDER } from "../../types";
 import type { CreateListInput, List, ListType } from "../../types";
 
@@ -341,7 +341,7 @@ async function onConfirmAdd(): Promise<void> {
                 @change="(e) => onRename(list, (e.target as HTMLInputElement).value)"
               />
 
-              <HexColorInput
+              <DanxColorPicker
                 :model-value="list.color"
                 :disabled="busyById.has(list.id)"
                 :test-id="`lists-color-${list.id}`"
@@ -445,7 +445,7 @@ async function onConfirmAdd(): Promise<void> {
           />
         </label>
 
-        <HexColorInput
+        <DanxColorPicker
           v-model="addColor"
           label="Color"
           test-id="lists-add-color"
