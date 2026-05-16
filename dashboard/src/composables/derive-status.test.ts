@@ -26,9 +26,10 @@ describe("SPA deriveStatus — mirrors backend rules", () => {
   it("rule 2: completed_at → Done", () => {
     expect(deriveStatus(input({ completed_at: TS, status: "ToDo" }))).toBe("Done");
   });
-  it("rule 3 deferred — dispatch alone does NOT derive In Progress (Phase 4 / DX-584)", () => {
-    expect(deriveStatus(input({ dispatch: { id: "d" }, status: "ToDo" }))).toBe("ToDo");
+  it("rule 4 (Phase 4 / DX-584) — dispatch live derives In Progress, guarded against raw terminal", () => {
+    expect(deriveStatus(input({ dispatch: { id: "d" }, status: "ToDo" }))).toBe("In Progress");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Done" }))).toBe("Done");
+    expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Cancelled" }))).toBe("Cancelled");
   });
   it("rule 4: blocked.at → Blocked", () => {
     expect(deriveStatus(input({ blocked: { at: TS }, status: "ToDo" }))).toBe("Blocked");

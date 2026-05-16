@@ -21,6 +21,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { issuePath, writeIssue } from "../poller/yaml-lifecycle.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
+import { resolveListNameForType } from "./list-resolve.js";
 import type { Issue } from "../issue-tracker/interface.js";
 
 export interface StampIssueBlockedInput {
@@ -42,6 +43,12 @@ export interface StampIssueBlockedInput {
 // the DB row stale; the picker's onComplete → loadLocal →
 // clearDispatchAndWrite chain in `multi-agent-pick.ts` then reads the
 // stale row and writes it back, clobbering this stamp.
+//
+// DX-584 (Phase 4) — auto-resolves `list_name` to the default blocked
+// list AND clears the live `dispatch` block on the same write. The
+// agent_blocked signal is terminal-for-session — leaving stale dispatch
+// data on disk falsely re-claims the card on the next poller startup's
+// reattach pass.
 export async function stampIssueBlocked({
   repoLocalPath,
   candidateId,
@@ -62,6 +69,8 @@ export async function stampIssueBlocked({
     ...issue,
     status: "Blocked",
     blocked: { reason, at },
+    list_name: resolveListNameForType(repoLocalPath, "blocked"),
+    dispatch: null,
   };
   await writeIssue(repoLocalPath, next);
 }

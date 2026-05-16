@@ -377,12 +377,17 @@ describe("runSync (local-first persist)", () => {
     expect(recordError).toHaveBeenCalledTimes(1);
   });
 
-  it("tracker throw + blocked record on ToDo → YAML lands in open/ (blocked is non-terminal for moveToClosedIfTerminal)", async () => {
-    // `isDispatchSessionTerminal` returns true for blocked (which clears
-    // `dispatch` on persist), but `moveToClosedIfTerminal` only fires on
-    // status Done / Cancelled — so a blocked ToDo card stays in open/.
-    // Pin both behaviours here so a future refactor of either branch
-    // can't silently drift.
+  it("tracker throw + waiting_on record on ToDo → YAML lands in open/ (non-terminal for moveToClosedIfTerminal)", async () => {
+    // `isDispatchSessionTerminal` returns true for blocked / waiting_on
+    // (the agent's session ended), but `moveToClosedIfTerminal` only
+    // fires when the derived status is Done / Cancelled — so a
+    // waiting_on ToDo card stays in open/. Pin both behaviours so a
+    // future refactor of either branch can't silently drift.
+    //
+    // DX-584 (Phase 4) — the in-flight `dispatch` block causes
+    // `parseIssue` to derive "In Progress" via rule 4. The raw `status`
+    // on disk is still "ToDo"; we read the raw field to assert the
+    // write contract here.
     vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 502"));
     const recordError = vi.fn().mockResolvedValue(undefined);
     const issue = makeIssue({
@@ -410,8 +415,13 @@ describe("runSync (local-first persist)", () => {
     const closedPath = issuePath(tmpDir, "ISS-105", "closed");
     expect(existsSync(openPath)).toBe(true);
     expect(existsSync(closedPath)).toBe(false);
-    const persisted = parseIssue(readFileSync(openPath, "utf-8"), { expectedPrefix: "ISS" });
-    expect(persisted.status).toBe("ToDo");
+    // Raw status on disk (not parseIssue's derived view) — confirms
+    // the writer persisted the agent's "ToDo" without mutation.
+    const rawText = readFileSync(openPath, "utf-8");
+    const { parse: parseYamlText } = await import("yaml");
+    const raw = parseYamlText(rawText) as { status?: string };
+    expect(raw.status).toBe("ToDo");
+    const persisted = parseIssue(rawText, { expectedPrefix: "ISS" });
     // dispatch + assigned_agent are preserved across every save; the
     // clear-on-terminal behavior was retired so the audit record of
     // who ran the last session survives.

@@ -30,6 +30,7 @@
  */
 
 import type { ConflictOnEntry, Issue } from "../issue-tracker/interface.js";
+import { deriveStatus } from "./derive-status.js";
 
 export interface EffectiveConflictReport {
   /** Forward direction — entries from THIS issue's `conflict_on[]`
@@ -55,12 +56,17 @@ export function effectiveConflictOn(
   const byId = new Map<string, Issue>();
   for (const i of allOpen) byId.set(i.id, i);
 
+  // DX-584 (Phase 4) — partner gates on derived semantic state, not
+  // raw `status`. A terminal-stamped partner (completed_at / cancelled_at
+  // / blocked.at set) derives to its terminal state even if the raw
+  // status still says "In Progress"; the conflict gate clears as soon
+  // as the partner's lifecycle truly ended.
   const forward: ConflictOnEntry[] = [];
   for (const entry of issue.conflict_on) {
     if (entry.id === issue.id) continue; // self-ref guard
     const partner = byId.get(entry.id);
     if (!partner) continue; // missing / hard-deleted
-    if (partner.status === "In Progress") {
+    if (deriveStatus(partner) === "In Progress") {
       forward.push(entry);
     }
   }
@@ -68,7 +74,7 @@ export function effectiveConflictOn(
   const reverse: ConflictOnEntry[] = [];
   for (const other of allOpen) {
     if (other.id === issue.id) continue;
-    if (other.status !== "In Progress") continue;
+    if (deriveStatus(other) !== "In Progress") continue;
     for (const entry of other.conflict_on) {
       if (entry.id === issue.id) {
         // Surface the OTHER issue's id (the live blocker), not the

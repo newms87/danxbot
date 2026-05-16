@@ -59,6 +59,7 @@ import {
   serializeIssue,
 } from "../issue-tracker/yaml.js";
 import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import {
   clearDispatchAndWrite,
   ensureIssuesDirs,
@@ -149,8 +150,13 @@ export function healLocalYamls(
         continue;
       }
 
-      if (issue.status !== "Done" && issue.status !== "Cancelled") continue;
-      const terminalStatus: "Done" | "Cancelled" = issue.status;
+      // DX-584 (Phase 4) — derived semantic state. A card whose
+      // `completed_at` is set reads as Done, ditto cancelled_at →
+      // Cancelled, both fall through to raw `status` for pre-Phase-4
+      // cards. Either spelling triggers the heal.
+      const derived = deriveStatus(issue);
+      if (derived !== "Done" && derived !== "Cancelled") continue;
+      const terminalStatus: "Done" | "Cancelled" = derived;
 
       // A terminal card has no live work — clear `dispatch` if it
       // lingered from a session that crashed before persisting. Mirrors
@@ -194,9 +200,11 @@ export function healLocalYamls(
         continue;
       }
 
-      // Closed/ YAML whose status is still terminal — file is in the
-      // right bucket. No-op (idempotency).
-      if (issue.status === "Done" || issue.status === "Cancelled") continue;
+      // DX-584 (Phase 4) — derived semantic state. A closed YAML
+      // whose derived state is still terminal is in the right bucket.
+      // No-op (idempotency).
+      const derivedClosed = deriveStatus(issue);
+      if (derivedClosed === "Done" || derivedClosed === "Cancelled") continue;
 
       // Real state delta: the card was once terminal (it lived in
       // closed/) but now carries a non-terminal status. Move it back to
@@ -806,7 +814,11 @@ export async function healOrphanInProgress(
       continue;
     }
 
-    if (issue.status !== "In Progress") continue;
+    // DX-584 (Phase 4) — derived semantic state. A card whose
+    // `completed_at` / `cancelled_at` / `blocked.at` is set is no
+    // longer "In Progress" semantically even if the raw `status`
+    // field still says so.
+    if (deriveStatus(issue) !== "In Progress") continue;
     // Invariant heal owns the `dispatch != null` branch. Splitting the
     // responsibilities keeps each pass simple and prevents double
     // mutation on the same tick.

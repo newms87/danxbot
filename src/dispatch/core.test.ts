@@ -666,7 +666,13 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
     }
 
     async function readCandidateStatus(id: string): Promise<string> {
-      const { parseIssue } = await import("../issue-tracker/yaml.js");
+      // DX-584 (Phase 4) — `parseIssue` returns the DERIVED status,
+      // which differs from the raw field once Phase 4 stamps
+      // `ready_at` during the auto-flip (rule 5 would derive "ToDo"
+      // mid-spawn before `stampDispatchAndWrite` lands the `dispatch`
+      // sidecar). The auto-flip test asserts the raw-status side of
+      // the write, so read the YAML directly without derive.
+      const { parse: parseYamlText } = await import("yaml");
       const yamlPath = resolve(
         tmpRepoDir,
         ".danxbot",
@@ -674,9 +680,10 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
         "open",
         `${id}.yml`,
       );
-      return parseIssue(readFileSync(yamlPath, "utf-8"), {
-        expectedPrefix: issueRepo.issuePrefix,
-      }).status;
+      const raw = parseYamlText(readFileSync(yamlPath, "utf-8")) as {
+        status?: string;
+      };
+      return raw.status ?? "";
     }
 
     it("flips ToDo → In Progress when issueId set + dispatchKind=work", async () => {
@@ -832,6 +839,46 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
 
       // Candidate rolled back to ToDo so the poller can re-pick.
       expect(await readCandidateStatus("ISS-103")).toBe("ToDo");
+    });
+
+    it("DX-584: revert restores ALL three fields the auto-flip stamped (status, ready_at, list_name)", async () => {
+      // Snapshot the prior values from the fixture: a fresh candidate
+      // has `ready_at: null` and `list_name: null` per createEmptyIssue.
+      await writeCandidate("ISS-105", "ToDo");
+      mockSpawnAgent.mockRejectedValueOnce(new Error("spawn failed"));
+
+      await expect(
+        dispatch({
+          repo: issueRepo,
+          task: "/danx-prep ISS-105\n\n/danx-next ISS-105",
+          workspace: "issue-worker",
+          overlay: {},
+          apiDispatchMeta: DEFAULT_DISPATCH_META,
+          issueId: "ISS-105",
+          dispatchKind: "work",
+        }),
+      ).rejects.toThrow(/spawn failed/);
+
+      // Read the raw YAML to confirm all three fields are at their
+      // prior values — a regression that forgets to restore `ready_at`
+      // would leave the card looking "ready" with a stale "In Progress"
+      // list projection on the next pick.
+      const { parse: parseYamlText } = await import("yaml");
+      const yamlPath = resolve(
+        tmpRepoDir,
+        ".danxbot",
+        "issues",
+        "open",
+        "ISS-105.yml",
+      );
+      const raw = parseYamlText(readFileSync(yamlPath, "utf-8")) as {
+        status?: string;
+        ready_at?: string | null;
+        list_name?: string | null;
+      };
+      expect(raw.status).toBe("ToDo");
+      expect(raw.ready_at).toBeNull();
+      expect(raw.list_name).toBeNull();
     });
   });
 

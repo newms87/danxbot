@@ -65,6 +65,7 @@ import {
 import { nextIssueId } from "../issue-tracker/id-generator.js";
 import { loadActionItemTitles, syncIssue } from "../issue-tracker/sync.js";
 import { enqueueRetry } from "../issue-tracker/retry-queue.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import {
   ensureIssuesDirs,
   issuePath,
@@ -580,11 +581,12 @@ export async function runSync(
  * is now the trigger for the agent-set "human is next actor" handoff.
  */
 export function isDispatchSessionTerminal(issue: Issue): boolean {
-  if (
-    issue.status === "Done" ||
-    issue.status === "Cancelled" ||
-    issue.status === "Blocked"
-  ) {
+  // DX-584 (Phase 4) — read derived semantic state, not raw `status`.
+  // A card with terminal timestamps (completed_at / cancelled_at /
+  // blocked.at) derives to its terminal state regardless of any stale
+  // raw `status` value still on disk.
+  const derived = deriveStatus(issue);
+  if (derived === "Done" || derived === "Cancelled" || derived === "Blocked") {
     return true;
   }
   if (issue.waiting_on !== null) return true;

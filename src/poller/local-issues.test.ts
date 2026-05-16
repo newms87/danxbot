@@ -189,6 +189,39 @@ describe("local-issues — DB-backed", () => {
     });
 
     it.skipIf(!handle)(
+      "DX-584: excludes Backlog cards (archived_at != null AND ready_at == null) — explicit gate",
+      async () => {
+        await seed(
+          {
+            ...makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
+            archived_at: "2026-05-14T00:00:00.000Z",
+            ready_at: null,
+          },
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
+
+    it.skipIf(!handle)(
+      "DX-584: re-readied card (archived_at + ready_at both set) is dispatchable — rule 5 beats rule 6",
+      async () => {
+        await seed(
+          {
+            ...makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
+            archived_at: "2026-05-14T00:00:00.000Z",
+            ready_at: "2026-05-14T12:00:00.000Z",
+          },
+          1000,
+        );
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-1"]);
+      },
+    );
+
+    it.skipIf(!handle)(
       "excludes waiting_on cards when dep is non-terminal",
       async () => {
         const waiting_on: WaitingOn = {

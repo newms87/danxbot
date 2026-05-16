@@ -78,6 +78,7 @@ import {
   dbListDependentsByWaitingOnId,
 } from "../poller/issues-db.js";
 import { repoNameFromPath } from "../poller/repo-name.js";
+import { deriveStatus } from "./derive-status.js";
 import type { Issue, IssueHistoryEntry } from "../issue-tracker/interface.js";
 import {
   applyParentDeriveMutation,
@@ -244,8 +245,12 @@ function dispatchableKey(repoName: string, id: string): string {
 }
 
 function isCardDispatchable(issue: Issue): boolean {
+  // DX-584 (Phase 4) — derived semantic state, mirror of the poller's
+  // `listDispatchableYamls` filter. A card whose timestamps say "Done"
+  // / "Cancelled" / "Blocked" must NOT be dispatchable regardless of
+  // any stale raw `status` field.
   return (
-    issue.status === "ToDo" &&
+    deriveStatus(issue) === "ToDo" &&
     issue.blocked === null &&
     issue.waiting_on === null &&
     issue.requires_human === null &&
@@ -724,12 +729,16 @@ async function reconcileBody(
   //
   // The triage-timer import is module-cyclic-safe because the timer
   // imports `ReconcileRepoContext` as a type-only symbol.
+  // DX-584 (Phase 4) — derived semantic state. A card whose
+  // `completed_at` / `cancelled_at` is stamped reads as terminal even
+  // when the raw `status` is stale.
+  const mutatedDerived = deriveStatus(mutated);
   const isTerminalStatus =
-    mutated.status === "Done" || mutated.status === "Cancelled";
+    mutatedDerived === "Done" || mutatedDerived === "Cancelled";
   const inTriageScope =
     mutated.waiting_on !== null ||
-    mutated.status === "Review" ||
-    mutated.status === "Blocked";
+    mutatedDerived === "Review" ||
+    mutatedDerived === "Blocked";
   const triageCacheKey = triageExpiresAtKey(repo.name, id);
   if (isTerminalStatus || targetBucket === "closed" || !inTriageScope) {
     clearTriageTimer(repo.name, id);

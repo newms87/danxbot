@@ -28,9 +28,11 @@ describe("deriveStatus — single-rule precedence", () => {
   }> = [
     { name: "rule 1: cancelled_at → Cancelled", overrides: { cancelled_at: TS, status: "ToDo" }, expected: "Cancelled" },
     { name: "rule 2: completed_at → Done", overrides: { completed_at: TS, status: "ToDo" }, expected: "Done" },
-    // rule 3 (dispatch → In Progress) deferred to Phase 4 (DX-584). See module docstring.
-    { name: "rule 3 deferred: dispatch live alone does NOT derive In Progress", overrides: { dispatch: { id: "d" }, status: "ToDo" }, expected: "ToDo" },
-    { name: "rule 4: blocked.at → Blocked", overrides: { blocked: { at: TS }, status: "ToDo" }, expected: "Blocked" },
+    { name: "rule 3: blocked.at → Blocked", overrides: { blocked: { at: TS }, status: "ToDo" }, expected: "Blocked" },
+    // Phase 4 (DX-584): rule 4 is live — dispatch != null derives In
+    // Progress when raw status is not terminal.
+    { name: "rule 4: dispatch live derives In Progress (raw ToDo)", overrides: { dispatch: { id: "d" }, status: "ToDo" }, expected: "In Progress" },
+    { name: "rule 4: dispatch live derives In Progress (raw Review)", overrides: { dispatch: { id: "d" }, status: "Review" }, expected: "In Progress" },
     { name: "rule 5: ready_at → ToDo", overrides: { ready_at: TS, status: "Review" }, expected: "ToDo" },
     { name: "rule 6: archived_at → Backlog", overrides: { archived_at: TS, status: "Review" }, expected: "Backlog" },
     { name: "rule 7: fallthrough → raw status (Review)", overrides: { status: "Review" }, expected: "Review" },
@@ -81,16 +83,14 @@ describe("deriveStatus — precedence combinations", () => {
     ).toBe("Done");
   });
 
-  it("rule 3 deferred — dispatch alone never derives In Progress (Phase 4 / DX-584)", () => {
-    // Until Phase 4 (DX-584) wires completed_at/cancelled_at stamping
-    // into the dispatch lifecycle, the dispatch sidecar is NOT read as
-    // a derivation signal. Raw `status` carries the In Progress signal
-    // via the fallthrough rule.
-    expect(deriveStatus(input({ dispatch: { id: "d" }, status: "ToDo" }))).toBe("ToDo");
+  it("rule 4 (Phase 4 / DX-584) — dispatch live derives In Progress, guarded against raw terminal", () => {
+    // Phase 4 lands rule 4: dispatch != null derives In Progress when
+    // raw status is not terminal. Legacy Done/Cancelled cards with a
+    // lingering dispatch fall through to rule 7 so the heal pass can
+    // detect + flush them.
+    expect(deriveStatus(input({ dispatch: { id: "d" }, status: "ToDo" }))).toBe("In Progress");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Done" }))).toBe("Done");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Cancelled" }))).toBe("Cancelled");
-    // A raw In Progress card with dispatch present still derives via
-    // rule 7 to raw In Progress — same answer, different code path.
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "In Progress" }))).toBe("In Progress");
   });
 

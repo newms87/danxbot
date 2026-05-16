@@ -33,6 +33,18 @@ export function deriveStatus(issue: DeriveStatusInput): IssueStatus {
   if (issue.cancelled_at) return "Cancelled";
   if (issue.completed_at) return "Done";
   if (issue.blocked?.at) return "Blocked";
+  // DX-584 (Phase 4) — rule 4. `dispatch != null` is the live-work
+  // signal AFTER terminal-timestamp + blocked rules, guarded against
+  // raw-terminal status so a legacy Done/Cancelled card with
+  // lingering dispatch still derives terminal via rule 7 fallthrough.
+  // Mirror of `src/issue/derive-status.ts`.
+  if (
+    issue.dispatch &&
+    issue.status !== "Done" &&
+    issue.status !== "Cancelled"
+  ) {
+    return "In Progress";
+  }
   if (issue.ready_at) return "ToDo";
   if (issue.archived_at) return "Backlog";
   return issue.status;

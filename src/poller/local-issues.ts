@@ -51,6 +51,7 @@ import {
 } from "../issue-tracker/sort.js";
 import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
 import { isEffectivelyConflicted } from "../issue/effective-conflict-on.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import { repoNameFromPath } from "./repo-name.js";
 
 function fifoCompare(a: DbIssueRow, b: DbIssueRow): number {
@@ -71,7 +72,19 @@ function sortFifo(rows: DbIssueRow[]): Issue[] {
 /**
  * Return every issue eligible for dispatch this tick. Predicates:
  *
- *   - `status === "ToDo"`
+ *   - `deriveStatus(i) === "ToDo"` (DX-584 — Phase 4 of computed card
+ *     state). Reads the derived semantic state instead of the raw
+ *     `status` field so a card whose timestamps drift ahead of `status`
+ *     (or vice versa) is interpreted via the single 7-rule precedence
+ *     in `deriveStatus`. The picker no longer trusts the raw `status`
+ *     write directly.
+ *   - Explicit Backlog gate: `archived_at != null && ready_at == null`
+ *     → skip. Backlog cards (parked / shelved without a readied flag)
+ *     are not dispatch-eligible even if some other code path nudges
+ *     `status` to ToDo by mistake. Belt-and-suspenders against the
+ *     deriveStatus rule 6 (`archived_at → Backlog`) — explicit guard
+ *     so a future tweak to the precedence does not silently allow
+ *     Backlog dispatch.
  *   - **Effective** `waiting_on` is null — `effectiveWaitingOn(i, byId)`
  *     returns null iff every id in `i.waiting_on.by[]` resolves to a
  *     terminal status (`Done` / `Cancelled`). The raw YAML may still
@@ -130,7 +143,19 @@ export async function listDispatchableYamls(
   const allOpen = rows.map((r) => r.issue);
   const filtered = rows.filter((r) => {
     const i = r.issue;
-    if (i.status !== "ToDo") return false;
+    // DX-584 (Phase 4) — derived semantic state, not raw `status`. The
+    // 7-rule precedence in deriveStatus folds Cancelled/Done/Blocked/
+    // ToDo/Backlog around the raw field; a card with the right
+    // timestamps reads as the right semantic regardless of any stale
+    // raw `status` value still on disk.
+    if (deriveStatus(i) !== "ToDo") return false;
+    // Explicit Backlog gate: a card with `archived_at` set but no
+    // `ready_at` is parked / shelved. deriveStatus rule 6 already
+    // returns "Backlog" for this case (so the predicate above filters
+    // it out), but the explicit check documents the precedence at the
+    // dispatchability surface and survives any future deriveStatus
+    // rewrite without silently re-opening Backlog cards to dispatch.
+    if (i.archived_at !== null && i.ready_at === null) return false;
     if (isEffectivelyWaitingOn(i, byId)) return false;
     if (i.blocked != null) return false;
     if (isEffectivelyConflicted(i, allOpen)) return false;
@@ -199,7 +224,11 @@ export async function listInProgressYamls(
 ): Promise<Issue[]> {
   const repoName = repoNameFromPath(repoLocalPath);
   const rows = await dbListOpenIssues(repoName);
-  return sortFifo(rows.filter((r) => r.issue.status === "In Progress"));
+  // DX-584 (Phase 4) — derived semantic state, not raw `status`. The
+  // orphan-resume + reattach paths walk this list to find dispatches
+  // whose dispatched PID died without a terminal save; derived state
+  // covers both pre- and post-Phase-4 cards uniformly.
+  return sortFifo(rows.filter((r) => deriveStatus(r.issue) === "In Progress"));
 }
 
 /**
@@ -219,9 +248,14 @@ export async function findInProgressIssueByDispatchId(
 ): Promise<Issue | null> {
   const repoName = repoNameFromPath(repoLocalPath);
   const rows = await dbListOpenIssues(repoName);
+  // DX-584 (Phase 4) — derived semantic state. A terminal-stamped card
+  // (completed_at / cancelled_at set) reads as Done / Cancelled even
+  // if the raw `status` field still says In Progress; the reattach
+  // pass must NOT re-resume a card whose work is already done.
   const match = rows.find(
     (r) =>
-      r.issue.status === "In Progress" && r.issue.dispatch?.id === dispatchId,
+      deriveStatus(r.issue) === "In Progress" &&
+      r.issue.dispatch?.id === dispatchId,
   );
   return match?.issue ?? null;
 }

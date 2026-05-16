@@ -98,6 +98,48 @@ describe("stampIssueBlocked", () => {
     ).rejects.toThrow(/candidate YAML not found/);
   });
 
+  it("DX-584: preserves ready_at, stamps list_name='Blocked', clears dispatch", async () => {
+    writeFixture("DX-3", "In Progress");
+    // Seed ready_at + a live dispatch block before stamping blocked —
+    // mirrors a card mid-dispatch when the agent self-blocks.
+    const yamlPath = join(root, ".danxbot/issues/open/DX-3.yml");
+    const seeded = parseIssue(readFileSync(yamlPath, "utf-8"), {
+      expectedPrefix: "DX",
+    });
+    seeded.ready_at = "2026-05-14T00:00:00.000Z";
+    seeded.dispatch = {
+      id: "dispatch-3",
+      pid: 4242,
+      host: "host-a",
+      kind: "work",
+      started_at: "2026-05-14T00:00:01.000Z",
+      ttl_seconds: 7200,
+    };
+    writeFileSync(yamlPath, serializeIssue(seeded));
+
+    await stampIssueBlocked({
+      repoLocalPath: root,
+      candidateId: "DX-3",
+      expectedPrefix: "DX",
+      reason: "agent self-block",
+      at: "2026-05-14T12:00:00.000Z",
+    });
+
+    const parsed = parseIssue(readFileSync(yamlPath, "utf-8"), {
+      expectedPrefix: "DX",
+    });
+    // ready_at survives — records the moment the card became
+    // dispatch-eligible and Phase 4 preserves it across every save.
+    expect(parsed.ready_at).toBe("2026-05-14T00:00:00.000Z");
+    // list_name auto-resolved to the default Blocked list (lists.yaml
+    // seed name).
+    expect(parsed.list_name).toBe("Blocked");
+    // dispatch cleared — the self-block signal is terminal for the
+    // session; leaving stale dispatch would falsely re-claim on the
+    // next poller startup's reattach pass.
+    expect(parsed.dispatch).toBeNull();
+  });
+
   it("preserves an existing waiting_on record (independent of status)", async () => {
     writeFixture("DX-2");
     // Seed a waiting_on record on the YAML before stamping blocked.

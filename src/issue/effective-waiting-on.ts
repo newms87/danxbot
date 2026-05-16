@@ -29,6 +29,7 @@
  */
 
 import type { Issue, WaitingOn } from "../issue-tracker/interface.js";
+import { deriveStatus } from "./derive-status.js";
 
 export function effectiveWaitingOn(
   issue: Issue,
@@ -38,7 +39,12 @@ export function effectiveWaitingOn(
   for (const depId of issue.waiting_on.by) {
     const dep = byId.get(depId);
     if (!dep) return issue.waiting_on;
-    if (dep.status !== "Done" && dep.status !== "Cancelled") {
+    // DX-584 (Phase 4) — derived semantic state. A dep with terminal
+    // timestamps but stale raw `status` still counts as terminal; same
+    // for the inverse (raw "Done" without `completed_at` per the
+    // pre-Phase-4 write path).
+    const depDerived = deriveStatus(dep);
+    if (depDerived !== "Done" && depDerived !== "Cancelled") {
       return issue.waiting_on;
     }
   }

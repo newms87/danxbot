@@ -806,6 +806,32 @@ describe("yaml-lifecycle", () => {
       }
     });
 
+    it("DX-584: moves a card whose raw status is 'In Progress' but completed_at is set (derived → Done)", () => {
+      ensureIssuesDirs(repoRoot);
+      const issue = buildIssueLite("ISS-7", "In Progress");
+      issue.completed_at = "2026-05-14T12:00:00.000Z";
+      writeFileSync(issuePath(repoRoot, "ISS-7", "open"), serializeIssue(issue));
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-7", "open"))).toBe(false);
+      expect(existsSync(issuePath(repoRoot, "ISS-7", "closed"))).toBe(true);
+    });
+
+    it("DX-584: moves a card whose raw status is 'In Progress' but cancelled_at is set (derived → Cancelled)", () => {
+      ensureIssuesDirs(repoRoot);
+      const issue = buildIssueLite("ISS-8", "In Progress");
+      issue.cancelled_at = "2026-05-14T12:00:00.000Z";
+      writeFileSync(issuePath(repoRoot, "ISS-8", "open"), serializeIssue(issue));
+
+      const moved = moveToClosedIfTerminal(repoRoot, issue);
+
+      expect(moved).toBe(true);
+      expect(existsSync(issuePath(repoRoot, "ISS-8", "open"))).toBe(false);
+      expect(existsSync(issuePath(repoRoot, "ISS-8", "closed"))).toBe(true);
+    });
+
     it("is idempotent when open/<id>.yml is absent (writes closed/, no unlink error)", () => {
       ensureIssuesDirs(repoRoot);
       // No open/ copy — this is the post-heal idempotency case where

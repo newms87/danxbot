@@ -36,6 +36,7 @@ import {
   type ScheduleCheckAgent,
 } from "../agent/agent-schedule.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import { createLogger } from "../logger.js";
 
 const log = createLogger("pick-agent");
@@ -254,12 +255,14 @@ export function findOwnedCard(
   agentName: string,
   openIssues: readonly Issue[],
 ): FindOwnedCardResult {
-  const owned = openIssues.filter(
-    (i) =>
-      i.assigned_agent === agentName &&
-      i.status !== "Done" &&
-      i.status !== "Cancelled",
-  );
+  const owned = openIssues.filter((i) => {
+    if (i.assigned_agent !== agentName) return false;
+    // DX-584 (Phase 4) — derived semantic state. A terminal-stamped
+    // card is no longer "owned" by an agent for resume purposes,
+    // regardless of any stale raw `status` still on disk.
+    const derived = deriveStatus(i);
+    return derived !== "Done" && derived !== "Cancelled";
+  });
   if (owned.length === 0) return { kind: "none" };
   if (owned.length === 1) return { kind: "single", card: owned[0] };
   return { kind: "duplicates", cards: owned };

@@ -33,6 +33,7 @@ import type {
   IssueHistoryEntry,
   IssueStatus,
 } from "../../issue-tracker/interface.js";
+import { deriveStatus } from "../derive-status.js";
 
 export type IssueBucket = "open" | "closed";
 
@@ -78,7 +79,11 @@ export function decideFileMove(
   issue: Issue,
   currentDir: IssueBucket,
 ): FileMoveDecision | null {
-  const isTerminal = issue.status === "Done" || issue.status === "Cancelled";
+  // DX-584 (Phase 4) — derived semantic state. Drives file-bucket
+  // decisions off the same 7-rule precedence as `moveToClosedIfTerminal`
+  // and `isDispatchSessionTerminal`.
+  const derived = deriveStatus(issue);
+  const isTerminal = derived === "Done" || derived === "Cancelled";
 
   if (isTerminal && currentDir === "open") {
     // Janitorial fix — no history entry per DX-147 AC #3.

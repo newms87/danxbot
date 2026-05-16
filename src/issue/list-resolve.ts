@@ -1,0 +1,71 @@
+/**
+ * DX-584 (Phase 4 of DX-575 — Computed card state) — single auto-resolve
+ * write path for `Issue.list_name`. Workers never READ `.list_name`
+ * (the static guard in `src/__tests__/no-list-name-reads.test.ts`
+ * pins that contract); the field is a denormalized projection
+ * computed from the card's derived semantic state at the moment of
+ * each lifecycle transition.
+ *
+ * Two helpers ship here:
+ *
+ *  - `resolveListNameForType(repoLocalPath, type)` — wraps
+ *    `getDefaultListForType` from `src/lists-file.ts` and returns the
+ *    default list's NAME for the given semantic type. The lists.yaml
+ *    file is the operator-owned source of truth — its 7-default seed
+ *    (Backlog/Review/To Do/Blocked/In Progress/Done/Cancelled) maps
+ *    1:1 to the `ListType` enum, and `ensureListsFile` plants the
+ *    seed on first boot so this lookup is hot-path safe.
+ *
+ *  - `deriveListTypeFromSemanticStatus(status)` — small enum map from
+ *    the derived semantic `IssueStatus` (Backlog/Review/ToDo/In Progress/
+ *    Blocked/Done/Cancelled) to the lists.yaml `ListType` enum
+ *    (archived/review/ready/in_progress/blocked/completed/cancelled).
+ *    Pure function; the worker calls it when it needs to recompute
+ *    `list_name` from the card's derived state.
+ *
+ * Together these support the four transitional writes Phase 4 introduces:
+ *   - dispatch start (auto-flip):   `in_progress` list
+ *   - terminal completed:           `completed` list
+ *   - terminal cancelled / failed:  `cancelled` list
+ *   - agent-blocked / blocked:      `blocked` list
+ *
+ * The exact name resolution is per-repo because operators may rename
+ * lists (e.g. "Backlog" → "Icebox"). `resolveListNameForType` always
+ * reads the current file rather than caching at module init.
+ */
+
+import { getDefaultListForType, type ListType } from "../lists-file.js";
+import type { IssueStatus } from "../issue-tracker/interface.js";
+
+export function resolveListNameForType(
+  repoLocalPath: string,
+  type: ListType,
+): string {
+  return getDefaultListForType(repoLocalPath, type).name;
+}
+
+/**
+ * Map the derived `IssueStatus` (the semantic enum the worker reads via
+ * `deriveStatus`) to the `ListType` enum the lists.yaml file uses.
+ * Total: every `IssueStatus` value maps to exactly one `ListType`.
+ */
+export function deriveListTypeFromSemanticStatus(
+  status: IssueStatus,
+): ListType {
+  switch (status) {
+    case "Backlog":
+      return "archived";
+    case "Review":
+      return "review";
+    case "ToDo":
+      return "ready";
+    case "In Progress":
+      return "in_progress";
+    case "Blocked":
+      return "blocked";
+    case "Done":
+      return "completed";
+    case "Cancelled":
+      return "cancelled";
+  }
+}

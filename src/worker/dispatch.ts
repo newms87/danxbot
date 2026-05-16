@@ -43,6 +43,10 @@ import {
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { applyStrike } from "../dashboard/dispatch-tracker.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
+import {
+  stampIssueCancelled,
+  stampIssueCompleted,
+} from "../issue/stamp-terminal.js";
 import { enforceCommitsShipped } from "../issue/enforce-commits-shipped.js";
 import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { onDispatchTerminated } from "../dispatch/scheduler.js";
@@ -1356,6 +1360,69 @@ function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
 }
 
 /**
+ * DX-584 (Phase 4) — terminal YAML stamping for `completed` / `failed`.
+ * Called from both the in-memory `handleStop` and the DB-fallback
+ * `handleStopFromDb` so the v10 timestamp fields land on the
+ * candidate YAML before the auto-sync reconcile fires. Idempotent on
+ * the YAML side; stamp errors log but never throw out (a YAML write
+ * failure must not block the dispatch row finalization).
+ *
+ * Excluded statuses (handled by their own branches in the caller):
+ *
+ *   - `critical_failure` — the per-repo halt flag is the operator
+ *     signal; the YAML stays In Progress so the next dispatch (after
+ *     operator clears the flag) resumes work on the same card.
+ *   - `agent_blocked` — routed through `stampIssueBlocked` which
+ *     handles its own `list_name` + dispatch-clear writes.
+ *   - `api_error_recover` / `api_error_failed` / `rate_limited` /
+ *     `recovered` / `throttled` — non-card-terminal dispatch
+ *     terminations (recover chain continues on a fresh dispatch row;
+ *     the card itself stays in flight).
+ */
+async function maybeStampTerminalYaml(input: {
+  jobId: string;
+  status: CompleteStatus;
+  repo: RepoContext;
+}): Promise<void> {
+  const { jobId, status, repo } = input;
+  if (status !== "completed" && status !== "failed") return;
+  let dispatchRow;
+  try {
+    dispatchRow = await getDispatchById(jobId);
+  } catch (err) {
+    log.error(
+      `[Dispatch ${jobId}] getDispatchById failed during terminal YAML stamp`,
+      err,
+    );
+    return;
+  }
+  if (!dispatchRow?.issueId) return;
+  const at = new Date().toISOString();
+  try {
+    if (status === "completed") {
+      await stampIssueCompleted({
+        repoLocalPath: repo.localPath,
+        candidateId: dispatchRow.issueId,
+        expectedPrefix: repo.issuePrefix,
+        at,
+      });
+    } else {
+      await stampIssueCancelled({
+        repoLocalPath: repo.localPath,
+        candidateId: dispatchRow.issueId,
+        expectedPrefix: repo.issuePrefix,
+        at,
+      });
+    }
+  } catch (stampErr) {
+    log.error(
+      `[Dispatch ${jobId}] terminal YAML stamp failed for ${dispatchRow.issueId} (status=${status})`,
+      stampErr,
+    );
+  }
+}
+
+/**
  * DX-559 — Pre-finalize gate for `danxbot_complete({status: "completed"})`.
  *
  * When the agent claims success on a card dispatch, the worker verifies
@@ -1568,6 +1635,12 @@ async function handleStopFromDb(
     return;
   }
 
+  // DX-584 (Phase 4) — stamp the v10 lifecycle timestamp + clear
+  // `dispatch` + auto-resolve `list_name` on the candidate YAML
+  // BEFORE the reconcile pass. Same ordering / contract as the
+  // in-memory `handleStop` path above.
+  await maybeStampTerminalYaml({ jobId, status, repo });
+
   // Non-critical terminal: sync the tracked YAML before marking the row
   // terminal, mirroring the in-memory path's ordering.
   await autoSyncTrackedIssue(jobId, repo);
@@ -1731,6 +1804,29 @@ export async function handleStop(
       json(res, 200, { status });
       return;
     }
+
+    // DX-584 (Phase 4) — stamp the v10 lifecycle timestamp + clear
+    // `dispatch` + auto-resolve `list_name` on the candidate YAML
+    // BEFORE the reconcile pass so the open→closed file move (driven
+    // by the derived semantic state via `moveToClosedIfTerminal`) sees
+    // the freshly-stamped fields. Idempotent on the YAML side —
+    // re-running on a card already carrying the terminal timestamp
+    // preserves the original `*_at`. Stamp errors are logged but do
+    // not block the dispatch-row finalization; a YAML stuck without
+    // its terminal timestamp self-heals on the next reconcile / heal
+    // pass via derive-status fallthrough on raw `status`.
+    //
+    // `critical_failure` and `agent_blocked` are handled by their own
+    // branches above — critical_failure intentionally does NOT stamp
+    // the YAML (the card stays In Progress until the operator clears
+    // the per-repo halt flag and the next dispatch resumes work),
+    // while agent_blocked routes through `stampIssueBlocked` which
+    // handles its own list_name + dispatch-clear writes.
+    await maybeStampTerminalYaml({
+      jobId,
+      status,
+      repo,
+    });
 
     // Post-dispatch reconcile. The agent edits the local YAML directly
     // with `Edit` / `Write` (DX-157 retired the legacy save MCP tool) and

@@ -252,6 +252,20 @@ vi.mock("../issue/stamp-blocked.js", () => ({
   stampIssueBlocked: (...args: unknown[]) => mockStampIssueBlocked(...args),
 }));
 
+// DX-584 (Phase 4) — handleStop stamps `completed_at` / `cancelled_at`
+// on the candidate YAML BEFORE the auto-sync reconcile so the
+// open→closed file move sees the freshly-stamped fields. Mocked here
+// so the unit tests can assert call shape without touching the real
+// filesystem; the integration coverage lives in `stamp-terminal.test.ts`.
+const mockStampIssueCompleted = vi.fn().mockResolvedValue(undefined);
+const mockStampIssueCancelled = vi.fn().mockResolvedValue(undefined);
+vi.mock("../issue/stamp-terminal.js", () => ({
+  stampIssueCompleted: (...args: unknown[]) =>
+    mockStampIssueCompleted(...args),
+  stampIssueCancelled: (...args: unknown[]) =>
+    mockStampIssueCancelled(...args),
+}));
+
 // DX-559: handleStop runs the commits-shipped enforcement before the
 // existing status branches. Mock it so tests can drive the violation /
 // no-violation path without setting up a real git repo per case (that
@@ -318,6 +332,8 @@ beforeEach(() => {
   // call history is cleared). Reset explicitly so the next test starts
   // with the default no-op implementation.
   mockStampIssueBlocked.mockReset();
+  mockStampIssueCompleted.mockReset().mockResolvedValue(undefined);
+  mockStampIssueCancelled.mockReset().mockResolvedValue(undefined);
 });
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
@@ -587,6 +603,113 @@ describe("handleStop", () => {
     expect(stopRes._getStatusCode()).toBe(200);
     expect(JSON.parse(stopRes._getBody())).toEqual({ status: "completed" });
     expect(mockStop).toHaveBeenCalledWith("completed", "All done");
+  });
+
+  it("DX-584: stamps completed_at on the candidate YAML BEFORE auto-sync on status=completed", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-completed",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockGetActiveJob.mockReturnValue(mockJob);
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-completed",
+      issueId: "ISS-300",
+      agentName: null,
+      status: "running",
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "completed",
+      summary: "Card done",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-completed", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(mockStampIssueCompleted).toHaveBeenCalledTimes(1);
+    expect(mockStampIssueCompleted).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "ISS-300",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+        at: expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
+      }),
+    );
+    expect(mockStampIssueCancelled).not.toHaveBeenCalled();
+    // Ordering invariant: stamp MUST run before auto-sync so the
+    // file-move pass sees the freshly-stamped completed_at.
+    const stampOrder = mockStampIssueCompleted.mock.invocationCallOrder[0]!;
+    const syncOrder = mockAutoSyncTrackedIssue.mock.invocationCallOrder[0]!;
+    expect(stampOrder).toBeLessThan(syncOrder);
+  });
+
+  it("DX-584: stamps cancelled_at on the candidate YAML BEFORE auto-sync on status=failed", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-failed",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockGetActiveJob.mockReturnValue(mockJob);
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-failed",
+      issueId: "ISS-301",
+      agentName: null,
+      status: "running",
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "failed",
+      summary: "Spec ambiguous",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-failed", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(mockStampIssueCancelled).toHaveBeenCalledTimes(1);
+    expect(mockStampIssueCancelled).toHaveBeenCalledWith(
+      expect.objectContaining({
+        repoLocalPath: MOCK_REPO.localPath,
+        candidateId: "ISS-301",
+        expectedPrefix: MOCK_REPO.issuePrefix,
+      }),
+    );
+    expect(mockStampIssueCompleted).not.toHaveBeenCalled();
+  });
+
+  it("DX-584: skips terminal-stamp when dispatch row has no issueId (Slack / external launch)", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-no-issue",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockGetActiveJob.mockReturnValue(mockJob);
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-no-issue",
+      issueId: null,
+      agentName: null,
+      status: "running",
+    });
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "completed",
+      summary: "Slack reply done",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-no-issue", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(mockStampIssueCompleted).not.toHaveBeenCalled();
+    expect(mockStampIssueCancelled).not.toHaveBeenCalled();
   });
 
   it("returns 400 when status is explicitly null — same fail-loud path as undefined", async () => {

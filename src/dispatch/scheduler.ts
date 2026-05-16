@@ -65,6 +65,7 @@ import {
   loadLocal,
 } from "../poller/yaml-lifecycle.js";
 import { buildReattachPlan, type ReattachPlan } from "./reattach-planner.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import type { Issue, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
@@ -827,6 +828,10 @@ export async function runPostDispatchProgressCheck(
     return;
   }
 
+  // DX-584 (Phase 4) — derived semantic state. The tracker's
+  // `card.status` is its own projection (Trello list → status enum);
+  // we read it directly because the tracker side does not carry the
+  // v10 timestamps. Local-YAML derivation happens below.
   if (card.status !== "ToDo") {
     return;
   }
@@ -841,9 +846,17 @@ export async function runPostDispatchProgressCheck(
     );
     return;
   }
-  if (!local || local.status !== "ToDo") {
+  // DX-584 (Phase 4) — derived semantic state. A card whose worker
+  // stamped `completed_at` post-dispatch derives to "Done" via the
+  // 7-rule precedence even if the agent never updated the raw status
+  // field. The post-dispatch check fires only when the card's derived
+  // state is STILL ToDo (no terminal timestamps stamped + raw status
+  // never moved off ToDo) — that's the symptom of an agent that
+  // dispatched, ran, and somehow didn't reach a terminal save.
+  const localDerived = local ? deriveStatus(local) : null;
+  if (!local || localDerived !== "ToDo") {
     log.info(
-      `[${repo.name}] post-dispatch check: local YAML for ${cardId} status=${local?.status ?? "(closed/missing)"} — tracker reports ToDo but local moved on, skipping flag (tracker likely stale, e.g. trello sync disabled)`,
+      `[${repo.name}] post-dispatch check: local YAML for ${cardId} derived=${localDerived ?? "(closed/missing)"} — tracker reports ToDo but local moved on, skipping flag (tracker likely stale, e.g. trello sync disabled)`,
     );
     return;
   }

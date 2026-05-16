@@ -35,6 +35,7 @@ import {
   serializeIssue,
   validateIssue,
 } from "../issue-tracker/yaml.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import {
   dbSelectIssueById,
   dbSelectIssueByExternalId,
@@ -443,7 +444,16 @@ export function moveToClosedIfTerminal(
   repoLocalPath: string,
   issue: Issue,
 ): boolean {
-  if (issue.status !== "Done" && issue.status !== "Cancelled") return false;
+  // DX-584 (Phase 4) — drive the open→closed move from the derived
+  // semantic state instead of the raw `status` field. `deriveStatus`
+  // returns "Done" when `completed_at` is set (rule 2) or via the
+  // rule-7 raw-status fallthrough; same for "Cancelled" via
+  // `cancelled_at` (rule 1) or fallthrough. Cards still on the
+  // pre-Phase-4 write path (raw `status: Done` without `completed_at`)
+  // continue to move via the fallthrough; new-path cards move via
+  // their stamped timestamps. Either spelling, one decision.
+  const derived = deriveStatus(issue);
+  if (derived !== "Done" && derived !== "Cancelled") return false;
   ensureIssuesDirs(repoLocalPath);
   const openPath = issuePath(repoLocalPath, issue.id, "open");
   const closedPath = issuePath(repoLocalPath, issue.id, "closed");

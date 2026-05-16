@@ -11,13 +11,13 @@
  * Precedence (first match wins; ties at higher precedence beat ties at
  * lower):
  *
- *   1. `cancelled_at`                        → `Cancelled`
- *   2. `completed_at`                        → `Done`
- *   3. (deferred — see deferral note below)
- *   4. `blocked.at`                          → `Blocked`
- *   5. `ready_at`                            → `ToDo`
- *   6. `archived_at`                         → `Backlog`
- *   7. fallthrough                           → raw `issue.status`
+ *   1. `cancelled_at`                                    → `Cancelled`
+ *   2. `completed_at`                                    → `Done`
+ *   3. `blocked.at`                                      → `Blocked`
+ *   4. `dispatch != null` AND raw status not terminal    → `In Progress`
+ *   5. `ready_at`                                        → `ToDo`
+ *   6. `archived_at`                                     → `Backlog`
+ *   7. fallthrough                                       → raw `issue.status`
  *
  * Rule 7 deviation from the card spec (DX-582 description rule 7 reads
  * "else → Review"). Every v10 card currently on disk has all five
@@ -29,26 +29,28 @@
  * (DX-584) wires timestamp stamping into the dispatch / poller / picker
  * transitions and the raw field drops out of relevance entirely.
  *
- * Rule 3 deferral. The spec's rule 3 (`dispatch != null && !blocked.at`
- * → `In Progress`) reads the `dispatch` sidecar as authoritative for
- * the In-Progress state. Two on-disk patterns block landing it in
- * Phase 2:
- *   - Terminal cards with lingering `dispatch` (DX-202 retired the
- *     clear-on-terminal step; the dispatch field persists as an audit
- *     record of who ran the last session). Reading rule 3 over them
- *     flips Done / Cancelled cards back to In Progress and breaks the
- *     heal pass + post-completion auto-sync.
+ * Rule 4 (added in Phase 4 — DX-584). `dispatch != null` is the
+ * authoritative "live work in flight on this card" signal. The Phase 4
+ * dispatch lifecycle stamps `completed_at` / `cancelled_at` / `blocked.at`
+ * on terminal save AND clears the `dispatch` sidecar at the same write,
+ * so the two prior on-disk patterns that blocked landing rule 4 in
+ * Phase 2 are now resolved:
+ *   - Terminal cards with lingering `dispatch` — the new write paths
+ *     (`stampIssueCompleted`, `stampIssueCancelled`, `stampIssueBlocked`)
+ *     explicitly clear `dispatch: null` so the terminal-state precedence
+ *     (rules 1-2 / rule 3) fires before rule 4 even gets a look-in.
  *   - Cards forced to ToDo by `forceWaitingOnToToDo` while a transient
- *     dispatch field lingers (rare race during waiting_on save). The
- *     poller's invariant pins them to ToDo; rule 3 would silently
- *     contradict.
- * The natural co-landing is Phase 4 (DX-584) — which wires
- * `completed_at` / `cancelled_at` stamping into the dispatch lifecycle.
- * Once those timestamps populate on terminal saves, rules 1-2 cover
- * the cases rule 3 was attempting to back-derive. Until then, raw
- * `status` carries the In-Progress signal directly via fallthrough
- * (rule 7), which is correct in 100% of cases — Phase 2 ships the
- * other six rules.
+ *     dispatch field lingers — the rare race window where `dispatch`
+ *     and `ready_at` co-exist with a forced ToDo. Rule 4 correctly
+ *     surfaces such a card as In Progress because the dispatch IS
+ *     live; the waiting_on gate still skips it at the picker filter,
+ *     so there is no spurious re-dispatch.
+ * Rule 4 fires AFTER the terminal-timestamp rules + blocked.at so a
+ * terminal-stamped card whose `dispatch` block somehow lingered still
+ * reads as Done / Cancelled / Blocked. The picker filter
+ * (`listDispatchableYamls`) requires `dispatch === null` independently,
+ * so a card with a live dispatch can never be picked even when its
+ * derived status says "ToDo".
  *
  * Rule 5 vs rule 6: `ready_at` (became dispatch-eligible) beats
  * `archived_at` (parked / shelved) — a card explicitly readied for
@@ -84,7 +86,30 @@ export interface DeriveStatusInput {
 export function deriveStatus(issue: DeriveStatusInput | Issue): IssueStatus {
   if (issue.cancelled_at) return "Cancelled";
   if (issue.completed_at) return "Done";
+  // Blocked beats dispatch: a card with `blocked.at` populated is a
+  // stable explicit-gate state. Phase 4's `stampIssueBlocked` clears
+  // `dispatch` at the same write, but a pre-Phase-4 Blocked card with
+  // a lingering dispatch must still derive Blocked — the agent that
+  // self-blocked is the authoritative signal, not the leftover
+  // dispatch sidecar.
   if (issue.blocked?.at) return "Blocked";
+  // DX-584 (Phase 4) — rule 4. `dispatch != null` is the live-work
+  // signal AFTER terminal-timestamp + blocked rules. Guarded against
+  // raw-terminal-status to preserve the pre-Phase-4 legacy heal path:
+  // a card whose raw `status` is "Done" / "Cancelled" with a lingering
+  // `dispatch` (pre-Phase-4 artifact where dispatch was not cleared
+  // on terminal save) still derives terminal via rule 7 fallthrough
+  // so `moveToClosedIfTerminal` + `healLocalYamls` flush the stuck
+  // state on the next tick. Phase 4 write paths clear `dispatch` on
+  // every terminal save, so the legacy pattern stops accumulating
+  // going forward.
+  if (
+    issue.dispatch &&
+    issue.status !== "Done" &&
+    issue.status !== "Cancelled"
+  ) {
+    return "In Progress";
+  }
   if (issue.ready_at) return "ToDo";
   if (issue.archived_at) return "Backlog";
   return issue.status;

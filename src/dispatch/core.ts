@@ -79,8 +79,10 @@ import { reconcileIssue } from "../issue/reconcile.js";
 import {
   clearDispatchAndWrite,
   loadLocal,
-  stampStatusAndWrite,
+  writeIssue,
 } from "../poller/yaml-lifecycle.js";
+import { resolveListNameForType } from "../issue/list-resolve.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import { resolveEffortToFlags } from "../settings-file.js";
 import { resolveDispatchEffort } from "./resolve-dispatch-effort.js";
 import { syncRepoFiles } from "../inject/sync.js";
@@ -1335,7 +1337,18 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
   // with `issueId` get effort resolution from the card just like work
   // dispatches; only the auto-flip itself is gated on
   // `dispatchKind === "work"`.
-  let priorStatus: Issue["status"] | undefined;
+  // DX-584 (Phase 4) — auto-flip snapshot covers all three fields the
+  // pre-spawn write mutates: status, ready_at, list_name. Rollback on
+  // spawn failure restores every field that was actually changed, so a
+  // partial state (e.g. status flipped but ready_at still null) never
+  // lingers in the working tree.
+  let priorSnapshot:
+    | {
+        status: Issue["status"];
+        ready_at: Issue["ready_at"];
+        list_name: Issue["list_name"];
+      }
+    | undefined;
   let candidateEffortLevel: Issue["effort_level"] | undefined;
   if (input.issueId) {
     const candidate = await loadLocal(
@@ -1346,12 +1359,22 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     if (candidate) {
       candidateEffortLevel = candidate.effort_level;
       if (input.dispatchKind === "work" && candidate.status === "ToDo") {
-        priorStatus = candidate.status;
-        await stampStatusAndWrite(
+        priorSnapshot = {
+          status: candidate.status,
+          ready_at: candidate.ready_at,
+          list_name: candidate.list_name,
+        };
+        const nowIso = new Date().toISOString();
+        const inProgressListName = resolveListNameForType(
           input.repo.localPath,
-          candidate,
-          "In Progress",
+          "in_progress",
         );
+        await writeIssue(input.repo.localPath, {
+          ...candidate,
+          status: "In Progress",
+          ready_at: candidate.ready_at ?? nowIso,
+          list_name: inProgressListName,
+        });
       }
     }
   }
@@ -1420,27 +1443,44 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     cleanupStagedFiles(stagedFilePaths);
     // Revert the auto-flip on spawn failure so the candidate card
     // returns to its prior status (typically ToDo) for the poller to
-    // re-pick next tick. Best-effort: a revert failure logs but does
-    // not mask the original spawn error.
-    if (priorStatus !== undefined && input.issueId) {
+    // re-pick next tick. DX-584 (Phase 4) — restores all three fields
+    // the pre-spawn write mutated (status, ready_at, list_name); the
+    // partial state where status was reverted but ready_at + list_name
+    // kept their in-progress values would slip a "looks ready" card
+    // back into the dispatchable set with a stale list projection.
+    // Best-effort: a revert failure logs but does not mask the
+    // original spawn error.
+    if (priorSnapshot !== undefined && input.issueId) {
       try {
         const candidate = await loadLocal(
           input.repo.localPath,
           input.issueId,
           input.repo.issuePrefix,
         );
-        // Only revert if the candidate is STILL at the status we
-        // flipped it to. If some other writer (prep-verdict route,
-        // human dashboard edit, parallel poller tick) has since stamped
-        // Blocked / Done / Cancelled / etc., respect that — clobbering
-        // a Blocked card back to ToDo would re-dispatch a card the
-        // operator already triaged.
-        if (candidate && candidate.status === "In Progress") {
-          await stampStatusAndWrite(
-            input.repo.localPath,
-            candidate,
-            priorStatus,
-          );
+        // Only revert if the candidate's derived semantic state is NOT
+        // terminal. If some other writer (prep-verdict route, human
+        // dashboard edit, parallel poller tick) has since stamped
+        // Blocked / Done / Cancelled, the derived state catches that —
+        // clobbering a terminal card back to ToDo would re-dispatch a
+        // card the operator already triaged. DX-584 (Phase 4): derived
+        // state is the canonical view; raw `status === "In Progress"`
+        // is no longer a reliable signal post-auto-flip because the
+        // newly-stamped `ready_at` makes parseIssue derive "ToDo" until
+        // `stampDispatchAndWrite` lands the dispatch sidecar.
+        if (candidate) {
+          const derived = deriveStatus(candidate);
+          if (
+            derived !== "Blocked" &&
+            derived !== "Done" &&
+            derived !== "Cancelled"
+          ) {
+            await writeIssue(input.repo.localPath, {
+              ...candidate,
+              status: priorSnapshot.status,
+              ready_at: priorSnapshot.ready_at,
+              list_name: priorSnapshot.list_name,
+            });
+          }
         }
       } catch (revertErr) {
         log.error(
