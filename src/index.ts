@@ -56,6 +56,7 @@ import {
   getIssuePollerPickupPrefix,
   syncSettingsFileOnBoot,
 } from "./settings-file.js";
+import { ensureListsFile } from "./lists-file.js";
 import { watchRepoEnvFile } from "./dashboard/repo-env-writer.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
 import { reapOrphans } from "./worker/process-scan.js";
@@ -171,6 +172,11 @@ async function startWorkerMode(): Promise<void> {
   // `overrides` are preserved across restarts. See
   // `.claude/rules/settings-file.md`.
   await syncSettingsFileOnBoot(repo, config.runtime);
+
+  // DX-583 — seed `<repo>/.danxbot/lists.yaml` on first boot. Idempotent:
+  // an existing file is left untouched so operator-tuned list taxonomies
+  // survive every restart. Same model as `syncSettingsFileOnBoot` above.
+  await ensureListsFile(repo.localPath);
 
   // DX-303: Watch `<repo>/.danxbot/.env` for credential rotations from
   // the dashboard's PATCH /api/agents/:repo/trello-credentials route
