@@ -219,7 +219,7 @@ Does the candidate describe work an autonomous agent can perform right now? Mech
 If any apply — **load the `danxbot:issue-blocker` skill first**. Its 8-item gating checklist distinguishes a real human-only block from a punt. Only if the gate passes:
 
 - For card-itself stuckness → emit verdict `blocked` (Step 6).
-- For prep-environment failure (your worktree is wedged, branch sync failed irrecoverably, MCP tool unreachable) → call `danxbot_complete({status: "agent_blocked", summary: "<one-sentence reason>"})` directly INSTEAD of emitting a verdict. The MCP server stamps `status: Blocked` + `blocked: {reason: summary, timestamp}` on the candidate YAML and terminates the dispatch as failed. Use this when you got past Step 2 / 3 / 4 but the environment will not let you proceed safely.
+- For prep-environment failure (your worktree is wedged, branch sync failed irrecoverably, MCP tool unreachable) → call `danxbot_complete({status: "agent_blocked", summary: "<one-sentence reason>"})` directly INSTEAD of emitting a verdict. The MCP server stamps `blocked: {at: <now ISO>, reason: summary}` on the candidate YAML (status derives to `Blocked` via `deriveStatus` rule 3) and terminates the dispatch as failed. Use this when you got past Step 2 / 3 / 4 but the environment will not let you proceed safely.
 
 Otherwise → continue to Step 6 with verdict `ok`.
 
@@ -293,7 +293,7 @@ After the verdict ack returns:
 
 ## Self-block via `agent_blocked` (Step 5 detail)
 
-`danxbot_complete({status: "agent_blocked", summary})` is the agent's self-block primitive when the prep ENVIRONMENT (not the candidate's spec) wedges. The MCP server requires the dispatch row to carry `issue_id` — the worker stamps `status: Blocked` + `blocked: {reason: summary, timestamp: now}` on that card's YAML and ends the dispatch as `failed`.
+`danxbot_complete({status: "agent_blocked", summary})` is the agent's self-block primitive when the prep ENVIRONMENT (not the candidate's spec) wedges. The MCP server requires the dispatch row to carry `issue_id` — the worker stamps `blocked: {at: <now ISO>, reason: summary}` on that card's YAML (status derives to `Blocked` via `deriveStatus` rule 3) and ends the dispatch as `failed`.
 
 Use this only when:
 
@@ -303,7 +303,7 @@ Use this only when:
 
 The `summary` becomes the `blocked.reason` verbatim. Make it one sentence stating the exact wedge: "Rebase conflict in `src/foo.ts:42` between candidate's rename and main's deletion — neither side has enough context to reconstruct intent."
 
-For card-itself stuckness (impossible AC, ambiguous spec) — use the `blocked` verdict in Step 6 instead. The two paths land at the same on-disk state (`status: Blocked` + `blocked` record) but the verdict path is the right semantic when you have not yet entered the work body.
+For card-itself stuckness (impossible AC, ambiguous spec) — use the `blocked` verdict in Step 6 instead. The two paths land at the same on-disk state (`blocked: {at, reason}` stamped → derived status `Blocked`) but the verdict path is the right semantic when you have not yet entered the work body.
 
 ---
 
