@@ -107,6 +107,7 @@ export type CriticalFailureSource =
   | "agent"
   | "post-dispatch-check"
   | "issues-db-mirror"
+  | "boot-migration-sweep"
   | "throttle"
   | "unparseable";
 
@@ -180,6 +181,7 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
     source !== "agent" &&
     source !== "post-dispatch-check" &&
     source !== "issues-db-mirror" &&
+    source !== "boot-migration-sweep" &&
     source !== "throttle" &&
     source !== "unparseable"
   ) {

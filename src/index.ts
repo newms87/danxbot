@@ -73,6 +73,9 @@ import {
 } from "./agent/systemd-preflight.js";
 import { sweepStaleTmpDirs } from "./agent/tmp-dir-sweep.js";
 import { tmpdir } from "node:os";
+import { runBootMigrationSweep } from "./worker/migrate-on-boot.js";
+import { writeFlag } from "./critical-failure.js";
+import { KNOWN_SCHEMA_MAX } from "./issue-tracker/schema-versions.js";
 
 const log = createLogger("startup");
 
@@ -236,6 +239,39 @@ async function startWorkerMode(): Promise<void> {
     // itself blew up — log + continue so the rest of boot proceeds.
     // The poller's pre-claim DB guard still keeps things consistent.
     log.error(`[${repo.name}] ensureWorktreesProvisioned failed`, err);
+  }
+
+  // DX-593 — boot-time schema migration sweep. Walks every open + closed
+  // YAML under `<repo>/.danxbot/issues/` and brings it to KNOWN_SCHEMA_MAX
+  // via the migration registry (DX-592). Deletes closed YAMLs older than
+  // 48h (no parse, no migrate). Per-file failures are collected into
+  // `failed[]` — the sweep never throws on a single file. ANY failure is
+  // fatal at boot: a worker that cannot guarantee uniform schema MUST NOT
+  // serve dispatches because P3 strips the validator's inline tolerance
+  // branches, so a missed migration cascades into every downstream reader.
+  //
+  // Order invariant: MUST run BEFORE `startIssuesMirror` (chokidar),
+  // `startWorkerCronLoop` (poller arm), and `startWorkerServer` (HTTP).
+  // Pinned by `src/__tests__/worker/migrate-on-boot-order.test.ts`.
+  //
+  // Escape hatch: `DANXBOT_SKIP_BOOT_MIGRATION_SWEEP=1` short-circuits the
+  // sweep (emergency-only; documented in `src/worker/migrate-on-boot.ts`).
+  const sweep = await runBootMigrationSweep([repo]);
+  log.info(
+    `[${repo.name}] Boot migration sweep: migrated=${sweep.migrated} unchanged=${sweep.unchanged} deletedClosed=${sweep.deletedClosed} failed=${sweep.failed.length}`,
+  );
+  if (sweep.failed.length > 0) {
+    log.error(
+      `[${repo.name}] Boot migration sweep failed for ${sweep.failed.length} file(s) — refusing to boot`,
+      sweep.failed,
+    );
+    writeFlag(repo.localPath, {
+      source: "boot-migration-sweep",
+      dispatchId: "boot",
+      reason: `Boot migration sweep failed for ${sweep.failed.length} file(s) — every YAML must reach v${KNOWN_SCHEMA_MAX} before the worker can serve dispatches`,
+      detail: JSON.stringify(sweep.failed, null, 2),
+    });
+    process.exit(1);
   }
 
   // Platform pool must be ready before any sql:execute block runs.

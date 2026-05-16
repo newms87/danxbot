@@ -115,6 +115,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { hostname as osHostname } from "node:os";
 import { createLogger } from "../logger.js";
 import { dispatch } from "../dispatch/core.js";
@@ -160,11 +161,13 @@ import {
 } from "./dispatch-liveness-yaml.js";
 import {
   clearDispatchAndWrite,
+  issuePath,
   loadLocal,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
 } from "./yaml-lifecycle.js";
+import { parseIssue } from "../issue-tracker/yaml.js";
 import type { IssueDispatch } from "../issue-tracker/interface.js";
 
 const log = createLogger("multi-agent-pick");
@@ -728,11 +731,49 @@ export async function tryMultiAgentDispatch(
             // sees a clean slate. The `assigned_agent` stamp survives
             // (the next dispatch by the same agent re-claims it via
             // pickCardForAgent's "self-claim allowed" branch).
-            const fresh = await loadLocal(
+            //
+            // Source-of-truth = FILE, not DB. The prep-verdict route's
+            // writeIssue stamps `waiting_on` / `conflict_on` and
+            // writeFileSync's the file as its final step; chokidar
+            // mirrors to DB on a 5s `awaitWriteFinish` debounce. If
+            // onComplete fires inside that debounce window, the DB row
+            // is still pre-verdict (waiting_on=null) — building the
+            // `dispatch: null` write from the stale DB row and
+            // re-writing it CLOBBERS the file's waiting_on stamp,
+            // causing the next picker tick to re-dispatch the same
+            // card (observed loop: prep verdict claims waitingOnStamped:
+            // true on every pass yet next tick still picks the card).
+            // Reading the file directly here uses whatever the verdict
+            // route just wrote, immune to the debounce race.
+            const filePath = issuePath(
               repo.localPath,
               stamped.id,
-              repo.issuePrefix,
+              "open",
             );
+            let fresh: Issue | null = null;
+            if (existsSync(filePath)) {
+              try {
+                fresh = parseIssue(readFileSync(filePath, "utf-8"), {
+                  expectedPrefix: repo.issuePrefix,
+                });
+              } catch (parseErr) {
+                log.error(
+                  `[${repo.name}] onComplete: failed to parse ${filePath} — falling back to DB-load`,
+                  parseErr,
+                );
+                fresh = await loadLocal(
+                  repo.localPath,
+                  stamped.id,
+                  repo.issuePrefix,
+                );
+              }
+            } else {
+              fresh = await loadLocal(
+                repo.localPath,
+                stamped.id,
+                repo.issuePrefix,
+              );
+            }
             if (fresh && fresh.dispatch !== null) {
               await clearDispatchAndWrite(repo.localPath, fresh);
             }
