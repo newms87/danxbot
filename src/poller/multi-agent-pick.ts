@@ -510,6 +510,11 @@ export async function tryMultiAgentDispatch(
     // cross-environment coordinate, so the tracker-comment lock is a
     // no-op by design. Same structural safety as the no-external_id
     // skip: the card is only visible to THIS worker.
+    // Every picker-driven dispatch (work, prep, reconcile) targets the
+    // `issue-worker` workspace. The card-creating self-repair branch
+    // (DX-560) was retired; the worker-fault rebuild (DX-580) will
+    // dispatch outside the picker (card-less, inline prompt), so no
+    // routing alternative exists here today.
     const dispatchWorkspace = "issue-worker";
 
     if (hasTrackerCoordinate(card) && tracker !== null) {

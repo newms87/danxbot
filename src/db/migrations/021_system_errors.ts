@@ -1,11 +1,12 @@
 import type { PoolClient } from "pg";
 
 /**
- * DX-561 (Phase 1 of DX-560 — Self-Repair): durable storage for deduped
- * system errors + per-attempt repair history. Phase 2 wires callsites
- * via `src/system-repair/categorize.ts#recordError`. Phase 3 reads the
- * top-ranked open rows via `getOpenErrorsRanked` to decide which error
- * to dispatch a repair agent at.
+ * Durable storage for deduped system errors + per-attempt repair
+ * history. `src/system-repair/categorize.ts#recordError` is the sole
+ * writer; the dashboard reads via `src/system-repair/db-reads.ts`. The
+ * card-creating dispatcher this originally fed (DX-560) was retired;
+ * `system_error_repairs` rows will only be written again when the
+ * DX-580 worker-fault rebuild lands.
  *
  * Two tables:
  *

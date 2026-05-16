@@ -15,9 +15,8 @@
  */
 
 /**
- * Per-tick context every cron job receives. DX-563 added the
- * `repoName` + `repoRoot` pair so per-repo jobs (self-repair
- * dispatcher) can scope their work without each one re-reading
+ * Per-tick context every cron job receives. The `repoName` + `repoRoot`
+ * pair lets per-repo jobs scope their work without each one re-reading
  * `DANXBOT_REPO_NAME` from `process.env`. Existing jobs whose `run`
  * body takes no args still match the signature — `run` accepts
  * `ctx?` so call sites that ignore it stay zero-churn.
@@ -51,9 +50,9 @@ export interface CronJob {
    *
    * `ctx` is supplied by the dispatcher. Existing jobs (orphan
    * reaper, SFC-deps provision/prune) ignore it — they read env /
-   * filesystem state directly. New per-repo jobs (DX-563 self-repair
-   * dispatcher) consume `ctx.repoName` + `ctx.repoRoot` so they don't
-   * re-parse env vars on every tick.
+   * filesystem state directly. Future per-repo jobs (DX-580 worker-
+   * fault dispatcher) will consume `ctx.repoName` + `ctx.repoRoot` so
+   * they don't re-parse env vars on every tick.
    */
   run(ctx?: CronJobContext): Promise<void>;
 }

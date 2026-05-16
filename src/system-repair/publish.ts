@@ -1,9 +1,12 @@
 /**
  * DX-565 (Phase 5 of DX-560 — Self-Repair): one-call publisher for
- * the `system-repair-error:updated` SSE topic. Consumers of write
- * paths (`recordError`, `resetRepairError`, `markUnfixable`) invoke
- * this after the DB write commits so the Self-Repair tab projects
- * the new state without a refetch.
+ * the `system-repair-error:updated` SSE topic. Producers:
+ *   - worker-side: `recordError` (categorize.ts) on every signature
+ *     upsert.
+ *   - dashboard-side: `resetRepairError` + `markUnfixable`
+ *     (db-reads.ts) on operator action.
+ * Each invokes this after the DB write commits so the Self-Repair tab
+ * projects the new state without a refetch.
  *
  * The publisher fetches the full `{error, attempts[]}` snapshot via
  * `getRepairErrorDetail` so subscribers never need to round-trip back

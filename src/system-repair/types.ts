@@ -1,31 +1,33 @@
 /**
- * DX-561 (Phase 1 of DX-560 — Self-Repair): row shapes for the two
- * tables that store deduped error categories and per-attempt repair
- * history. Mirrors the column set declared in migration 021. Used by
- * `recordError` / `getOpenErrorsRanked` in `categorize.ts`; the Phase 3
- * dispatcher will consume `SystemErrorRow` directly when it scans for
- * top-ranked open errors to dispatch repair agents at.
+ * Row shapes for the two tables that store deduped error categories
+ * and per-attempt repair history. Mirrors the column set declared in
+ * migration 021. Used by `recordError` in `categorize.ts` (write path)
+ * + the dashboard read surface (`db-reads.ts`, `self-repair-routes.ts`).
+ *
+ * NOTE: the card-creating dispatcher (DX-560) was retired; the
+ * `"repairing"` status + `SystemErrorRepairVerdict` are reserved for
+ * the DX-580 worker-fault rebuild and no current code writes them.
  */
 
 export type SystemErrorStatus = "open" | "repairing" | "fixed" | "unfixable";
 
 /**
- * DX-566 Phase 6 — single source of truth for the self-repair cap.
+ * Single source of truth for the self-repair cap.
  *
- * Three call sites read it; they MUST agree:
- *   - `dispatch-pick.ts` — WHERE clause refuses to pick rows with
- *     `>= REPAIR_CAP` prior attempts.
- *   - `finalize.ts` — `failed` verdict at `attempt_n >= REPAIR_CAP`
- *     flips the row to `unfixable`.
+ * Live consumers:
  *   - `categorize.ts` — recurrence transition at
  *     `recurrence_count + 1 >= REPAIR_CAP` flips straight to
- *     `unfixable` instead of `open`.
+ *     `unfixable` instead of `open` (the only path that fires today).
  *
- * Changing this value here propagates to all three. The dashboard
- * mirrors it via the `recurrence_count >= REPAIR_CAP` branch in
- * `SelfRepairTab.vue`; keep the SPA-side literal in sync by hand if
- * the cap ever moves (the cross-process boundary makes a runtime
- * import inconvenient).
+ * Reserved for DX-580 rebuild:
+ *   - dispatcher pick query — refuse rows with `>= REPAIR_CAP` attempts.
+ *   - finalize hook — `failed` verdict at `attempt_n >= REPAIR_CAP`
+ *     flips the row to `unfixable`.
+ *
+ * The dashboard mirrors the literal via `recurrence_count >= REPAIR_CAP`
+ * in `SelfRepairTab.vue`; keep the SPA-side literal in sync by hand if
+ * the cap moves (cross-process boundary makes runtime import
+ * inconvenient).
  */
 export const REPAIR_CAP = 3;
 

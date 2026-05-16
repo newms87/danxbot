@@ -337,6 +337,13 @@ describe("tryMultiAgentDispatch", () => {
     expect(result.dispatched).toBe(1);
     expect(mockedDispatchWithRecovery).toHaveBeenCalledTimes(1);
     expect(mockedDispatchWithRecovery.mock.calls[0][1].agentName).toBe("bob");
+    // Pin the picker → workspace contract: every picker-driven dispatch
+    // targets `issue-worker`. The DX-560 self-repair branch was retired,
+    // so a regression that reintroduces an alternative workspace string
+    // (typo, partial rebuild, accidental branch) fails here.
+    expect(mockedDispatchWithRecovery.mock.calls[0][0].workspace).toBe(
+      "issue-worker",
+    );
   });
 
   it("DX-292: returns 0 dispatched when every agent is broken (no fallback)", async () => {

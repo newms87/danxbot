@@ -16,11 +16,10 @@ const VALID_STATUSES: ReadonlySet<SystemErrorStatus> = new Set([
 ]);
 
 /**
- * DX-561 (Phase 1 of DX-560 — Self-Repair): pure error categorization +
- * persistent deduped storage. Phase 2 wires callsites, Phase 3 builds the
- * dispatcher that consumes `getOpenErrorsRanked` for repair-agent
- * targeting. This module is callsite-free on its own — importing it has
- * zero runtime side effects.
+ * Pure error categorization + persistent deduped storage. `recordError`
+ * is invoked from every callsite that surfaces a system error
+ * (`reportSystemError`, `recordSystemError`); the dashboard reads via
+ * `db-reads.ts`. Card-dispatcher (DX-560) was retired.
  *
  * Design rules:
  *
@@ -36,9 +35,6 @@ const VALID_STATUSES: ReadonlySet<SystemErrorStatus> = new Set([
  * - `recordError` uses Postgres's `INSERT ... ON CONFLICT DO UPDATE`
  *   keyed on `signature_hash` for atomic upsert — concurrent writers
  *   from different processes / workers do not race.
- * - `getOpenErrorsRanked` filters by `repo` + `status='open'` (the
- *   dispatcher's view) and orders by count DESC, last_seen DESC. Phase 3
- *   will read it to pick the top error to dispatch a repair card at.
  */
 
 // Absolute-path matcher — requires the basename to carry an extension
@@ -127,18 +123,18 @@ export interface RecordErrorInput {
  * Subsequent occurrences: count++, last_seen=now, sample_payload=
  * excluded (latest sample wins for context freshness).
  *
- * Status transitions on conflict (DX-566 Phase 6):
+ * Status transitions on conflict:
  *  - When existing `status='fixed'` — a previously-fixed signature is
  *    firing again. Flip back to `open` AND bump `recurrence_count`. If
- *    the bumped count >= 3, the cycle proved unfixable: flip to
- *    `unfixable` instead so the dispatcher stops trying.
+ *    the bumped count >= 3, flip to `unfixable` instead.
  *  - When existing status is `open` / `repairing` / `unfixable` —
- *    leave status + recurrence_count alone. A row marked `repairing`
- *    while occurrences keep landing is the expected state during a
- *    repair attempt; the dispatcher decides when to re-open. A row at
- *    `unfixable` stays there until an operator resets it. A row at
- *    `open` is already a dispatch candidate; bumping it would clobber
- *    history without changing dispatcher behavior.
+ *    leave status + recurrence_count alone.
+ *
+ * NOTE: the card-creating dispatcher (DX-560) was retired; no code
+ * writes `'repairing'` or `'fixed'` today. The 'fixed'-flip branch
+ * lies dormant until the DX-580 worker-fault rebuild lands. The
+ * remaining live transition is `open → unfixable` via the operator's
+ * `markUnfixable` route in `db-reads.ts`.
  */
 export async function recordError(
   input: RecordErrorInput,
@@ -197,37 +193,6 @@ export async function recordError(
   // committed by the time we get here.
   void publishRepairErrorUpdated({ db, errorId: row.id });
   return row;
-}
-
-export interface GetOpenErrorsRankedInput {
-  db: Pool;
-  repo: string;
-  limit: number;
-}
-
-/**
- * Open errors for a repo, ordered by count DESC then last_seen DESC.
- * Phase 3's dispatcher consumes this — the top row is the next repair
- * target.
- */
-export async function getOpenErrorsRanked(
-  input: GetOpenErrorsRankedInput,
-): Promise<SystemErrorRow[]> {
-  const { db, repo, limit } = input;
-  const { rows } = await db.query<SystemErrorRowFromDb>(
-    `
-    SELECT
-      id, signature_hash, category_key, component, err_class,
-      normalized_msg, sample_payload, count, first_seen, last_seen,
-      status, repo, recurrence_count
-    FROM system_errors
-    WHERE repo = $1 AND status = 'open'
-    ORDER BY count DESC, last_seen DESC
-    LIMIT $2
-    `,
-    [repo, limit],
-  );
-  return rows.map(rowToSystemError);
 }
 
 type SystemErrorRowFromDb = Omit<SystemErrorRow, "status"> & {

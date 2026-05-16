@@ -57,25 +57,25 @@ const {
  */
 const RECURRENCE_CAP = 3;
 
-function unfixableReason(row: RepairErrorWithAttempts): "recurrence" | "agent-or-cap" {
-  return row.error.recurrence_count >= RECURRENCE_CAP ? "recurrence" : "agent-or-cap";
+function unfixableReason(row: RepairErrorWithAttempts): "recurrence" | "operator" {
+  return row.error.recurrence_count >= RECURRENCE_CAP ? "recurrence" : "operator";
 }
 
 function unfixableBadgeTooltip(row: RepairErrorWithAttempts): string {
   return unfixableReason(row) === "recurrence"
-    ? `Unfixable due to recurrence — agent claimed a fix but the producer re-emitted the signature ${row.error.recurrence_count} times.`
-    : "Unfixable — agent self-declared OR 3 repair attempts exhausted without a fix.";
+    ? `Unfixable due to recurrence — the producer re-emitted the signature ${row.error.recurrence_count} times.`
+    : "Unfixable — operator declared via Mark Unfixable.";
 }
 
-const unfixableBreakdown = computed<{ recurrence: number; agentOrCap: number }>(() => {
+const unfixableBreakdown = computed<{ recurrence: number; operator: number }>(() => {
   let recurrence = 0;
-  let agentOrCap = 0;
+  let operator = 0;
   for (const row of errors.value) {
     if (row.error.status !== "unfixable") continue;
     if (unfixableReason(row) === "recurrence") recurrence++;
-    else agentOrCap++;
+    else operator++;
   }
-  return { recurrence, agentOrCap };
+  return { recurrence, operator };
 });
 
 const now = useNowTick();
@@ -176,12 +176,11 @@ function close(): void {
         </div>
         <div class="text-red-200/80">
           <span v-if="unfixableBreakdown.recurrence > 0" data-testid="banner-recurrence-line">
-            {{ unfixableBreakdown.recurrence }} due to recurrence (agent
-            claimed a fix, producer re-emitted){{ unfixableBreakdown.agentOrCap > 0 ? ';' : '.' }}
+            {{ unfixableBreakdown.recurrence }} due to recurrence (producer
+            re-emitted the signature ≥{{ RECURRENCE_CAP }} times){{ unfixableBreakdown.operator > 0 ? ';' : '.' }}
           </span>
-          <span v-if="unfixableBreakdown.agentOrCap > 0" data-testid="banner-agent-or-cap-line">
-            {{ unfixableBreakdown.agentOrCap }} agent-declared or 3-attempt
-            cap exhausted.
+          <span v-if="unfixableBreakdown.operator > 0" data-testid="banner-operator-line">
+            {{ unfixableBreakdown.operator }} operator-declared via Mark Unfixable.
           </span>
           Operator must inspect, reset to retry, or fix manually.
         </div>

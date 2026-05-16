@@ -52,11 +52,11 @@ export interface RunTickArgs {
   readonly jobs: readonly CronJob[];
   readonly repoRoot: string;
   /**
-   * DX-563 — repo name forwarded to each job's `run(ctx)` so per-repo
-   * jobs (self-repair dispatcher) can scope their work without each
-   * one re-reading `DANXBOT_REPO_NAME` from `process.env`. Tests that
-   * skip per-repo jobs may omit this field; existing jobs ignore the
-   * value entirely.
+   * Repo name forwarded to each job's `run(ctx)` so per-repo jobs
+   * (future DX-580 worker-fault dispatcher) can scope their work
+   * without each one re-reading `DANXBOT_REPO_NAME` from `process.env`.
+   * Tests that skip per-repo jobs may omit this field; existing jobs
+   * ignore the value entirely.
    */
   readonly repoName?: string;
   /** Defaults to `Date.now()`. Injected by tests. */

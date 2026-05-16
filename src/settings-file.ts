@@ -531,11 +531,11 @@ export interface Settings {
    */
   effortAssignmentPrompt?: string;
   /**
-   * DX-563 — Self-Repair runtime config (threshold for the dispatcher).
+   * Self-Repair runtime config. Parked — no consumer reads this today.
+   * The card-creating dispatcher this used to drive was retired (DX-560)
+   * and the worker-fault rebuild (DX-580) will rewire the reader.
    * Optional in the type; `normalize` always materializes `{}` so reads
-   * see a stable shape. `getSelfRepairThreshold` (in
-   * `system-repair/settings.ts`) is the canonical reader and falls back
-   * to {@link DEFAULT_SELF_REPAIR_THRESHOLD} when missing.
+   * see a stable shape. {@link DEFAULT_SELF_REPAIR_THRESHOLD} = 3.
    */
   selfRepair?: SelfRepairSettings;
   meta: SettingsMeta;

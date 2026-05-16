@@ -1,7 +1,8 @@
 /**
- * DX-565 (Phase 5 of DX-560 — Self-Repair): SQL helpers the dashboard
- * "Self-Repair" tab reads. The dispatcher (`dispatch-pick.ts`) reads
- * the WRITE side; this module is the READ + operator-action side.
+ * SQL helpers the dashboard "Self-Repair" tab reads + operator-action
+ * writes. `categorize.ts#recordError` is the sole producer feeding
+ * `system_errors` today; this module is the read surface + the two
+ * operator overrides (reset / mark unfixable).
  *
  * `listRepairErrors` and `getRepairErrorDetail` return the same
  * `RepairErrorWithAttempts` shape — list is multi-row, detail is
@@ -11,9 +12,9 @@
  *
  * `resetRepairError` clears every repair attempt for the error AND
  * flips the row back to `status='open'`. Used when an operator wants
- * the self-repair pipeline to try again after a manual fix (or after
- * three failed agent attempts hit the cap). DELETE-cascade on
- * `system_error_repairs` keeps the implementation a single statement.
+ * the (future DX-580) self-repair pipeline to try again after a manual
+ * fix. DELETE-cascade on `system_error_repairs` keeps the
+ * implementation a single statement.
  *
  * `markUnfixable` is the operator override that flips status to
  * `unfixable` without going through a repair attempt — used when a

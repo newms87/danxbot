@@ -93,19 +93,19 @@ export async function autoSyncTrackedIssue(
     // reconcile. No `issueId` → dispatch wasn't bound to a card YAML
     // (Slack chat, board-chat, ideator, or /api/launch without an issue),
     // so there is no YAML for reconcile to operate on. Skip the
-    // reconcile + finalize branch but FALL THROUGH to the root-clone
-    // sync below — every terminal dispatch (issue-bound or not) can
-    // have advanced `origin/main`, so the root clone may still drift.
+    // reconcile branch but FALL THROUGH to the root-clone sync below —
+    // every terminal dispatch (issue-bound or not) can have advanced
+    // `origin/main`, so the root clone may still drift.
     if (row && row.issueId !== null) {
       await deps.reconcile(
-      {
-        name: repo.name,
-        localPath: repo.localPath,
-        issuePrefix: repo.issuePrefix,
-      },
-      row.issueId,
-      "lifecycle",
-    );
+        {
+          name: repo.name,
+          localPath: repo.localPath,
+          issuePrefix: repo.issuePrefix,
+        },
+        row.issueId,
+        "lifecycle",
+      );
     }
   } catch (err) {
     log.error(
