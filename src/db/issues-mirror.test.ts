@@ -219,6 +219,25 @@ describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () =
     });
   });
 
+  it("non-canonical id (descriptive filename pre-rename): skips upsert + does NOT write CRITICAL_FAILURE", async () => {
+    // Agents routinely Write a draft YAML with a descriptive filename
+    // (`my-feature-name.yml`) and then call `danx_issue_create` which
+    // atomically renames to `<PREFIX>-<N>.yml`. The transient bad-shape
+    // event must not flag, must not mirror, must not halt the poller —
+    // the canonical-named event arrives moments later.
+    const badId = "my-feature-name";
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      badId,
+      `id: ${badId}\nstatus: ToDo\ntype: Feature\n`,
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(db.rows.has(rowKey("test-repo", badId))).toBe(false);
+    expect(db.history).toHaveLength(0);
+    expect(readFlag(repo.localPath)).toBeNull();
+  });
+
   it("DB write failure: writes CRITICAL_FAILURE flag + mirror keeps running", async () => {
     db.fail = new Error("connection refused");
     const path = writeYaml(repo.localPath, "open", "DX-6", SAMPLE_YAML("DX-6"));
