@@ -78,9 +78,11 @@ describe("migration registry", () => {
     // Caller's responsibility — boot sweep (P2) is supposed to bump any
     // pre-MIN file to MIN first. In-process readers never see pre-MIN data
     // under normal operation; if they do, fail loud rather than guess.
-    const v3 = { schema_version: 3 };
-    expect(() => migrateForward(v3)).toThrow(MigrationRegistryError);
-    expect(() => migrateForward(v3)).toThrow(/no migration registered/i);
+    // v3 IS now registered (legacy-to-v10 bridge). Use v2 — below the
+    // registry floor; expected behavior is hard-throw.
+    const v2 = { schema_version: 2 };
+    expect(() => migrateForward(v2)).toThrow(MigrationRegistryError);
+    expect(() => migrateForward(v2)).toThrow(/no migration registered/i);
   });
 
   it("throws when input is not a plain object", () => {
