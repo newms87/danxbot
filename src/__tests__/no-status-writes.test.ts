@@ -87,6 +87,10 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // to "ToDo" when reading orphan rows + carries the comment for the
   // Blocked record field.
   "dashboard/issues-reader.ts",
+  // Dashboard issue projection — surfaces a placeholder "ToDo" status
+  // for missing-child stubs in IssueListChild so the SPA can route
+  // them to the ⛔ unknown chip (not a write to disk).
+  "dashboard/project-issue.ts",
   // MCP server docstring references status: "Blocked" in the agent-
   // self-block contract description.
   "mcp/danxbot-server.ts",
