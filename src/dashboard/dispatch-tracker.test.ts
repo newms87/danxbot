@@ -23,10 +23,28 @@ vi.mock("../logger.js", () => ({
 }));
 
 import {
+  applyStrike,
   extractSessionUuidFromPath,
   startDispatchTracking,
   type FinalizeTokens,
 } from "./dispatch-tracker.js";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import {
+  _resetForTesting,
+  readSettings,
+  settingsFilePath,
+  type AgentRecord,
+  type AgentStrikeEntry,
+  type Settings,
+} from "../settings-file.js";
+import { afterEach } from "vitest";
 import type { DispatchTriggerMetadata } from "./dispatches.js";
 import type { AgentLogEntry } from "../types.js";
 
@@ -747,5 +765,375 @@ describe("startDispatchTracking — EventBus publishing", () => {
     expect(call.data.status).toBe("failed");
     expect(call.data.error).toBe("Agent timed out");
     expect(call.data.summary).toBeNull();
+  });
+});
+
+// =============================================================================
+// DX-604 — applyStrike branches: failed-class strikes, completed resets,
+// cancelled is a true no-op
+// =============================================================================
+
+function setupRepoDir(): string {
+  const dir = mkdtempSync(resolve(tmpdir(), "danxbot-applystrike-test-"));
+  mkdirSync(resolve(dir, ".danxbot"), { recursive: true });
+  return dir;
+}
+
+function validAgentRecord(over: Partial<AgentRecord> = {}): AgentRecord {
+  return {
+    type: "agent",
+    bio: "apply-strike test bio.",
+    capabilities: ["issue-worker"],
+    schedule: {
+      tz: "UTC",
+      always_on: true,
+      mon: [],
+      tue: [],
+      wed: [],
+      thu: [],
+      fri: [],
+      sat: [],
+      sun: [],
+    },
+    enabled: true,
+    broken: null,
+    strikes: { count: 0, history: [] },
+    created_at: "2026-05-14T00:00:00Z",
+    updated_at: "2026-05-14T00:00:00Z",
+    ...over,
+  };
+}
+
+function seedAgent(localPath: string, name: string, over?: Partial<AgentRecord>): void {
+  const settings: Settings = {
+    overrides: {
+      slack: { enabled: null },
+      issuePoller: { enabled: null, pickupNamePrefix: null },
+      dispatchApi: { enabled: null },
+      ideator: { enabled: null },
+      autoTriage: { enabled: null },
+      trelloSync: { enabled: null },
+    },
+    display: {},
+    agents: { [name]: validAgentRecord(over) },
+    agentDefaults: { prepMode: "combined" },
+    meta: { updatedAt: "2026-05-14T00:00:00Z", updatedBy: "worker" },
+  };
+  writeFileSync(
+    settingsFilePath(localPath),
+    JSON.stringify(settings, null, 2),
+    "utf-8",
+  );
+}
+
+function strikeEntry(over: Partial<AgentStrikeEntry> = {}): AgentStrikeEntry {
+  return {
+    dispatch_id: over.dispatch_id ?? "d1",
+    issue_id: over.issue_id ?? "DX-1",
+    terminal_status: over.terminal_status ?? "failed",
+    timestamp: over.timestamp ?? "2026-05-14T00:00:01Z",
+    raw_error: over.raw_error ?? "",
+  };
+}
+
+describe("applyStrike — DX-604 reset on completed", () => {
+  let localPath: string;
+
+  beforeEach(() => {
+    _resetForTesting();
+    localPath = setupRepoDir();
+  });
+
+  afterEach(() => {
+    rmSync(localPath, { recursive: true, force: true });
+  });
+
+  it("resets strikes.count + history to zero on terminal status 'completed'", async () => {
+    seedAgent(localPath, "alice", {
+      strikes: {
+        count: 2,
+        history: [
+          strikeEntry({ dispatch_id: "d1" }),
+          strikeEntry({ dispatch_id: "d2", timestamp: "2026-05-14T00:00:02Z" }),
+        ],
+      },
+    });
+
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "completion-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+
+    const after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(0);
+    expect(after?.strikes.history).toEqual([]);
+    expect(after?.updated_at).toBe("2026-05-14T10:00:00Z");
+  });
+
+  it("failures still increment strikes — reset path does NOT capture failed-class statuses", async () => {
+    seedAgent(localPath, "alice", {
+      strikes: { count: 1, history: [strikeEntry({ dispatch_id: "prior" })] },
+    });
+
+    await applyStrike({
+      status: "failed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "fail-1",
+      issueId: "DX-9",
+      rawError: "boom",
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+
+    const after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(2);
+    expect(after?.strikes.history).toHaveLength(2);
+    expect(after?.strikes.history[1].dispatch_id).toBe("fail-1");
+  });
+
+  it("cancelled neither strikes nor resets (operator interrupt)", async () => {
+    const seedHistory = [strikeEntry({ dispatch_id: "prior" })];
+    seedAgent(localPath, "alice", {
+      strikes: { count: 1, history: seedHistory },
+    });
+
+    await applyStrike({
+      status: "cancelled",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "cancel-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+
+    const after = readSettings(localPath).agents?.alice;
+    // Counter preserved exactly — neither incremented nor cleared.
+    expect(after?.strikes.count).toBe(1);
+    expect(after?.strikes.history).toHaveLength(1);
+    expect(after?.strikes.history[0].dispatch_id).toBe("prior");
+    // updated_at also untouched — applyStrike returned without any write.
+    expect(after?.updated_at).toBe("2026-05-14T00:00:00Z");
+  });
+
+  it("recovered + throttled still strike (DX-365 contract preserved); next completed clears", async () => {
+    seedAgent(localPath, "alice");
+
+    await applyStrike({
+      status: "recovered",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "rec-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+    await applyStrike({
+      status: "throttled",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "thr-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:01Z",
+    });
+    let after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(2);
+
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "ok-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:02Z",
+    });
+    after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(0);
+    expect(after?.strikes.history).toEqual([]);
+  });
+
+  it("3 consecutive failures still trip the broken-flag (no completion between them)", async () => {
+    seedAgent(localPath, "alice");
+
+    for (let i = 1; i <= 3; i++) {
+      await applyStrike({
+        status: "failed",
+        repoLocalPath: localPath,
+        repoName: "myrepo",
+        agentName: "alice",
+        dispatchId: `fail-${i}`,
+        issueId: "DX-9",
+        rawError: "boom",
+        timestampIso: `2026-05-14T10:00:0${i}Z`,
+      });
+    }
+
+    const after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(3);
+    expect(after?.broken).not.toBeNull();
+  });
+
+  it("doom-loop fixed: 2 failed → completed → 2 more failed does NOT trip broken at the old 3-consecutive threshold", async () => {
+    seedAgent(localPath, "alice");
+
+    // First two failures accumulate against an old-style durable counter.
+    for (const i of [1, 2]) {
+      await applyStrike({
+        status: "failed",
+        repoLocalPath: localPath,
+        repoName: "myrepo",
+        agentName: "alice",
+        dispatchId: `pre-fail-${i}`,
+        issueId: "DX-9",
+        rawError: "boom",
+        timestampIso: `2026-05-14T09:00:0${i}Z`,
+      });
+    }
+    expect(readSettings(localPath).agents?.alice.strikes.count).toBe(2);
+
+    // A productive completion lands — DX-604 says this clears the counter.
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "productive-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+    expect(readSettings(localPath).agents?.alice.strikes.count).toBe(0);
+
+    // Two more transient failures — pre-DX-604 these would have been the
+    // 3rd + 4th strike against a durable counter and tripped broken.
+    // Post-DX-604 they're 1 + 2 against a freshly-cleared counter.
+    for (const i of [1, 2]) {
+      await applyStrike({
+        status: "failed",
+        repoLocalPath: localPath,
+        repoName: "myrepo",
+        agentName: "alice",
+        dispatchId: `post-fail-${i}`,
+        issueId: "DX-9",
+        rawError: "boom",
+        timestampIso: `2026-05-14T11:00:0${i}Z`,
+      });
+    }
+
+    const after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(2);
+    // Critical: broken-flag NOT tripped. This is the load-bearing
+    // assertion the card was filed to deliver — flaky-but-productive
+    // agents survive transient instability between completions.
+    expect(after?.broken).toBeNull();
+  });
+
+  it("completed on already-broken agent: count resets to 0, broken record preserved", async () => {
+    const preExistingBroken = {
+      reason: "manual operator flag",
+      suggested_steps: ["check logs"],
+      set_at: "2026-05-14T00:00:00Z",
+      evaluator_status: "completed" as const,
+      evaluator_dispatch_id: null,
+    };
+    seedAgent(localPath, "alice", {
+      strikes: { count: 3, history: [strikeEntry({ dispatch_id: "prior" })] },
+      broken: preExistingBroken,
+    });
+
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "ok-1",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+
+    const after = readSettings(localPath).agents?.alice;
+    expect(after?.strikes.count).toBe(0);
+    expect(after?.strikes.history).toEqual([]);
+    // Broken stays — the dashboard banner is dismissed only by operator
+    // action, not by a single successful completion.
+    expect(after?.broken).not.toBeNull();
+    expect(after?.broken?.reason).toBe("manual operator flag");
+  });
+
+  it("resetStrikes failure (missing agent) is swallowed — applyStrike resolves without throwing", async () => {
+    seedAgent(localPath, "alice");
+    // Reference a name not in the roster — resetStrikes will throw inside,
+    // applyStrike's try/catch must keep the dispatch finalize path clean.
+    await expect(
+      applyStrike({
+        status: "completed",
+        repoLocalPath: localPath,
+        repoName: "myrepo",
+        agentName: "ghost",
+        dispatchId: "ok-1",
+        issueId: "DX-9",
+        rawError: null,
+        timestampIso: "2026-05-14T10:00:00Z",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("guard short-circuits when repoLocalPath / agentName / issueId is missing — no write", async () => {
+    seedAgent(localPath, "alice", {
+      strikes: { count: 1, history: [strikeEntry({ dispatch_id: "prior" })] },
+    });
+
+    // null repoLocalPath
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: null,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "x",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+    // null agentName
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: null,
+      dispatchId: "x",
+      issueId: "DX-9",
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+    // null issueId
+    await applyStrike({
+      status: "completed",
+      repoLocalPath: localPath,
+      repoName: "myrepo",
+      agentName: "alice",
+      dispatchId: "x",
+      issueId: null,
+      rawError: null,
+      timestampIso: "2026-05-14T10:00:00Z",
+    });
+
+    const after = readSettings(localPath).agents?.alice;
+    // All three guards short-circuited — counter unchanged.
+    expect(after?.strikes.count).toBe(1);
+    expect(after?.strikes.history[0].dispatch_id).toBe("prior");
   });
 });

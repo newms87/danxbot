@@ -7,7 +7,7 @@
  *
  *   | terminal status | strike? | notes                                   |
  *   |-----------------|---------|-----------------------------------------|
- *   | completed       | NO      | success; does NOT reset count            |
+ *   | completed       | NO      | success — RESETS count + history (DX-604)|
  *   | cancelled       | NO      | operator interrupt — not the agent       |
  *   | failed          | YES     | agent did not put card/env in valid state|
  *   | recovered       | YES     | API-error auto-recover ⇒ unstable session|
@@ -39,10 +39,16 @@
  *      event fires EXACTLY once per `null → populated` transition; a
  *      4th strike when already broken does NOT re-emit (AC #4).
  *
- * Strikes do NOT reset on `completed` — the counter is durable across
- * the agent's lifetime until a human clears it via the dashboard
- * (Phase 6). This is the load-bearing assumption that makes 3 strikes
- * mean "this agent is failing across cards", not "this card is hard."
+ * Strikes RESET on `completed` (DX-604). Successful completions are
+ * direct evidence the agent is NOT failing across cards, so the counter
+ * clears via `resetStrikes` to prevent the doom loop where 50 successes
+ * between two transient `recovered` / `failed` ticks still flip broken.
+ * The counter measures "consecutive strike-eligible terminals since
+ * the last completed dispatch" — three of those in a row without a
+ * success between them still trips broken, which is the load-bearing
+ * "this agent is failing across cards" signal. `resetStrikes` clears
+ * only `strikes.{count, history}`; an existing `broken` record is
+ * preserved (operator clears it via the dashboard).
  *
  * `agent_blocked` and `critical_failure` agent-side complete signals
  * collapse to `failed` at the dispatch row's terminal status (see
@@ -231,6 +237,67 @@ export async function recordStrike(
   }
 
   return { count: resultCount, brokenTransitionEmitted: resultEmitted };
+}
+
+export interface ResetStrikesDeps {
+  /** `<repo>/.danxbot` parent — same arg shape as `mutateAgents`. */
+  localPath: string;
+  /** Agent key in `settings.agents` map. Throws if not found on disk. */
+  agentName: string;
+  /**
+   * ISO 8601 timestamp stamped onto `agent.updated_at`. Required so the
+   * dashboard's "last activity" surface reflects the reset moment.
+   */
+  timestamp: string;
+}
+
+/**
+ * Atomically clear `strikes.{count, history}` for the named agent
+ * (DX-604). Called from `applyStrike` when the dispatch's terminal
+ * status is `completed`.
+ *
+ * Preserves any existing `broken` record — clearing broken is the
+ * operator's explicit action via the dashboard Agents tab. A success
+ * on an already-broken agent resets the counter (so the next
+ * `recordStrike` starts from 0) but leaves the broken banner in
+ * place; the dashboard's clear-strikes button is what dismisses it.
+ *
+ * No-op + skip the disk write when `strikes.count === 0` AND
+ * `history.length === 0` — the common case (every successful
+ * completion against a healthy agent). Throws when the agent is
+ * missing — same fail-loud semantics as `recordStrike`.
+ */
+export async function resetStrikes(deps: ResetStrikesDeps): Promise<void> {
+  if (deps.timestamp.length === 0) {
+    throw new TypeError("resetStrikes: deps.timestamp must be non-empty");
+  }
+  await mutateAgents(
+    deps.localPath,
+    (current) => {
+      const record = current[deps.agentName];
+      if (!record) {
+        throw new Error(
+          `resetStrikes: agent "${deps.agentName}" not found in roster`,
+        );
+      }
+      if (record.strikes.count === 0 && record.strikes.history.length === 0) {
+        return current;
+      }
+      const prevCount = record.strikes.count;
+      const nextRecord: AgentRecord = {
+        ...record,
+        strikes: { count: 0, history: [] },
+        updated_at: deps.timestamp,
+      };
+      validateStrikes(nextRecord.strikes);
+      current[deps.agentName] = nextRecord;
+      log.info(
+        `[strikes] ${deps.agentName} strikes reset from ${prevCount} to 0 on success`,
+      );
+      return current;
+    },
+    "worker",
+  );
 }
 
 /**

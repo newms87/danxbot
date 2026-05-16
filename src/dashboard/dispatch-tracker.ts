@@ -3,6 +3,7 @@ import { createLogger } from "../logger.js";
 import {
   isStrikeEligible,
   recordStrike,
+  resetStrikes,
 } from "../agent/strikes.js";
 import {
   insertDispatch,
@@ -59,6 +60,26 @@ export async function applyStrike(args: ApplyStrikeArgs): Promise<void> {
   if (!args.repoLocalPath) return;
   if (!args.agentName) return;
   if (!args.issueId) return;
+  // DX-604 — successful completions reset the durable strike counter
+  // (count + history). Branches BEFORE `isStrikeEligible` because
+  // `completed` is not strike-eligible (it does not increment) but it
+  // IS the only status that clears. `cancelled` (operator interrupt)
+  // stays a true no-op — neither strike nor reset.
+  if (args.status === "completed") {
+    try {
+      await resetStrikes({
+        localPath: args.repoLocalPath,
+        agentName: args.agentName,
+        timestamp: args.timestampIso,
+      });
+    } catch (err) {
+      log.error(
+        `[Dispatch ${args.dispatchId}] strike reset failed for agent="${args.agentName}"`,
+        err,
+      );
+    }
+    return;
+  }
   if (!isStrikeEligible(args.status)) return;
   try {
     await recordStrike(

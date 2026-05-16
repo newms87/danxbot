@@ -46,8 +46,10 @@ import {
   DEFAULT_BROKEN_REASON,
   isStrikeEligible,
   recordStrike,
+  resetStrikes,
   type StrikeInput,
 } from "./strikes.js";
+import type { AgentStrikeEntry } from "../settings-file.js";
 
 function setupRepoDir(): string {
   const dir = mkdtempSync(resolve(tmpdir(), "danxbot-strikes-test-"));
@@ -456,6 +458,134 @@ describe("strikes", () => {
       expect(after.reason).toBe("operator-set reason");
       expect(after.suggested_steps).toEqual(["step1"]);
       expect(after.set_at).toBe("2026-05-14T00:00:00Z");
+    });
+  });
+
+  // =========================================================================
+  // DX-604 — resetStrikes clears the durable counter on success
+  // =========================================================================
+
+  describe("resetStrikes (DX-604)", () => {
+    function entry(over: Partial<AgentStrikeEntry> = {}): AgentStrikeEntry {
+      return {
+        dispatch_id: over.dispatch_id ?? "d1",
+        issue_id: over.issue_id ?? "DX-1",
+        terminal_status: over.terminal_status ?? "failed",
+        timestamp: over.timestamp ?? "2026-05-14T00:00:01Z",
+        raw_error: over.raw_error ?? "",
+      };
+    }
+
+    it("clears count + history on an agent with prior strikes", async () => {
+      seed(localPath, "alice", {
+        strikes: {
+          count: 2,
+          history: [
+            entry({ dispatch_id: "d1" }),
+            entry({ dispatch_id: "d2", timestamp: "2026-05-14T00:00:02Z" }),
+          ],
+        },
+      });
+      await resetStrikes({
+        localPath,
+        agentName: "alice",
+        timestamp: "2026-05-14T10:00:00Z",
+      });
+      const after = readSettings(localPath).agents?.alice;
+      expect(after?.strikes.count).toBe(0);
+      expect(after?.strikes.history).toEqual([]);
+      expect(after?.updated_at).toBe("2026-05-14T10:00:00Z");
+    });
+
+    it("preserves an existing broken record — operator clears broken via dashboard", async () => {
+      const preExistingBroken: AgentBrokenState = {
+        reason: "operator-set",
+        suggested_steps: ["check logs"],
+        set_at: "2026-05-14T00:00:00Z",
+        evaluator_status: "completed",
+        evaluator_dispatch_id: null,
+      };
+      seed(localPath, "alice", {
+        strikes: { count: 3, history: [entry()] },
+        broken: preExistingBroken,
+      });
+      await resetStrikes({
+        localPath,
+        agentName: "alice",
+        timestamp: "2026-05-14T10:00:00Z",
+      });
+      const after = readSettings(localPath).agents?.alice;
+      expect(after?.strikes.count).toBe(0);
+      expect(after?.broken).not.toBeNull();
+      expect((after!.broken as AgentBrokenState).reason).toBe("operator-set");
+      expect((after!.broken as AgentBrokenState).suggested_steps).toEqual([
+        "check logs",
+      ]);
+    });
+
+    it("no-ops when strikes already at {count:0, history:[]} — does not touch updated_at", async () => {
+      seed(localPath, "alice");
+      await resetStrikes({
+        localPath,
+        agentName: "alice",
+        timestamp: "2026-05-14T10:00:00Z",
+      });
+      const after = readSettings(localPath).agents?.alice;
+      expect(after?.strikes.count).toBe(0);
+      expect(after?.strikes.history).toEqual([]);
+      // updated_at unchanged from seed value — the skip avoided the write.
+      expect(after?.updated_at).toBe("2026-05-14T00:00:00Z");
+    });
+
+    it("throws when the agent does not exist", async () => {
+      seed(localPath, "alice");
+      await expect(
+        resetStrikes({
+          localPath,
+          agentName: "ghost",
+          timestamp: "2026-05-14T10:00:00Z",
+        }),
+      ).rejects.toThrow(/agent "ghost" not found/);
+    });
+
+    it("rejects empty timestamp at the boundary", async () => {
+      seed(localPath, "alice");
+      await expect(
+        resetStrikes({ localPath, agentName: "alice", timestamp: "" }),
+      ).rejects.toThrow(/timestamp must be non-empty/);
+    });
+
+    it("serializes against a concurrent recordStrike via mutateAgents lock", async () => {
+      seed(localPath, "alice", {
+        strikes: {
+          count: 2,
+          history: [
+            entry({ dispatch_id: "d1" }),
+            entry({ dispatch_id: "d2", timestamp: "2026-05-14T00:00:02Z" }),
+          ],
+        },
+      });
+      // Two concurrent writers: a reset and a new strike. The lock + queue
+      // serializes them; the only observable invariant is "neither lost"
+      // — final count is either {reset → strike} = 1 OR {strike → reset}
+      // = 0. Any other value means the lock failed.
+      await Promise.all([
+        resetStrikes({
+          localPath,
+          agentName: "alice",
+          timestamp: "2026-05-14T10:00:00Z",
+        }),
+        recordStrike(makeInput({ dispatchId: "race-strike" }), {
+          localPath,
+          repoName: "r",
+          agentName: "alice",
+        }),
+      ]);
+      const after = readSettings(localPath).agents?.alice;
+      // count and history length agree — a partial write that shipped one
+      // without the other (lock failure) would fail this dual assertion.
+      expect([0, 1]).toContain(after!.strikes.count);
+      expect(after!.strikes.history).toHaveLength(after!.strikes.count);
     });
   });
 });
