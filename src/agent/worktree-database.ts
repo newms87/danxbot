@@ -60,6 +60,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
+import { provisionWorktreePorts } from "./worktree-ports.js";
 
 const execFile = promisify(execFileCb);
 const log = createLogger("worktree-database");
@@ -84,7 +85,9 @@ export interface PgAdminClient {
   end(): Promise<void>;
 }
 
-export type PgClientFactory = (cfg: PgConnectionConfig) => Promise<PgAdminClient>;
+export type PgClientFactory = (
+  cfg: PgConnectionConfig,
+) => Promise<PgAdminClient>;
 
 export interface MigrationRunnerOpts {
   repoRoot: string;
@@ -435,10 +438,23 @@ export async function provisionWorktreeDatabase(
     secretStore.write(opts.repoRoot, opts.worktreeName, workerPassword);
   }
 
+  // Per-worktree host-port overrides. The consumer's docker-compose.yml
+  // declares every host-port mapping via `${VAR:-default}` env
+  // interpolation, so the worktree's .env is the single source of truth
+  // for which host port its compose stack binds. Without these overrides
+  // every worktree inherits the operator's root ports and races for the
+  // same host binding. See `worktree-ports.ts` for the registry + range
+  // design.
+  const portOverrides = provisionWorktreePorts(
+    opts.repoRoot,
+    opts.worktreeName,
+  );
+
   writeWorktreeEnvFile(opts.worktreePath, parentContent, {
     DB_DATABASE: workerDb,
     DB_USERNAME: workerRole,
     DB_PASSWORD: workerPassword,
+    ...portOverrides,
   });
 
   const runner = opts.migrationRunner ?? defaultMigrationRunner;
