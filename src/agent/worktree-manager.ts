@@ -56,6 +56,7 @@ import { promisify } from "node:util";
 import { join, sep } from "node:path";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -761,9 +762,76 @@ async function provisionWorktreeArtifacts(
   provisionNodeModules(repoRoot, worktreePath);
   provisionDashboardNodeModules(repoRoot, worktreePath);
   provisionEnvFile(repoRoot, worktreePath);
+  provisionSafeResetScript(repoRoot, worktreePath);
   provisionIssuesSymlink(repoRoot, worktreePath);
   provisionWorktreeWorkspaces(repoRoot, worktreePath);
   provisionLaravelStorageDirs(repoRoot, worktreePath);
+}
+
+/**
+ * DX-572 (Phase 2 of DX-570): copy the consumer repo's
+ * `<repoRoot>/.danxbot/safe-reset-db.sh` template into
+ * `<worktreePath>/.danxbot/safe-reset-db.sh` and make it executable.
+ *
+ * The script itself is consumer-repo-specific (a Laravel + Sail recipe
+ * differs from a future Node / Python / Rust consumer repo) and lives
+ * in the consumer repo's tree under version control. Danxbot's role is
+ * to ferry it into every worktree's `.danxbot/` dir at provisioning
+ * time so the agent skill (DX-573) can invoke a stable per-worktree
+ * absolute path.
+ *
+ * Silent skip when the consumer repo has no template — non-DB repos
+ * see no behavior change. When the template DOES exist, the post-copy
+ * verification throws a fail-loud `WorktreeError` if the destination
+ * is missing or not executable; that surfaces in the boot
+ * `ensureWorktreesProvisioned` system-error stream so the operator
+ * sees a clear error instead of a silently-broken worktree.
+ *
+ * Idempotent — `copyFileSync` overwrites destination atomically, so
+ * editing the consumer-repo template and re-running provisioning
+ * propagates the change to every worktree's copy.
+ */
+function provisionSafeResetScript(
+  repoRoot: string,
+  worktreePath: string,
+): void {
+  const src = join(repoRoot, ".danxbot", "safe-reset-db.sh");
+  if (!existsSync(src)) {
+    log.debug(
+      `provisionSafeResetScript: ${src} does not exist — skipping (consumer repo has no template)`,
+    );
+    return;
+  }
+
+  const destDir = join(worktreePath, ".danxbot");
+  const dest = join(destDir, "safe-reset-db.sh");
+
+  mkdirSync(destDir, { recursive: true });
+  copyFileSync(src, dest);
+  chmodSync(dest, 0o755);
+
+  // Fail-loud post-condition. copyFileSync + chmodSync are throwing
+  // calls, so this branch defends against an underlying fs that
+  // silently no-ops (broken bind-mount, exotic union fs); cheap stat
+  // catches any future provisioner regression that drops one of the
+  // two calls without erroring.
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(dest);
+  } catch (err) {
+    throw new WorktreeError(
+      `provisionSafeResetScript: ${dest} missing after copy — ${(err as Error).message ?? err}`,
+    );
+  }
+  // 0o111 = any of owner/group/other exec bit set. The script is
+  // invoked via `bash <path>` so this check is belt-and-suspenders, but
+  // it pins the chmod contract for the AC.
+  if ((st.mode & 0o111) === 0) {
+    throw new WorktreeError(
+      `provisionSafeResetScript: ${dest} is not executable (mode=${(st.mode & 0o777).toString(8)})`,
+    );
+  }
+  log.debug(`provisionSafeResetScript: copied ${src} -> ${dest}`);
 }
 
 /** Path basename without bringing in node:path's `basename` alias. */

@@ -8,14 +8,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   readlinkSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -1226,6 +1229,103 @@ describe("WorktreeManager", () => {
         wm.ensureProvisioned(ctxWithLaravel, "alice"),
       ).rejects.toBeDefined();
       expect(existsSync(join(worktreeRoot, ".env"))).toBe(false);
+    });
+  });
+
+  describe("provisionSafeResetScript / ensureProvisioned (DX-572)", () => {
+    // Phase 2 of DX-570 — copy the consumer repo's
+    // <repoRoot>/.danxbot/safe-reset-db.sh into the worktree and
+    // chmod +x it. Idempotent. Missing template = silent skip
+    // (non-DB consumer repos see no behavior change).
+    let workArea: string;
+    let repoRoot: string;
+    let worktreeRoot: string;
+    const TEMPLATE_REL = join(".danxbot", "safe-reset-db.sh");
+    const TEMPLATE_CONTENT = "#!/usr/bin/env bash\necho safe-reset-stub\n";
+
+    function seedRootRepo(): void {
+      // node_modules sentinel so provisionNodeModules does not throw.
+      writeFileSync(
+        join(repoRoot, "package.json"),
+        JSON.stringify({ name: "test-repo", devDependencies: { tsx: "^4.0.0" } }),
+      );
+      mkdirSync(join(repoRoot, "node_modules", ".bin"), { recursive: true });
+      writeFileSync(join(repoRoot, "node_modules", ".bin", "tsx"), "#!fake\n");
+      writeFileSync(join(repoRoot, ".env"), "FAKE_KEY=1\n");
+    }
+
+    function seedTemplate(content = TEMPLATE_CONTENT): void {
+      mkdirSync(join(repoRoot, ".danxbot"), { recursive: true });
+      writeFileSync(join(repoRoot, TEMPLATE_REL), content);
+    }
+
+    beforeEach(() => {
+      workArea = mkdtempSync(join(tmpdir(), "danxbot-prov-safe-reset-"));
+      repoRoot = join(workArea, "repo");
+      worktreeRoot = join(repoRoot, ".danxbot", "worktrees", "alice");
+      mkdirSync(repoRoot, { recursive: true });
+      mkdirSync(worktreeRoot, { recursive: true });
+      seedRootRepo();
+    });
+
+    afterEach(() => {
+      rmSync(workArea, { recursive: true, force: true });
+    });
+
+    it("copies the template into the worktree and chmods it executable", async () => {
+      seedTemplate();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const dest = join(worktreeRoot, TEMPLATE_REL);
+      expect(existsSync(dest)).toBe(true);
+      // Real file (not a symlink) — the script must be edit-safe per
+      // worktree without rippling back into the consumer repo template.
+      expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+      expect(readFileSync(dest, "utf8")).toBe(TEMPLATE_CONTENT);
+      expect((statSync(dest).mode & 0o111) !== 0).toBe(true);
+    });
+
+    it("silently skips when the consumer repo has no template (non-DB repo path)", async () => {
+      // No seedTemplate() call — non-DB consumer repos see no behavior
+      // change AND boot does not fail.
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await expect(wm.ensureProvisioned(ctx, "alice")).resolves.toBeUndefined();
+      expect(existsSync(join(worktreeRoot, TEMPLATE_REL))).toBe(false);
+    });
+
+    it("is idempotent and propagates template edits on re-provision", async () => {
+      seedTemplate("#!/usr/bin/env bash\necho v1\n");
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const dest = join(worktreeRoot, TEMPLATE_REL);
+      expect(readFileSync(dest, "utf8")).toBe("#!/usr/bin/env bash\necho v1\n");
+
+      // Edit the template — re-provisioning replaces the worktree copy
+      // (the AC's "edit the template, re-run provisioning, change
+      // propagates" contract).
+      writeFileSync(join(repoRoot, TEMPLATE_REL), "#!/usr/bin/env bash\necho v2\n");
+      await wm.ensureProvisioned(ctx, "alice");
+      expect(readFileSync(dest, "utf8")).toBe("#!/usr/bin/env bash\necho v2\n");
+      expect((statSync(dest).mode & 0o111) !== 0).toBe(true);
+    });
+
+    it("replaces a stale worktree copy whose exec bit was stripped", async () => {
+      // Operator hand-runs `chmod -x` (or a previous provisioner bug
+      // wrote without the exec bit) — the post-condition stat catches
+      // it AND the re-provision restores the bit. Asserts the
+      // validator surface from AC #6.
+      seedTemplate();
+      const wm = createWorktreeManager(fakeRunner());
+      const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+      await wm.ensureProvisioned(ctx, "alice");
+      const dest = join(worktreeRoot, TEMPLATE_REL);
+      chmodSync(dest, 0o644);
+      expect((statSync(dest).mode & 0o111) === 0).toBe(true);
+      await wm.ensureProvisioned(ctx, "alice");
+      expect((statSync(dest).mode & 0o111) !== 0).toBe(true);
     });
   });
 
