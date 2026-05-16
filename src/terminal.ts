@@ -180,9 +180,7 @@ export function buildDispatchScript(
   // script, and SIGTERM to bash's PID would NOT reliably propagate to script
   // (bash doesn't forward signals to foreground children by default). The
   // exec-to-script pattern is the idiomatic workaround.
-  const pidEmit = options.pidFilePath
-    ? `echo $$ > "$PID_FILE"\n`
-    : "";
+  const pidEmit = options.pidFilePath ? `echo $$ > "$PID_FILE"\n` : "";
 
   const scriptPath = join(settingsDir, "run-agent.sh");
   writeFileSync(
@@ -196,7 +194,14 @@ API_TOKEN=${quotedApiToken}
 TERMINAL_LOG=${quotedTerminalLog}
 ${pidFileLine}
 report_status() {
-  [ -n "$STATUS_URL" ] && curl -s -X PUT "$STATUS_URL" \\
+  # --connect-timeout 1 + --max-time 2 bound the call so an unreachable or
+  # misconfigured STATUS_URL cannot wedge the wrapper past the worker's
+  # 2000ms PID-file watch. Without these flags, curl defaults to ~300s
+  # connect timeout and the wrapper never reaches the PID-emit line, the
+  # worker reports a real-but-misleading "Timed out 2000ms waiting for
+  # PID file" failure, and the dispatch is dead. The running notification
+  # is best-effort anyway -- node-side putStatus owns the authoritative push.
+  [ -n "$STATUS_URL" ] && curl -s --connect-timeout 1 --max-time 2 -X PUT "$STATUS_URL" \\
     -H "Content-Type: application/json" \\
     -H "Authorization: Bearer $API_TOKEN" \\
     -d "{\\"status\\": \\"$1\\", \\"summary\\": \\"$2\\"}" > /dev/null 2>&1 || true
@@ -271,7 +276,9 @@ export function spawnInTerminal(options: TerminalLaunchOptions): void {
     { cwd: options.cwd, stdio, env, detached: true },
   );
   child.on("error", (err) => {
-    log.error(`Failed to spawn terminal: ${err.message} — is wt.exe available? (Docker containers need the dispatch API instead)`);
+    log.error(
+      `Failed to spawn terminal: ${err.message} — is wt.exe available? (Docker containers need the dispatch API instead)`,
+    );
     // When spawn fails (ENOENT, permission, etc.) Node never plumbs the
     // inherited FD to a child process, so the FD stays open for the worker's
     // lifetime. This is the exact diagnostic case — leaking one FD per

@@ -44,8 +44,7 @@ describe("buildDispatchScript", () => {
   ) {
     return buildDispatchScript(dir, {
       flags: ["--dangerously-skip-permissions", "--verbose"],
-      firstMessage:
-        "<!-- danxbot-dispatch:test-job-id --> @/tmp/p/prompt.md",
+      firstMessage: "<!-- danxbot-dispatch:test-job-id --> @/tmp/p/prompt.md",
       jobId: "test-job-id",
       terminalLogPath: "/tmp/danxbot-terminal-test-job-id.log",
       apiToken: "test-token",
@@ -93,7 +92,9 @@ describe("buildDispatchScript", () => {
     // single-quoted firstMessage. A missing separator regresses host mode to
     // the silent-hang state (card kwZOGOrQ) — the agent TUI boots but never
     // processes the first turn.
-    expect(content).toMatch(/'--mcp-config' '\/tmp\/mcp\/settings\.json' '--' 'the user message'/);
+    expect(content).toMatch(
+      /'--mcp-config' '\/tmp\/mcp\/settings\.json' '--' 'the user message'/,
+    );
   });
 
   it("does NOT write prompt.txt — firstMessage is delivered inline, not via a file", () => {
@@ -165,7 +166,12 @@ describe("buildDispatchScript", () => {
   it("safely quotes flag values containing JSON (--agents)", () => {
     const agentsJson = '{"Validator":{"description":"v","prompt":"p"}}';
     const scriptPath = buildScript({
-      flags: ["--dangerously-skip-permissions", "--verbose", "--agents", agentsJson],
+      flags: [
+        "--dangerously-skip-permissions",
+        "--verbose",
+        "--agents",
+        agentsJson,
+      ],
     });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain(`'--agents' '${agentsJson}'`);
@@ -187,7 +193,7 @@ describe("buildDispatchScript", () => {
       },
       "schema-builder": {
         description: "Builds the data model",
-        prompt: "Another prompt with \"embedded\" double quotes.",
+        prompt: 'Another prompt with "embedded" double quotes.',
       },
     });
     const scriptPath = buildScript({
@@ -214,16 +220,29 @@ describe("buildDispatchScript", () => {
   it("generated script parses as valid bash with a realistic large JSON payload", () => {
     // Mirror the shape GPT Manager's orchestrator sends — multiple agents,
     // each with multi-line prompts and embedded quotes.
-    const bigPrompt = Array.from({ length: 40 }, (_, i) =>
-      `Line ${i}: An "instruction" with 'various' "punctuation" including $special and \\escapes.`,
+    const bigPrompt = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `Line ${i}: An "instruction" with 'various' "punctuation" including $special and \\escapes.`,
     ).join("\n");
     const agentsJson = JSON.stringify({
       "schema-builder": { description: "Schema sub-agent", prompt: bigPrompt },
-      "behavior-builder": { description: "Directive sub-agent", prompt: bigPrompt },
-      "template-builder": { description: "Template sub-agent", prompt: bigPrompt },
+      "behavior-builder": {
+        description: "Directive sub-agent",
+        prompt: bigPrompt,
+      },
+      "template-builder": {
+        description: "Template sub-agent",
+        prompt: bigPrompt,
+      },
     });
     const scriptPath = buildScript({
-      flags: ["--dangerously-skip-permissions", "--verbose", "--agents", agentsJson],
+      flags: [
+        "--dangerously-skip-permissions",
+        "--verbose",
+        "--agents",
+        agentsJson,
+      ],
     });
 
     const result = spawnSync("bash", ["-n", scriptPath], {
@@ -235,7 +254,9 @@ describe("buildDispatchScript", () => {
   });
 
   it("sets STATUS_URL to the given statusUrl", () => {
-    const scriptPath = buildScript({ statusUrl: "http://example.com/api/status" });
+    const scriptPath = buildScript({
+      statusUrl: "http://example.com/api/status",
+    });
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain("STATUS_URL='http://example.com/api/status'");
   });
@@ -251,6 +272,17 @@ describe("buildDispatchScript", () => {
     const content = readFileSync(scriptPath, "utf-8");
     expect(content).toContain("report_status() {");
     expect(content).toContain('report_status "running"');
+  });
+
+  it("bounds report_status curl with --connect-timeout and --max-time so a misconfigured STATUS_URL cannot wedge the wrapper past the 2000ms PID-file watch", () => {
+    const scriptPath = buildScript({ statusUrl: "http://example.com/status" });
+    const content = readFileSync(scriptPath, "utf-8");
+    // The curl invocation inside report_status MUST carry both flags. Without
+    // them, an unreachable status_url hangs at curl's default connect timeout
+    // (300s on Linux), which is well past the worker's 2000ms PID-file watch.
+    // See `~/web/gpt-manager/.env` DANXBOT_GPT_MANAGER_API_URL incident (2026-05-16).
+    expect(content).toMatch(/curl[^\n]*--connect-timeout 1/);
+    expect(content).toMatch(/curl[^\n]*--max-time 2/);
   });
 
   it("guard in report_status skips curl when STATUS_URL is empty", () => {
