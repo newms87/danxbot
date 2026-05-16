@@ -64,6 +64,7 @@ import {
   injectDanxWorkspaces,
   injectDanxbotScripts,
   mirrorWorkspaceTree,
+  rebakeDanxRepoRoot,
 } from "./workspaces.js";
 
 /**
@@ -88,7 +89,7 @@ export function syncRepoFiles(repo: RepoContext): void {
 
   // Stage 1: static workspace mirror.
   const workspacesDir = resolve(repo.localPath, ".danxbot/workspaces");
-  injectDanxWorkspaces(workspacesDir);
+  injectDanxWorkspaces(workspacesDir, repo.localPath);
 
   // Stage 1b: danxbot-shipped scripts -> <repo>/.danxbot/scripts/.
   // Scope is repo-wide (not per-workspace) because the agent invokes
@@ -239,7 +240,15 @@ function mirrorWorkspacesIntoWorktrees(
         } catch {
           continue;
         }
-        mirrorWorkspaceTree(src, resolve(workspacesTarget, entry), []);
+        const dst = resolve(workspacesTarget, entry);
+        mirrorWorkspaceTree(src, dst, []);
+        // Re-bake DANX_REPO_ROOT against the worktree path. The main
+        // workspace dir was baked w/ `repo.localPath`; the copy here
+        // brings that literal into the worktree dir where the value
+        // must instead point at the worktree root so the danx-issue
+        // MCP server resolves `<worktree>/.danxbot/issues/`, not the
+        // main checkout's.
+        rebakeDanxRepoRoot(dst, repo.localPath, worktree);
       }
       renderPerRepoFilesIntoWorkspaces(
         repo,

@@ -106,7 +106,10 @@ export function injectDanxbotScripts(repoLocalPath: string): void {
  * Phase 1 resolver contract in `src/workspace/resolve.ts` for how the
  * mirrored trees are consumed at dispatch time.
  */
-export function injectDanxWorkspaces(workspacesTargetDir: string): void {
+export function injectDanxWorkspaces(
+  workspacesTargetDir: string,
+  repoRoot: string,
+): void {
   const injectWorkspacesDir = resolve(injectDir, "workspaces");
   mkdirSync(workspacesTargetDir, { recursive: true });
   if (!existsSync(injectWorkspacesDir)) return;
@@ -147,6 +150,7 @@ export function injectDanxWorkspaces(workspacesTargetDir: string): void {
     if (!statSync(workspaceDir).isDirectory()) continue;
     injectMcpServers(workspaceDir);
     stripHostUnreachableMcpServers(workspaceDir);
+    bakeDanxRepoRoot(workspaceDir, repoRoot);
     injectSharedWorktreeGuardHook(workspaceDir);
     pruneStaleDanxArtifactsInWorkspace(
       resolve(injectWorkspacesDir, entry),
@@ -181,6 +185,78 @@ function injectSharedWorktreeGuardHook(workspaceDir: string): void {
   const targetPath = resolve(targetDir, "worktree-guard.mjs");
   writeIfChanged(targetPath, readFileSync(source, "utf-8"));
   chmodExecutable(targetPath);
+}
+
+/**
+ * Substitute every `${DANX_REPO_ROOT}` placeholder in the workspace's
+ * `.mcp.json` with the literal `repoRoot` path. The dispatched agent's
+ * `cwd` IS this workspace dir, so the repo root that `@thehammer/danx-issue-mcp`
+ * needs is fixed per file location — `repo.localPath` for the main
+ * `<repo>/.danxbot/workspaces/<name>/` mirror, the worktree path for
+ * each `<worktree>/.danxbot/workspaces/<name>/` mirror.
+ *
+ * Why bake at inject time rather than leave the placeholder for
+ * dispatch-time substitution (`src/workspace/resolve.ts#writeMcpSettings`)?
+ * Two payoffs:
+ *
+ *   1. Host-mode dispatches don't export overlay env vars into the
+ *      claude subprocess (`src/terminal.ts` `run-agent.sh` source-only
+ *      pattern), so claude's project-trust walker reads the raw
+ *      workspace `.mcp.json` and warns `Missing environment variables:
+ *      DANX_REPO_ROOT` on every `/doctor` invocation. Baking the
+ *      literal removes the placeholder from the raw file.
+ *   2. Operators inspecting the file see the actual path instead of
+ *      `${DANX_REPO_ROOT}` — fewer "what is this pointing at" diagnostic
+ *      sessions.
+ *
+ * Dispatch-time substitution (`writeMcpSettings`) still runs and becomes
+ * an identity for this key — safety net for any operator-authored
+ * workspace `.mcp.json` that still uses the placeholder.
+ *
+ * Idempotent: `writeIfChanged` skips when content is already baked.
+ * Missing file is a no-op (some workspaces, e.g. `system-test`, ship
+ * `{"mcpServers": {}}` with no placeholder; some are operator-authored
+ * with no `.mcp.json` at all).
+ */
+export function bakeDanxRepoRoot(workspaceDir: string, repoRoot: string): void {
+  const mcpJsonPath = resolve(workspaceDir, ".mcp.json");
+  if (!existsSync(mcpJsonPath)) return;
+  const raw = readFileSync(mcpJsonPath, "utf-8");
+  if (!raw.includes("${DANX_REPO_ROOT}")) return;
+  const baked = raw.replace(/\$\{DANX_REPO_ROOT\}/g, repoRoot);
+  writeIfChanged(mcpJsonPath, baked);
+}
+
+/**
+ * Re-bake when a workspace `.mcp.json` was already baked against a
+ * different repo root and must now point at a new one. Used by the
+ * worktree mirror in `sync.ts`: the main `<repo>/.danxbot/workspaces/<name>/`
+ * is baked w/ `repo.localPath`; the worktree mirror copies that baked
+ * literal into `<worktree>/.danxbot/workspaces/<name>/` where it must
+ * instead point at the worktree path. String-replace the old literal
+ * w/ the new. Idempotent: no-op when the new literal already in place.
+ *
+ * Narrow string match — only swaps occurrences inside the danx-issue
+ * env block's `DANX_REPO_ROOT` value. Falsely matching elsewhere would
+ * require the operator to have written the main repo's absolute path
+ * as a literal string in some other entry's args/env, which has zero
+ * legitimate use in a workspace `.mcp.json`.
+ */
+export function rebakeDanxRepoRoot(
+  workspaceDir: string,
+  oldRepoRoot: string,
+  newRepoRoot: string,
+): void {
+  if (oldRepoRoot === newRepoRoot) return;
+  const mcpJsonPath = resolve(workspaceDir, ".mcp.json");
+  if (!existsSync(mcpJsonPath)) return;
+  const raw = readFileSync(mcpJsonPath, "utf-8");
+  const needle = `"DANX_REPO_ROOT": ${JSON.stringify(oldRepoRoot)}`;
+  if (!raw.includes(needle)) return;
+  const rebaked = raw.split(needle).join(
+    `"DANX_REPO_ROOT": ${JSON.stringify(newRepoRoot)}`,
+  );
+  writeIfChanged(mcpJsonPath, rebaked);
 }
 
 /**
