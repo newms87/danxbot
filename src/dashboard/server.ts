@@ -108,6 +108,7 @@ import { handleAdminReset } from "./admin-routes.js";
 import { requireUser } from "./auth-middleware.js";
 import { optional } from "../env.js";
 import { createWorktreeManager } from "../agent/worktree-manager.js";
+import { createRemoteWorktreeManager } from "./remote-worktree-manager.js";
 
 const log = createLogger("dashboard");
 
@@ -921,10 +922,31 @@ export async function startDashboard(): Promise<void> {
   // `worker_host:` in deploy/targets/<TARGET>.yml) and falls back to
   // the default `danxbot-worker-<name>` for repos without one.
   const resolveHost = makeResolveWorkerHost(repos);
-  // DX-161: per-agent worktree manager. One process-wide instance shared
-  // across every POST/DELETE /api/agents call. Tests opt in via mocked
-  // deps; production always wires the real default.
-  const worktreeManager = createWorktreeManager();
+  // Per-agent worktree manager. Two flavors:
+  //   - dashboard container (default): DELEGATES bootstrap+teardown to
+  //     the per-repo worker over HTTP. The worker is on the consumer's
+  //     `sail` net and CAN reach the consumer Postgres / Redis by
+  //     Docker DNS, while the dashboard container is on `danxbot-net`
+  //     only and would `getaddrinfo ENOTFOUND pgsql` on a local call.
+  //   - host-mode dashboard (`DANXBOT_WORKTREE_MANAGER=local`): runs
+  //     git + DB + compose directly inside this process. The host
+  //     itself has access to every consumer net via host bind ports,
+  //     so the local manager works.
+  //
+  // Operator override exists so a single-host dev box can run the
+  // dashboard host-mode without spinning a worker container at all.
+  const useLocalManager = process.env.DANXBOT_WORKTREE_MANAGER === "local";
+  const worktreeManager = useLocalManager
+    ? createWorktreeManager()
+    : createRemoteWorktreeManager({
+        resolveHost,
+        workerPort: (repoName) =>
+          repos.find((r) => r.name === repoName)?.workerPort ?? 0,
+        token,
+      });
+  log.info(
+    `worktreeManager wired: ${useLocalManager ? "local (in-process)" : "remote (HTTP → worker)"}`,
+  );
   const dispatchDeps: DispatchProxyDeps = {
     token,
     repos,

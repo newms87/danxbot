@@ -41,6 +41,11 @@ import {
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
 import { handleIssueCreate } from "./issue-route.js";
+import {
+  handleWorktreeBootstrap,
+  handleWorktreeTeardown,
+} from "./agents-route.js";
+import { loadDispatchToken } from "../dashboard/dispatch-proxy.js";
 import { handleRestart } from "./restart-route.js";
 import { handleRestage } from "./restage-route.js";
 import { handlePrepVerdict } from "./prep-verdict-route.js";
@@ -205,6 +210,29 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       url.pathname === "/api/poller/critical-failure"
     ) {
       await handleClearCriticalFailure(req, res, repo);
+      return;
+    }
+
+    // Per-agent worktree provisioning. Dashboard delegates here via
+    // `RemoteWorktreeManager` because the dashboard container is on
+    // `danxbot-net` only and cannot reach consumer-repo DB / redis
+    // by Docker DNS, while the worker IS joined to the consumer's
+    // sail network.
+    if (method === "POST" && url.pathname === "/api/worktree-bootstrap") {
+      await handleWorktreeBootstrap(req, res, repo, loadDispatchToken());
+      return;
+    }
+    const teardownMatch = url.pathname.match(
+      /^\/api\/worktree-bootstrap\/([^/]+)$/,
+    );
+    if (method === "DELETE" && teardownMatch) {
+      await handleWorktreeTeardown(
+        req,
+        res,
+        repo,
+        teardownMatch[1],
+        loadDispatchToken(),
+      );
       return;
     }
 
