@@ -1200,6 +1200,33 @@ describe("WorktreeManager", () => {
       ).toBe(true);
       expect(lstatSync(join(worktreeRoot, ".env")).isSymbolicLink()).toBe(true);
     });
+
+    it("DX-571: skips the .env symlink when the consumer repo is Laravel-pgsql", async () => {
+      // Laravel-pgsql consumer repos own a REAL per-worktree .env written
+      // by `provisionWorktreeDatabase` — `provisionEnvFile` MUST NOT
+      // symlink over it. Seeding the parent .env with `DB_CONNECTION=pgsql`
+      // routes the umbrella's call to `provisionWorktreeDatabase` first
+      // (which throws here without a real Postgres) — the assertion is
+      // that `provisionEnvFile`'s own work is gated AND the umbrella
+      // surfaces the DB-step failure rather than silently re-coupling
+      // the worktree to the parent .env.
+      writeFileSync(
+        join(repoRoot, ".env"),
+        "DB_CONNECTION=pgsql\nDB_DATABASE=laravel\nDB_USERNAME=sail\nDB_PASSWORD=p\nDB_HOST=does-not-resolve.invalid\n",
+      );
+      const wm = createWorktreeManager(fakeRunner());
+      const ctxWithLaravel = makeRepoContext({
+        localPath: repoRoot,
+        hostPath: repoRoot,
+      });
+      // The DB step throws against the unresolvable host — that is the
+      // expected fail-loud behavior. Assert it propagates AND that no
+      // symlink got created in the meantime.
+      await expect(
+        wm.ensureProvisioned(ctxWithLaravel, "alice"),
+      ).rejects.toBeDefined();
+      expect(existsSync(join(worktreeRoot, ".env"))).toBe(false);
+    });
   });
 
   describe("provisionDashboardNodeModules / ensureProvisioned (DX-314)", () => {

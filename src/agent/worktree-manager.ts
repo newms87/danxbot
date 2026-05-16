@@ -71,6 +71,10 @@ import { mirrorWorkspaceTree } from "../inject/workspaces.js";
 import { createLogger } from "../logger.js";
 import { AGENT_NAME_SHAPE } from "../settings-file.js";
 import type { RepoConfig } from "../types.js";
+import {
+  isLaravelPgsqlRepo,
+  provisionWorktreeDatabase,
+} from "./worktree-database.js";
 
 /**
  * Minimal repo shape — needs `localPath` (where the actual repo lives,
@@ -408,7 +412,7 @@ export function createWorktreeManager(
       // variable: DANXBOT_DB_USER" at module-load time. Both
       // symlinks are gitignored so they never appear in `git
       // status`.
-      provisionWorktreeArtifacts(ctx.hostPath, path);
+      await provisionWorktreeArtifacts(ctx.hostPath, path);
       log.info(`bootstrap(${agentName}): created worktree at ${path}`);
     },
 
@@ -424,7 +428,7 @@ export function createWorktreeManager(
         );
         return;
       }
-      provisionWorktreeArtifacts(ctx.hostPath, path);
+      await provisionWorktreeArtifacts(ctx.hostPath, path);
     },
 
     async teardown(ctx, agentName) {
@@ -592,7 +596,7 @@ export function createWorktreeManager(
 
       // Step 3 — pure-noop: already at origin/main, nothing to do.
       if (ahead === 0 && behind === 0) {
-        provisionWorktreeArtifacts(ctx.hostPath, path);
+        await provisionWorktreeArtifacts(ctx.hostPath, path);
         return { kind: "noop" };
       }
 
@@ -666,7 +670,7 @@ async function fastForward(
     return buildAbort("ff-only pull rejected", "git pull", pull);
   }
   const toHead = await runner.run(path, ["rev-parse", "HEAD"]);
-  provisionWorktreeArtifacts(ctx.hostPath, path);
+  await provisionWorktreeArtifacts(ctx.hostPath, path);
   return {
     kind: "ff",
     from: fromHead.stdout.trim(),
@@ -700,7 +704,7 @@ async function rebaseOnto(
     await runner.run(path, ["rebase", "--abort"]);
     return aborted;
   }
-  provisionWorktreeArtifacts(ctx.hostPath, path);
+  await provisionWorktreeArtifacts(ctx.hostPath, path);
   return { kind: "rebased", commits: ahead };
 }
 
@@ -738,16 +742,35 @@ function worktreeListIncludes(stdout: string, path: string): boolean {
  *   - `.danxbot/workspaces/<name>/` real-dir copies (DX-309)
  *   - Laravel storage dirs (DX-500)
  */
-function provisionWorktreeArtifacts(
+async function provisionWorktreeArtifacts(
   repoRoot: string,
   worktreePath: string,
-): void {
+): Promise<void> {
+  // DX-571: per-worktree Postgres DB + role for Laravel-pgsql consumer
+  // repos. MUST run BEFORE provisionEnvFile — when it provisions, it
+  // writes a REAL per-worktree .env file, and provisionEnvFile's
+  // symlink path would then overwrite that real file with a symlink to
+  // the parent (silently re-coupling the worktree to the primary DB).
+  // For non-Laravel consumer repos this is a quick no-op skip.
+  const worktreeName = basename(worktreePath);
+  await provisionWorktreeDatabase({
+    repoRoot,
+    worktreePath,
+    worktreeName,
+  });
   provisionNodeModules(repoRoot, worktreePath);
   provisionDashboardNodeModules(repoRoot, worktreePath);
   provisionEnvFile(repoRoot, worktreePath);
   provisionIssuesSymlink(repoRoot, worktreePath);
   provisionWorktreeWorkspaces(repoRoot, worktreePath);
   provisionLaravelStorageDirs(repoRoot, worktreePath);
+}
+
+/** Path basename without bringing in node:path's `basename` alias. */
+function basename(p: string): string {
+  const trimmed = p.replace(/\/+$/, "");
+  const idx = trimmed.lastIndexOf("/");
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
 /**
@@ -1102,6 +1125,14 @@ function pickInstallSentinel(
  * lets `npx vitest run` from the worktree's cwd see DANXBOT_DB_*
  * without operator preamble.
  *
+ * DX-571 retired the symlink path for Laravel-pgsql consumer repos —
+ * `provisionWorktreeDatabase` writes a REAL per-worktree `.env` first
+ * (with worktree-scoped DB_DATABASE / DB_USERNAME / DB_PASSWORD), and
+ * symlinking over that real file would silently re-couple the worktree
+ * to the primary DB. Non-Laravel consumer repos still get the symlink
+ * — they don't have DB isolation to defend, and the symlink preserves
+ * the cheap "edit parent .env, every worktree sees the change" model.
+ *
  * No precondition (the file is opaque content; vitest will surface a
  * clear "Missing required environment variable: <NAME>" if a needed
  * key is absent — that's actionable on its own). Test-path silent
@@ -1109,6 +1140,11 @@ function pickInstallSentinel(
  * existing integration-test fixtures with synthetic repos).
  */
 function provisionEnvFile(repoRoot: string, worktreePath: string): void {
+  if (isLaravelPgsqlRepo(repoRoot)) {
+    // The DB provisioner already wrote a real per-worktree .env. The
+    // umbrella's call order guarantees that ran first.
+    return;
+  }
   provisionSymlink(repoRoot, worktreePath, ".env", "file", "provisionEnvFile");
 }
 
