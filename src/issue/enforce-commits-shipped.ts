@@ -106,9 +106,14 @@ export async function enforceCommitsShipped(
 
   const missing = result.missing.join(", ");
   const reason =
-    `DX-559 enforcement: commits in retro.commits[] are not on origin/main — ` +
-    `agent branch needs push + merge before this card can close. ` +
-    `Missing shas: ${missing}.`;
+    `DX-559 enforcement: commits in retro.commits[] not found on this repo's origin/main. ` +
+    `Missing shas: ${missing}.\n\n` +
+    `Likely cause — pick one:\n` +
+    `  (a) Agent branch not pushed to main — re-run agent-finalize.sh, then retry.\n` +
+    `  (b) Commits live in a different repo (plugin edits, sibling repo) — ` +
+    `remove them from retro.commits[] and add a comments[] entry naming the ` +
+    `external repo + sha(s) + what shipped. retro.commits[] is owned-repo only.\n\n` +
+    `On resume: identify which case, fix the YAML, then call danxbot_complete.`;
 
   return {
     missingShas: result.missing,
