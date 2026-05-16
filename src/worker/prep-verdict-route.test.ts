@@ -27,6 +27,66 @@ import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import { createEmptyIssue, serializeIssue, parseIssue } from "../issue-tracker/yaml.js";
 import type { AgentJob } from "../agent/agent-types.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
+import {
+  registerWriterDb,
+  unregisterWriterDb,
+  type IssuesMirrorDb,
+  type UpsertArgs,
+} from "../db/issues-mirror.js";
+
+/**
+ * Install a writer DB against the issues-mirror registry for one test.
+ * Returns the upsert call log + an `unregister` handle the test MUST
+ * call in a `finally` block. Mirrors the helper in
+ * `src/poller/yaml-lifecycle.test.ts` so the writer-DB assertions share
+ * a mental model across the suite.
+ *
+ * Regression coverage: the prep-verdict route's three YAML stamps
+ * (conflict_on, waiting_on, blocked) MUST go through `writeIssue` so
+ * the DB row lands in lockstep with the file. A `writeFileSync`-only
+ * write (the pre-DX-552 bug) leaves the DB row stale; the subsequent
+ * `onComplete` → `loadLocal` → `clearDispatchAndWrite` chain in
+ * `multi-agent-pick.ts` reads that stale row and writes it back,
+ * clobbering the stamp. The regression tests below assert
+ * `upsertWithHistoryCalls` carries the stamped state so a future
+ * regression to direct `writeFileSync` fails the suite.
+ */
+function installWriterDb(repoLocalPath: string): {
+  upsertWithHistoryCalls: UpsertArgs[];
+  unregister: () => void;
+} {
+  const rows = new Map<
+    string,
+    { data: Record<string, unknown>; content_hash: string }
+  >();
+  const upsertWithHistoryCalls: UpsertArgs[] = [];
+  const db: IssuesMirrorDb = {
+    async selectExisting(repoName, id) {
+      return rows.get(`${repoName}|${id}`) ?? null;
+    },
+    async upsertWithHistory(args) {
+      rows.set(`${args.repoName}|${args.id}`, {
+        data: args.data,
+        content_hash: args.contentHash,
+      });
+      upsertWithHistoryCalls.push(args);
+    },
+    async tombstone() {},
+    async listIds() {
+      const out: Array<{ id: string; content_hash: string }> = [];
+      for (const [key, row] of rows) {
+        const id = key.split("|")[1]!;
+        out.push({ id, content_hash: row.content_hash });
+      }
+      return out;
+    },
+  };
+  registerWriterDb(repoLocalPath, db);
+  return {
+    upsertWithHistoryCalls,
+    unregister: () => unregisterWriterDb(repoLocalPath),
+  };
+}
 
 function makeRepo(localPath: string) {
   return makeRepoContext({
@@ -901,5 +961,121 @@ describe("handlePrepVerdict — prepVerdict stash on AgentJob", () => {
     });
     // No throw, side-effect applied where applicable, response 200.
     expect(res._getStatusCode()).toBe(200);
+  });
+});
+
+describe("handlePrepVerdict — DB writer consistency (DX-552 regression)", () => {
+  // The prep-verdict route's three YAML stamps MUST go through
+  // `writeIssue` so the synchronous DB upsert lands in lockstep with the
+  // file write. The pre-fix code used `writeFileSync` directly, leaving
+  // the DB row stale. The follow-up onComplete (`multi-agent-pick.ts`
+  // line ~756) then `loadLocal`s the stale row and writes it back via
+  // `clearDispatchAndWrite` → the just-stamped field evaporates and the
+  // poller re-dispatches the same card forever.
+
+  let root: string;
+  let repo: ReturnType<typeof makeRepo>;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "prep-verdict-route-"));
+    repo = makeRepo(root);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("waiting_on verdict upserts the DB row with waiting_on populated", async () => {
+    writeIssue(root, "DX-100");
+    const writerDb = installWriterDb(root);
+    try {
+      const { job } = makeJobStub();
+      const req = createMockReqWithBody("POST", {
+        verdict: "waiting_on",
+        reason: "Phase 2 needs Phase 1",
+        depends_on: ["DX-200"],
+      });
+      const res = createMockRes();
+      await handlePrepVerdict(req, res, "dispatch-1", repo, {
+        getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+        getJob: vi.fn().mockReturnValue(job),
+        now: () => new Date("2026-05-15T07:00:00Z").getTime(),
+      });
+      expect(res._getStatusCode()).toBe(200);
+      const upserts = writerDb.upsertWithHistoryCalls.filter(
+        (u) => u.id === "DX-100",
+      );
+      expect(upserts.length).toBeGreaterThan(0);
+      const last = upserts[upserts.length - 1]!;
+      expect(last.source).toBe("writer");
+      expect(last.data.waiting_on).toEqual({
+        by: ["DX-200"],
+        reason: "Phase 2 needs Phase 1",
+        timestamp: "2026-05-15T07:00:00.000Z",
+      });
+    } finally {
+      writerDb.unregister();
+    }
+  });
+
+  it("conflict_on verdict upserts the DB row with the appended conflict_on[]", async () => {
+    writeIssue(root, "DX-100");
+    const writerDb = installWriterDb(root);
+    try {
+      const { job } = makeJobStub();
+      const req = createMockReqWithBody("POST", {
+        verdict: "conflict_on",
+        reason: "shared module",
+        conflict_with: ["DX-200", "DX-201"],
+      });
+      const res = createMockRes();
+      await handlePrepVerdict(req, res, "dispatch-1", repo, {
+        getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+        getJob: vi.fn().mockReturnValue(job),
+      });
+      expect(res._getStatusCode()).toBe(200);
+      const upserts = writerDb.upsertWithHistoryCalls.filter(
+        (u) => u.id === "DX-100",
+      );
+      expect(upserts.length).toBeGreaterThan(0);
+      const last = upserts[upserts.length - 1]!;
+      expect(last.data.conflict_on).toEqual([
+        { id: "DX-200", reason: "shared module" },
+        { id: "DX-201", reason: "shared module" },
+      ]);
+    } finally {
+      writerDb.unregister();
+    }
+  });
+
+  it("blocked verdict upserts the DB row with status: Blocked + blocked record", async () => {
+    writeIssue(root, "DX-100");
+    const writerDb = installWriterDb(root);
+    try {
+      const { job } = makeJobStub();
+      const req = createMockReqWithBody("POST", {
+        verdict: "blocked",
+        reason: "spec ambiguous",
+      });
+      const res = createMockRes();
+      await handlePrepVerdict(req, res, "dispatch-1", repo, {
+        getDispatch: vi.fn().mockResolvedValue(makeDispatch()),
+        getJob: vi.fn().mockReturnValue(job),
+        now: () => new Date("2026-05-15T07:00:00Z").getTime(),
+      });
+      expect(res._getStatusCode()).toBe(200);
+      const upserts = writerDb.upsertWithHistoryCalls.filter(
+        (u) => u.id === "DX-100",
+      );
+      expect(upserts.length).toBeGreaterThan(0);
+      const last = upserts[upserts.length - 1]!;
+      expect(last.data.status).toBe("Blocked");
+      expect(last.data.blocked).toEqual({
+        reason: "spec ambiguous",
+        timestamp: "2026-05-15T07:00:00.000Z",
+      });
+    } finally {
+      writerDb.unregister();
+    }
   });
 });

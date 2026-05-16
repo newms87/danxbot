@@ -49,7 +49,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { getActiveJob } from "../dispatch/core.js";
@@ -60,12 +60,8 @@ import {
   type PrepVerdict,
   type PrepVerdictPayload,
 } from "../mcp/danxbot-prep-verdict.js";
-import {
-  parseIssue,
-  serializeIssue,
-  IssueParseError,
-} from "../issue-tracker/yaml.js";
-import { issuePath } from "../poller/yaml-lifecycle.js";
+import { parseIssue, IssueParseError } from "../issue-tracker/yaml.js";
+import { issuePath, writeIssue } from "../poller/yaml-lifecycle.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import {
   defaultBrokenEvaluator,
@@ -136,11 +132,11 @@ function assertNever(value: never, label: string): never {
  * Returns the count of newly-appended entries so the route's response
  * body can surface what actually landed.
  */
-function applyConflictOnVerdict(
+async function applyConflictOnVerdict(
   repo: RepoContext,
   candidateId: string,
   payload: Extract<PrepVerdictPayload, { verdict: "conflict_on" }>,
-): number {
+): Promise<number> {
   const partners = payload.conflict_with;
   const filePath = issuePath(repo.localPath, candidateId, "open");
   if (!existsSync(filePath)) {
@@ -163,7 +159,14 @@ function applyConflictOnVerdict(
     ...issue,
     conflict_on: [...issue.conflict_on, ...additions],
   };
-  writeFileSync(filePath, serializeIssue(next));
+  // DX-552 — writeIssue upserts the DB row in lockstep with the file
+  // write. A bare writeFileSync (the pre-DX-552 shape) leaves the DB
+  // row stale, and the picker's onComplete → loadLocal → clearDispatch
+  // chain reads that stale row and writes it back, clobbering this
+  // stamp. The result is a verdict that "succeeds" while the candidate
+  // YAML reverts to its pre-verdict state — the next picker tick
+  // re-dispatches the same card, looping forever.
+  await writeIssue(repo.localPath, next);
   return additions.length;
 }
 
@@ -189,12 +192,12 @@ function applyConflictOnVerdict(
  *
  * Returns `true` when the YAML actually changed, `false` on no-op.
  */
-function applyWaitingOnVerdict(
+async function applyWaitingOnVerdict(
   repo: RepoContext,
   candidateId: string,
   payload: Extract<PrepVerdictPayload, { verdict: "waiting_on" }>,
   nowIso: string,
-): boolean {
+): Promise<boolean> {
   const filePath = issuePath(repo.localPath, candidateId, "open");
   if (!existsSync(filePath)) {
     throw new Error(
@@ -225,7 +228,9 @@ function applyWaitingOnVerdict(
       timestamp: nowIso,
     },
   };
-  writeFileSync(filePath, serializeIssue(next));
+  // DX-552 — see applyConflictOnVerdict for why writeIssue (not
+  // writeFileSync) is load-bearing here.
+  await writeIssue(repo.localPath, next);
   return true;
 }
 
@@ -236,13 +241,13 @@ function applyWaitingOnVerdict(
  * card in Blocked. Any pre-existing `waiting_on` record is preserved
  * (independent durable dep-chain note; not coupled to status).
  */
-function applyBlockedVerdict(
+async function applyBlockedVerdict(
   repo: RepoContext,
   candidateId: string,
   payload: Extract<PrepVerdictPayload, { verdict: "blocked" }>,
   nowIso: string,
-): void {
-  stampIssueBlocked({
+): Promise<void> {
+  await stampIssueBlocked({
     repoLocalPath: repo.localPath,
     candidateId,
     expectedPrefix: repo.issuePrefix,
@@ -344,14 +349,14 @@ async function applyVerdictSideEffect(
       return ack;
     case "conflict_on":
       // Precondition gate ensures issueId is non-null.
-      ack.conflictsAppended = applyConflictOnVerdict(
+      ack.conflictsAppended = await applyConflictOnVerdict(
         repo,
         dispatch.issueId!,
         payload,
       );
       return ack;
     case "waiting_on":
-      ack.waitingOnStamped = applyWaitingOnVerdict(
+      ack.waitingOnStamped = await applyWaitingOnVerdict(
         repo,
         dispatch.issueId!,
         payload,
@@ -359,7 +364,7 @@ async function applyVerdictSideEffect(
       );
       return ack;
     case "blocked":
-      applyBlockedVerdict(repo, dispatch.issueId!, payload, nowIso);
+      await applyBlockedVerdict(repo, dispatch.issueId!, payload, nowIso);
       ack.candidateBlocked = true;
       return ack;
     case "abort":

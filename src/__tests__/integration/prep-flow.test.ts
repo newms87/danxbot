@@ -116,7 +116,13 @@ vi.mock("../../poller/yaml-lifecycle.js", async () => {
       dispatch: null,
     })),
     loadLocal: vi.fn(async () => null),
-    writeIssue: vi.fn(async () => undefined),
+    // DX-552 — the prep-verdict route now writes through real
+    // `writeIssue` so DB + file land together (was a bare `writeFileSync`
+    // before, which caused the picker's onComplete → loadLocal →
+    // clearDispatchAndWrite chain to clobber the stamp). The integration
+    // test asserts on on-disk state via direct `parseIssue` reads, so
+    // we let the real `writeIssue` run (its DB upsert is a no-op when no
+    // writer DB is registered, which matches this fixture).
   };
 });
 vi.mock("../../logger.js", () => ({

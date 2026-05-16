@@ -39,10 +39,10 @@ describe("stampIssueBlocked", () => {
     );
   }
 
-  it("stamps status: Blocked + blocked.reason + blocked.timestamp on the candidate YAML", () => {
+  it("stamps status: Blocked + blocked.reason + blocked.timestamp on the candidate YAML", async () => {
     writeFixture("DX-1");
     const ts = "2026-05-14T00:00:00.000Z";
-    stampIssueBlocked({
+    await stampIssueBlocked({
       repoLocalPath: root,
       candidateId: "DX-1",
       expectedPrefix: "DX",
@@ -61,16 +61,16 @@ describe("stampIssueBlocked", () => {
     });
   });
 
-  it("is idempotent — second stamp overwrites timestamp but leaves status + reason at the new values", () => {
+  it("is idempotent — second stamp overwrites timestamp but leaves status + reason at the new values", async () => {
     writeFixture("DX-1");
-    stampIssueBlocked({
+    await stampIssueBlocked({
       repoLocalPath: root,
       candidateId: "DX-1",
       expectedPrefix: "DX",
       reason: "first reason",
       timestamp: "2026-05-14T00:00:00.000Z",
     });
-    stampIssueBlocked({
+    await stampIssueBlocked({
       repoLocalPath: root,
       candidateId: "DX-1",
       expectedPrefix: "DX",
@@ -86,8 +86,8 @@ describe("stampIssueBlocked", () => {
     expect(parsed.blocked?.timestamp).toBe("2026-05-14T01:00:00.000Z");
   });
 
-  it("throws when the candidate YAML does not exist", () => {
-    expect(() =>
+  it("throws when the candidate YAML does not exist", async () => {
+    await expect(
       stampIssueBlocked({
         repoLocalPath: root,
         candidateId: "DX-999",
@@ -95,10 +95,10 @@ describe("stampIssueBlocked", () => {
         reason: "not gonna land",
         timestamp: "2026-05-14T00:00:00.000Z",
       }),
-    ).toThrow(/candidate YAML not found/);
+    ).rejects.toThrow(/candidate YAML not found/);
   });
 
-  it("preserves an existing waiting_on record (independent of status)", () => {
+  it("preserves an existing waiting_on record (independent of status)", async () => {
     writeFixture("DX-2");
     // Seed a waiting_on record on the YAML before stamping blocked.
     const yamlPath = join(root, ".danxbot/issues/open/DX-2.yml");
@@ -112,7 +112,7 @@ describe("stampIssueBlocked", () => {
     };
     writeFileSync(yamlPath, serializeIssue(seeded));
 
-    stampIssueBlocked({
+    await stampIssueBlocked({
       repoLocalPath: root,
       candidateId: "DX-2",
       expectedPrefix: "DX",

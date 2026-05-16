@@ -7,6 +7,21 @@ vi.mock("./publish.js", () => ({
   publishRepairErrorUpdated: vi.fn(),
 }));
 
+// DX-574 (self-repair signature 1502aa1896560811): the
+// `getPool()`-fallthrough test below used to omit `db` and hope
+// that either no PG was reachable or the `system_errors` table
+// was missing. On a dev machine with both present, the wrapper
+// silently wrote a real `test-component:Error("boom")` row each
+// run — accumulating count, getting picked by the self-repair
+// dispatcher, spawning DX-574. Mock `getPool` so the fallthrough
+// path throws a synthetic configuration error deterministically,
+// exercising the swallow path without touching a real DB.
+vi.mock("../db/connection.js", () => ({
+  getPool: vi.fn(() => {
+    throw new Error("getPool unavailable in unit test (DX-574 mock)");
+  }),
+}));
+
 import { reportSystemError, _resetWarnDedupForTest } from "./report.js";
 
 /**
@@ -259,10 +274,10 @@ describe("reportSystemError — swallow paths", () => {
 
   it("does not throw when the wrapper falls through to the shared getPool() and the DB hiccups", async () => {
     // No `db` override → wrapper resolves the shared pool via
-    // `getPool()`. In the test process this either resolves a real
-    // local pool (whose `system_errors` table may be absent on a
-    // fresh fixture) or throws a configuration error if no PG env
-    // vars are set. Either way, the wrapper must swallow.
+    // `getPool()`. The module-level `vi.mock("../db/connection.js")`
+    // above makes `getPool()` throw deterministically (DX-574), so
+    // this test never reaches a real DB regardless of `DANXBOT_DB_*`
+    // env presence. The wrapper must still resolve undefined.
     await expect(
       reportSystemError({
         repo: "danxbot",
