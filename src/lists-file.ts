@@ -58,35 +58,24 @@ const log = createLogger("lists-file");
  * derives `list_name` from `status`, so a missing type leaves cards
  * unmapped).
  */
-export type ListType =
-  | "archived"
-  | "review"
-  | "ready"
-  | "blocked"
-  | "in_progress"
-  | "completed"
-  | "cancelled";
-
-export const LIST_TYPES: readonly ListType[] = [
-  "archived",
-  "review",
-  "ready",
-  "blocked",
-  "in_progress",
-  "completed",
-  "cancelled",
-] as const;
+export {
+  LIST_TYPES,
+  type ListType,
+  type List,
+  type ListsFile,
+  type CreateListInput,
+  type UpdateListInput,
+} from "./lists-types.js";
+import {
+  LIST_TYPES,
+  type ListType,
+  type List,
+  type ListsFile,
+  type CreateListInput,
+  type UpdateListInput,
+} from "./lists-types.js";
 
 const LIST_TYPES_SET: ReadonlySet<string> = new Set<string>(LIST_TYPES);
-
-export interface List {
-  id: string;
-  name: string;
-  type: ListType;
-  order: number;
-  is_default_for_type: boolean;
-  color: string;
-}
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
@@ -95,17 +84,6 @@ export function isValidHexColor(value: unknown): value is string {
 }
 
 const NEUTRAL_LIST_COLOR = "#94a3b8";
-
-export interface ListsFile {
-  lists: List[];
-  /**
-   * Soft tombstone of every list id that has ever existed on this repo.
-   * Tracked so a future create cannot reuse a deleted id. Append-only;
-   * never pruned. The whole file is operator-visible so an operator
-   * can audit + manually edit if they truly need to recycle an id.
-   */
-  tombstone_ids: string[];
-}
 
 export class ListsValidationError extends Error {
   public readonly errors: readonly string[];
@@ -506,30 +484,6 @@ async function acquireFileLock(lockFile: string): Promise<() => Promise<void>> {
  * post-mutation file; the caller passes it through `writeLists` to
  * persist (which re-runs `validateLists` under the lock).
  */
-export interface CreateListInput {
-  name: string;
-  type: ListType;
-  order?: number;
-  is_default_for_type?: boolean;
-  color?: string;
-}
-
-/**
- * Update surface. `type` is intentionally NOT patchable: a cross-type
- * move would either orphan the source type (last-of-type violation) or
- * land two defaults on the destination type — both invariant breaks
- * that the unique-default + ≥1-per-type rules would then reject under
- * the lock with a confusing 400. Operator workflow for a real type
- * migration is "create a new list of the target type, reassign the
- * cards via PATCH /api/issues, delete the old list."
- */
-export interface UpdateListInput {
-  name?: string;
-  order?: number;
-  is_default_for_type?: boolean;
-  color?: string;
-}
-
 /**
  * Append a new list. Generates a fresh id; if `is_default_for_type` is
  * true, demotes the existing default of the same type so the

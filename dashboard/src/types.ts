@@ -146,8 +146,8 @@ export type {
   ListsFile,
   CreateListInput,
   UpdateListInput,
-} from "@backend/lists-file.js";
-export { LIST_TYPES } from "@backend/lists-file.js";
+} from "@backend/lists-types.js";
+export { LIST_TYPES } from "@backend/lists-types.js";
 
 /**
  * UI-side ladder ordering for the seven semantic types. Matches the
