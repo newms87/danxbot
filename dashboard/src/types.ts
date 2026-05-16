@@ -140,3 +140,39 @@ export type {
   SystemErrorSamplePayload,
 } from "@backend/system-repair/types.js";
 export type { RepairErrorWithAttempts } from "@backend/system-repair/db-reads.js";
+export type {
+  List,
+  ListType,
+  ListsFile,
+  CreateListInput,
+  UpdateListInput,
+} from "@backend/lists-file.js";
+export { LIST_TYPES } from "@backend/lists-file.js";
+
+/**
+ * UI-side ladder ordering for the seven semantic types. Matches the
+ * derivation precedence + move-semantics ladder in DX-575's epic body:
+ * archived → review → ready → blocked → in_progress → completed → cancelled.
+ * Settings UI groups + renders lists in this order so operators see the
+ * board top-to-bottom in the same order the board view will render
+ * columns left-to-right (Phase 6 / DX-586).
+ */
+export const LIST_TYPE_LADDER = [
+  "archived",
+  "review",
+  "ready",
+  "blocked",
+  "in_progress",
+  "completed",
+  "cancelled",
+] as const;
+
+export const LIST_TYPE_LABELS: Record<(typeof LIST_TYPE_LADDER)[number], string> = {
+  archived: "Backlog",
+  review: "Review",
+  ready: "Ready",
+  blocked: "Blocked",
+  in_progress: "In Progress",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};

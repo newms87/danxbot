@@ -4,6 +4,7 @@ import type {
   AgentRosterResponse,
   AgentSchedule,
   AgentSnapshot,
+  CreateListInput,
   Dispatch,
   DispatchDetail,
   DispatchFilters,
@@ -16,9 +17,12 @@ import type {
   IssueListItem,
   IssuePatch,
   JsonlBlock,
+  List,
+  ListsFile,
   RepairErrorWithAttempts,
   SyncRootStateEntry,
   SystemError,
+  UpdateListInput,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
 import { useStream } from "./composables/useStream";
@@ -863,6 +867,122 @@ export async function patchEffortSettings(
   );
   if (!res.ok) throw toggleError(res.status, await readJsonError(res));
   return res.json();
+}
+
+// ── Lists CRUD (DX-602 routes, DX-603 consumer) ─────────────────────
+
+/**
+ * GET /api/lists?repo=<name> — DX-602. Returns the operator-owned per-repo
+ * list taxonomy: the seven seeded lists + any operator additions. Wire
+ * shape: `{file: ListsFile}` — the wrapper survives possible future
+ * companions (e.g. `{file, computed: {...}}`) without breaking callers.
+ *
+ * Hot-path consumer is the `useListColors` composable; rare callers may
+ * fetch directly when they need the full taxonomy outside the composable's
+ * SSE pipeline. Auth: per-user bearer (same as the rest of the dashboard
+ * write surface).
+ */
+export async function fetchLists(repo: string): Promise<ListsFile> {
+  const res = await fetchWithAuth(
+    `/api/lists?repo=${encodeURIComponent(repo)}`,
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const body = (await res.json()) as { file: ListsFile };
+  return body.file;
+}
+
+/**
+ * POST /api/lists?repo=<name> — DX-602. Append a new list. Server picks the
+ * id + (optionally) the order; pass `is_default_for_type: true` to promote
+ * the new list to the type's default (server demotes the prior default in
+ * the same atomic write). Returns `{list, file}` so the caller can both
+ * spotlight the new row AND replace its in-memory taxonomy snapshot
+ * without a second fetch.
+ */
+export async function createList(
+  repo: string,
+  input: CreateListInput,
+): Promise<{ list: List; file: ListsFile }> {
+  const res = await fetchWithAuth(
+    `/api/lists?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readListsError(res));
+  return res.json();
+}
+
+/**
+ * PATCH /api/lists/:id?repo=<name> — DX-602. Rename / promote-default /
+ * recolor / reorder. `type` is intentionally not patchable on the server
+ * (see `lists-file.ts#UpdateListInput`). Returns `{list, file}` so callers
+ * can reconcile the affected row + the full taxonomy in one round-trip.
+ */
+export async function patchList(
+  repo: string,
+  id: string,
+  patch: UpdateListInput,
+): Promise<{ list: List; file: ListsFile }> {
+  const res = await fetchWithAuth(
+    `/api/lists/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readListsError(res));
+  return res.json();
+}
+
+export interface DeleteListResult {
+  deleted: List;
+  reassignTo: List;
+  reassignedCount: number;
+  file: ListsFile;
+}
+
+/**
+ * DELETE /api/lists/:id?repo=<name> — DX-602. Server refuses last-of-type
+ * with 409 (validator error string carries the explanation). On success
+ * returns the deleted list, the list that orphaned cards reassigned to,
+ * the number of card YAMLs rewritten, and the updated taxonomy.
+ */
+export async function deleteList(
+  repo: string,
+  id: string,
+): Promise<DeleteListResult> {
+  const res = await fetchWithAuth(
+    `/api/lists/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw toggleError(res.status, await readListsError(res));
+  return res.json();
+}
+
+/**
+ * The lists routes return validation failures as `{errors: string[]}`
+ * (one per invariant violation) instead of the dashboard's common
+ * `{error: string}` shape. Join them for the inline-render path so the
+ * operator sees every failed invariant at once (often "name must be
+ * non-empty" + "color must be a hex color" land together on the same
+ * POST).
+ */
+async function readListsError(res: Response): Promise<string | undefined> {
+  try {
+    const body = await res.json();
+    if (Array.isArray(body?.errors)) {
+      const joined = body.errors.filter((s: unknown) => typeof s === "string").join("; ");
+      if (joined.length > 0) return joined;
+    }
+    if (typeof body?.error === "string") return body.error;
+  } catch {
+    /* ignore */
+  }
+  return undefined;
 }
 
 export interface ResetAllDataResult {

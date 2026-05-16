@@ -12,6 +12,7 @@ import RepoCard from "./agents/RepoCard.vue";
 import RepoRootDirtyBanner from "./agents/RepoRootDirtyBanner.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
+import ListsManager from "./settings/ListsManager.vue";
 import type { Feature } from "../types";
 
 /**
@@ -196,6 +197,10 @@ function dismissResult(): void {
         <EffortLevelsSection
           :repo="activeRepoName"
           :settings="activeAgent.settings"
+        />
+        <ListsManager
+          :key="activeRepoName"
+          :repo="activeRepoName"
         />
       </template>
 

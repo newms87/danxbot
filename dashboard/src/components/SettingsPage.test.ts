@@ -24,6 +24,23 @@ vi.mock("../composables/useAgents", () => ({
   }),
 }));
 
+// DX-603 — SettingsPage now embeds ListsManager, which calls
+// `useListColors(repo).init()` on mount. Mock the composable to a no-op
+// surface (empty lists, no-op SSE wiring) so SettingsPage tests stay
+// untouched by the new section's stream behavior.
+vi.mock("../composables/useListColors", () => ({
+  NEUTRAL_LIST_COLOR: "#94a3b8",
+  useListColors: () => ({
+    lists: { value: [] },
+    loading: { value: false },
+    error: { value: null },
+    colorFor: () => "#94a3b8",
+    refresh: vi.fn(),
+    init: vi.fn(),
+    destroy: vi.fn(),
+  }),
+}));
+
 import SettingsPage from "./SettingsPage.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 
