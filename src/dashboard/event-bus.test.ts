@@ -107,57 +107,41 @@ describe("EventBus — publish / subscribe", () => {
   });
 });
 
-describe("EventBus — typed issue:updated topic (DX-226)", () => {
-  it("delivers the upsert variant ({repoName, id, issue}) verbatim", () => {
+describe("EventBus — typed issue:updated topic", () => {
+  it("delivers the upsert variant ({repoName, id, item}) verbatim", () => {
     const cb = vi.fn();
     eventBus.subscribe("issue:updated", cb);
+    // Minimal valid IssueListItem stub — the bus does not validate the
+    // payload shape, just routes it.
     const evt: BusEvent = {
       topic: "issue:updated",
       data: {
         repoName: "danxbot",
         id: "DX-1",
-        // Minimal valid Issue stub — the bus does not validate the
-        // payload, just routes it. Subscribers project to IssueListItem.
-        issue: {
-          schema_version: 10,
-          tracker: "memory",
+        item: {
           id: "DX-1",
-          external_id: "",
-          parent_id: null,
-          children: [],
-          dispatch: null,
-          status: "ToDo",
           type: "Feature",
           title: "Card 1",
           description: "",
+          status: "ToDo",
+          parent_id: null,
+          children: [],
+          ac_total: 0,
+          ac_done: 0,
+          children_detail: [],
+          waiting_on: false,
+          waiting_on_reason: null,
+          waiting_on_by: [],
+          comments_count: 0,
+          has_retro: false,
+          updated_at: 0,
+          created_at: 0,
           priority: 3,
           position: null,
-          triage: {
-            expires_at: "",
-            reassess_hint: "",
-            last_status: "",
-            last_explain: "",
-            ice: { total: 0, i: 0, c: 0, e: 0 },
-            history: [],
-          },
-          ac: [],
-          comments: [],
-          history: [],
-          retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-          waiting_on: null,
-          blocked: null,
-          requires_human: null,
-          conflict_on: [],
-          effort_level: null,
           assigned_agent: null,
-          db_updated_at: "",
-    archived_at: null,
-    ready_at: null,
-    completed_at: null,
-    cancelled_at: null,
-    list_name: null,
+          requires_human: null,
+          requires_human_child_count: 0,
         },
-
       },
     };
     eventBus.publish(evt);

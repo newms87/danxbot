@@ -6,12 +6,18 @@ import type { IssueDetail, RequiresHuman } from "../../types";
 // `patchIssue` is the only outbound call this panel makes. We stub it
 // so the test asserts the wire shape (the field names + values the
 // dashboard sends server-side) without standing up a real fetch. The
-// server response shape is `{issue: Issue}`; `patchIssue` returns the
-// inner Issue, so the mock returns the Issue directly.
+// server response shape is `{issue, item}`; the component destructures
+// `.issue` and emits that. `wrap` helper builds the canonical shape.
 const patchIssue = vi.fn();
 vi.mock("../../api", () => ({
   patchIssue: (...args: unknown[]) => patchIssue(...args),
 }));
+
+function wrap(
+  issue: IssueDetail,
+): { issue: IssueDetail; item: import("../../types").IssueListItem } {
+  return { issue, item: issue as unknown as import("../../types").IssueListItem };
+}
 
 function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
   const base: IssueDetail = {
@@ -68,7 +74,7 @@ function mountPanel(issue: IssueDetail) {
 describe("RequiresHumanPanel", () => {
   beforeEach(() => {
     patchIssue.mockReset();
-    patchIssue.mockResolvedValue(makeIssue());
+    patchIssue.mockResolvedValue(wrap(makeIssue()));
   });
 
   // ── State A — requires_human != null ────────────────────────────────
@@ -139,7 +145,7 @@ describe("RequiresHumanPanel", () => {
 
     it("confirming clears the field with PATCH {requires_human: null} and emits patched", async () => {
       const patched = makeIssue({ requires_human: null });
-      patchIssue.mockResolvedValue(patched);
+      patchIssue.mockResolvedValue(wrap(patched));
       const w = mountPanel(makeIssue({ requires_human: reqHuman }));
       await w.get("[data-test='rh-mark-resolved']").trigger("click");
       await w.get("[data-test='rh-confirm-yes']").trigger("click");
@@ -240,7 +246,7 @@ describe("RequiresHumanPanel", () => {
           set_at: "2026-05-10T17:00:00Z",
         },
       });
-      patchIssue.mockResolvedValue(patched);
+      patchIssue.mockResolvedValue(wrap(patched));
       const w = mountPanel(makeIssue({ requires_human: null }));
       await w.get("[data-test='rh-flag']").trigger("click");
       await w.get("[data-test='rh-modal-reason']").setValue("Need access to Slack");
@@ -272,7 +278,7 @@ describe("RequiresHumanPanel", () => {
     });
 
     it("drops a trailing empty step row so the operator's 'about to add another' row isn't persisted", async () => {
-      patchIssue.mockResolvedValue(makeIssue());
+      patchIssue.mockResolvedValue(wrap(makeIssue()));
       const w = mountPanel(makeIssue({ requires_human: null }));
       await w.get("[data-test='rh-flag']").trigger("click");
       await w.get("[data-test='rh-modal-reason']").setValue("Rotate Stripe key");

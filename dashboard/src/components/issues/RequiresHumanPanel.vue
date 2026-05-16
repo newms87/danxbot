@@ -113,7 +113,7 @@ async function saveModal(): Promise<void> {
     // Server stamps `set_by: "human"` + `set_at: now` — the wire shape
     // is `RequiresHumanPatchInput` (reason + steps only). The slim
     // type makes the contract explicit in the SPA, no placeholders.
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       requires_human: { reason, steps },
     });
     emit("patched", updated);
@@ -129,7 +129,7 @@ async function confirmAndClear(): Promise<void> {
   confirmResolve.value = "busy";
   resolveError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       requires_human: null,
     });
     emit("patched", updated);

@@ -164,38 +164,31 @@ beforeEach(() => {
 // ─── Pure reducer ────────────────────────────────────────────────────────────
 
 describe("applyIssueEvent — reducer", () => {
-  it("upserts a known id by merging the patchable fields from Issue", () => {
+  it("upserts a known id by replacing the row with the server-projected item", () => {
     const state = [makeIssue("DX-1"), makeIssue("DX-2")];
+    const replacement: IssueListItem = {
+      ...makeIssue("DX-1"),
+      title: "Renamed",
+      status: "In Progress",
+    };
     const next = applyIssueEvent(state, {
       topic: "issue:updated",
-      data: {
-        repoName: "danxbot",
-        id: "DX-1",
-        issue: makeIssueSnapshot("DX-1", {
-          title: "Renamed",
-          status: "In Progress",
-        }),
-      },
+      data: { repoName: "danxbot", id: "DX-1", item: replacement },
     });
     expect(next).not.toBe(state);
-    expect(next.find((i) => i.id === "DX-1")!.title).toBe("Renamed");
-    expect(next.find((i) => i.id === "DX-1")!.status).toBe("In Progress");
-    // Sibling untouched.
+    expect(next.find((i) => i.id === "DX-1")).toBe(replacement);
     expect(next.find((i) => i.id === "DX-2")!.title).toBe("Card DX-2");
   });
 
-  it("appends a freshly-projected row when the upsert id is not in state", () => {
+  it("appends the server-projected item when the upsert id is not in state", () => {
     const state = [makeIssue("DX-1")];
+    const fresh: IssueListItem = { ...makeIssue("DX-99"), title: "Fresh" };
     const next = applyIssueEvent(state, {
       topic: "issue:updated",
-      data: {
-        repoName: "danxbot",
-        id: "DX-99",
-        issue: makeIssueSnapshot("DX-99", { title: "Fresh" }),
-      },
+      data: { repoName: "danxbot", id: "DX-99", item: fresh },
     });
     expect(next).toHaveLength(2);
-    expect(next.find((i) => i.id === "DX-99")!.title).toBe("Fresh");
+    expect(next.find((i) => i.id === "DX-99")).toBe(fresh);
   });
 
   it("drops the matching row on removed:true", () => {
@@ -225,104 +218,18 @@ describe("applyIssueEvent — reducer", () => {
     expect(next).toBe(state);
   });
 
-  // DX-516 — the SPA-side projection deep-copies the triage block from
-  // the Issue snapshot so the IssueCard chip renders ICE total + most
-  // recent history timestamp without a per-row detail fetch, and so a
-  // downstream mutation can't leak into the SSE input.
-  it("round-trips the triage block on upsert (ice total + history)", () => {
+  it("ignores events missing the `item` field (defense-in-depth)", () => {
     const state = [makeIssue("DX-1")];
+    // Cast-through-unknown so the test can simulate a malformed payload
+    // arriving from an out-of-band producer.
     const next = applyIssueEvent(state, {
       topic: "issue:updated",
       data: {
         repoName: "danxbot",
         id: "DX-1",
-        issue: makeIssueSnapshot("DX-1", {
-          triage: {
-            expires_at: "2026-06-01T00:00:00Z",
-            reassess_hint: "",
-            last_status: "Keep",
-            last_explain: "high",
-            ice: { total: 80, i: 4, c: 5, e: 4 },
-            history: [
-              {
-                timestamp: "2026-05-13T10:00:00Z",
-                status: "Keep",
-                explain: "scored",
-                expires_at: "2026-06-01T00:00:00Z",
-                ice: { total: 80, i: 4, c: 5, e: 4 },
-              },
-            ],
-          },
-        }),
-      },
+      } as unknown as { repoName: string; id: string; item: IssueListItem },
     });
-    const t = next.find((i) => i.id === "DX-1")!.triage!;
-    expect(t.ice.total).toBe(80);
-    expect(t.history).toHaveLength(1);
-    expect(t.history[0].timestamp).toBe("2026-05-13T10:00:00Z");
-  });
-
-  it("round-trips the triage block when projecting a fresh id (append path)", () => {
-    const state: IssueListItem[] = [];
-    const next = applyIssueEvent(state, {
-      topic: "issue:updated",
-      data: {
-        repoName: "danxbot",
-        id: "DX-9",
-        issue: makeIssueSnapshot("DX-9", {
-          triage: {
-            expires_at: "",
-            reassess_hint: "",
-            last_status: "Keep",
-            last_explain: "",
-            ice: { total: 12, i: 3, c: 2, e: 2 },
-            history: [
-              {
-                timestamp: "2026-05-13T11:00:00Z",
-                status: "Keep",
-                explain: "",
-                expires_at: "",
-                ice: { total: 12, i: 3, c: 2, e: 2 },
-              },
-            ],
-          },
-        }),
-      },
-    });
-    const t = next.find((i) => i.id === "DX-9")!.triage!;
-    expect(t.ice.total).toBe(12);
-    expect(t.history[0].timestamp).toBe("2026-05-13T11:00:00Z");
-  });
-
-  it("deep-copies the triage block — mutating the result does not leak into the input", () => {
-    const issue = makeIssueSnapshot("DX-1", {
-      triage: {
-        expires_at: "",
-        reassess_hint: "",
-        last_status: "Keep",
-        last_explain: "",
-        ice: { total: 45, i: 3, c: 5, e: 3 },
-        history: [
-          {
-            timestamp: "2026-05-13T10:00:00Z",
-            status: "Keep",
-            explain: "x",
-            expires_at: "",
-            ice: { total: 45, i: 3, c: 5, e: 3 },
-          },
-        ],
-      },
-    });
-    const state = [makeIssue("DX-1")];
-    const next = applyIssueEvent(state, {
-      topic: "issue:updated",
-      data: { repoName: "danxbot", id: "DX-1", issue },
-    });
-    const t = next.find((i) => i.id === "DX-1")!.triage!;
-    t.ice.total = -1;
-    t.history[0].ice.total = -1;
-    expect(issue.triage.ice.total).toBe(45);
-    expect(issue.triage.history[0].ice.total).toBe(45);
+    expect(next).toBe(state);
   });
 });
 
@@ -362,7 +269,7 @@ describe("useIssues — hydrate + subscribe", () => {
     currentStream.emit("issue:updated", {
       repoName: "danxbot",
       id: "DX-1",
-      issue: makeIssueSnapshot("DX-1", { status: "In Progress" }),
+      item: makeIssue("DX-1", "In Progress"),
     });
 
     expect(ret.issues.value[0].status).toBe("In Progress");
@@ -393,7 +300,7 @@ describe("useIssues — hydrate + subscribe", () => {
     currentStream.emit("issue:updated", {
       repoName: "platform",
       id: "DX-1",
-      issue: makeIssueSnapshot("DX-1", { status: "Done" }),
+      item: makeIssue("DX-1", "Done"),
     });
 
     expect(ret.issues.value[0].status).toBe("ToDo");
@@ -419,7 +326,7 @@ describe("useIssues — hydrate + subscribe", () => {
     currentStream.emit("issue:updated", {
       repoName: "danxbot",
       id: "DX-1",
-      issue: makeIssueSnapshot("DX-1", { title: "From SSE" }),
+      item: { ...makeIssue("DX-1"), title: "From SSE" },
     });
 
     // Cache MISS — invalidated by the SSE handler.
@@ -588,7 +495,7 @@ describe("useIssues — moveIssueStatus", () => {
     currentStream.emit("issue:updated", {
       repoName: "danxbot",
       id: "DX-R",
-      issue: makeIssueSnapshot("DX-R", { status: "ToDo" }),
+      item: makeIssue("DX-R", "ToDo"),
     });
     expect(ret.issues.value[0].status).toBe("In Progress");
 
@@ -610,10 +517,39 @@ describe("useIssues — moveIssueStatus", () => {
   });
 });
 
-// ─── applyIssueUpdate (drawer affordance, unchanged) ─────────────────────────
+// ─── applyIssueUpdate — detail-cache invalidator only ─────────────────────────
+//
+// Post-refactor, the SPA no longer derives IssueListItem fields locally.
+// The server projector emits the canonical projection through the SSE
+// `issue:updated` topic; the client reducer is a dumb id-keyed upsert
+// (see `applyIssueEvent`). `applyIssueUpdate(id)` only invalidates the
+// drawer's detail cache so the next `fetchDetail(id)` re-fetches the
+// post-mutation YAML. List-row refresh flows entirely through SSE.
 
-describe("useIssues — applyIssueUpdate", () => {
-  it("merges the patchable fields from Issue into the matching IssueListItem", async () => {
+describe("useIssues — applyIssueUpdate (detail-cache invalidator)", () => {
+  it("drops the cached IssueDetail entry so the next fetchDetail re-fetches", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    // Warm the cache.
+    mockFetchIssueDetail.mockResolvedValue(makeIssueSnapshot("DX-1"));
+    await ret.fetchDetail("DX-1");
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(1);
+
+    // Second call is cache-served.
+    await ret.fetchDetail("DX-1");
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(1);
+
+    ret.applyIssueUpdate("DX-1");
+
+    // After invalidation the next fetch hits the network again.
+    await ret.fetchDetail("DX-1");
+    expect(mockFetchIssueDetail).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("does NOT mutate the issues list — the SSE feed owns list-row refresh", async () => {
     mockFetchIssues.mockResolvedValue([
       makeIssue("DX-1", "ToDo"),
       makeIssue("DX-2", "ToDo"),
@@ -621,54 +557,8 @@ describe("useIssues — applyIssueUpdate", () => {
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
     await flushPromises();
 
-    const updated = makeIssueSnapshot("DX-1", {
-      title: "Renamed",
-      description: "New body",
-      status: "In Progress",
-      priority: 5,
-      parent_id: "DX-99",
-      children: ["DX-3"],
-    });
-    ret.applyIssueUpdate(updated);
-
-    const row = ret.issues.value.find((i) => i.id === "DX-1")!;
-    expect(row.title).toBe("Renamed");
-    expect(row.description).toBe("New body");
-    expect(row.status).toBe("In Progress");
-    expect(row.priority).toBe(5);
-    expect(row.parent_id).toBe("DX-99");
-    expect(row.children).toEqual(["DX-3"]);
-    expect(ret.issues.value.find((i) => i.id === "DX-2")!.status).toBe("ToDo");
-    wrapper.unmount();
-  });
-
-  it("recomputes ac_done from `ac[].checked` and ac_total from length", async () => {
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
-    const updated = makeIssueSnapshot("DX-1", {
-      ac: [
-        { check_item_id: "a", title: "1", checked: true },
-        { check_item_id: "b", title: "2", checked: false },
-        { check_item_id: "c", title: "3", checked: true },
-      ],
-    });
-    ret.applyIssueUpdate(updated);
-
-    const row = ret.issues.value[0];
-    expect(row.ac_total).toBe(3);
-    expect(row.ac_done).toBe(2);
-    wrapper.unmount();
-  });
-
-  it("is a no-op when the id is not in the list", async () => {
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-1")]);
-    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
-    await flushPromises();
-
     const before = ret.issues.value;
-    ret.applyIssueUpdate(makeIssueSnapshot("DX-999", { title: "Phantom" }));
+    ret.applyIssueUpdate("DX-1");
     expect(ret.issues.value).toBe(before);
     wrapper.unmount();
   });
@@ -678,9 +568,7 @@ describe("useIssues — applyIssueUpdate", () => {
     const { wrapper, ret } = mountWithIssues(ref(""));
     await flushPromises();
 
-    expect(() =>
-      ret.applyIssueUpdate(makeIssueSnapshot("DX-1")),
-    ).not.toThrow();
+    expect(() => ret.applyIssueUpdate("DX-1")).not.toThrow();
     wrapper.unmount();
   });
 });

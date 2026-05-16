@@ -21,6 +21,15 @@ import { resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Mock the DB layer the canonical publisher walks so unit tests
+// stay process-local. publishIssueUpsert / publishIssueRemoved call
+// dbListAllIssues to compute the fan-out set; an empty result keeps
+// the publish to just the caller-passed changed card (matches every
+// fixture in this file — each test writes a single isolated card).
+vi.mock("../poller/issues-db.js", () => ({
+  dbListAllIssues: vi.fn(async () => []),
+}));
+
 import { eventBus, type BusEvent } from "./event-bus.js";
 import { startIssuesWatcher } from "./issues-watcher.js";
 import { serializeIssue } from "../issue-tracker/yaml.js";
@@ -143,7 +152,7 @@ describe("startIssuesWatcher — single repo", () => {
 
   afterEach(() => restorePublish());
 
-  it("publishes issue:updated with the parsed Issue + repoName on add", async () => {
+  it("publishes issue:updated with the projected IssueListItem + repoName on add", async () => {
     const path = writeIssue(repoRoot, "open", { id: "DX-1", title: "Hello" });
     const watcher = await startIssuesWatcher(
       [{ name: "danxbot", localPath: repoRoot }],
@@ -161,8 +170,9 @@ describe("startIssuesWatcher — single repo", () => {
         throw new Error("expected upsert variant");
       expect(evt.data.repoName).toBe("danxbot");
       expect(evt.data.id).toBe("DX-1");
-      expect(evt.data.issue.id).toBe("DX-1");
-      expect(evt.data.issue.title).toBe("Hello");
+      expect(evt.data.item.id).toBe("DX-1");
+      expect(evt.data.item.title).toBe("Hello");
+      expect(evt.data.item.waiting_on).toBe(false);
     } finally {
       await watcher.stop();
     }
@@ -189,7 +199,7 @@ describe("startIssuesWatcher — single repo", () => {
       if (evt.topic !== "issue:updated") throw new Error("topic guard");
       if ("removed" in evt.data && evt.data.removed)
         throw new Error("expected upsert variant");
-      expect(evt.data.issue.title).toBe("v2");
+      expect(evt.data.item.title).toBe("v2");
     } finally {
       await watcher.stop();
     }
@@ -422,7 +432,7 @@ describe("startIssuesWatcher — multiple repos", () => {
         for (const evt of events) {
           if (evt.topic !== "issue:updated") continue;
           if ("removed" in evt.data && evt.data.removed) continue;
-          titles.set(evt.data.repoName, evt.data.issue.title);
+          titles.set(evt.data.repoName, evt.data.item.title);
         }
         expect(titles.get("repo-a")).toBe("A");
         expect(titles.get("repo-b")).toBe("B");

@@ -101,7 +101,7 @@ async function rhClear(): Promise<void> {
   rhBusy.value = true;
   rhError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       requires_human: null,
     });
     emit("update:issue", updated);
@@ -121,7 +121,7 @@ async function clearBlocked(): Promise<void> {
   blockedBusy.value = true;
   blockedError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       blocked: null,
       status: "ToDo",
     });
@@ -149,7 +149,7 @@ async function clearConflictEntry(entry: ConflictOnEntry): Promise<void> {
   conflictError.value = null;
   try {
     const next = conflictForward.value.filter((e) => e.id !== entry.id);
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       conflict_on: next,
     });
     emit("update:issue", updated);

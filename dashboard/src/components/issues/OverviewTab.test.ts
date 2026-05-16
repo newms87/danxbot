@@ -135,7 +135,7 @@ describe("OverviewTab description editor", () => {
     const patched = makeDetail({
       description: "Rewritten body",
     });
-    patchMock.mockResolvedValue(patched);
+    patchMock.mockResolvedValue({ issue: patched, item: patched as unknown as import("../../types").IssueListItem });
 
     const w = mountTab();
     await w.get('[data-test="overview-edit-description"]').trigger("click");

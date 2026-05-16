@@ -97,7 +97,7 @@ async function onTitleCommit(next: string): Promise<void> {
   titleSaving.value = true;
   titleError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       title: trimmed,
     });
     emit("update:issue", updated);
@@ -246,7 +246,9 @@ async function selectStatus(s: IssueStatus): Promise<void> {
   statusSaving.value = true;
   statusError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, { status: s });
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
+      status: s,
+    });
     emit("update:issue", updated);
     statusMenuOpen.value = false;
   } catch (err) {
@@ -265,7 +267,7 @@ async function selectPriority(tier: PriorityTier): Promise<void> {
   prioritySaving.value = true;
   priorityError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       priority: tier.defaultValue,
     });
     emit("update:issue", updated);
@@ -286,7 +288,9 @@ async function selectType(t: IssueType): Promise<void> {
   typeSaving.value = true;
   typeError.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, { type: t });
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
+      type: t,
+    });
     emit("update:issue", updated);
     typeMenuOpen.value = false;
   } catch (err) {

@@ -42,6 +42,10 @@ vi.mock("./event-bus.js", () => ({
   },
 }));
 
+vi.mock("../poller/issues-db.js", () => ({
+  dbListAllIssues: vi.fn(async () => []),
+}));
+
 import {
   applyIssueImport,
   buildIssueSubtreePayload,

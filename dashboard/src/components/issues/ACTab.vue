@@ -64,7 +64,7 @@ async function doSave(): Promise<void> {
   saving.value = true;
   errorMsg.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       ac: snapshot,
     });
     if (controller.signal.aborted) return;

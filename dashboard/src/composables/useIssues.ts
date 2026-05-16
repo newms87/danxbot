@@ -1,6 +1,5 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
-import { cloneTriage } from "@backend/issue-tracker/interface.js";
 import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
 import {
   createHydrationBuffer,
@@ -9,39 +8,26 @@ import {
   type StreamEvent,
   type UseStreamReturn,
 } from "./useStream";
-import type {
-  Issue,
-  IssueDetail,
-  IssueListChild,
-  IssueListItem,
-  IssueStatus,
-} from "../types";
+import type { IssueDetail, IssueListItem, IssueStatus } from "../types";
 
 /**
- * Discriminated payload of the `issue:updated` SSE topic — mirrored from
- * the backend's `IssueUpdatedPayload`. Re-declared here (not imported from
- * `../types`) because the backend type uses the full `Issue` graph; this
- * one matches the projection the reducer needs without dragging the
- * backend's narrowing helpers in.
+ * Discriminated payload of the `issue:updated` SSE topic. Mirrored from
+ * the backend's `IssueUpdatedPayload` — the wire shape is canonical:
+ * the upsert variant carries the fully-projected `item: IssueListItem`,
+ * built by the server-side `projectIssue` from the same projector that
+ * powers the REST `/api/issues` endpoint. The client reducer never
+ * derives cross-card state; this composable is a dumb id-keyed upsert.
  */
 type IssueUpdatedData =
-  | { repoName: string; id: string; issue: Issue; removed?: false }
+  | { repoName: string; id: string; item: IssueListItem; removed?: false }
   | { repoName: string; id: string; removed: true };
 
-/** Type guard for the upsert variant. */
 function isUpsertEvent(
   data: IssueUpdatedData,
-): data is { repoName: string; id: string; issue: Issue; removed?: false } {
+): data is { repoName: string; id: string; item: IssueListItem; removed?: false } {
   return !("removed" in data) || data.removed !== true;
 }
 
-/**
- * Single source of truth for parsing + shape-validating an `issue:updated`
- * SSE event. Both the pure reducer (`applyIssueEvent`) and the composable's
- * repo-filtered wrapper (`useIssues.applyEvent`) call this so the cast
- * + null-guards live in one place. Returns `null` if the event is not
- * `issue:updated`, has a non-object payload, or is missing required keys.
- */
 function parseIssueEvent(event: StreamEvent): IssueUpdatedData | null {
   if (event.topic !== "issue:updated") return null;
   const data = event.data as IssueUpdatedData | null | undefined;
@@ -49,7 +35,7 @@ function parseIssueEvent(event: StreamEvent): IssueUpdatedData | null {
     return null;
   }
   if ("removed" in data && data.removed === true) return data;
-  if (!("issue" in data) || !data.issue || typeof data.issue !== "object") {
+  if (!("item" in data) || !data.item || typeof data.item !== "object") {
     return null;
   }
   return data;
@@ -82,100 +68,23 @@ export interface UseIssues {
    */
   moveIssuePosition: (id: string, position: number | null) => Promise<void>;
   /**
-   * Apply a server-confirmed Issue snapshot to local state — drops the
-   * detail cache entry and merges the patchable fields into the matching
-   * IssueListItem. Used by the drawer's inline edit affordances after
-   * every successful PATCH; the same projection runs inside the SSE
-   * reducer so optimistic + push paths produce identical state.
+   * Invalidate the cached detail entry for `id`. Called after the drawer's
+   * inline edit affordances PATCH the server; the next `fetchDetail(id)`
+   * re-fetches the post-mutation YAML. List-row updates flow through the
+   * SSE `issue:updated` topic — the server is the only place that
+   * projects to `IssueListItem`.
    */
-  applyIssueUpdate: (updated: Issue) => void;
+  applyIssueUpdate: (id: string) => void;
 }
 
 /**
- * Project a server-confirmed Issue into an IssueListItem row, preserving
- * the IssueListItem-only fields (`children_detail`, `has_retro`,
- * `created_at`) from the prior row. Shared between the drawer's
- * `applyIssueUpdate` path and the SSE reducer so both produce the
- * same projection.
- */
-function mergeIntoListItem(
-  item: IssueListItem,
-  updated: Issue,
-): IssueListItem {
-  const acDone = updated.ac.filter((a) => a.checked).length;
-  return {
-    ...item,
-    title: updated.title,
-    description: updated.description,
-    status: updated.status,
-    type: updated.type,
-    priority: updated.priority,
-    position: updated.position,
-    parent_id: updated.parent_id,
-    children: [...updated.children],
-    ac_done: acDone,
-    ac_total: updated.ac.length,
-    comments_count: updated.comments.length,
-    waiting_on: updated.waiting_on !== null,
-    waiting_on_reason: updated.waiting_on?.reason ?? null,
-    waiting_on_by: updated.waiting_on?.by ?? [],
-    assigned_agent: updated.assigned_agent,
-    triage: cloneTriage(updated.triage),
-    updated_at: Date.now(),
-  };
-}
-
-/**
- * Build a brand-new IssueListItem from an Issue when the SSE feed
- * reports an id we have not seen before (a watcher `add` for a freshly-
- * created card). Computed projection fields the backend derives from
- * cross-card walks (`children_detail`, `has_retro`,
- * `requires_human_child_count`, `conflict_on_active_count`) are
- * impossible to reconstruct from one Issue — they fill in to safe
- * zero/empty defaults. The next REST hydrate (which carries the
- * canonical backend projection) re-affirms the proper values.
- */
-function projectIssueToListItem(
-  updated: Issue,
-  fallbackCreatedAt: number,
-): IssueListItem {
-  const acDone = updated.ac.filter((a) => a.checked).length;
-  return {
-    id: updated.id,
-    type: updated.type,
-    title: updated.title,
-    description: updated.description,
-    status: updated.status,
-    parent_id: updated.parent_id,
-    children: [...updated.children],
-    ac_total: updated.ac.length,
-    ac_done: acDone,
-    children_detail: [] as IssueListChild[],
-    waiting_on: updated.waiting_on !== null,
-    waiting_on_reason: updated.waiting_on?.reason ?? null,
-    waiting_on_by: updated.waiting_on?.by ?? [],
-    comments_count: updated.comments.length,
-    has_retro: false,
-    updated_at: fallbackCreatedAt,
-    created_at: fallbackCreatedAt,
-    priority: updated.priority,
-    position: updated.position,
-    assigned_agent: updated.assigned_agent,
-    requires_human: updated.requires_human,
-    requires_human_child_count: 0,
-    blocked: updated.blocked,
-    conflict_on: updated.conflict_on,
-    conflict_on_active_count: 0,
-    triage: cloneTriage(updated.triage),
-  };
-}
-
-/**
- * Single-event reducer over an IssueListItem[]. Three outcomes:
+ * Single-event reducer over an `IssueListItem[]`. Three outcomes:
  *
  *   - `removed: true` → drop the matching id (no-op if absent).
- *   - upsert variant with a known id → merge via `mergeIntoListItem`.
- *   - upsert variant with an unknown id → append a freshly-projected row.
+ *   - upsert with a known id → replace the row with the server-projected item.
+ *   - upsert with an unknown id → append the server-projected item.
+ *
+ * No client-side derivation. The wire is canonical. The reducer is dumb.
  *
  * Returns the same array reference when the event causes no observable
  * change (e.g. a `removed` for an id we don't have, or a wrong-repo
@@ -196,11 +105,11 @@ export function applyIssueEvent(
   }
   const idx = state.findIndex((i) => i.id === data.id);
   if (idx === -1) {
-    return [...state, projectIssueToListItem(data.issue, Date.now())];
+    return [...state, data.item];
   }
   return [
     ...state.slice(0, idx),
-    mergeIntoListItem(state[idx], data.issue),
+    data.item,
     ...state.slice(idx + 1),
   ];
 }
@@ -420,15 +329,14 @@ export function useIssues(
     }
   }
 
-  function applyIssueUpdate(updated: Issue): void {
+  function applyIssueUpdate(id: string): void {
     const requestRepo = repo.value;
     if (!requestRepo) return;
-    detailCache.delete(`${requestRepo}:${updated.id}`);
-    const idx = issues.value.findIndex((i) => i.id === updated.id);
-    if (idx === -1) return;
-    issues.value = issues.value.map((i, j) =>
-      j === idx ? mergeIntoListItem(i, updated) : i,
-    );
+    // Drop the cached detail so the next drawer open re-fetches the
+    // post-mutation YAML. The list-row update arrives via SSE
+    // (`issue:updated`) carrying the canonical projected item — no
+    // local merge.
+    detailCache.delete(`${requestRepo}:${id}`);
   }
 
   return {

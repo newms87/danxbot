@@ -7,7 +7,7 @@ import type {
   IssueType,
   RequiresHuman,
 } from "../issue-tracker/interface.js";
-import { ISSUE_STATUSES, cloneTriage } from "../issue-tracker/interface.js";
+import { ISSUE_STATUSES } from "../issue-tracker/interface.js";
 import { sortInputsForStatus } from "../issue-tracker/sort.js";
 import { serializeIssue } from "../issue-tracker/yaml.js";
 import {
@@ -20,7 +20,7 @@ import {
 import { repoNameFromPath } from "../poller/repo-name.js";
 import { createLogger } from "../logger.js";
 import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
-import { effectiveConflictOn } from "../issue/effective-conflict-on.js";
+import { projectIssue } from "./project-issue.js";
 
 const log = createLogger("issues-reader");
 
@@ -286,7 +286,7 @@ const DEFAULT_CLOSED_LIMIT = 50;
 
 const STEM_SHAPE = /^([A-Z]{2,4})-\d+$/;
 
-interface RawIssue {
+export interface RawIssue {
   issue: Issue;
   mtimeMs: number;
 }
@@ -299,7 +299,7 @@ interface RawIssue {
  * for unparseable YAML bytes) — fail loud, no silent skip, matching
  * the pre-DX-156 reader's behaviour for rogue YAMLs on disk.
  */
-function toRawIssue(row: DbIssueRow): RawIssue {
+export function toRawIssue(row: DbIssueRow): RawIssue {
   const data = row.issue as unknown as Record<string, unknown>;
   if (data._malformed === true) {
     const id = typeof data.id === "string" ? data.id : "<unknown>";
@@ -321,150 +321,15 @@ function toRawIssue(row: DbIssueRow): RawIssue {
   return { issue: row.issue, mtimeMs: row.mirrorUpdatedAtMs };
 }
 
-/**
- * DX-524 — non-terminal child statuses that contribute to the parent
- * `child_assignments` rollup. `Done` / `Cancelled` children are excluded
- * so stale agent names from completed work do not surface on the parent
- * row; `Review` is excluded by spec because cards in Review have not yet
- * been picked up by the dispatcher (a stamped `assigned_agent` there is
- * almost certainly leftover triage residue, not active work).
- */
-const ASSIGNABLE_STATUSES = new Set<IssueStatus>([
-  "ToDo",
-  "In Progress",
-  "Blocked",
-]);
-
-/**
- * DX-524 — walk THIS card's recursive child subtree and collect one
- * `IssueListChildAssignment` per (child) whose `status` is in
- * `ASSIGNABLE_STATUSES` AND `assigned_agent !== null`. Skips children
- * absent from `byId` (orphaned references — `children_detail` already
- * surfaces those as `missing: true`; the assignment rollup mirrors the
- * "missing ⟹ excluded" semantics so the count never inflates from a
- * dropped row). Cycle-safe via `visited: Set<string>` — a malformed
- * graph that loops back never re-enters a node.
- */
-function collectChildAssignments(
-  root: Issue,
-  byId: Map<string, Issue>,
-): IssueListChildAssignment[] {
-  const out: IssueListChildAssignment[] = [];
-  const visited = new Set<string>([root.id]);
-  function walk(parent: Issue): void {
-    for (const cid of parent.children) {
-      if (visited.has(cid)) continue;
-      visited.add(cid);
-      const child = byId.get(cid);
-      if (!child) continue;
-      if (
-        ASSIGNABLE_STATUSES.has(child.status) &&
-        child.assigned_agent !== null
-      ) {
-        out.push({
-          agent: child.assigned_agent,
-          issue_id: child.id,
-          issue_title: child.title,
-        });
-      }
-      // Recurse into grandchildren so a multi-level epic (epic →
-      // sub-epic → phase) surfaces agents on the top-level row. Same
-      // status + assigned_agent gate applies at every depth.
-      walk(child);
-    }
-  }
-  walk(root);
-  return out;
-}
-
 function toListItem(
   raw: RawIssue,
   byId: Map<string, Issue>,
   allOpen: readonly Issue[],
 ): IssueListItem {
-  const { issue, mtimeMs } = raw;
-  const childrenDetail: IssueListChild[] = issue.children
-    .map((cid) => {
-      const child = byId.get(cid);
-      if (!child) {
-        // Surface as waiting_on so the SPA's projection routes the row
-        // into the red ⛔ chip — visually distinct from a real ToDo
-        // child. `missing: true` is the canonical discriminator.
-        return {
-          id: cid,
-          name: `<${cid}: unknown>`,
-          type: "Feature" as IssueType,
-          status: "ToDo" as IssueStatus,
-          waiting_on: true,
-          waiting_on_by_card: false,
-          requires_human: false,
-          missing: true,
-        };
-      }
-      const childEffective = effectiveWaitingOn(child, byId);
-      return {
-        id: cid,
-        name: child.title,
-        type: child.type,
-        status: child.status,
-        waiting_on: childEffective !== null,
-        waiting_on_by_card:
-          childEffective !== null && childEffective.by.length > 0,
-        requires_human: child.requires_human !== null,
-        missing: false,
-      };
-    });
-  const effective = effectiveWaitingOn(issue, byId);
-  // No projection. The literal YAML `status` + `waiting_on` are the
-  // single source of truth for both the board's column placement and
-  // the card's "Blocked by" pill. If an epic should surface as Blocked,
-  // the worker / operator writes that into the YAML directly. Epics
-  // whose only deps are intra-sibling children — and the Issues tab's
-  // child glyph badges — communicate the structural relationship
-  // without the dashboard inventing a different status from what the
-  // tracker says.
-
-  return {
-    id: issue.id,
-    type: issue.type,
-    title: issue.title,
-    description: issue.description,
-    status: issue.status,
-    parent_id: issue.parent_id,
-    children: [...issue.children],
-    ac_total: issue.ac.length,
-    ac_done: issue.ac.filter((a) => a.checked).length,
-    children_detail: childrenDetail,
-    waiting_on: effective !== null,
-    waiting_on_reason: effective?.reason ?? null,
-    waiting_on_by: effective?.by ?? [],
-    comments_count: issue.comments.length,
-    has_retro:
-      issue.retro.good.length > 0 ||
-      issue.retro.bad.length > 0 ||
-      issue.retro.action_item_ids.length > 0 ||
-      issue.retro.commits.length > 0,
-    updated_at: mtimeMs,
-    created_at: deriveCreatedAt(issue.external_id, mtimeMs),
-    priority: issue.priority,
-    position: issue.position,
-    assigned_agent: issue.assigned_agent,
-    requires_human: issue.requires_human,
-    requires_human_child_count: childrenDetail.filter(
-      (c) => c.requires_human,
-    ).length,
-    blocked: issue.blocked,
-    conflict_on: issue.conflict_on.map((e) => ({ ...e })),
-    conflict_on_active_count: (() => {
-      const r = effectiveConflictOn(issue, allOpen);
-      return r.forward.length + r.reverse.length;
-    })(),
-    triage: cloneTriage(issue.triage),
-    child_assignments: collectChildAssignments(issue, byId),
-  };
+  return projectIssue(raw.issue, raw.mtimeMs, byId, allOpen);
 }
 
-function isClosed(status: IssueStatus): boolean {
+export function isClosed(status: IssueStatus): boolean {
   return status === "Done" || status === "Cancelled";
 }
 

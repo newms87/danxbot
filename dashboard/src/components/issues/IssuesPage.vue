@@ -59,11 +59,14 @@ const {
 } = useIssues(toRef(selectedRepo), includeClosed);
 
 function onUpdateIssue(updated: Issue): void {
-  // Update the board projection + invalidate the detail cache.
-  applyIssueUpdate(updated);
+  // Invalidate the cached detail entry. The board list-row updates
+  // arrive via SSE `issue:updated` carrying the canonical projected
+  // IssueListItem — no client-side projection.
+  applyIssueUpdate(updated.id);
   // Reflect the change immediately in the drawer's current detail view
   // by merging the new Issue fields onto the IssueDetail (detail-only
-  // fields — created_at, raw_yaml — stay; the 30s poll refreshes them).
+  // fields — created_at, raw_yaml — stay; the next drawer open
+  // re-fetches the full record via fetchIssueDetail).
   if (selectedDetail.value && selectedDetail.value.id === updated.id) {
     selectedDetail.value = {
       ...selectedDetail.value,

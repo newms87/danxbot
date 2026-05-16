@@ -18,14 +18,23 @@
  * may pick the card up AND the dashboard hides the "waiting on" badge —
  * but the YAML / DB row still carries the raw link as an audit trail.
  *
+ * Return contract: when the card IS still effectively waiting, the
+ * returned record carries a FILTERED `by[]` containing only the deps
+ * that are still gating progress — terminal (Done / Cancelled) deps
+ * are removed. This is what every consumer wants for display + counting
+ * ("WAITING ON N" pills, dispatch gate reasoning, drawer partner list).
+ * The raw, unfiltered record remains on `issue.waiting_on` for callers
+ * that need the durable history. Order in `by[]` mirrors the raw record;
+ * a fresh array is returned on every call (no mutation of the input).
+ *
  * Missing-dep semantics: any id in `by[]` that does not resolve in the
- * supplied `byId` map keeps the card effectively waiting. The caller's
- * map must therefore include every dep the issue might reference;
- * callers that read open-only data must pre-populate the map with any
- * closed deps they care about. This mirrors the user's stated intent:
- * the dispatch gate must verify Done/Cancelled before progressing —
- * "can't find the dep" is not the same as "dep is terminal" and should
- * not auto-eligibilise the card.
+ * supplied `byId` map is KEPT in the filtered `by[]` and KEEPS the card
+ * effectively waiting. The caller's map must therefore include every dep
+ * the issue might reference; callers that read open-only data must pre-
+ * populate the map with any closed deps they care about. This mirrors
+ * the user's stated intent: the dispatch gate must verify Done/Cancelled
+ * before progressing — "can't find the dep" is not the same as "dep is
+ * terminal" and should not auto-eligibilise the card.
  */
 
 import type { Issue, WaitingOn } from "../issue-tracker/interface.js";
@@ -36,19 +45,29 @@ export function effectiveWaitingOn(
   byId: Map<string, Issue>,
 ): WaitingOn | null {
   if (issue.waiting_on == null) return null;
+  const filtered: string[] = [];
   for (const depId of issue.waiting_on.by) {
     const dep = byId.get(depId);
-    if (!dep) return issue.waiting_on;
+    if (!dep) {
+      // Missing → keep as a still-gating dep (fail-safe).
+      filtered.push(depId);
+      continue;
+    }
     // DX-584 (Phase 4) — derived semantic state. A dep with terminal
     // timestamps but stale raw `status` still counts as terminal; same
     // for the inverse (raw "Done" without `completed_at` per the
     // pre-Phase-4 write path).
     const depDerived = deriveStatus(dep);
     if (depDerived !== "Done" && depDerived !== "Cancelled") {
-      return issue.waiting_on;
+      filtered.push(depId);
     }
   }
-  return null;
+  if (filtered.length === 0) return null;
+  return {
+    reason: issue.waiting_on.reason,
+    timestamp: issue.waiting_on.timestamp,
+    by: filtered,
+  };
 }
 
 export function isEffectivelyWaitingOn(

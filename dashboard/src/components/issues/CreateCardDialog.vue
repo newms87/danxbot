@@ -125,7 +125,7 @@ async function onSubmit(): Promise<void> {
   submitting.value = true;
   errorMessage.value = null;
   try {
-    const issue = await createIssue(props.repo, {
+    const { issue } = await createIssue(props.repo, {
       title: title.value.trim(),
       description: description.value.trim(),
       status: status.value,

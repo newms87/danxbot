@@ -95,44 +95,72 @@ describe("effectiveWaitingOn", () => {
   });
 
   it.each<IssueStatus>(["Review", "ToDo", "In Progress", "Blocked"])(
-    "returns raw waiting_on when a dep is %s (non-terminal)",
+    "returns record with full by[] when single dep is %s (non-terminal)",
     (status) => {
       const raw = waitingOn(["DX-2"]);
       const issue = makeIssue({ waiting_on: raw });
       const map = byIdMap([depIssue("DX-2", status)]);
-      expect(effectiveWaitingOn(issue, map)).toBe(raw);
+      const result = effectiveWaitingOn(issue, map);
+      expect(result).not.toBeNull();
+      expect(result?.reason).toBe(raw.reason);
+      expect(result?.by).toEqual(["DX-2"]);
     },
   );
 
-  it("returns raw waiting_on when one of many deps is non-terminal", () => {
+  it("filters terminal deps out of by[] when one of many is non-terminal", () => {
+    const raw = waitingOn(["DX-2", "DX-3", "DX-4"]);
+    const issue = makeIssue({ waiting_on: raw });
+    const map = byIdMap([
+      depIssue("DX-2", "Done"),
+      depIssue("DX-3", "In Progress"),
+      depIssue("DX-4", "Cancelled"),
+    ]);
+    const result = effectiveWaitingOn(issue, map);
+    expect(result).not.toBeNull();
+    expect(result?.reason).toBe(raw.reason);
+    expect(result?.by).toEqual(["DX-3"]);
+  });
+
+  it("returns record with by[]=[depId] when dep missing from byId (fail-safe)", () => {
+    const raw = waitingOn(["DX-2"]);
+    const issue = makeIssue({ waiting_on: raw });
+    const result = effectiveWaitingOn(issue, new Map());
+    expect(result).not.toBeNull();
+    expect(result?.by).toEqual(["DX-2"]);
+  });
+
+  it("keeps missing deps in by[]; drops terminal ones", () => {
     const raw = waitingOn(["DX-2", "DX-3"]);
+    const issue = makeIssue({ waiting_on: raw });
+    const map = byIdMap([depIssue("DX-2", "Done")]);
+    const result = effectiveWaitingOn(issue, map);
+    expect(result).not.toBeNull();
+    expect(result?.by).toEqual(["DX-3"]);
+  });
+
+  it("does NOT mutate issue.waiting_on when computing effective", () => {
+    const raw = waitingOn(["DX-2", "DX-3"]);
+    const rawByBefore = [...raw.by];
     const issue = makeIssue({ waiting_on: raw });
     const map = byIdMap([
       depIssue("DX-2", "Done"),
       depIssue("DX-3", "In Progress"),
     ]);
-    expect(effectiveWaitingOn(issue, map)).toBe(raw);
-  });
-
-  it("returns raw waiting_on when a dep is missing from byId (fail-safe)", () => {
-    const raw = waitingOn(["DX-2"]);
-    const issue = makeIssue({ waiting_on: raw });
-    expect(effectiveWaitingOn(issue, new Map())).toBe(raw);
-  });
-
-  it("returns raw waiting_on when one of many deps is missing", () => {
-    const raw = waitingOn(["DX-2", "DX-3"]);
-    const issue = makeIssue({ waiting_on: raw });
-    const map = byIdMap([depIssue("DX-2", "Done")]);
-    expect(effectiveWaitingOn(issue, map)).toBe(raw);
-  });
-
-  it("does NOT mutate issue.waiting_on when deps terminal", () => {
-    const raw = waitingOn(["DX-2"]);
-    const issue = makeIssue({ waiting_on: raw });
-    const map = byIdMap([depIssue("DX-2", "Done")]);
     effectiveWaitingOn(issue, map);
     expect(issue.waiting_on).toBe(raw);
+    expect(raw.by).toEqual(rawByBefore);
+  });
+
+  it("preserves by[] order from the raw record", () => {
+    const raw = waitingOn(["DX-2", "DX-3", "DX-4"]);
+    const issue = makeIssue({ waiting_on: raw });
+    const map = byIdMap([
+      depIssue("DX-2", "In Progress"),
+      depIssue("DX-3", "Done"),
+      depIssue("DX-4", "ToDo"),
+    ]);
+    const result = effectiveWaitingOn(issue, map);
+    expect(result?.by).toEqual(["DX-2", "DX-4"]);
   });
 });
 

@@ -19,7 +19,7 @@ import type { Dispatch } from "./dispatches.js";
 import type { JsonlBlock } from "./jsonl-reader.js";
 import type { AgentSnapshot } from "./agents-list.js";
 import type { SystemError } from "./system-errors.js";
-import type { Issue } from "../issue-tracker/interface.js";
+import type { IssueListItem } from "./issues-reader.js";
 import type { RepairErrorWithAttempts } from "../system-repair/db-reads.js";
 import type { RepoRootSyncError } from "../worker/sync-root.js";
 import type { ListsFile } from "../lists-file.js";
@@ -82,20 +82,35 @@ export interface IssuePrefixChangedPayload {
 }
 
 /**
- * DX-226 + DX-236: emitted on every YAML state change so the Issues tab
- * reflects card updates in <1s without polling.
+ * Emitted on every YAML state change so the Issues tab reflects card
+ * updates in <1s without polling.
  *
- * Two producers:
- *   - `PATCH /api/issues/:id` (DX-236) — operator-driven optimistic write.
- *   - chokidar `<repo>/.danxbot/issues/{open,closed}/*.yml` (DX-226) —
- *     every other write source (agents, watcher mirror's read-your-
- *     writes, `git pull`, hand edits), 50ms debounce per file id.
+ * Single canonical wire shape: `item: IssueListItem` — fully-projected,
+ * cross-card-derived fields resolved (effective `waiting_on`, filtered
+ * `waiting_on_by`, `children_detail`, `child_assignments`,
+ * `conflict_on_active_count`, `requires_human_child_count`). Both the
+ * REST `/api/issues` reader and the SSE publish path use the same
+ * `projectIssue` projector so there is exactly ONE source of truth on
+ * the wire. The client reducer is a dumb id-keyed upsert — no
+ * client-side derivation, no cross-card walk.
  *
- * Discriminated payload: the upsert variant carries the post-write
- * `Issue` so the SPA projects to its `IssueListItem` row without a
- * refetch round trip; the `removed: true` variant carries only `id` +
- * `repoName` so the reducer can drop the row without reading the file
- * (which is gone, by definition).
+ * Producers (all route through `publishIssueUpsert` /
+ * `publishIssueRemoved` in `publish-issue-update.ts`):
+ *   - `PATCH /api/issues/:id` — operator-driven write surface.
+ *   - chokidar `<repo>/.danxbot/issues/{open,closed}/*.yml` watcher —
+ *     every other write source (agents, mirror read-your-writes,
+ *     `git pull`, hand edits), 50ms per-file debounce.
+ *   - `dashboard/issue-import.ts` — bulk paste-import write surface.
+ *
+ * Discriminated payload: upsert variant carries the projected `item`;
+ * `removed: true` variant carries only `id` + `repoName` so the reducer
+ * drops the row without rereading the file.
+ *
+ * Fan-out: a single YAML change re-emits not only the changed card but
+ * also every OTHER open card whose projection depends on the changed
+ * card (waiting_on dep referrers, conflict_on partners, parent/ancestor
+ * chain for `child_assignments` rollup). One DB event → N SSE events
+ * (N typically 1–5).
  *
  * Subscribers MUST be idempotent — chokidar's `awaitWriteFinish` debounce
  * (5s) means the PATCH publisher's immediate event and the watcher's
@@ -104,7 +119,7 @@ export interface IssuePrefixChangedPayload {
 export type IssueUpdatedPayload = {
   topic: "issue:updated";
   data:
-    | { repoName: string; id: string; issue: Issue; removed?: false }
+    | { repoName: string; id: string; item: IssueListItem; removed?: false }
     | { repoName: string; id: string; removed: true };
 };
 

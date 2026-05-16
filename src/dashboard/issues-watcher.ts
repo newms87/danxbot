@@ -33,7 +33,7 @@
  * `debounceMs: 0` for synchronous assertions.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, resolve, sep } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 
@@ -41,6 +41,10 @@ import { eventBus, type BusEvent } from "./event-bus.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import { createLogger } from "../logger.js";
+import {
+  publishIssueRemoved,
+  publishIssueUpsert,
+} from "./publish-issue-update.js";
 
 const log = createLogger("issues-watcher");
 
@@ -165,11 +169,13 @@ export async function startIssuesWatcher(
     }
   }
 
-  function publishUpsert(state: PerRepoState, path: string): void {
+  async function publishUpsert(state: PerRepoState, path: string): Promise<void> {
     if (stopped) return;
     let text: string;
+    let mtimeMs: number;
     try {
       text = readFileSync(path, "utf-8");
+      mtimeMs = statSync(path).mtimeMs;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
       log.error(`[${state.name}] read ${path}`, err);
@@ -188,32 +194,32 @@ export async function startIssuesWatcher(
       );
       return;
     }
-    bus.publish({
-      topic: "issue:updated",
-      data: {
-        repoName: state.name,
-        id: issue.id,
-        issue,
-      },
+    try {
+      // Route through the canonical publisher — projects to IssueListItem
+      // + fans out to dependent cards.
+      await publishIssueUpsert(state.name, issue, mtimeMs, bus);
+    } catch (err) {
+      log.error(`[${state.name}] publishIssueUpsert ${issue.id}`, err);
+    }
+  }
+
+  function scheduleUpsert(state: PerRepoState, path: string): Promise<void> {
+    if (stopped) return Promise.resolve();
+    clearPendingForPath(state, path);
+    if (debounceMs <= 0) {
+      return publishUpsert(state, path);
+    }
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        state.pending.delete(path);
+        publishUpsert(state, path).finally(() => resolve());
+      }, debounceMs);
+      if (typeof timer.unref === "function") timer.unref();
+      state.pending.set(path, timer);
     });
   }
 
-  function scheduleUpsert(state: PerRepoState, path: string): void {
-    if (stopped) return;
-    clearPendingForPath(state, path);
-    if (debounceMs <= 0) {
-      publishUpsert(state, path);
-      return;
-    }
-    const timer = setTimeout(() => {
-      state.pending.delete(path);
-      publishUpsert(state, path);
-    }, debounceMs);
-    if (typeof timer.unref === "function") timer.unref();
-    state.pending.set(path, timer);
-  }
-
-  function publishRemoved(state: PerRepoState, path: string): void {
+  async function publishRemoved(state: PerRepoState, path: string): Promise<void> {
     if (stopped) return;
     // Move-aware: if the sibling path exists, the unlink is the back
     // half of an `open/` ↔ `closed/` status flip. The sibling's `add`
@@ -230,22 +236,19 @@ export async function startIssuesWatcher(
     // the row. Acceptable trade-off for the common atomic-rename case.
     if (existsSync(siblingPath(path))) return;
     const id = deriveIdFromPath(path);
-    bus.publish({
-      topic: "issue:updated",
-      data: {
-        repoName: state.name,
-        id,
-        removed: true,
-      },
-    });
+    try {
+      await publishIssueRemoved(state.name, id, bus);
+    } catch (err) {
+      log.error(`[${state.name}] publishIssueRemoved ${id}`, err);
+    }
   }
 
-  function handleUnlink(state: PerRepoState, path: string): void {
+  function handleUnlink(state: PerRepoState, path: string): Promise<void> {
     // Cancel any pending upsert for the same path — it would read a
     // gone file and ENOENT-skip anyway, but cleaning the map keeps
     // `stop()` snappy.
     clearPendingForPath(state, path);
-    publishRemoved(state, path);
+    return publishRemoved(state, path);
   }
 
   function startChokidarFor(state: PerRepoState): Promise<void> {
@@ -269,15 +272,15 @@ export async function startIssuesWatcher(
     state.watcher = w;
     w.on("add", (path) => {
       if (!path.endsWith(".yml")) return;
-      scheduleUpsert(state, path);
+      void scheduleUpsert(state, path);
     });
     w.on("change", (path) => {
       if (!path.endsWith(".yml")) return;
-      scheduleUpsert(state, path);
+      void scheduleUpsert(state, path);
     });
     w.on("unlink", (path) => {
       if (!path.endsWith(".yml")) return;
-      handleUnlink(state, path);
+      void handleUnlink(state, path);
     });
     w.on("error", (err) => {
       log.error(`[${state.name}] chokidar error`, err);
@@ -296,14 +299,13 @@ export async function startIssuesWatcher(
         throw new Error(`Unknown repo "${repoName}"`);
       }
       if (stopped) return;
+      // Tests await the full publish chain so assertions on `events`
+      // hold immediately after the call returns. Debounced path resolves
+      // its timer Promise once the trailing publish finishes.
       if (event === "unlink") {
-        handleUnlink(state, path);
+        await handleUnlink(state, path);
       } else {
-        // Drain the debounce synchronously so tests can assert on
-        // `events` immediately. When `debounceMs === 0` we publish
-        // inline; otherwise we still respect the timer so the
-        // debounce-coalescing test exercises the real path.
-        scheduleUpsert(state, path);
+        await scheduleUpsert(state, path);
       }
     },
     async stop() {

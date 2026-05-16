@@ -10,6 +10,15 @@ vi.mock("../../api", () => ({
 import { patchIssue } from "../../api";
 const patchMock = vi.mocked(patchIssue);
 
+// PATCH response now carries both the Issue (for the drawer's local
+// view) and the projected IssueListItem (for the board's list row).
+// Tests stub the wire shape verbatim — component only consumes `.issue`.
+function patchResponse(
+  issue: Issue,
+): { issue: Issue; item: import("../../types").IssueListItem } {
+  return { issue, item: issue as unknown as import("../../types").IssueListItem };
+}
+
 const MarkdownEditorStub = {
   name: "MarkdownEditor",
   props: ["modelValue", "readonly", "hideFooter"],
@@ -113,7 +122,7 @@ describe("ACTab", () => {
         ],
       }),
     };
-    patchMock.mockResolvedValue(patched);
+    patchMock.mockResolvedValue(patchResponse(patched));
 
     const w = mountACTab();
     await w.get('[data-test="ac-row-0"]').trigger("click");
@@ -141,7 +150,7 @@ describe("ACTab", () => {
         ],
       }),
     };
-    patchMock.mockResolvedValue(patched);
+    patchMock.mockResolvedValue(patchResponse(patched));
 
     const w = mountACTab();
     await w.get('[data-test="ac-row-0"]').trigger("click");
@@ -169,18 +178,23 @@ describe("ACTab", () => {
   });
 
   it("shows the saving indicator while the PATCH is in flight", async () => {
-    let resolvePatch!: (issue: Issue) => void;
+    let resolvePatch!: (
+      v: { issue: Issue; item: import("../../types").IssueListItem },
+    ) => void;
     patchMock.mockImplementation(
-      () => new Promise<Issue>((res) => { resolvePatch = res; }),
+      () =>
+        new Promise<{ issue: Issue; item: import("../../types").IssueListItem }>(
+          (res) => {
+            resolvePatch = res;
+          },
+        ),
     );
     const w = mountACTab();
     await w.get('[data-test="ac-row-0"]').trigger("click");
     vi.advanceTimersByTime(301);
     await flushPromises();
     expect(w.find('[data-test="ac-saving"]').exists()).toBe(true);
-    resolvePatch({
-      ...makeDetail({ ac: makeAc() }),
-    });
+    resolvePatch(patchResponse({ ...makeDetail({ ac: makeAc() }) }));
     await flushPromises();
     expect(w.find('[data-test="ac-saving"]').exists()).toBe(false);
   });

@@ -207,11 +207,23 @@ export async function fetchIssueDetail(
  * non-allowlisted fields, schema-invariant violations, or empty patch;
  * 404 when the YAML is missing in both `open/` and `closed/`.
  */
+/**
+ * PATCH response carries BOTH the post-patch Issue (used by the drawer's
+ * inline edit affordances) AND the server-projected IssueListItem (used
+ * by the board's optimistic list-row refresh). Both come from the same
+ * `projectIssue` projector that powers REST + SSE, so the wire shape is
+ * canonical across every code path.
+ */
+export interface PatchIssueResult {
+  issue: Issue;
+  item: IssueListItem;
+}
+
 export async function patchIssue(
   repo: string,
   id: string,
   patch: IssuePatch,
-): Promise<Issue> {
+): Promise<PatchIssueResult> {
   const res = await fetchWithAuth(
     `/api/issues/${encodeURIComponent(id)}?repo=${encodeURIComponent(repo)}`,
     {
@@ -221,8 +233,8 @@ export async function patchIssue(
     },
   );
   if (!res.ok) throw toggleError(res.status, await readJsonError(res));
-  const body = (await res.json()) as { issue: Issue };
-  return body.issue;
+  const body = (await res.json()) as PatchIssueResult;
+  return body;
 }
 
 /**
@@ -293,7 +305,7 @@ export interface IssueCreateInput {
 export async function createIssue(
   repo: string,
   input: IssueCreateInput,
-): Promise<Issue> {
+): Promise<PatchIssueResult> {
   const res = await fetchWithAuth(
     `/api/issues?repo=${encodeURIComponent(repo)}`,
     {
@@ -303,8 +315,8 @@ export async function createIssue(
     },
   );
   if (!res.ok) throw toggleError(res.status, await readJsonError(res));
-  const body = (await res.json()) as { issue: Issue };
-  return body.issue;
+  const body = (await res.json()) as PatchIssueResult;
+  return body;
 }
 
 /**

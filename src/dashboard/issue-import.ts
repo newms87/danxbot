@@ -45,13 +45,13 @@
  * (the schema invariant requires `by[]` non-empty).
  */
 
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import type { IncomingMessage, ServerResponse } from "http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { requireUser } from "./auth-middleware.js";
-import { eventBus } from "./event-bus.js";
+import { publishIssueUpsert } from "./publish-issue-update.js";
 import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import {
   KNOWN_SCHEMA_MAX,
@@ -421,12 +421,11 @@ export async function applyIssueImport(
     // Phase 4 — fan out SSE so every connected dashboard sees the new
     // cards without a manual refetch. The watcher mirror will fire
     // the same topic when chokidar catches the disk writes; SSE
-    // subscribers must already be idempotent per DX-236.
-    for (const issue of rewritten) {
-      eventBus.publish({
-        topic: "issue:updated",
-        data: { repoName, id: issue.id, issue },
-      });
+    // subscribers must already be idempotent.
+    for (let i = 0; i < rewritten.length; i += 1) {
+      const issue = rewritten[i];
+      const mtimeMs = statSync(targets[i]).mtimeMs;
+      await publishIssueUpsert(repoName, issue, mtimeMs);
     }
 
     return {

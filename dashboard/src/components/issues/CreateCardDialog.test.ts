@@ -14,6 +14,14 @@ import { createIssue, fleshOutIssue } from "../../api";
 const createMock = vi.mocked(createIssue);
 const fleshMock = vi.mocked(fleshOutIssue);
 
+// Wraps a stub Issue into the {issue, item} wire shape the server returns.
+// Component only reads `.issue.id`; `item` is a typed placeholder.
+function wrap(
+  issue: Issue,
+): { issue: Issue; item: import("../../types").IssueListItem } {
+  return { issue, item: issue as unknown as import("../../types").IssueListItem };
+}
+
 /**
  * DanxDialog stub renders the dialog inline as a teleport-less wrapper
  * so `@vue/test-utils` can reach the inner form. We expose the v-model
@@ -232,7 +240,7 @@ describe("CreateCardDialog", () => {
   });
 
   it("DX-544 — clicking a priority tier commits its defaultValue", async () => {
-    createMock.mockResolvedValueOnce(makeIssue({ id: "DX-9" }));
+    createMock.mockResolvedValueOnce(wrap(makeIssue({ id: "DX-9" })));
     const w = mountDialog(true);
     await w.find("[data-test='create-card-title']").setValue("T");
     await w.find("[data-test='markdown-editor-stub']").setValue("Body");
@@ -294,7 +302,7 @@ describe("CreateCardDialog", () => {
   });
 
   it("submits with form values + fires flesh-out + closes on success", async () => {
-    createMock.mockResolvedValueOnce(makeIssue({ id: "DX-5", title: "Foo" }));
+    createMock.mockResolvedValueOnce(wrap(makeIssue({ id: "DX-5", title: "Foo" })));
     fleshMock.mockResolvedValueOnce({ jobId: "j-1" });
     const w = mountDialog(true);
     await w.find("[data-test='create-card-title']").setValue("Foo");
@@ -319,7 +327,7 @@ describe("CreateCardDialog", () => {
   });
 
   it("trims whitespace from title and description before submitting", async () => {
-    createMock.mockResolvedValueOnce(makeIssue());
+    createMock.mockResolvedValueOnce(wrap(makeIssue()));
     const w = mountDialog(true);
     await w.find("[data-test='create-card-title']").setValue("  Padded  ");
     await w
@@ -352,7 +360,7 @@ describe("CreateCardDialog", () => {
   });
 
   it("does not fail the create when flesh-out rejects (fire-and-forget)", async () => {
-    createMock.mockResolvedValueOnce(makeIssue({ id: "DX-7" }));
+    createMock.mockResolvedValueOnce(wrap(makeIssue({ id: "DX-7" })));
     fleshMock.mockRejectedValueOnce(new Error("worker timeout"));
     const w = mountDialog(true);
     await w.find("[data-test='create-card-title']").setValue("Foo");

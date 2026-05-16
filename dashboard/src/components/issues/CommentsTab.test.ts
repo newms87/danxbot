@@ -104,9 +104,16 @@ describe("CommentsTab", () => {
   });
 
   it("inserts an optimistic pending comment, calls patchIssue, and emits update:issue", async () => {
-    let resolvePatch!: (issue: Issue) => void;
+    let resolvePatch!: (
+      v: { issue: Issue; item: import("../../types").IssueListItem },
+    ) => void;
     patchMock.mockImplementation(
-      () => new Promise<Issue>((res) => { resolvePatch = res; }),
+      () =>
+        new Promise<{ issue: Issue; item: import("../../types").IssueListItem }>(
+          (res) => {
+            resolvePatch = res;
+          },
+        ),
     );
 
     const w = mountTab();
@@ -141,7 +148,7 @@ describe("CommentsTab", () => {
         },
       ],
     });
-    resolvePatch(stamped);
+    resolvePatch({ issue: stamped, item: stamped as unknown as import("../../types").IssueListItem });
     await flushPromises();
 
     const events = w.emitted("update:issue");
@@ -155,9 +162,16 @@ describe("CommentsTab", () => {
   });
 
   it("reconciles the pending bubble away once the SSE-driven prop update lands a real comment with matching text", async () => {
-    let resolvePatch!: (issue: Issue) => void;
+    let resolvePatch!: (
+      v: { issue: Issue; item: import("../../types").IssueListItem },
+    ) => void;
     patchMock.mockImplementation(
-      () => new Promise<Issue>((res) => { resolvePatch = res; }),
+      () =>
+        new Promise<{ issue: Issue; item: import("../../types").IssueListItem }>(
+          (res) => {
+            resolvePatch = res;
+          },
+        ),
     );
 
     const w = mountTab();
@@ -165,7 +179,10 @@ describe("CommentsTab", () => {
     await w.get('[data-test="comment-post"]').trigger("click");
     expect(w.find('[data-test="comment-pending"]').exists()).toBe(true);
 
-    resolvePatch(makeDetail({}));
+    {
+      const d = makeDetail({});
+      resolvePatch({ issue: d, item: d as unknown as import("../../types").IssueListItem });
+    }
     await flushPromises();
     // Simulate the parent forwarding the server-stamped issue back.
     await w.setProps({
@@ -195,9 +212,16 @@ describe("CommentsTab", () => {
     // whose text matches — e.g. a 30s poll tick that hydrated a
     // pre-existing comment with the same wording. Key-based dedupe
     // keeps the pending around until OUR PATCH resolves.
-    let resolvePatch!: (issue: Issue) => void;
+    let resolvePatch!: (
+      v: { issue: Issue; item: import("../../types").IssueListItem },
+    ) => void;
     patchMock.mockImplementation(
-      () => new Promise<Issue>((res) => { resolvePatch = res; }),
+      () =>
+        new Promise<{ issue: Issue; item: import("../../types").IssueListItem }>(
+          (res) => {
+            resolvePatch = res;
+          },
+        ),
     );
 
     const w = mountTab();
@@ -240,7 +264,7 @@ describe("CommentsTab", () => {
         },
       ],
     });
-    resolvePatch(postPatch);
+    resolvePatch({ issue: postPatch, item: postPatch as unknown as import("../../types").IssueListItem });
     await flushPromises();
     // Simulate the parent receiving the emit and forwarding the
     // post-PATCH issue back down.

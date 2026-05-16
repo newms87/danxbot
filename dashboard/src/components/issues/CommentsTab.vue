@@ -98,7 +98,7 @@ async function onSubmit(): Promise<void> {
   submitting.value = true;
   errorMsg.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       comments_append: { text },
     });
     // Remove THIS pending entry by key — not by text — so a duplicate

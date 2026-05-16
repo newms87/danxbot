@@ -38,6 +38,7 @@ import {
   existsSync,
   mkdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   readFileSync,
@@ -47,7 +48,10 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { requireUser } from "./auth-middleware.js";
-import { eventBus } from "./event-bus.js";
+import {
+  publishIssueRemoved,
+  publishIssueUpsert,
+} from "./publish-issue-update.js";
 import { issuePath, ensureIssuesDirs } from "../issue-tracker/paths.js";
 import {
   createEmptyIssue,
@@ -785,7 +789,7 @@ export async function applyIssuePatch(
   id: string,
   rawBody: unknown,
   authUsername: string,
-): Promise<Issue> {
+): Promise<{ issue: Issue; item: import("./issues-reader.js").IssueListItem }> {
   const patch = validatePatchShape(rawBody);
   const expectedPrefix = loadIssuePrefix(repoLocalPath);
   const result = await withPerIdLock(repoLocalPath, id, async () => {
@@ -797,11 +801,9 @@ export async function applyIssuePatch(
       expectedPrefix,
     );
   });
-  eventBus.publish({
-    topic: "issue:updated",
-    data: { repoName, id, issue: result.issue },
-  });
-  return result.issue;
+  const mtimeMs = statSync(result.targetPath).mtimeMs;
+  const item = await publishIssueUpsert(repoName, result.issue, mtimeMs);
+  return { issue: result.issue, item };
 }
 
 /**
@@ -840,14 +842,14 @@ export async function handlePatchIssue(
     return;
   }
   try {
-    const issue = await applyIssuePatch(
+    const result = await applyIssuePatch(
       repo.name,
       repo.localPath,
       id,
       body,
       auth.user.username,
     );
-    json(res, 200, { issue });
+    json(res, 200, { issue: result.issue, item: result.item });
   } catch (err) {
     if (err instanceof IssuePatchError) {
       json(res, err.status, err.body);
@@ -1019,10 +1021,7 @@ export async function deleteIssue(
         });
       }
     });
-    eventBus.publish({
-      topic: "issue:updated",
-      data: { repoName, id: targetId, removed: true },
-    });
+    await publishIssueRemoved(repoName, targetId);
   }
   return { removed };
 }
@@ -1189,7 +1188,7 @@ export async function createIssue(
   repoName: string,
   repoLocalPath: string,
   rawBody: unknown,
-): Promise<Issue> {
+): Promise<{ issue: Issue; item: import("./issues-reader.js").IssueListItem }> {
   const input = validateCreateShape(rawBody);
   const expectedPrefix = loadIssuePrefix(repoLocalPath);
   const issuesRoot = resolve(repoLocalPath, ".danxbot", "issues");
@@ -1238,11 +1237,9 @@ export async function createIssue(
     const targetPath = issuePath(repoLocalPath, issue.id, "open");
     writeIssueYamlAtomic(targetPath, serialized, issue.id);
 
-    eventBus.publish({
-      topic: "issue:updated",
-      data: { repoName, id: issue.id, issue },
-    });
-    return issue;
+    const mtimeMs = statSync(targetPath).mtimeMs;
+    const item = await publishIssueUpsert(repoName, issue, mtimeMs);
+    return { issue, item };
   });
 }
 
@@ -1285,8 +1282,8 @@ export async function handlePostIssue(
     return;
   }
   try {
-    const issue = await createIssue(repo.name, repo.localPath, body);
-    json(res, 200, { issue });
+    const result = await createIssue(repo.name, repo.localPath, body);
+    json(res, 200, { issue: result.issue, item: result.item });
   } catch (err) {
     if (err instanceof IssuePatchError) {
       json(res, err.status, err.body);

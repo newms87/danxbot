@@ -34,6 +34,13 @@ vi.mock("./event-bus.js", () => ({
   eventBus: { publish: (...args: unknown[]) => mockEventBusPublish(...args) },
 }));
 
+// Mock the DB list helper the canonical publisher walks for fan-out.
+// Empty rows = no other open cards reference the patched one, so the
+// publish chain emits exactly ONE event per write (the changed card).
+vi.mock("../poller/issues-db.js", () => ({
+  dbListAllIssues: vi.fn(async () => []),
+}));
+
 import {
   applyIssuePatch,
   createIssue,
@@ -140,7 +147,7 @@ describe("applyIssuePatch — allowlist + body shape", () => {
 
   it("accepts a type flip (Feature → Epic) and lands on disk", async () => {
     writeFixture(makeIssue({ type: "Feature" }), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -404,7 +411,7 @@ describe("applyIssuePatch — allowlist + body shape", () => {
 describe("applyIssuePatch — round-trip mutation", () => {
   it("applies title + description and writes the YAML in place", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -421,7 +428,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("position: finite number lands on disk + post-patch issue carries it", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -437,7 +444,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("position: null clears the override", async () => {
     writeFixture(makeIssue({ position: 7.25 }), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -453,7 +460,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("DX-521 — priority: 4.2 lands on disk + publishes issue:updated SSE", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -471,7 +478,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
         data: expect.objectContaining({
           repoName: "danxbot",
           id: "DX-1",
-          issue: expect.objectContaining({ priority: 4.2 }),
+          item: expect.objectContaining({ priority: 4.2 }),
         }),
       }),
     );
@@ -479,7 +486,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("DX-521 — priority: 0.01 (minimum allowed) round-trips", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -491,7 +498,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("DX-521 — priority: 5.99 (maximum allowed) round-trips", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -509,7 +516,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     // closed bounds) — this test pins the gap so a future "tighten the
     // validator to match the clamp" change is a conscious choice.
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -548,7 +555,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -570,7 +577,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     vi.setSystemTime(frozen);
     try {
       writeFixture(makeIssue(), "open");
-      const issue = await applyIssuePatch(
+      const { issue } = await applyIssuePatch(
         "danxbot",
         repoLocalPath,
         "DX-1",
@@ -598,7 +605,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     vi.setSystemTime(frozen);
     try {
       writeFixture(makeIssue(), "open");
-      const issue = await applyIssuePatch(
+      const { issue } = await applyIssuePatch(
         "danxbot",
         repoLocalPath,
         "DX-1",
@@ -625,7 +632,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("preserves requires_human.steps[] order verbatim (panel reorder UX contract)", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -660,7 +667,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -672,7 +679,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("status: Done moves the file open/ → closed/ and unlinks the source", async () => {
     const openPath = writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -702,7 +709,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       makeIssue({ status: "Done" }),
       "closed",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -716,7 +723,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("reopen: true with explicit status overrides the default", async () => {
     writeFixture(makeIssue({ status: "Done" }), "closed");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -766,7 +773,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
     vi.setSystemTime(frozen);
     try {
       writeFixture(makeIssue(), "open");
-      const issue = await applyIssuePatch(
+      const { issue } = await applyIssuePatch(
         "danxbot",
         repoLocalPath,
         "DX-1",
@@ -790,7 +797,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -813,7 +820,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -827,7 +834,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
 
   it("status patch that does not touch Blocked leaves `blocked` alone", async () => {
     writeFixture(makeIssue({ status: "ToDo", blocked: null }), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -951,7 +958,7 @@ describe("applyIssuePatch — error-path coverage", () => {
       ),
     ).rejects.toMatchObject({ status: 400, body: { error: "Field not patchable: foo" } });
     // Second patch on the SAME id MUST run cleanly.
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -1038,7 +1045,7 @@ describe("applyIssuePatch — SSE event emission", () => {
     expect(call.topic).toBe("issue:updated");
     expect(call.data.repoName).toBe("danxbot");
     expect(call.data.id).toBe("DX-1");
-    expect(call.data.issue.title).toBe("Renamed");
+    expect(call.data.item.title).toBe("Renamed");
   });
 
   it("does NOT publish issue:updated when validation rejects", async () => {
@@ -1068,12 +1075,12 @@ describe("applyIssuePatch — SSE event emission", () => {
     expect(call.topic).toBe("issue:updated");
     // The broadcast carries the post-patch Issue verbatim — the SPA
     // relies on this so a second operator's view updates without a refetch.
-    expect(call.data.issue.requires_human).toMatchObject({
+    expect(call.data.item.requires_human).toMatchObject({
       reason: "Need vendor access",
       steps: ["Grant role A", "Notify ops"],
       set_by: "human",
     });
-    expect(call.data.issue.requires_human.set_at.length).toBeGreaterThan(0);
+    expect(call.data.item.requires_human.set_at.length).toBeGreaterThan(0);
   });
 });
 
@@ -1196,7 +1203,7 @@ describe("handlePatchIssue — HTTP route", () => {
 describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
   it("accepts conflict_on full-array replace and round-trips", async () => {
     writeFixture(makeIssue(), "open");
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -1226,7 +1233,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -1288,7 +1295,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
       }),
       "open",
     );
-    const issue = await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
@@ -1460,7 +1467,7 @@ describe("createIssue — body validation", () => {
 
 describe("createIssue — happy path", () => {
   it("allocates DX-1 in an empty repo, writes YAML, publishes SSE", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "First card",
       description: "Body",
       status: "Review",
@@ -1494,13 +1501,13 @@ describe("createIssue — happy path", () => {
     expect(call.topic).toBe("issue:updated");
     expect(call.data.repoName).toBe("danxbot");
     expect(call.data.id).toBe("DX-1");
-    expect(call.data.issue.title).toBe("First card");
+    expect(call.data.item.title).toBe("First card");
   });
 
   it("monotonically increments id when prior cards exist", async () => {
     writeFixture(makeIssue({ id: "DX-1" }), "open");
     writeFixture(makeIssue({ id: "DX-5" }), "closed");
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Next",
       description: "Body",
       status: "ToDo",
@@ -1522,7 +1529,7 @@ describe("createIssue — happy path", () => {
   });
 
   it("starts cards in Blocked + sentinel encoding Review when Review was requested", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Triage me",
       description: "Body",
       status: "Review",
@@ -1536,7 +1543,7 @@ describe("createIssue — happy path", () => {
   });
 
   it("starts cards in Blocked + sentinel encoding ToDo when ToDo was requested", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Ready",
       description: "Body",
       status: "ToDo",
@@ -1549,7 +1556,7 @@ describe("createIssue — happy path", () => {
   it("respects all four valid types", async () => {
     const types = ["Bug", "Feature", "Epic", "Chore"] as const;
     for (const t of types) {
-      const issue = await createIssue("danxbot", repoLocalPath, {
+      const { issue } = await createIssue("danxbot", repoLocalPath, {
         title: `Card ${t}`,
         description: "Body",
         status: "ToDo",
@@ -1560,7 +1567,7 @@ describe("createIssue — happy path", () => {
   });
 
   it("created card has empty ac[], empty children[], null waiting_on/requires_human, sentinel blocked", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Defaults",
       description: "Body",
       status: "Review",
@@ -1578,7 +1585,7 @@ describe("createIssue — happy path", () => {
   });
 
   it("DX-544 — optional priority round-trips into Issue.priority", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Prio",
       description: "Body",
       status: "ToDo",
@@ -1589,7 +1596,7 @@ describe("createIssue — happy path", () => {
   });
 
   it("DX-544 — omitted priority falls back to PRIORITY_DEFAULT (3.0)", async () => {
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Prio",
       description: "Body",
       status: "ToDo",
@@ -1634,7 +1641,7 @@ describe("createIssue — concurrency + disk fault paths (review C1/T1/T2)", () 
         type: "Bug",
       }),
     ]);
-    const ids = new Set<string>([a.id, b.id]);
+    const ids = new Set<string>([a.issue.id, b.issue.id]);
     expect(ids.size).toBe(2);
     expect(ids).toEqual(new Set<string>(["DX-1", "DX-2"]));
     // Both YAML files exist on disk (no clobber)
@@ -1654,7 +1661,7 @@ describe("createIssue — concurrency + disk fault paths (review C1/T1/T2)", () 
         type: "Feature",
       }),
     ).rejects.toMatchObject({ status: 400 });
-    const issue = await createIssue("danxbot", repoLocalPath, {
+    const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Recovered",
       description: "Body",
       status: "Review",

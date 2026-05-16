@@ -96,7 +96,7 @@ async function save(): Promise<void> {
   saving.value = true;
   error.value = null;
   try {
-    const updated = await patchIssue(props.repo, props.issue.id, {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       requires_human: { reason: r, steps: cleaned },
     });
     emit("patched", updated);
