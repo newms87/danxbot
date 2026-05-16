@@ -76,9 +76,10 @@ import type { DispatchProxyDeps } from "./dispatch-proxy.js";
  * `Blocked`, `Done`, `Cancelled` — must come from the agent / poller path
  * or a follow-up PATCH, not from the create surface.
  */
-const CREATE_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>(
-  ["Review", "ToDo"],
-);
+const CREATE_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
+  "Review",
+  "ToDo",
+]);
 
 const log = createLogger("issue-write");
 
@@ -675,15 +676,15 @@ function applyValidatedPatch(
     next.blocked = patch.blocked;
   }
 
-  // Operator action (dashboard drag, manual status patch) overrides the
-  // dispatch gates `blocked` / `waiting_on`. Without this normalization
-  // the YAML-level invariant `status === "Blocked" ⟺ blocked != null`
-  // (and `waiting_on != null ⟹ status === "ToDo"`) would 400 every
-  // drag-into-Blocked or drag-out-of-Blocked, since the inbound patch
-  // only carries `status`. Auto-stamp / auto-clear so the drag UX
-  // round-trips cleanly. The operator wins; if they explicitly set
-  // `blocked` or `waiting_on` in the patch (future field expansion),
-  // those take precedence over this normalization.
+  // Operator action (dashboard drag, manual status patch) crosses the
+  // status⟺blocked mirror invariant. Without this normalization, the
+  // YAML-level invariant `status === "Blocked" ⟺ blocked != null` would
+  // 400 every drag-into-Blocked or drag-out-of-Blocked, since the inbound
+  // patch only carries `status`. Auto-stamp / auto-clear `blocked` so the
+  // drag UX round-trips cleanly. `waiting_on`, `requires_human`, and
+  // `conflict_on[]` are status-independent — no normalization needed for
+  // those. The operator wins; if they explicitly set `blocked` in the
+  // patch, that takes precedence over this normalization.
   if (patch.status !== undefined) {
     if (next.status === "Blocked" && next.blocked === null) {
       next.blocked = {
@@ -946,10 +947,9 @@ function moveYamlToTrash(
   // first trashed copy. The operator's "undelete by hand" play remains
   // tractable — `ls <repo>/.danxbot/trash/<id>.yml*` lists every prior
   // version.
-  const target =
-    existsSync(dest)
-      ? `${dest}.${new Date().toISOString().replace(/[:.]/g, "-")}`
-      : dest;
+  const target = existsSync(dest)
+    ? `${dest}.${new Date().toISOString().replace(/[:.]/g, "-")}`
+    : dest;
   moveAcrossDevices(sourcePath, target);
 }
 

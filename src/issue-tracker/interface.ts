@@ -29,8 +29,13 @@
  * (or a subsequent agent run) must clear the block. Distinct from:
  *  - `Issue.waiting_on` field — the card is waiting on OTHER cards in
  *    `waiting_on.by[]` to reach a terminal status before it can start. The
- *    card's own work is fine; it's queued behind dependencies. Cards with
- *    a non-null `waiting_on` keep `status: "ToDo"` (worker enforces).
+ *    card's own work is fine; it's queued behind dependencies.
+ *    Status-independent — the validator allows `waiting_on` at any status
+ *    (Review, ToDo, In Progress, Blocked, Done, Cancelled). The picker's
+ *    runtime release path (multi-agent-pick) flips an actively-assigned
+ *    card to `ToDo` + clears `assigned_agent` when a gate re-fires at
+ *    pickup time; that is a runtime side effect, NOT a write-time
+ *    invariant.
  *  - `Issue.requires_human` field — orthogonal indicator; the card needs
  *    human-only action (3rd-party token rotation, credential rotation,
  *    ambiguous spec). DX-231 retired the parking `"Needs Approval"`
