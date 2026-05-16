@@ -33,67 +33,48 @@ const EFFORT_LEVEL_SET: ReadonlySet<EffortLevelName> = new Set(EFFORT_LEVEL_NAME
 const TRIAGE_HISTORY_CAP = 10;
 
 /**
- * Forward-compatible schema_version bounds (DX-280).
+ * Schema-version bounds — strict canonical reader (DX-594).
  *
- * `KNOWN_SCHEMA_MIN` is the oldest schema_version this validator still
- * accepts directly (older YAMLs are rejected with a migration pointer).
- * `KNOWN_SCHEMA_MAX` is the newest schema_version this validator was
- * built against — values ABOVE this are still accepted (forward-compat)
- * but emit a `console.warn` so consumers notice their bundled validator
- * is behind the writer.
+ * The validator accepts exactly two `schema_version` values directly:
  *
- * The drift class this prevents: the writer in `serializeIssue` /
- * `createEmptyIssue` stamps `schema_version: N` on every save; the
- * published `@thehammer/danx-issue-mcp` package bundles a validator
- * snapshot at publish time. If the writer's N is bumped without a
- * same-commit `make publish-danx-issue-mcp`, host sessions running the
- * stale npm-resolved bundle hit a hard parse error on every save round
- * trip. Before DX-280 the bound was an explicit allowlist (`v.schema_version
- * !== 3 && !== 4 && !== 5 && !== 6`) — a writer bump to 7 with the bundle
- * still at 6 made every save fail until the operator noticed and
- * republished. Forward-compat soft-degrades that into a noisy warning;
- * cards still load, agents still work, the operator still sees a clear
- * signal to republish.
+ *   - `KNOWN_SCHEMA_MAX` — canonical. Disk YAMLs round-trip byte-stable.
+ *   - `KNOWN_SCHEMA_MIN === KNOWN_SCHEMA_MAX - 1` — single-version
+ *     tolerance window handed off to `migrations/registry.ts#migrateForward`
+ *     before per-field validation. In practice the boot sweep
+ *     (DX-593 / `bootMigrateSweep`) walks every on-disk YAML to MAX so
+ *     this tolerance tier never fires under normal operation; it is
+ *     kept as defense-in-depth for a writer/reader race during a
+ *     schema bump.
  *
- * Schema bumps are increment-only and ADDITIVE — new fields default to
- * safe values on parse, removed fields are still tolerated by the
- * shape-specific validators. Breaking field-shape changes are caught by
- * the per-field validators (`validateBlocked`, `validateRequiresHuman`,
- * etc.) regardless of `schema_version`, so forward-compat does not paper
- * over real schema breaks.
+ * Anything `< KNOWN_SCHEMA_MIN` throws immediately: the boot sweep is
+ * the only path that should produce a writable MIN-or-MAX file; a value
+ * below MIN means a pre-sweep file slipped through (operator restore,
+ * stale branch, hand-edit). Operator fixes the file or files a bug.
  *
- * Maintenance contract: every time the writer's stamped version bumps
- * (the literal in `createEmptyIssue` + `serializeIssue` +
- * `issueToCreateInput` + the `issue.schema_version` assignment in
- * `validateIssue`), bump `KNOWN_SCHEMA_MAX` here. The DX-280 lockstep
- * test in `yaml.test.ts` pins the writer == `KNOWN_SCHEMA_MAX` invariant
- * — a one-sided bump fails the unit suite before it reaches a host
- * session.
+ * Values `> KNOWN_SCHEMA_MAX` (writer bumped past this bundled reader)
+ * warn-and-accept once per distinct version, then silent-downgrade
+ * `Issue.schema_version` to MAX on the returned object — same drift
+ * protection DX-280 introduced. Unknown future fields drop on the
+ * write side (canonical key set in `serializeIssue`), so the
+ * round-trip is read-only-faithful for known keys.
  *
- * Schema versions:
- *  - v3: `children[]` field for two-way epic ↔ phase linkage.
- *  - v4: split `blocked` → `waiting_on` (dep-chain) + `blocked` (self-block).
- *  - v5: `priority` field.
- *  - v6: `requires_human` orthogonal indicator (DX-231).
- *  - v7: `conflict_on[]` two-way dispatch mutex.
- *  - v8: `effort_level` field (DX-508 / DX-511).
- *  - v9: `db_updated_at` field (DX-545 / DX-546) — schema-only foundation
- *    for the synchronous DB-mirror write Phase 2 ships.
- *  - v10 (DX-592, parent epic DX-591): five computed-timestamp fields
+ * Maintenance contract — bumping `KNOWN_SCHEMA_MAX`:
+ *  1. Add `migrations/v(MAX)-to-v(MAX+1).ts` (pure `(prev) => next`).
+ *  2. Register it in `migrations/registry.ts#migrationsByFromVersion`.
+ *  3. Bump the literal in `schema-versions.ts` (MIN := old MAX, MAX := new MAX).
+ *  4. Update every writer literal — `createEmptyIssue`, `serializeIssue`,
+ *     `issueToCreateInput`, the `issue.schema_version` assignment in
+ *     `validateIssue`.
+ *  5. Run `make publish-danx-issue-mcp` in the SAME commit so the
+ *     bundled MCP catches up. The DX-280 lockstep test pins the
+ *     writer == `KNOWN_SCHEMA_MAX` invariant.
+ *
+ * Schema-version log (most recent last):
+ *  - v9: `db_updated_at` field (DX-545 / DX-546).
+ *  - v10 (DX-592 / parent epic DX-591): five computed-timestamp fields
  *    (`archived_at`, `ready_at`, `completed_at`, `cancelled_at`,
- *    `list_name`) + `blocked.timestamp` renamed to `blocked.at`. v9 →
- *    v10 conversion is delegated to
- *    `src/issue-tracker/migrations/registry.ts#migrateForward` — the
- *    validator invokes it before per-field validation when it sees a
- *    v9 input (single-version tolerance window; P2's boot sweep
- *    migrates every on-disk YAML forward; P3 removes the inline
- *    tolerance once that sweep guarantees canonical-on-disk).
- *
- * Single-version tolerance rule:
- *   `KNOWN_SCHEMA_MIN === KNOWN_SCHEMA_MAX - 1`. The validator accepts
- *   exactly the canonical version and its immediate predecessor; the
- *   boot sweep handles the rest. Pinned by the migration registry's
- *   `MIN == MAX - 1 invariant` unit test.
+ *    `list_name`) + `blocked` payload's prior `timestamp` key renamed
+ *    to `blocked.at` for naming consistency.
  *
  * The literal values live in `./schema-versions.ts` so the migration
  * registry can import them without creating a yaml.ts ↔ registry.ts
@@ -104,12 +85,12 @@ export { KNOWN_SCHEMA_MIN, KNOWN_SCHEMA_MAX } from "./schema-versions.js";
 import { KNOWN_SCHEMA_MIN, KNOWN_SCHEMA_MAX } from "./schema-versions.js";
 
 /**
- * Set of `schema_version` values this process has already warned about.
- * `parseIssue` is on the chokidar mirror's hot path (also `/api/issues`,
- * heal pass, retry queue, sync.ts) — without dedup, a single drifted
- * worker would emit `N_cards × M_call_sites` warnings per tick, drowning
- * the operator log. One warning per distinct unknown version per
- * process lifetime is enough signal: the operator runs `make
+ * Per-process dedup set for the "future-version" warn path. `parseIssue`
+ * sits on the chokidar mirror's hot path (plus `/api/issues`, heal
+ * pass, retry queue, sync.ts) — without dedup, a single drifted worker
+ * would emit `N_cards × M_call_sites` warnings per tick, drowning the
+ * operator log. One warning per distinct unknown version per process
+ * lifetime is enough signal: the operator runs `make
  * publish-danx-issue-mcp` once; subsequent reads stop warning after the
  * republish makes the version known. Module-scoped (per-process), so a
  * fresh dispatch starts with an empty set and re-warns once.
@@ -121,24 +102,28 @@ const warnedSchemaVersions = new Set<number>();
  * here so the YAML parser can validate `assigned_agent` (DX-200) without
  * importing the settings file (which would pull `node:fs/promises` + the
  * logger + the full per-repo settings surface into every parseIssue
- * caller). The two definitions MUST stay byte-identical; a new test in
+ * caller). The two definitions MUST stay byte-identical; a test in
  * `yaml.test.ts` asserts the regex source.
  */
 const AGENT_NAME_SHAPE = /^[a-z][a-z0-9_-]{0,31}$/;
 
 /**
- * Priority field bounds + default. Operators set `priority` in the open
- * interval `(0, 6)` clamped on read to `[PRIORITY_MIN, PRIORITY_MAX]`
- * (`[0.01, 5.99]` post-DX-521); the parser clamps out-of-range values
- * and defaults missing fields to `PRIORITY_DEFAULT` so legacy v3/v4
- * YAMLs round-trip without a hard migration. The numeric range maps to
- * six labeled tiers via `priorityTier()` in `./priority-tier.ts`:
- * `lowest` `(0, 1)`, `low` `[1, 2)`, `medium` `[2, 3)`, `high`
- * `[3, 4)`, `very_high` `[4, 5)`, `critical` `[5, 5.99]`. See
- * `Issue.priority` for the full semantic. Introduced by ISS-210;
- * bounds widened from `[1.0, 5.0]` to `[0.01, 5.99]` by DX-521 to
- * accommodate the 6-tier mapping (no schema bump — the value shape
- * is unchanged, only the clamp range widened).
+ * Priority field bounds. `priority` is REQUIRED on every v10 YAML and
+ * must be a finite number; the parser clamps out-of-range values into
+ * `[PRIORITY_MIN, PRIORITY_MAX]` so a hand-edit (e.g. `priority: 0` or
+ * `priority: 6`) heals to the bound rather than failing parse. Missing
+ * field rejects fail-loud — the boot sweep stamps `PRIORITY_DEFAULT` on
+ * any card that lacked the field on migration, so disk is canonical.
+ * `PRIORITY_DEFAULT` (`3.0`) is exposed for the migration registry +
+ * fresh-card constructor; it is NOT a parse-time default.
+ *
+ * The numeric range maps to six labeled tiers via `priorityTier()` in
+ * `./priority-tier.ts`: `lowest` `(0, 1)`, `low` `[1, 2)`, `medium`
+ * `[2, 3)`, `high` `[3, 4)`, `very_high` `[4, 5)`, `critical`
+ * `[5, 5.99]`. See `Issue.priority` for the full semantic. Bounds:
+ * `[0.01, 5.99]` (DX-521 widened from `[1.0, 5.0]` to accommodate the
+ * 6-tier mapping; no schema bump — the value shape is unchanged, only
+ * the clamp range widened).
  */
 export const PRIORITY_MIN = 0.01;
 export const PRIORITY_MAX = 5.99;
@@ -158,8 +143,8 @@ const VALID_DISPATCH_KINDS: ReadonlySet<string> = new Set([
 
 /**
  * Maximum number of `IssueHistoryEntry`s retained on an Issue. Enforced both
- * on parse (a legacy YAML carrying more than this drops oldest silently) and
- * on `appendHistory` (push past the cap shifts the oldest off the head).
+ * on parse (a YAML carrying more than this drops oldest silently) and on
+ * `appendHistory` (push past the cap shifts the oldest off the head).
  * Phase 1 of DX-138 — see DX-145 description for sizing rationale (1000
  * transitions on a single card means the card is mis-scoped, not that
  * history is wrong).
@@ -169,10 +154,10 @@ export const HISTORY_CAP = 1000;
 /**
  * Maximum length of `IssueHistoryEntry.note`. Enforced ONLY at append time
  * by `appendHistory` — the validator tolerates longer existing entries so
- * legacy YAMLs round-trip. A note longer than `HISTORY_NOTE_CAP` is
- * truncated to `HISTORY_NOTE_CAP - 1` chars + `…` ellipsis (single-char
- * Unicode ellipsis, not three dots) so the resulting string is exactly
- * `HISTORY_NOTE_CAP` chars long.
+ * an over-cap note already on disk round-trips. A note longer than
+ * `HISTORY_NOTE_CAP` is truncated to `HISTORY_NOTE_CAP - 1` chars + `…`
+ * ellipsis (single-char Unicode ellipsis, not three dots) so the resulting
+ * string is exactly `HISTORY_NOTE_CAP` chars long.
  */
 export const HISTORY_NOTE_CAP = 200;
 
@@ -186,10 +171,11 @@ const VALID_HISTORY_EVENTS: ReadonlySet<string> = new Set([
 /**
  * Actor-format guard for `appendHistory`. The interface JSDoc on
  * `IssueHistoryEntry.actor` promises that format enforcement happens at
- * append-time (NOT parse-time, so legacy YAMLs with future actor prefixes
- * round-trip). This regex is the load-bearing implementation of that
- * promise — Phase 2/3 callers fail loud here when they accidentally drop
- * the `:` separator or pass an empty actor.
+ * append-time (NOT parse-time, so a YAML carrying an unknown actor
+ * prefix from a future writer round-trips). This regex is the
+ * load-bearing implementation of that promise — Phase 2/3 callers fail
+ * loud here when they accidentally drop the `:` separator or pass an
+ * empty actor.
  *
  * Accepts:
  *  - `<source>:<id>` — non-empty source, non-empty id, separated by exactly
@@ -303,8 +289,8 @@ export class IssueHistoryAppendError extends Error {
  *  - **Actor format**: throws `IssueHistoryAppendError` when `entry.actor`
  *    does not match `<source>:<id>` (or bare `setup` / `unknown`). The
  *    interface contract documents this as the only enforcement point —
- *    `validateHistory` (parse-time) is intentionally permissive so legacy
- *    YAMLs with future actor prefixes round-trip.
+ *    `validateHistory` (parse-time) is intentionally permissive so an
+ *    entry from a future writer with an unknown actor prefix round-trips.
  *  - **Per-event field invariants**: throws when the event-required fields
  *    are missing. `status_change` requires both `from` and `to`;
  *    `created` / `blocked` require `to`; `unblocked` has no required
@@ -447,10 +433,10 @@ export function serializeIssue(issue: Issue): string {
       return out;
     }),
     history: issue.history.map((h) => {
-      // Drop optional `from` / `to` / `note` when undefined so legacy entries
-      // and entries that don't carry the field round-trip without growing
-      // synthetic null keys (which would diverge from the byte-stable form
-      // the rest of the schema commits to).
+      // Drop optional `from` / `to` / `note` when undefined so an entry
+      // that doesn't carry the field round-trips without growing
+      // synthetic null keys (which would diverge from the byte-stable
+      // form the rest of the schema commits to).
       const out: Record<string, unknown> = {
         timestamp: h.timestamp,
         actor: h.actor,
@@ -468,14 +454,10 @@ export function serializeIssue(issue: Issue): string {
       commits: [...issue.retro.commits],
     },
     // `assigned_agent` carries the persona name claiming the card or `null`
-    // when no agent owns it. Serialized AFTER `retro` so existing YAMLs that
-    // omit the field round-trip without churning the byte order; the v3 →
-    // v6 migrations don't need a hard rewrite.
+    // when no agent owns it.
     assigned_agent: issue.assigned_agent,
-    // `waiting_on` carries `null` (default) or a record with reason/timestamp/by[].
-    // Position after `retro` keeps the canonical key order stable for older
-    // YAMLs that omit the field — they parse with `waiting_on: null` defaulted in
-    // and re-serialize at the end of the document.
+    // `waiting_on` carries `null` (default) or a record with
+    // reason/timestamp/by[].
     waiting_on:
       issue.waiting_on === null
         ? null
@@ -498,10 +480,10 @@ export function serializeIssue(issue: Issue): string {
             at: issue.blocked.at,
           },
     // `requires_human` is the orthogonal "this card needs a human"
-    // indicator (DX-231 — replaces the retired `"Needs Approval"`
-    // status). Position after `blocked` so a reader scanning the YAML
-    // sees every dispatch gate adjacent. Field is `null` when no human
-    // action is needed. Independent from `blocked` and `waiting_on`.
+    // indicator (DX-231). Position after `blocked` so a reader scanning
+    // the YAML sees every dispatch gate adjacent. Field is `null` when
+    // no human action is needed. Independent from `blocked` and
+    // `waiting_on`.
     requires_human:
       issue.requires_human == null
         ? null
@@ -533,10 +515,9 @@ export function serializeIssue(issue: Issue): string {
     // `db_updated_at` (v9) — ISO 8601 timestamp of the most recent DB
     // upsert of this card's canonical content. Phase 2 wires the
     // synchronous DB-mirror write; Phase 1 (DX-546) just lands the
-    // field on every save. Position at the end of the document so
-    // legacy v8 YAMLs that omit the key serialize stably (the field
-    // simply joins the canonical tail on first round-trip). Empty
-    // string serializes as YAML `""` — the "never-mirrored" sentinel.
+    // field on every save. Empty string serializes as YAML `""` — the
+    // "never-mirrored" sentinel for fresh cards that have not yet hit
+    // the mirror path.
     db_updated_at: issue.db_updated_at,
     // v10 (DX-592) computed-timestamp fields. Position at the tail of
     // the document so v9 YAMLs migrated forward via
@@ -569,8 +550,8 @@ export const ISSUE_PREFIX_SHAPE = /^[A-Z]{2,4}$/;
  * Required knobs accepted by `parseIssue` and `validateIssue`. The
  * `expectedPrefix` knob enforces a per-repo `<PREFIX>-<N>` id shape (e.g.
  * `DX-12`, `SG-7`). Phase 4 of DX-99 made this required — there is no
- * legacy `"ISS"` default. Every caller MUST supply the active repo's
- * prefix (typically from `RepoContext.issuePrefix`).
+ * implicit default. Every caller MUST supply the active repo's prefix
+ * (typically from `RepoContext.issuePrefix`).
  */
 export interface ParseIssueOptions {
   /**
@@ -587,15 +568,10 @@ export interface ParseIssueOptions {
  * Parse YAML text into an Issue, throwing IssueParseError with a useful
  * message on either malformed YAML or schema violations.
  *
- * In schema v3, `external_id` is always allowed to be empty (YAML-only
- * mode + drafts pre-create have no tracker mapping yet), so there is no
- * separate "draft" parse mode — the v1 `parseDraftIssue` is gone. The
- * primary id (`id`) is the strict required-non-empty field. v3 adds the
- * `children: string[]` field for two-way epic ↔ phase linkage.
- *
- * `options.expectedPrefix` is required (Phase 4 of DX-99 dropped the legacy
- * `"ISS"` default). Pass the active repo's prefix from
- * `RepoContext.issuePrefix`.
+ * `external_id` is always allowed to be empty (memory-tracker mode +
+ * drafts pre-create have no tracker mapping yet); the primary `id` is
+ * the strict required-non-empty field. `options.expectedPrefix` is
+ * required — pass the active repo's prefix from `RepoContext.issuePrefix`.
  */
 export function parseIssue(text: string, options: ParseIssueOptions): Issue {
   let raw: unknown;
@@ -699,18 +675,22 @@ type ValidateResult =
  * match. Does NOT validate: ISO 8601 timestamp shape, UUID format, etc.;
  * those are caller responsibilities.
  *
- * Schema v3 contract:
- *  - `id` is required, non-empty, must match `ISS-<positive-integer>`.
- *  - `external_id` is required as a field but may be empty (YAML-only
+ * Schema contract (v10 canonical — see schema-version log at top of file):
+ *  - `id` is required, non-empty, must match `<PREFIX>-<positive-integer>`
+ *    (prefix from `options.expectedPrefix`).
+ *  - `external_id` is required as a field but may be empty (memory-tracker
  *    mode + drafts pre-tracker-create have no external mapping yet).
- *  - `children` is required, must be an array of `ISS-N` strings (may be
- *    empty). Available on every card type. On Epic = ordered phase cards;
- *    on non-epic = ordered sub-cards. Reverse linkage to `parent_id`.
- *  - `phases` is RETIRED in ISS-81. Legacy YAMLs may still carry it; the
- *    parse path tolerates any value and drops the field on the next save.
- *  - v1 / v2 documents are rejected with a migration suggestion — there is
- *    NO runtime backwards-compat shim. Run `scripts/migrate-issues-to-v3.ts`
- *    once on each repo to upgrade.
+ *  - `children` is required, must be an array of `<PREFIX>-N` strings
+ *    (may be empty). Available on every card type. On Epic = ordered
+ *    phase cards; on non-epic = ordered sub-cards. Reverse linkage to
+ *    `parent_id`.
+ *  - `priority` is required; values are clamped into
+ *    `[PRIORITY_MIN, PRIORITY_MAX]` and non-finite values fall back to
+ *    `PRIORITY_DEFAULT`. The boot sweep stamps a default on any pre-v10
+ *    card that lacked the field.
+ *  - Anything `schema_version < KNOWN_SCHEMA_MIN` is rejected with the
+ *    canonical < MIN error string; the boot sweep is the only path that
+ *    should produce a writable MIN-or-MAX file.
  */
 export function validateIssue(
   value: unknown,
@@ -726,62 +706,22 @@ export function validateIssue(
   }
   let v = value as Record<string, unknown>;
 
-  // v9 → v10 forward migration via the registry (DX-592, parent epic
-  // DX-591). The validator accepts MIN-version (v9) input and migrates
-  // it to canonical (v10) in place — `migrateForward` is a pure clone,
-  // so the caller's input is never mutated. This is the registry-based
-  // path the parent epic mandates ("keeps v9 readable through the
-  // registry, not through inline tolerance"). v3-v8 inputs fail the
-  // schema_version range check below (MIN=9) and never reach the
-  // registry; the inline tolerance branches for those older versions
-  // become unreachable dead code, kept in place until P3 deletes them.
-  if (
-    typeof v.schema_version === "number" &&
-    Number.isInteger(v.schema_version) &&
-    v.schema_version >= KNOWN_SCHEMA_MIN &&
-    v.schema_version < KNOWN_SCHEMA_MAX
-  ) {
-    try {
-      const migrated = migrateForward(v);
-      if (isPlainObject(migrated)) {
-        v = migrated as Record<string, unknown>;
-      }
-    } catch (err) {
-      // Registry-level failure (e.g. a buggy migration step). Surface
-      // as a validation error so the caller sees a consistent
-      // `{ok: false, errors}` shape — never propagate a raw throw
-      // through what callers treat as a validator.
-      return {
-        ok: false,
-        errors: [
-          `schema migration failed: ${err instanceof Error ? err.message : String(err)}`,
-        ],
-      };
-    }
-  }
-
-  // schema_version — v3 through v6 (KNOWN_SCHEMA_MIN..KNOWN_SCHEMA_MAX),
-  // with forward-compat for any integer > KNOWN_SCHEMA_MAX (DX-280).
-  // Reject older versions with a loud migration pointer. v1 was retired
-  // by `migrate-issues-to-v2`; v2 is retired by `migrate-issues-to-v3`
-  // (adds the required `children: []` field). v3 is migrated to v4
-  // lazily by this validator when reading v3 YAMLs with `blocked:` field
-  // (auto-renamed to `waiting_on:` in the output). v6 (DX-231) drops
-  // `"Needs Approval"` status and adds the orthogonal `requires_human`
-  // field — the migration is a no-op for YAMLs that did not carry the
-  // retired status (the field defaults `null` on parse when missing);
-  // YAMLs carrying `status: "Needs Approval"` are rejected fail-loud
-  // below so the operator migrates by hand before the loader can
-  // normalize them. Versions ABOVE KNOWN_SCHEMA_MAX warn-and-accept so
-  // a writer bump committed without a matching `make
-  // publish-danx-issue-mcp` does not bring down host saves — see the
-  // `KNOWN_SCHEMA_MAX` header above for the drift-class rationale.
+  // schema_version — strict canonical reader (DX-594).
+  //
+  //   v < KNOWN_SCHEMA_MIN  → reject fail-loud (boot sweep should have
+  //                           handled this before any reader saw it).
+  //   v == KNOWN_SCHEMA_MIN → migrate forward via the registry
+  //                           (defense-in-depth tier for a writer/reader
+  //                           race during a schema bump).
+  //   v == KNOWN_SCHEMA_MAX → pass through (canonical).
+  //   v > KNOWN_SCHEMA_MAX  → warn-and-accept (DX-280 drift protection)
+  //                           with silent-downgrade of `Issue.schema_version`
+  //                           to MAX on the returned object.
+  //
+  // Non-integer / missing / non-numeric values reject with the canonical
+  // error string the boot sweep + tests grep on.
   if (!("schema_version" in v)) {
     errors.push("missing required field: schema_version");
-  } else if (v.schema_version === 1 || v.schema_version === 2) {
-    errors.push(
-      `schema_version ${v.schema_version} is no longer supported — run scripts/migrate-issues-to-v3.ts to upgrade`,
-    );
   } else if (
     typeof v.schema_version !== "number" ||
     !Number.isInteger(v.schema_version) ||
@@ -790,21 +730,38 @@ export function validateIssue(
     errors.push(
       `schema_version must be an integer >= ${KNOWN_SCHEMA_MIN} (got ${JSON.stringify(v.schema_version)})`,
     );
+  } else if (v.schema_version < KNOWN_SCHEMA_MAX) {
+    // Defense-in-depth: the boot sweep should have already migrated this
+    // to MAX before any in-process reader saw it. Hand off to the
+    // registry; surface any registry failure as a validation error so
+    // callers see a consistent `{ok: false, errors}` shape.
+    try {
+      const migrated = migrateForward(v);
+      if (isPlainObject(migrated)) {
+        v = migrated as Record<string, unknown>;
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        errors: [
+          `schema migration failed: ${err instanceof Error ? err.message : String(err)}`,
+        ],
+      };
+    }
   } else if (v.schema_version > KNOWN_SCHEMA_MAX) {
-    // Forward-compat (DX-280). Writer bumped past this validator's known
-    // max — bundled package is behind. Accept the YAML (cards still load,
-    // saves still round-trip), but emit a loud warning so the operator
-    // sees the lag and runs `make publish-danx-issue-mcp` to refresh the
-    // bundle. Same parser otherwise — unknown future fields are silently
-    // dropped on serialize, which is the standard forward-compat read
-    // semantic. Per-field validators still fire so a breaking shape
-    // change is NOT papered over. Dedup keyed on the unknown version so
-    // a 100-card poll tick emits ONE warning per distinct future
-    // version, not 100 × N call sites.
+    // Writer bumped past this validator's known max — bundled package is
+    // behind. Accept the YAML (cards still load, saves still round-trip),
+    // but emit a loud warning so the operator sees the lag and runs
+    // `make publish-danx-issue-mcp` to refresh the bundle. Unknown future
+    // top-level fields drop on the write side (canonical key set in
+    // `serializeIssue`). Per-field validators still fire so a breaking
+    // shape change is NOT papered over. Dedup keyed on the unknown
+    // version so a 100-card poll tick emits ONE warning per distinct
+    // future version, not 100 × N call sites.
     if (!warnedSchemaVersions.has(v.schema_version)) {
       warnedSchemaVersions.add(v.schema_version);
       console.warn(
-        `[danx-issue-yaml] schema_version ${v.schema_version} is newer than this validator's known max ${KNOWN_SCHEMA_MAX} — accepting (forward-compat). Run \`make publish-danx-issue-mcp\` from danxbot to refresh the bundled validator.`,
+        `[danx-issue-yaml] schema_version ${v.schema_version} is newer than this validator's known max ${KNOWN_SCHEMA_MAX} — accepting. Run \`make publish-danx-issue-mcp\` from danxbot to refresh the bundled validator.`,
       );
     }
   }
@@ -865,57 +822,19 @@ export function validateIssue(
     else childrenResult = r;
   }
 
-  // dispatch — required object (or null when no active dispatch). Replaces
-  // the legacy `dispatch_id: string|null` field. Legacy YAMLs that still
-  // carry `dispatch_id` are rejected with a migration pointer — running
-  // `scripts/migrate-issues-to-triage-v3.ts` upgrades every YAML in one
-  // shot. The presence check ALWAYS rejects (even when both fields are
-  // present) so a half-migrated YAML with both legacy + new fields fails
-  // loud instead of silently picking one.
-  if ("dispatch_id" in v) {
-    errors.push(
-      "Legacy `dispatch_id` field is no longer supported — run scripts/migrate-issues-to-triage-v3.ts to convert to the structured `dispatch` block",
-    );
-  }
+  // dispatch — required object (or null when no active dispatch). The
+  // poller-managed dispatch record. Missing key parses as `null` so
+  // fixtures that omit the field don't have to spell it out.
   let dispatchResult: IssueDispatch | null = null;
   if ("dispatch" in v) {
     const r = validateDispatch(v.dispatch);
     if (typeof r === "string") errors.push(r);
     else dispatchResult = r;
   }
-  // Old YAMLs that pre-date both fields parse with dispatch: null —
-  // tolerated here so test fixtures that omit the field don't have to
-  // be rebuilt. Strict callers can pass through `validateIssue` once
-  // and re-emit via `serializeIssue` to get the canonical shape.
 
-  // status — v3 YAMLs carry `"Needs Help"`; v4 renames to `"Blocked"`.
-  // Auto-migrate on read so existing files round-trip without a separate
-  // migration script. The validator accepts the legacy literal only when
-  // schema_version is 3 (else the file is a half-migrated v4 with stale
-  // status — fail loud). Sets `v3NeedsHelpMigration = true` so the v3
-  // `blocked` synthesis below populates the new self-block field (the
-  // invariant `status === "Blocked" ⟺ blocked !== null` requires it).
-  //
-  // DX-231 (schema_version 6): the `"Needs Approval"` parking status was
-  // retired in favour of the orthogonal `requires_human` field. The
-  // ~3 cards in flight at the time of the rollout are migrated by hand
-  // BEFORE this phase merges (operator moves them to `Review`/`ToDo` and
-  // sets `requires_human` where appropriate). Any YAML still carrying
-  // `status: "Needs Approval"` is a half-migrated file — reject fail-loud
-  // with a clear migration pointer rather than silently coercing.
-  let v3NeedsHelpMigration = false;
+  // status — required, must match the canonical enum.
   if (!("status" in v)) {
     errors.push("missing required field: status");
-  } else if (v.status === "Needs Approval") {
-    errors.push(
-      'status: "Needs Approval" was retired in DX-231 (schema_version 6) — migrate this card by hand: move it to "Review" or "ToDo" and set the orthogonal `requires_human: {...}` field if a human still needs to act.',
-    );
-  } else if (
-    v.status === "Needs Help" &&
-    v.schema_version === 3
-  ) {
-    v.status = "Blocked";
-    v3NeedsHelpMigration = true;
   } else if (!ISSUE_STATUSES.includes(v.status as IssueStatus)) {
     errors.push(
       `status must be one of [${ISSUE_STATUSES.join(", ")}] (got ${JSON.stringify(v.status)})`,
@@ -948,21 +867,10 @@ export function validateIssue(
     description = v.description;
   }
 
-  // triage — required object. Replaces the legacy flat
-  // `triaged: {timestamp, status, explain}` block. Legacy YAMLs that
-  // still carry `triaged` are rejected with a migration pointer
-  // regardless of whether `triage` is also present, so a half-migrated
-  // YAML with both fields fails loud instead of silently picking one.
-  if ("triaged" in v) {
-    errors.push(
-      "Legacy `triaged` field is no longer supported — run scripts/migrate-issues-to-triage-v3.ts to convert to the structured `triage` block",
-    );
-  }
+  // triage — required object. Strict mapping shape (no flat alternative).
   let triageResult: IssueTriage | null = null;
   if (!("triage" in v)) {
-    if (!("triaged" in v)) {
-      errors.push("missing required field: triage");
-    }
+    errors.push("missing required field: triage");
   } else {
     const r = validateTriage(v.triage);
     if (typeof r === "string") errors.push(r);
@@ -979,12 +887,9 @@ export function validateIssue(
     else acResult = r;
   }
 
-  // phases — RETIRED in ISS-81. Legacy YAMLs may still carry the key; the
-  // normalize-on-read path tolerates any value here (including malformed
-  // shapes) and drops it silently. The next save re-emits the YAML without
-  // `phases:`. The unified field for child cards is `children[]`.
-  // Intentionally NO validation: a legacy `phases: []` or `phases: [...stuff]`
-  // must never block a parse, otherwise pre-ISS-81 YAMLs become unreadable.
+  // `phases` was retired in ISS-81 — `children[]` carries the same info.
+  // Unknown top-level keys silently drop on the write side (canonical key
+  // set in `serializeIssue`), so no parse-time check is needed.
 
   // comments — required.
   let commentsResult: IssueComment[] | null = null;
@@ -1006,60 +911,23 @@ export function validateIssue(
     else retroResult = r;
   }
 
-  // waiting_on — dep-chain queue. Optional field. Missing → null. Present
-  // must be either YAML null OR `{reason, timestamp, by[]}`.
+  // waiting_on — dep-chain queue. Optional field. Missing → null.
+  // Present must be either YAML null OR `{reason, timestamp, by[]}`.
   //
-  // blocked — self-block record. Optional field. Missing → null. Present
-  // must be either YAML null OR `{reason, timestamp}` (NO `by[]` —
-  // distinguishes from v3 schema where `blocked` carried the dep-chain
-  // payload, now renamed to `waiting_on`).
-  //
-  // v3 → v4 auto-migration: in a v3 YAML the `blocked:` key carries the
-  // dep-chain payload (`{reason, timestamp, by[]}`). On read we map it to
-  // `waiting_on` and leave `blocked: null`. v4 YAMLs with the new
-  // self-block shape (`blocked: {reason, timestamp}`) parse straight
-  // through.
+  // blocked — self-block record. Optional field. Missing → null.
+  // Present must be either YAML null OR `{reason, at}` (NO `by[]` —
+  // dep-chain payload lives on `waiting_on`).
   let waitingOnResult: WaitingOn | null = null;
   let blockedResult: Blocked | null = null;
-  const isV3 = v.schema_version === 3;
-  if (isV3) {
-    // v3 file: `blocked:` is dep-chain → goes into waiting_on. New
-    // self-block field doesn't exist on v3 files.
-    if ("waiting_on" in v) {
-      errors.push(
-        "schema_version: 3 file carries 'waiting_on:' — set schema_version to 4",
-      );
-    }
-    if ("blocked" in v) {
-      const r = validateWaitingOn(v.blocked, idRegex, idShape);
-      if (typeof r === "string") errors.push(r);
-      else waitingOnResult = r;
-    }
-    // v3 status="Needs Help" → v4 status="Blocked". Synthesize a placeholder
-    // `blocked` self-block record so the invariant
-    // `status === "Blocked" ⟺ blocked !== null` holds. Reason is a
-    // migration marker; timestamp is epoch so reloads stamp deterministically
-    // (next save serializes the synthesized record; subsequent reads round-trip
-    // it byte-stable). Agents can edit the reason on next pickup.
-    if (v3NeedsHelpMigration) {
-      blockedResult = {
-        reason:
-          "(no recorded reason — migrated from legacy v3 'Needs Help' status; agent should overwrite on next pickup)",
-        at: "1970-01-01T00:00:00.000Z",
-      };
-    }
-  } else {
-    // v4 file: `waiting_on:` is dep-chain, `blocked:` is self-block.
-    if ("waiting_on" in v) {
-      const r = validateWaitingOn(v.waiting_on, idRegex, idShape);
-      if (typeof r === "string") errors.push(r);
-      else waitingOnResult = r;
-    }
-    if ("blocked" in v) {
-      const r = validateBlocked(v.blocked);
-      if (typeof r === "string") errors.push(r);
-      else blockedResult = r;
-    }
+  if ("waiting_on" in v) {
+    const r = validateWaitingOn(v.waiting_on, idRegex, idShape);
+    if (typeof r === "string") errors.push(r);
+    else waitingOnResult = r;
+  }
+  if ("blocked" in v) {
+    const r = validateBlocked(v.blocked);
+    if (typeof r === "string") errors.push(r);
+    else blockedResult = r;
   }
 
   // Invariant: status === "Blocked" ⟺ blocked !== null. Worker write-paths
@@ -1089,11 +957,10 @@ export function validateIssue(
     }
   }
 
-  // requires_human — optional field. Missing → null. Cards predating
-  // DX-231 omit the field entirely; the loader defaults `null` so legacy
-  // YAMLs continue to parse cleanly. Present must be either YAML null OR
-  // `{reason, steps[], set_by, set_at}`. Independent from `blocked` /
-  // `waiting_on` — all three are dispatch gates and may co-exist.
+  // requires_human — optional field. Missing → null. Present must be
+  // either YAML null OR `{reason, steps[], set_by, set_at}`. Independent
+  // from `blocked` / `waiting_on` — all three are dispatch gates and may
+  // co-exist.
   let requiresHumanResult: RequiresHuman | null = null;
   if ("requires_human" in v) {
     const r = validateRequiresHuman(v.requires_human);
@@ -1102,11 +969,10 @@ export function validateIssue(
   }
 
   // conflict_on — optional field (v7). Missing → []. Present must be
-  // an array of `{id: <PREFIX>-N, reason: non-empty string}`. Legacy
-  // v3-v6 YAMLs omit the field; the validator defaults `[]` so they
-  // round-trip cleanly. Independent dispatch gate from `blocked` /
-  // `waiting_on` / `requires_human` — see `Issue.conflict_on`
-  // docstring for the two-way enforcement contract.
+  // an array of `{id: <PREFIX>-N, reason: non-empty string}`.
+  // Independent dispatch gate from `blocked` / `waiting_on` /
+  // `requires_human` — see `Issue.conflict_on` docstring for the two-way
+  // enforcement contract.
   let conflictOnResult: ConflictOnEntry[] = [];
   if ("conflict_on" in v && v.conflict_on !== null && v.conflict_on !== undefined) {
     const r = validateConflictOn(v.conflict_on, idRegex, idShape);
@@ -1115,9 +981,8 @@ export function validateIssue(
   }
 
   // db_updated_at — optional field (v9). Missing / null → "" (the
-  // "never-mirrored" sentinel for legacy v8 YAMLs that round-trip
-  // through this validator before Phase 2 ships the synchronous
-  // DB-mirror write — DX-545 / DX-546). Present must be a string;
+  // "never-mirrored" sentinel for cards that have not yet hit the
+  // synchronous DB mirror — DX-545 / DX-546). Present must be a string;
   // anything else fails-loud (a numeric or boolean here would silently
   // route the wrong value into the canonical hash + the DB column).
   // No ISO 8601 shape check — same forgiving discipline as every
@@ -1134,12 +999,11 @@ export function validateIssue(
     }
   }
 
-  // effort_level — optional field (v8). Missing / null → null. Present
-  // must be one of the seven canonical EffortLevelName literals
-  // (EFFORT_LEVEL_NAMES). Anything else fails-loud — a typo in a
-  // hand-edited card would silently route the dispatch through the
-  // wrong model/effort tier. v3-v7 YAMLs omit the field; the
-  // validator defaults to `null` so they round-trip cleanly.
+  // effort_level — optional field (v8). Missing / null → null
+  // (canonical "inherit agent default"). Present must be one of the
+  // seven canonical EffortLevelName literals (EFFORT_LEVEL_NAMES).
+  // Anything else fails-loud — a typo in a hand-edited card would
+  // silently route the dispatch through the wrong model/effort tier.
   let effortLevelResult: EffortLevelName | null = null;
   if ("effort_level" in v && v.effort_level !== null && v.effort_level !== undefined) {
     if (typeof v.effort_level !== "string" || !EFFORT_LEVEL_SET.has(v.effort_level as EffortLevelName)) {
@@ -1211,6 +1075,18 @@ export function validateIssue(
     }
   }
 
+  // priority — REQUIRED. Strict canonical reader (DX-594): every v10
+  // YAML on disk has been stamped by the boot sweep, so a missing key
+  // here means a pre-sweep file slipped through. Out-of-range finite
+  // numbers heal by clamp; non-finite / non-numeric values fall back
+  // to the default (matches the NaN-from-.nan handling DX-521 pinned).
+  let priorityValue = PRIORITY_DEFAULT;
+  if (!("priority" in v)) {
+    errors.push("missing required field: priority");
+  } else {
+    priorityValue = clampPriority(v.priority);
+  }
+
   // v10 (DX-592) — five computed-timestamp / projection fields. Each
   // is `string | null`; missing defaults to `null`. Anything that is
   // NOT a string and NOT `null` / `undefined` pushes onto `errors[]`
@@ -1229,15 +1105,9 @@ export function validateIssue(
   }
 
   // All required fields present and well-typed; build the validated Issue.
-  // Priority: missing / out-of-range values are clamped to `[1.0, 5.0]` and
-  // missing fields default to `3.0` — same forgiving shape as `description`
-  // so v3 / v4 YAMLs round-trip without a hard migration. The
-  // `migrate-issues-priority.ts` one-off bumps the on-disk shape lazily.
-  const priorityValue =
-    "priority" in v ? clampPriority(v.priority) : PRIORITY_DEFAULT;
   const issue: Issue = {
     // Hardcoded to the canonical writer version (KNOWN_SCHEMA_MAX). A
-    // forward-compat-accepted parse (v.schema_version > KNOWN_SCHEMA_MAX)
+    // future-version-accepted parse (v.schema_version > KNOWN_SCHEMA_MAX)
     // silent-downgrades here — the returned `Issue.schema_version` is
     // type-literal `KNOWN_SCHEMA_MAX`, never the future value seen on
     // disk. Lockstep contract: when the writer bumps, bump this literal
@@ -1585,7 +1455,7 @@ function validateTriageHistory(
   }
   // Cap at TRIAGE_HISTORY_CAP — drop oldest entries silently. The triage
   // agent is supposed to maintain the cap on write, but we tolerate a
-  // legacy YAML with too many entries instead of failing parse.
+  // YAML with too many entries instead of failing parse.
   if (out.length > TRIAGE_HISTORY_CAP) {
     return out.slice(out.length - TRIAGE_HISTORY_CAP);
   }
@@ -1751,12 +1621,11 @@ function validateWaitingOn(
 
 /**
  * Validate the v10 `blocked` self-block field. Shape: `{reason, at}`.
- * NO `by[]` (that's `waiting_on.by`). A v3 file's `blocked:` carries a
- * `by[]` and is mapped to `waiting_on:` upstream — `validateBlocked` is
- * only called on v4+ input. v9 inputs reach this function via
- * `migrateForward` (in `validateIssue`), which renames `.timestamp` →
- * `.at` before per-field validation, so by the time control lands here
- * the `at` field is always populated and `.timestamp` is gone.
+ * NO `by[]` (that's `waiting_on.by`). A half-migrated YAML carrying
+ * `by` on `blocked` rejects fail-loud here so the half-migrated state
+ * doesn't silently round-trip. v9 inputs reach this function via
+ * `migrateForward` in `validateIssue`, which renames the v9-era
+ * `.timestamp` key to v10's `.at` before per-field validation.
  */
 function validateBlocked(value: unknown): Blocked | null | string {
   if (value === null || value === undefined) return null;
@@ -1791,30 +1660,6 @@ function validateRetro(
   }
   if (v.bad !== undefined && typeof v.bad !== "string") {
     return "retro.bad must be a string";
-  }
-  // Legacy `action_items: string[]` (free-text titles) is no longer accepted.
-  // Reject loudly: silent-drop would lose information from the only place it
-  // exists. The agent must convert each title to a `danx_issue_create` call
-  // and reference the returned `ISS-N` in `action_item_ids[]`. An empty
-  // `action_items: []` field on disk is harmless legacy noise — accept that
-  // shape silently because no information is lost. Anything non-empty fails
-  // validation so the operator/agent fixes it once instead of forever.
-  if (v.action_items !== undefined) {
-    if (!Array.isArray(v.action_items)) {
-      return "retro.action_items is no longer supported (legacy free-text shape). Remove the field; use retro.action_item_ids[] of ISS-N references instead.";
-    }
-    if (v.action_items.length > 0) {
-      const sample = v.action_items
-        .filter((s) => typeof s === "string")
-        .slice(0, 3)
-        .map((s) => JSON.stringify(s))
-        .join(", ");
-      return (
-        `retro.action_items (legacy free-text shape) is no longer supported. ` +
-        `Create each action item as a full issue via danx_issue_create and reference its ISS-N in retro.action_item_ids[]. ` +
-        `Offending sample: [${sample}${v.action_items.length > 3 ? ", …" : ""}]`
-      );
-    }
   }
   let actionItemIds: string[] = [];
   if (v.action_item_ids !== undefined) {

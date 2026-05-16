@@ -57,7 +57,9 @@ import {
   appendHistory,
   IssueParseError,
   issueToCreateInput,
+  KNOWN_SCHEMA_MAX,
   parseIssue,
+  PRIORITY_DEFAULT,
   serializeIssue,
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
@@ -736,10 +738,11 @@ export async function handleIssueCreate(
     repo.issuePrefix,
   );
   draftMap.id = newId;
-  // `parseIssue` requires schema_version: 3 — auto-fill if the agent
-  // omitted it (drafts are increasingly skeletal).
+  // `parseIssue` requires `schema_version === KNOWN_SCHEMA_MAX` (with
+  // the MIN-tier migrate-forward window as defense-in-depth). Drafts
+  // authored by skills routinely omit the field — auto-fill canonical.
   if (draftMap.schema_version === undefined) {
-    draftMap.schema_version = 3;
+    draftMap.schema_version = KNOWN_SCHEMA_MAX;
   }
   // Provide an empty external_id explicitly so the validator's required-
   // field check passes.
@@ -751,6 +754,15 @@ export async function handleIssueCreate(
   // post-create on epics, never on the create call itself).
   if (draftMap.children === undefined) {
     draftMap.children = [];
+  }
+  // `priority` became strictly required in DX-594 (P3 of the schema
+  // invariant epic). Drafts authored by skills + the danx_issue_create
+  // MCP tool routinely omit it — auto-fill the canonical default so the
+  // strict validator accepts the draft. `PRIORITY_DEFAULT` is sourced
+  // from `yaml.ts` so a future bump (e.g. widen-to-0..10) takes effect
+  // here in lockstep.
+  if (draftMap.priority === undefined) {
+    draftMap.priority = PRIORITY_DEFAULT;
   }
 
   // `phases` was retired in ISS-81 — unified into `children[]`. Reject any

@@ -33,6 +33,7 @@ status: ToDo
 type: Feature
 title: t
 description: d
+priority: 3.0
 triage:
   expires_at: ""
   reassess_hint: ""
@@ -1088,5 +1089,251 @@ effort_level: null
     const reSerialized = serializeIssue(issue);
     const reParsed = parseIssue(reSerialized, { expectedPrefix: "DX" });
     expect(reParsed.priority).toBe(3.0);
+  });
+});
+
+/**
+ * DX-594 — strict canonical reader.
+ *
+ * Phase 3 of the schema-invariant epic (DX-591) deletes every legacy
+ * reader branch from `yaml.ts`. The boot sweep (DX-593) guarantees every
+ * on-disk YAML is canonical-v(MAX) by the time any in-process reader
+ * sees it, so the validator no longer carries:
+ *
+ *   - schema_version 1/2 rejection with a migration-script pointer
+ *   - `dispatch_id` legacy field rejection
+ *   - `triaged` legacy block rejection
+ *   - `"Needs Approval"` status branch (DX-231 retired)
+ *   - `"Needs Help"` → `"Blocked"` v3 auto-migrate
+ *   - v3 `blocked: {by[]}` → `waiting_on` auto-migrate
+ *   - `retro.action_items` (legacy free-text) rejection
+ *   - Priority defaulting on read
+ *
+ * Each test below pins the strict-rejection (or silent-drop) behavior
+ * that replaces the deleted branch.
+ */
+describe("DX-594 — strict canonical reader", () => {
+  function strictCanonical(overrides: Record<string, string> = {}): string {
+    const lines: Record<string, string> = {
+      schema_version: "10",
+      tracker: "trello",
+      id: "DX-1",
+      external_id: '""',
+      parent_id: "null",
+      children: "[]",
+      dispatch: "null",
+      status: "ToDo",
+      type: "Feature",
+      title: "t",
+      description: "d",
+      priority: "3.0",
+      position: "null",
+      triage:
+        "\n  expires_at: ''\n  reassess_hint: ''\n  last_status: ''\n  last_explain: ''\n  ice: {total: 0, i: 0, c: 0, e: 0}\n  history: []",
+      ac: "[]",
+      comments: "[]",
+      retro:
+        "\n  good: ''\n  bad: ''\n  action_item_ids: []\n  commits: []",
+      assigned_agent: "null",
+      waiting_on: "null",
+      blocked: "null",
+      requires_human: "null",
+      conflict_on: "[]",
+      effort_level: "null",
+      history: "[]",
+      db_updated_at: '""',
+      ...overrides,
+    };
+    return Object.entries(lines)
+      .map(([k, v]) => `${k}:${v.startsWith("\n") ? v : ` ${v}`}`)
+      .join("\n") + "\n";
+  }
+
+  describe("schema_version", () => {
+    it.each([1, 2, 3, 4, 5, 6, 7, 8])(
+      "rejects schema_version %s (below KNOWN_SCHEMA_MIN) with the canonical < MIN error",
+      (version) => {
+        const txt = strictCanonical({ schema_version: String(version) });
+        expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+          new RegExp(`schema_version must be an integer >= ${KNOWN_SCHEMA_MIN}`),
+        );
+      },
+    );
+
+    it("does NOT emit the retired `migrate-issues-to-v3.ts` pointer for schema_version 1 or 2", () => {
+      // Previously v1/v2 had a special-case error mentioning the migration
+      // script. After DX-594 they share the generic < MIN error path.
+      const txt = strictCanonical({ schema_version: "1" });
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).not.toThrow(
+        /migrate-issues-to-v3/,
+      );
+    });
+
+    it("accepts schema_version === KNOWN_SCHEMA_MIN via migrateForward (defense-in-depth)", () => {
+      // v9 → v10 migration: the registry stamps schema_version: 10 + adds
+      // the five v10 computed-timestamp fields. The boot sweep handles
+      // this before any reader sees a v9 file, but the inline registry
+      // call remains as a safety net.
+      const v9Txt = `schema_version: 9
+tracker: trello
+id: DX-1
+external_id: ""
+parent_id: null
+children: []
+dispatch: null
+status: ToDo
+type: Feature
+title: t
+description: d
+priority: 3.0
+position: null
+triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+ac: []
+comments: []
+retro:
+  good: ""
+  bad: ""
+  action_item_ids: []
+  commits: []
+assigned_agent: null
+waiting_on: null
+blocked: null
+requires_human: null
+conflict_on: []
+effort_level: null
+history: []
+db_updated_at: ""
+`;
+      const issue = parseIssue(v9Txt, { expectedPrefix: "DX" });
+      expect(issue.schema_version).toBe(KNOWN_SCHEMA_MAX);
+      // v10's computed-timestamp fields default to null on migration.
+      expect(issue.archived_at).toBeNull();
+      expect(issue.ready_at).toBeNull();
+      expect(issue.completed_at).toBeNull();
+      expect(issue.cancelled_at).toBeNull();
+      expect(issue.list_name).toBeNull();
+    });
+  });
+
+  describe("dispatch_id (retired field)", () => {
+    it("silently drops dispatch_id — no `dispatch_id is no longer supported` rejection", () => {
+      // The validator no longer carries the legacy rejection. An on-disk
+      // file with a stale dispatch_id key is treated as an unknown top-
+      // level field — silently dropped on the write side via the
+      // canonical key set in `serializeIssue`.
+      const txt = strictCanonical().replace(
+        "dispatch: null",
+        "dispatch: null\ndispatch_id: stale-uuid-from-old-schema",
+      );
+      const issue = parseIssue(txt, { expectedPrefix: "DX" });
+      expect(issue.dispatch).toBeNull();
+      // Round-trip drops the unknown key.
+      expect(serializeIssue(issue)).not.toContain("dispatch_id");
+    });
+  });
+
+  describe("triaged (retired field)", () => {
+    it("silently drops triaged — no `triaged is no longer supported` rejection", () => {
+      const txt = strictCanonical().replace(
+        /triage:[\s\S]*?history: \[\]\n/,
+        `triage:
+  expires_at: ""
+  reassess_hint: ""
+  last_status: ""
+  last_explain: ""
+  ice: {total: 0, i: 0, c: 0, e: 0}
+  history: []
+triaged:
+  timestamp: "2024-01-01"
+  status: approved
+  explain: stale flat block from prior schema
+`,
+      );
+      const issue = parseIssue(txt, { expectedPrefix: "DX" });
+      expect(issue.triage.expires_at).toBe("");
+      // Round-trip drops the unknown key.
+      expect(serializeIssue(issue)).not.toContain("triaged:");
+    });
+  });
+
+  describe("status: Needs Approval / Needs Help (retired)", () => {
+    it("rejects status: 'Needs Approval' via the generic enum check (no DX-231 specific pointer)", () => {
+      const txt = strictCanonical({ status: "'Needs Approval'" });
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+        /status must be one of/,
+      );
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).not.toThrow(
+        /DX-231/,
+      );
+    });
+
+    it("rejects status: 'Needs Help' — no v3-to-v4 auto-migration", () => {
+      // Previously a v3 YAML with status: "Needs Help" was auto-migrated
+      // to "Blocked" with a synthesized epoch-stamped blocked record. Now
+      // the field is rejected via the canonical status enum check.
+      const txt = strictCanonical({ status: "'Needs Help'" });
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+        /status must be one of/,
+      );
+    });
+  });
+
+  describe("blocked / waiting_on (no v3 auto-migration)", () => {
+    it("rejects a canonical-v(MAX) file whose `blocked` carries the legacy `by[]` payload", () => {
+      // v3 schema had `blocked: {reason, timestamp, by[]}` (dep-chain).
+      // v10 splits that into `waiting_on` (dep-chain) + `blocked`
+      // (self-block, no by[]). A v10 file with `by[]` on `blocked` is
+      // half-migrated; validateBlocked rejects it fail-loud.
+      const txt = strictCanonical({
+        status: "Blocked",
+        blocked: '\n  reason: "test"\n  at: "2026-05-16T00:00:00Z"\n  by: [DX-2]',
+      });
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+        /blocked must NOT carry 'by'/,
+      );
+    });
+
+    it("rejects `blocked.timestamp` (renamed to `blocked.at` in v10)", () => {
+      const txt = strictCanonical({
+        status: "Blocked",
+        blocked: '\n  reason: "test"\n  timestamp: "2026-05-16T00:00:00Z"',
+      });
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+        /blocked\.at must be a non-empty string/,
+      );
+    });
+  });
+
+  describe("retro.action_items (retired)", () => {
+    it("silently drops retro.action_items — no `legacy free-text shape` rejection", () => {
+      // Previously a non-empty `action_items: ["title1", "title2"]` was
+      // rejected fail-loud with a danx_issue_create migration pointer.
+      // The boot sweep guarantees no on-disk YAML carries the legacy
+      // shape, so the validator just silently drops it on read; the
+      // canonical writer key set in `serializeIssue` only emits
+      // `action_item_ids`.
+      const txt = strictCanonical({
+        retro:
+          "\n  good: ''\n  bad: ''\n  action_items: ['title1', 'title2']\n  action_item_ids: []\n  commits: []",
+      });
+      const issue = parseIssue(txt, { expectedPrefix: "DX" });
+      expect(issue.retro.action_item_ids).toEqual([]);
+      expect(serializeIssue(issue)).not.toContain("action_items:");
+    });
+  });
+
+  describe("priority (REQUIRED — no read-time default)", () => {
+    it("rejects a file that omits priority", () => {
+      const txt = strictCanonical().replace(/^priority: 3\.0\n/m, "");
+      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).toThrow(
+        /missing required field: priority/,
+      );
+    });
   });
 });

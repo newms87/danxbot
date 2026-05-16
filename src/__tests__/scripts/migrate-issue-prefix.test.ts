@@ -73,6 +73,7 @@ function writeIssue(
     "type: Feature",
     `title: ${JSON.stringify(issue.title ?? "fixture")}`,
     `description: ${JSON.stringify(issue.description ?? "body")}`,
+    "priority: 3.0",
     "triage:",
     '  expires_at: ""',
     '  reassess_hint: ""',

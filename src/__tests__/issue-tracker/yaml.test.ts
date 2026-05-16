@@ -300,21 +300,17 @@ describe("serializeIssue / parseIssue", () => {
       );
     });
 
-    it('parseIssue throws fail-loud on status: "Needs Approval" with a clear migration message (DX-231)', () => {
-      // The legacy parking status was retired in schema_version 6.
-      // ~3 cards in flight at the rollout were migrated by hand BEFORE
-      // this phase merged; any YAML still carrying the old status is a
-      // half-migrated file and must surface loudly so the operator
-      // notices and finishes the migration.
+    it('parseIssue rejects status: "Needs Approval" via the canonical status enum check (DX-594)', () => {
+      // DX-231 retired the parking status; DX-594 dropped the bespoke
+      // migration-pointer error in favour of the generic enum-mismatch
+      // path. The status field still rejects fail-loud, just without
+      // the DX-231-specific pointer message.
       const yaml = serializeIssue(fullIssue()).replace(
         "status: ToDo\n",
         "status: Needs Approval\n",
       );
       expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-        /retired in DX-231/,
-      );
-      expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-        /requires_human/,
+        /status must be one of/,
       );
     });
   });
@@ -463,12 +459,21 @@ describe("serializeIssue / parseIssue", () => {
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/external_id/);
   });
 
-  it("rejects schema_version 1 with a migration pointer", () => {
+  it("rejects schema_version 1 with the canonical < MIN error (no migration-script pointer)", () => {
+    // DX-594 dropped the bespoke v1/v2 migration-pointer branch in
+    // favour of the canonical < KNOWN_SCHEMA_MIN error. The boot sweep
+    // handles forward migration end-to-end; the validator just rejects
+    // anything older than MIN with a single uniform message.
     const yaml = "schema_version: 1\ntracker: trello\n";
-    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/migrate-issues-to-v3/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+      /schema_version must be an integer >= 9/,
+    );
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).not.toThrow(
+      /migrate-issues-to-v3/,
+    );
   });
 
-  it("tolerates a legacy phases: [...] key on read and drops it on re-serialize (ISS-81)", () => {
+  it("tolerates a prior `phases: [...]` key on read and drops it on re-serialize (ISS-81)", () => {
     const legacyYaml = [
       "schema_version: 10",
       "tracker: trello",
@@ -481,6 +486,7 @@ describe("serializeIssue / parseIssue", () => {
       "type: Feature",
       "title: legacy",
       "description: body",
+      "priority: 3.0",
       "triage: { expires_at: '', reassess_hint: '', last_status: '', last_explain: '', ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] }",
       "ac: []",
       "phases:",
@@ -531,6 +537,7 @@ describe("validateIssue", () => {
       type: "Bug",
       title: "T",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -576,6 +583,7 @@ describe("validateIssue", () => {
           expect.stringContaining("type"),
           expect.stringContaining("title"),
           expect.stringContaining("description"),
+          expect.stringContaining("priority"),
           expect.stringContaining("triage"),
           expect.stringContaining("ac"),
           expect.stringContaining("comments"),
@@ -605,38 +613,66 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects a YAML carrying the legacy `triaged` field with a migration pointer", () => {
+  it("rejects missing priority specifically (DX-594 — strict canonical reader)", () => {
+    const input = valid();
+    delete input.priority;
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.errors).toContain("missing required field: priority");
+    }
+  });
+
+  it("silently drops a stale `triaged` key without inventing a triage record (DX-594)", () => {
+    // DX-594 dropped the bespoke `triaged` migration-pointer rejection.
+    // The boot sweep guarantees no on-disk YAML carries the flat block,
+    // so an in-memory input with `triaged` but no `triage` is treated
+    // as a missing triage field (canonical required-field error fires).
+    // Anything that does have `triage` parses successfully and the
+    // `triaged` key drops silently via the canonical writer key set.
+    const input = valid();
+    (input as Record<string, unknown>).triaged = {
+      timestamp: "2026-04-01T00:00:00Z",
+      status: "ToDo",
+      explain: "stale flat block",
+    };
+    const result = validateIssue(input, { expectedPrefix: "ISS" });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The proper `triage` record (still present on `input`) wins; the
+      // stale `triaged` block leaves no trace on the built Issue.
+      expect(result.issue.triage.expires_at).toBe("");
+    }
+  });
+
+  it("when ONLY `triaged` is present and `triage` is absent, fires canonical `missing required field: triage` (DX-594)", () => {
+    // Locks the fall-through path: the bespoke "Legacy `triaged` is no
+    // longer supported" pointer was deleted; a YAML with ONLY the flat
+    // block now hits the generic required-field check instead.
     const input = valid();
     delete input.triage;
     (input as Record<string, unknown>).triaged = {
       timestamp: "2026-04-01T00:00:00Z",
       status: "ToDo",
-      explain: "legacy",
+      explain: "stale flat block, no canonical triage",
     };
     const result = validateIssue(input, { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.errors.join("\n")).toContain(
-        "Legacy `triaged` field is no longer supported",
-      );
-      expect(result.errors.join("\n")).toContain(
-        "scripts/migrate-issues-to-triage-v3.ts",
-      );
+      expect(result.errors).toContain("missing required field: triage");
     }
   });
 
-  it("rejects a YAML carrying the legacy `dispatch_id` field with a migration pointer", () => {
+  it("silently drops a stale `dispatch_id` key (DX-594)", () => {
+    // DX-594 dropped the bespoke legacy rejection. An unknown top-level
+    // key is silently dropped on the write side via the canonical key
+    // set in `serializeIssue`; on read the validator ignores it.
     const input = valid();
     (input as Record<string, unknown>).dispatch_id = "abc";
     const result = validateIssue(input, { expectedPrefix: "ISS" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      expect(result.errors.join("\n")).toContain(
-        "Legacy `dispatch_id` field is no longer supported",
-      );
-      expect(result.errors.join("\n")).toContain(
-        "scripts/migrate-issues-to-triage-v3.ts",
-      );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.dispatch).toBeNull();
     }
   });
 
@@ -914,22 +950,29 @@ describe("validateIssue", () => {
     }
   });
 
-  it("schema_version: 1 produces the migration-pointer error string", () => {
+  it("schema_version: 1 produces the canonical < MIN error (DX-594 — no migration-script pointer)", () => {
     const result = validateIssue(valid({ schema_version: 1 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
-        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
+        result.errors.some((e) =>
+          /schema_version must be an integer >= 9/.test(e),
+        ),
       ).toBe(true);
+      expect(
+        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
+      ).toBe(false);
     }
   });
 
-  it("schema_version: 2 produces the migration-pointer error string", () => {
+  it("schema_version: 2 produces the canonical < MIN error (DX-594)", () => {
     const result = validateIssue(valid({ schema_version: 2 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
-        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
+        result.errors.some((e) =>
+          /schema_version must be an integer >= 9/.test(e),
+        ),
       ).toBe(true);
     }
   });
@@ -958,29 +1001,28 @@ describe("validateIssue", () => {
     }
   });
 
-  it("rejects legacy retro.action_items with populated free-text strings", () => {
+  it("silently drops a populated retro.action_items free-text list (DX-594)", () => {
+    // DX-594 dropped the bespoke `retro.action_items` rejection. The
+    // boot sweep guarantees no on-disk YAML carries the retired shape;
+    // an in-memory input with the key simply silent-drops on the write
+    // side (canonical key set in `serializeIssue`).
     const result = validateIssue(
       valid({
         retro: {
           good: "",
           bad: "",
-          action_items: ["Migrate the X service", "Add tests for Y"],
+          action_items: ["stale title 1", "stale title 2"],
           commits: [],
         },
       }),
     );
-    expect(result.ok).toBe(false);
-    if (!result.ok) {
-      const msg = result.errors.find((e) =>
-        e.includes("retro.action_items (legacy free-text shape)"),
-      );
-      expect(msg).toBeDefined();
-      expect(msg).toContain("danx_issue_create");
-      expect(msg).toContain("action_item_ids");
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.retro.action_item_ids).toEqual([]);
     }
   });
 
-  it("accepts legacy retro.action_items: [] (empty) silently — no information lost", () => {
+  it("silently drops a retro.action_items: [] key (DX-594)", () => {
     const result = validateIssue(
       valid({
         retro: {
@@ -1041,6 +1083,7 @@ describe("validateIssue waiting_on is independent of status", () => {
       type: "Bug",
       title: "t",
       description: "",
+      priority: 3.0,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -1135,7 +1178,7 @@ describe("validateIssue waiting_on is independent of status", () => {
   });
 });
 
-describe("children field (v3 epic → phase linkage)", () => {
+describe("children field (epic → phase linkage)", () => {
   function valid(
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
@@ -1151,6 +1194,7 @@ describe("children field (v3 epic → phase linkage)", () => {
       type: "Epic",
       title: "T",
       description: "",
+      priority: 3.0,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [],
       comments: [],
@@ -1231,10 +1275,12 @@ describe("children field (v3 epic → phase linkage)", () => {
   });
 });
 
-describe("schema_version 3 contract", () => {
-  it("rejects schema_version 2 (must migrate)", () => {
+describe("schema_version < MIN (boot sweep escapes)", () => {
+  it("rejects schema_version 2 with the canonical < MIN error", () => {
     const yaml = "schema_version: 2\ntracker: trello\n";
-    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(/migrate-issues-to-v3/);
+    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
+      /schema_version must be an integer >= 9/,
+    );
   });
 });
 

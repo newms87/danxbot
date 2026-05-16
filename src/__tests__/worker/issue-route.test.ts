@@ -282,6 +282,65 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
     expect(stamped).toMatch(/^children:/m);
     // ISS-81: re-serialized YAML must NOT carry the legacy `phases:` key.
     expect(stamped).not.toMatch(/^phases:/m);
+    // DX-594: priority became strictly required. The fixture above omits
+    // the field; the handler stamps `PRIORITY_DEFAULT` so the strict
+    // validator accepts the draft and the canonical writer emits it.
+    expect(stamped).toMatch(/^priority: 3(\.0)?$/m);
+  });
+
+  it("auto-fills schema_version: KNOWN_SCHEMA_MAX when the draft omits it (DX-594)", async () => {
+    // DX-594 strict reader rejects anything < KNOWN_SCHEMA_MIN, so the
+    // handler's auto-fill MUST stamp the canonical version (10), not
+    // the legacy `3` literal it used pre-DX-594. Drafts authored by
+    // skills routinely omit the field — this exercises that fall-through.
+    const draftPath = issuePath(h.repo.localPath, "no-schema-version", "open");
+    ensureIssuesDirs(h.repo.localPath);
+    writeFileSync(
+      draftPath,
+      [
+        // schema_version intentionally omitted
+        "tracker: memory",
+        'id: ""',
+        'external_id: ""',
+        "parent_id: null",
+        "children: []",
+        "dispatch: null",
+        "status: ToDo",
+        "type: Feature",
+        "title: skill-authored draft without schema_version",
+        'description: ""',
+        "triage:",
+        '  expires_at: ""',
+        '  reassess_hint: ""',
+        '  last_status: ""',
+        '  last_explain: ""',
+        "  ice:",
+        "    total: 0",
+        "    i: 0",
+        "    c: 0",
+        "    e: 0",
+        "  history: []",
+        "ac: []",
+        "comments: []",
+        "retro:",
+        '  good: ""',
+        '  bad: ""',
+        "  action_item_ids: []",
+        "  commits: []",
+        "",
+      ].join("\n"),
+    );
+    const res = await fetch(`${h.url}/api/issue-create/dispatch-c`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: "no-schema-version" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.created).toBe(true);
+    const stamped = readYaml(h.repo.localPath, body.id);
+    // The canonical writer stamps KNOWN_SCHEMA_MAX (=10) at save time.
+    expect(stamped).toMatch(/^schema_version: 10$/m);
   });
 
   it("rejects danx_issue_create when the draft carries a non-empty phases: [...] payload (ISS-81)", async () => {

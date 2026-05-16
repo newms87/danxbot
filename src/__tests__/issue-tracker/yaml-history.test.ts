@@ -755,7 +755,7 @@ describe("appendHistory per-event field invariants", () => {
   });
 });
 
-describe("legacy YAML migration side-effect", () => {
+describe("pre-Phase-1 YAML migration side-effect", () => {
   it("a pre-Phase-1 YAML re-serializes with `history: []` between comments and retro on first save", () => {
     // Pre-Phase-1 YAMLs ship without `history:`. On the next save through
     // serializeIssue, the field appears in canonical position. This test
@@ -774,6 +774,7 @@ describe("legacy YAML migration side-effect", () => {
       "type: Feature",
       "title: legacy card",
       "description: body",
+      "priority: 3.0",
       "triage:",
       "  expires_at: ''",
       "  reassess_hint: ''",
