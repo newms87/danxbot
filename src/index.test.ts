@@ -127,6 +127,18 @@ vi.mock("./lists-file.js", async () => {
   return { ...actual, ensureListsFile: mockEnsureListsFile };
 });
 
+// DX-609 — boot path also seeds `<repo>/.danxbot/trello-list-map.yaml` via
+// ensureTrelloListMapFile. Same reasoning as the lists-file mock — the
+// mock repo path is a string literal, not a real disk path.
+const mockEnsureTrelloListMapFile = vi.fn().mockResolvedValue(undefined);
+vi.mock("./trello-list-map.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("./trello-list-map.js")>(
+      "./trello-list-map.js",
+    );
+  return { ...actual, ensureTrelloListMapFile: mockEnsureTrelloListMapFile };
+});
+
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
   repoName: "mock",
   repoLocalPath: "/mock",

@@ -57,6 +57,7 @@ import {
   syncSettingsFileOnBoot,
 } from "./settings-file.js";
 import { ensureListsFile } from "./lists-file.js";
+import { ensureTrelloListMapFile } from "./trello-list-map.js";
 import { watchRepoEnvFile } from "./dashboard/repo-env-writer.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
 import { reapOrphans } from "./worker/process-scan.js";
@@ -179,6 +180,13 @@ async function startWorkerMode(): Promise<void> {
   // an existing file is left untouched so operator-tuned list taxonomies
   // survive every restart. Same model as `syncSettingsFileOnBoot` above.
   await ensureListsFile(repo.localPath);
+
+  // DX-609 — seed `<repo>/.danxbot/trello-list-map.yaml` on first boot.
+  // Idempotent: an existing file is left untouched so operator-configured
+  // Trello list mappings (set via Settings UI in Phase 8b.3) survive every
+  // restart. File ships seeded with an empty map; the Phase 8b.2 routes
+  // are the only mutators.
+  await ensureTrelloListMapFile(repo.localPath);
 
   // DX-303: Watch `<repo>/.danxbot/.env` for credential rotations from
   // the dashboard's PATCH /api/agents/:repo/trello-credentials route
