@@ -165,6 +165,12 @@ vi.mock("./dispatch-stream.js", () => ({
   startDbChangeDetector: (...args: unknown[]) => mockStartDbChangeDetector(...args),
 }));
 
+// Stub self-repair-stream so startDashboard() doesn't open a real pg pool.
+const mockStartSelfRepairStream = vi.fn();
+vi.mock("./self-repair-stream.js", () => ({
+  startSelfRepairStream: (...args: unknown[]) => mockStartSelfRepairStream(...args),
+}));
+
 // Stub stream-routes so the /api/stream handler is a no-op in server tests.
 const mockHandleStream = vi.fn();
 vi.mock("./stream-routes.js", () => ({

@@ -22,6 +22,7 @@ import {
 } from "./chat-routes.js";
 import { handleStream } from "./stream-routes.js";
 import { startDbChangeDetector } from "./dispatch-stream.js";
+import { startSelfRepairStream } from "./self-repair-stream.js";
 import { startIssuesWatcher } from "./issues-watcher.js";
 import { startAgentsWatcher } from "./agents-watcher.js";
 import { eventBus } from "./event-bus.js";
@@ -852,6 +853,15 @@ export async function startDashboard(): Promise<void> {
   // Start the DB change detector that publishes dispatch:created and
   // dispatch:updated events to the EventBus for SSE subscribers.
   startDbChangeDetector();
+
+  // DX-569 — dashboard-side bridge for worker-side `system_errors` writes.
+  // The worker process emits `system-repair-error:updated` on its own
+  // in-process eventBus, but those events never cross the process
+  // boundary into the dashboard's SSE subscribers. Poll the table from
+  // here, diff against a snapshot, and re-emit so the Self-Repair tab
+  // live-updates when `recordError` / `flipErrorStatus` /
+  // `setRepairAttemptCard` / `finalizeSelfRepair` fire on the worker.
+  startSelfRepairStream();
 
   // DX-226 — per-repo chokidar watcher on `.danxbot/issues/{open,closed}/`.
   // Drives the Issues tab's `issue:updated` SSE feed so the SPA composable
