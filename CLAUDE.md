@@ -2,6 +2,20 @@
 
 Autonomous AI agent that orchestrates Claude Code CLI dispatches. Connects to one or more repos, processes Trello cards, and optionally answers questions in Slack. Run `./install.sh` for interactive setup.
 
+## Core Principle: Single Canonical Schema — Fail Loud, No Legacy
+
+Every data shape in this codebase (issue YAMLs, settings.json, dispatch rows, every other persisted struct) has exactly ONE correct version at any time. For issue YAMLs that version is currently `schema_version: 10` (track `KNOWN_SCHEMA_MAX` in `src/issue-tracker/schema-versions.ts`).
+
+- There is exactly ONE correct version of any data shape at any time. Disk YAMLs round-trip byte-stable at `KNOWN_SCHEMA_MAX`.
+- Forward migration to the current version is automatic at worker boot via the registry (`src/issue-tracker/migrations/`). The boot sweep walks every YAML, runs `migrateForward` to canonicalize, then re-asserts the strict shape.
+- Any YAML on disk after the boot sweep that fails strict validation is a bug, not an edge case. Fix the migration or the writer — never tolerate, never paper over with a silent default at parse time.
+- Code NEVER contains back-compat reader branches, "auto-migrate on read", silent defaults at parse time, or version-conditional logic at the read path. Migration is a single, well-defined, registered, tested chain — not a scatter of read-time conditionals.
+- Adding a new schema field: (a) bump `KNOWN_SCHEMA_MAX` in `src/issue-tracker/schema-versions.ts`, (b) bump the writer literal in `src/issue-tracker/yaml.ts`, (c) add one migration file under `src/issue-tracker/migrations/v<N-1>-to-v<N>.ts` with paired test, (d) ship via `make publish-danx-issue-mcp` so the bundled MCP validator catches up. The boot sweep does the rest on next worker start.
+- Mismatch surfaces at the validator: a read of a YAML below `KNOWN_SCHEMA_MIN` (= `KNOWN_SCHEMA_MAX - 1`) throws fail-loud with the file path + offending field name.
+- Cross-cutting: this principle applies to every persisted shape in the codebase, not only issue YAMLs. Settings files, dispatch rows, prep verdicts — same contract: one canonical version, one migration chain, no read-time tolerance.
+
+The forbidden tokens — `back-compat`, `forward-compat`, `auto-migrate`, `schema_version` literals other than the canonical one — appear in this codebase ONLY in this section (as quoted forbidden patterns) and in `.claude/rules/agent-dispatch.md` "Forbidden Patterns" table (also as quoted forbidden patterns). Anything else is a regression.
+
 ## CRITICAL Pointers Before Touching Sensitive Areas
 
 Auto-loaded rules + skills. Trigger the right one BEFORE editing.
@@ -24,7 +38,7 @@ Auto-loaded rules + skills. Trigger the right one BEFORE editing.
 | Anything in production: deployed job/dispatch/container/log/DB/SSH, `make deploy-*`, `danxbot.sageus.ai`, "I can't reach production" | `danxbot:prod-access` |
 | Editing root `.mcp.json` inject, `deploy/secrets.ts`, `.env.<target>` overlays, workspace cwd, container paths, Laravel `.env.{APP_ENV}` trap | `danxbot:docker-deep` |
 | Editing `/api/resume`, `staged_files` validation, Playwright proxy binary path, any `usage` accumulator, debugging silent-dispatch / claude-auth failures | `danxbot:dispatch-deep` |
-| Editing `src/settings-file.ts`, dashboard Agents tab handlers, adding feature toggle / display field, `syncSettingsFileOnBoot`, legacy `trelloPoller` migration | `danxbot:settings-deep` |
+| Editing `src/settings-file.ts`, dashboard Agents tab handlers, adding feature toggle / display field, `syncSettingsFileOnBoot`, pre-rename `trelloPoller` key fallback | `danxbot:settings-deep` |
 | Reading / writing / creating any issue YAML, ESPECIALLY epic creation (epics MUST ship with phase cards same turn) | `danxbot:issue-card-workflow` |
 | Card status `Needs Help` / `blocked != null`, `/unblock` invoked | `danxbot:unblock` |
 | Anything about danxbot runtime / dispatch / Trello-as-background-infra / poller boundary | `danxbot:danxbot` |
@@ -45,9 +59,7 @@ Source: `~/web/danx-issue-mcp/`. Every dispatched agent and host session resolve
 
 **Sequencing rule.** When the change touches BOTH the MCP package AND danxbot's consumer side (workspace `.mcp.json`, inject contract, dispatch overlay), publish first → then commit danxbot side. Reverse order = ~60s window where every workspace dispatch breaks because the new env shape lands locally before npm propagates the matching server. The publish make target waits for `npm view` to surface the new version before exiting; once it returns, the danxbot commit is safe.
 
-**Schema-version lockstep + forward-compat safety net (DX-280).** Two of the bundled symbols MUST stay in lockstep across every commit, on pain of the drift class that broke every host save mid-DX-275: the writer's stamped `schema_version` literal (currently `6`, in `src/issue-tracker/yaml.ts` — used by `createEmptyIssue`, `serializeIssue`, `issueToCreateInput`, and the built `Issue` in `validateIssue`) and `KNOWN_SCHEMA_MAX` (the validator's accepted-version ceiling, same file). When the writer bumps, bump `KNOWN_SCHEMA_MAX` in the SAME commit, then run `make publish-danx-issue-mcp` so the bundled validator catches up. The `DX-280 — schema_version forward-compat bound` block in `src/issue-tracker/yaml.test.ts` pins the writer == `KNOWN_SCHEMA_MAX` invariant — a one-sided bump fails the unit suite before it reaches a host session.
-
-If the publish step gets missed anyway, the validator no longer hard-rejects: any integer `schema_version >= KNOWN_SCHEMA_MIN` is accepted, with a `console.warn` for values above the known max. Cards still parse, saves still round-trip, the operator gets a loud signal to republish. This is a safety net, not a license to skip the publish — forward-compat reads silently drop unknown future fields on round-trip (a v7-only field disappears the moment a stale v6 reader saves the YAML), so the same-commit publish is still the right discipline. The hard-reject form is a workflow violation to reintroduce.
+**Schema bump contract.** Bump = (1) writer literal in `src/issue-tracker/yaml.ts` bumped, (2) `KNOWN_SCHEMA_MAX` in `src/issue-tracker/schema-versions.ts` bumped, (3) one migration file added under `src/issue-tracker/migrations/v<N-1>-to-v<N>.ts` with paired test, (4) same-commit publish via `make publish-danx-issue-mcp` so the bundled MCP validator catches up. Readers accept `KNOWN_SCHEMA_MAX` (canonical) and `KNOWN_SCHEMA_MAX - 1` (defense-in-depth tier handed off to `migrateForward` inline); the boot sweep handles the drift window so reads at canonical happen the vast majority of the time. Anything `< KNOWN_SCHEMA_MIN` throws fail-loud with the file path. The writer == `KNOWN_SCHEMA_MAX` invariant is pinned by the unit suite — a one-sided bump fails CI before it reaches a host session. Sequencing: when the change touches the MCP package AND danxbot consumer side, publish first → commit consumer side, otherwise the ~60s npm propagation gap breaks every workspace dispatch.
 
 ## Architecture
 

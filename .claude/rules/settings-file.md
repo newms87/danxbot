@@ -8,4 +8,4 @@
 
 > **Sibling tripwire — NOT this file:** `<repo>/.danxbot/CRITICAL_FAILURE` is a separate poller-halt flag (present-or-absent halt signal cleared by human). Don't conflate with three-valued runtime overrides. Contract: `.claude/rules/agent-dispatch.md` "Critical failure flag — poller halt".
 
-**Deep contract** (schema, ownership matrix, why-worker-not-deploy-writes-display, legacy `trelloPoller` migration) → invoke `danxbot:settings-deep` skill BEFORE editing `src/settings-file.ts` or any reader/writer/dashboard handler.
+**Deep contract** (schema, ownership matrix, why-worker-not-deploy-writes-display, pre-rename `trelloPoller` key fallback) → invoke `danxbot:settings-deep` skill BEFORE editing `src/settings-file.ts` or any reader/writer/dashboard handler.

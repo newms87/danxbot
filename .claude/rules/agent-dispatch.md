@@ -12,7 +12,7 @@ Every dispatch runs with `cwd = <repo>/.danxbot/workspaces/<name>/`. Contents:
 - `.claude/rules/danx-repo-{config,overview,workflow}.md` + `danx-tools.md` — rendered fresh from `RepoContext` every tick by `renderPerRepoFilesIntoWorkspaces`, duplicated per workspace so cwd-relative `Read .claude/rules/...` resolves locally without ancestor walk
 - `.claude/tools/` — copied from `<repo>/.danxbot/config/tools/`
 
-**Repo-root `<repo>/.claude/` is developer territory.** Danxbot never writes there and scrubs any `danx-*` artifact + legacy singular `<repo>/.danxbot/workspace/` dir every tick (`scrubRepoRootDanxArtifacts`, `scrubLegacySingularWorkspace`). `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspaces/` — reintroducing a repo-root write fails CI.
+**Repo-root `<repo>/.claude/` is developer territory.** Danxbot never writes there and scrubs any `danx-*` artifact + the retired singular `<repo>/.danxbot/workspace/` dir every tick (`scrubRepoRootDanxArtifacts`, `scrubLegacySingularWorkspace`). `src/poller/index.test.ts` asserts zero writes outside `<repo>/.danxbot/workspaces/` — reintroducing a repo-root write fails CI.
 
 `DANXBOT_WORKER_PORT` source chain (`src/repo-context.ts#readWorkerPort`): `<repo>/.danxbot/.env` (dev) → `process.env` (prod compose). No longer reads `<repo>/.claude/settings.local.json`.
 
@@ -32,7 +32,7 @@ Workers bind only on `danxbot-net` (no public ingress). Caddy → port 443 → d
 
 All require `Authorization: Bearer $DANXBOT_DISPATCH_TOKEN`. Token generated per-target at deploy (`deploy/secrets.ts::getOrCreateDispatchToken`), persisted at `/<ssm_prefix>/shared/DANXBOT_DISPATCH_TOKEN`, materialized into dashboard container's `/danxbot/.env`. `checkAuth` (`src/dashboard/dispatch-proxy.ts`) is timing-safe: 401 bad/missing, 500 dashboard has no token.
 
-Worker hostname: `workerHost(name) = danxbot-worker-<name>` (compose `container_name`). Resolved via Docker DNS on `danxbot-net`. Worker port from `deploy/targets/<DANXBOT_TARGET>.yml`'s per-repo `worker_port:` via `src/target.ts#loadTarget` (legacy `REPO_WORKER_PORTS` retired in Phase B).
+Worker hostname: `workerHost(name) = danxbot-worker-<name>` (compose `container_name`). Resolved via Docker DNS on `danxbot-net`. Worker port from `deploy/targets/<DANXBOT_TARGET>.yml`'s per-repo `worker_port:` via `src/target.ts#loadTarget` (the pre-Phase-B `REPO_WORKER_PORTS` env shape was retired in favor of the per-target YAML).
 
 **Playwright proxy** `/api/playwright/<tail>` is binary-safe — do NOT reuse `proxyToWorker` (corrupts PNG bytes). Full contract → dispatch-deep skill.
 
@@ -150,7 +150,7 @@ Every multi-agent dispatch begins with the `danxbot:danx-prep` skill running on 
 
 Mode is per-repo via `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json` (`combined` default, `separate` for dev-loop debugging).
 
-The prep skill is the new authority on "is the agent ready?" — DX-297 retired the separate `runConflictCheck` precursor and the `dispatchInRecoveryMode` legacy recovery prompt. `dispatchWithRecovery` (`src/dispatch/recovery-mode.ts`) is now a thin wrapper: `fetchOrigin` + `syncWorktree` + spawn. On `syncWorktree` abort it stamps `agents.<name>.broken` directly (matches the prep-verdict route's stamp path) and throws.
+The prep skill is the new authority on "is the agent ready?" — DX-297 retired the separate `runConflictCheck` precursor and the `dispatchInRecoveryMode` recovery prompt. `dispatchWithRecovery` (`src/dispatch/recovery-mode.ts`) is now a thin wrapper: `fetchOrigin` + `syncWorktree` + spawn. On `syncWorktree` abort it stamps `agents.<name>.broken` directly (matches the prep-verdict route's stamp path) and throws.
 
 ## Stall Recovery
 
@@ -179,6 +179,7 @@ Mechanical pre-edit check for `src/terminal.ts` / any WT-launching bash:
 
 | Forbidden | Why |
 |---|---|
+| Schema legacy-tolerance patterns — `back-compat` reader branches, `forward-compat` silent acceptance of unknown fields on round-trip, `auto-migrate` on read, version-conditional reader logic, `schema_version` literals other than `KNOWN_SCHEMA_MAX` in write paths, "auto-migrate-on-read" defaults at parse time | Migration is the registry under `src/issue-tracker/migrations/` running once at worker boot, not a scatter of read-time conditionals. The validator rejects fail-loud anything `< KNOWN_SCHEMA_MIN`. See CLAUDE.md "Core Principle: Single Canonical Schema — Fail Loud, No Legacy". |
 | `claude -p` in host mode | See "Host mode MUST be interactive". |
 | `--output-format stream-json` anywhere | Vestigial. Replaced by SessionLogWatcher. |
 | Two claude processes per dispatch | Two sessions, two JSONL, orphaned TUI, misreported usage. `openTerminal` branch REPLACES headless spawn, not supplements. |

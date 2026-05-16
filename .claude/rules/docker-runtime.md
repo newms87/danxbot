@@ -88,7 +88,7 @@ Per-repo secrets use standardized `DANX_*` prefix: `DANX_SLACK_BOT_TOKEN`, `DANX
 
 ## Portable Repo Path (DX-230)
 
-Every per-repo `compose.yml` MUST declare `DANXBOT_REPO_HOST_PATH: ${DANXBOT_REPO_ROOT}` in `environment:` AND a second mirror-bind volume `${DANXBOT_REPO_ROOT}:${DANXBOT_REPO_HOST_PATH:?...}`. The mirror-bind makes the repo visible at TWO real paths inside the container — the legacy `/danxbot/app/repos/<name>` and the host's absolute path — so `git worktree add` (which calls `realpath()` on its cwd before writing metadata) bakes runtime-agnostic paths. Adding a new connected repo without these two lines = worker boot fails loud (`ensurePortableRepoPath` throws). `scripts/worker-env.sh` exports `DANXBOT_REPO_HOST_PATH=DANXBOT_REPO_ROOT` for compose-up; both `make launch-worker` and `make launch-worker-host` source it. See `src/agent/portable-path.ts`.
+Every per-repo `compose.yml` MUST declare `DANXBOT_REPO_HOST_PATH: ${DANXBOT_REPO_ROOT}` in `environment:` AND a second mirror-bind volume `${DANXBOT_REPO_ROOT}:${DANXBOT_REPO_HOST_PATH:?...}`. The mirror-bind makes the repo visible at TWO real paths inside the container — the container-internal `/danxbot/app/repos/<name>` and the host's absolute path — so `git worktree add` (which calls `realpath()` on its cwd before writing metadata) bakes runtime-agnostic paths. Adding a new connected repo without these two lines = worker boot fails loud (`ensurePortableRepoPath` throws). `scripts/worker-env.sh` exports `DANXBOT_REPO_HOST_PATH=DANXBOT_REPO_ROOT` for compose-up; both `make launch-worker` and `make launch-worker-host` source it. See `src/agent/portable-path.ts`.
 
 ## Per-Repo Trello Toggle
 
