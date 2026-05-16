@@ -28,12 +28,15 @@
  * (NOT `migrate:fresh`) so re-running against a populated DB does
  * not destroy data.
  *
+ * Schema migration is OUT OF SCOPE for danxbot. The dispatched agent
+ * inherits the worktree's per-agent credentials via the rewritten
+ * `.env` and runs the consumer repo's own migration commands itself
+ * (e.g. `php artisan migrate --force` for Laravel, equivalent for
+ * other stacks). Danxbot provisions the empty DB + role only.
+ *
  * Injection seams (constructor-only — no module-level singletons):
  *   - `pgClientFactory` — produces a `PgAdminClient` for the root
  *     superuser connection. Default impl uses `pg.Pool`.
- *   - `migrationRunner` — runs `php artisan migrate --force` for the
- *     newly-provisioned DB. Default impl shells to `docker exec` into
- *     the consumer repo's sail container.
  *   - `secretStore` — reads/writes the per-worktree DB password.
  *     Default impl writes to `<repo>/.danxbot/worktree-secrets/<name>.json`
  *     (gitignored), mode 0600.
@@ -45,8 +48,6 @@
  */
 
 import { Pool } from "pg";
-import { execFile as execFileCb } from "node:child_process";
-import { promisify } from "node:util";
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
@@ -62,7 +63,6 @@ import { join } from "node:path";
 import { createLogger } from "../logger.js";
 import { provisionWorktreePorts } from "./worktree-ports.js";
 
-const execFile = promisify(execFileCb);
 const log = createLogger("worktree-database");
 
 // --------------------------------------------------------------------
@@ -89,20 +89,6 @@ export type PgClientFactory = (
   cfg: PgConnectionConfig,
 ) => Promise<PgAdminClient>;
 
-export interface MigrationRunnerOpts {
-  repoRoot: string;
-  worktreePath: string;
-  worktreeName: string;
-  workerDb: string;
-  workerRole: string;
-  workerPassword: string;
-  /** Resolved DB host the migration runner should target. */
-  dbHost: string;
-  dbPort: number;
-}
-
-export type MigrationRunner = (opts: MigrationRunnerOpts) => Promise<void>;
-
 export interface WorktreeSecretStore {
   read(repoRoot: string, worktreeName: string): string | null;
   write(repoRoot: string, worktreeName: string, password: string): void;
@@ -113,7 +99,6 @@ export interface ProvisionWorktreeDatabaseOpts {
   worktreePath: string;
   worktreeName: string;
   pgClientFactory?: PgClientFactory;
-  migrationRunner?: MigrationRunner;
   secretStore?: WorktreeSecretStore;
   /**
    * Host the worker should use to reach the consumer Postgres. Falls
@@ -274,50 +259,6 @@ export const defaultPgClientFactory: PgClientFactory = async (cfg) => {
   };
 };
 
-// --------------------------------------------------------------------
-// Default migration runner — shells to `docker exec` into the consumer
-// repo's sail container. Container naming follows Laravel Sail
-// convention: `<repo-base>-laravel.test-1`. The runner reads the repo
-// base name from the basename of `repoRoot`.
-// --------------------------------------------------------------------
-
-export const defaultMigrationRunner: MigrationRunner = async (opts) => {
-  const repoBase = basename(opts.repoRoot);
-  const sailContainer = `${repoBase}-laravel.test-1`;
-  const args = [
-    "exec",
-    "-e",
-    `DB_HOST=${opts.dbHost}`,
-    "-e",
-    `DB_PORT=${opts.dbPort}`,
-    "-e",
-    `DB_DATABASE=${opts.workerDb}`,
-    "-e",
-    `DB_USERNAME=${opts.workerRole}`,
-    "-e",
-    `DB_PASSWORD=${opts.workerPassword}`,
-    sailContainer,
-    "php",
-    "artisan",
-    "migrate",
-    "--force",
-  ];
-  try {
-    const { stdout } = await execFile("docker", args, {
-      maxBuffer: 16 * 1024 * 1024,
-    });
-    log.info(
-      `migrationRunner(${opts.worktreeName}): ${stdout.trim().split("\n").pop() ?? "done"}`,
-    );
-  } catch (err) {
-    const e = err as NodeJS.ErrnoException & { stderr?: string };
-    throw new WorktreeDatabaseError(
-      `php artisan migrate --force failed against ${opts.workerDb} via ${sailContainer}: ` +
-        `${e.stderr?.trim() ?? e.message}`,
-    );
-  }
-};
-
 function basename(p: string): string {
   const trimmed = p.replace(/\/+$/, "");
   const idx = trimmed.lastIndexOf("/");
@@ -455,18 +396,6 @@ export async function provisionWorktreeDatabase(
     DB_USERNAME: workerRole,
     DB_PASSWORD: workerPassword,
     ...portOverrides,
-  });
-
-  const runner = opts.migrationRunner ?? defaultMigrationRunner;
-  await runner({
-    repoRoot: opts.repoRoot,
-    worktreePath: opts.worktreePath,
-    worktreeName: opts.worktreeName,
-    workerDb,
-    workerRole,
-    workerPassword,
-    dbHost: parentEnv.DB_HOST ?? "localhost",
-    dbPort: Number(parentEnv.DB_PORT ?? "5432"),
   });
 
   log.info(

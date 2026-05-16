@@ -5,7 +5,8 @@
  * the integration suite at `src/__tests__/integration/worktree-manager.test.ts`.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as worktreeDatabase from "./worktree-database.js";
 import { join } from "node:path";
 import {
   chmodSync,
@@ -1202,6 +1203,43 @@ describe("WorktreeManager", () => {
         lstatSync(join(worktreeRoot, "node_modules")).isSymbolicLink(),
       ).toBe(true);
       expect(lstatSync(join(worktreeRoot, ".env")).isSymbolicLink()).toBe(true);
+    });
+
+    it("host-mode override: DANXBOT_PLATFORM_DB_{HOST,PORT} flow to the admin pg client", async () => {
+      // Parent .env carries the docker-network DB_HOST (`pgsql`) the
+      // shared sail network resolves. On host-mode the operator's
+      // `make launch-worker-host` exports DANXBOT_PLATFORM_DB_HOST /
+      // DANXBOT_PLATFORM_DB_PORT after sniffing `docker port`; the
+      // umbrella MUST honour those so the admin client opens against
+      // the host-mapped port. Without the override, the connect targets
+      // an unresolvable docker name and boot hangs (real symptom on
+      // 2026-05-16 — `ensureWorktreesProvisioned` timed out 3/3).
+      writeFileSync(
+        join(repoRoot, ".env"),
+        "DB_CONNECTION=pgsql\nDB_DATABASE=laravel\nDB_USERNAME=sail\nDB_PASSWORD=p\nDB_HOST=pgsql\n",
+      );
+      const prevHost = process.env.DANXBOT_PLATFORM_DB_HOST;
+      const prevPort = process.env.DANXBOT_PLATFORM_DB_PORT;
+      process.env.DANXBOT_PLATFORM_DB_HOST = "127.0.0.1";
+      process.env.DANXBOT_PLATFORM_DB_PORT = "15432";
+      const spy = vi
+        .spyOn(worktreeDatabase, "provisionWorktreeDatabase")
+        .mockResolvedValue({ kind: "skipped", reason: "test-stub" });
+      try {
+        const wm = createWorktreeManager(fakeRunner());
+        const ctx = makeRepoContext({ localPath: repoRoot, hostPath: repoRoot });
+        await wm.ensureProvisioned(ctx, "alice");
+        expect(spy).toHaveBeenCalledTimes(1);
+        const call = spy.mock.calls[0][0];
+        expect(call.pgHostOverride).toBe("127.0.0.1");
+        expect(call.pgPortOverride).toBe(15432);
+      } finally {
+        spy.mockRestore();
+        if (prevHost === undefined) delete process.env.DANXBOT_PLATFORM_DB_HOST;
+        else process.env.DANXBOT_PLATFORM_DB_HOST = prevHost;
+        if (prevPort === undefined) delete process.env.DANXBOT_PLATFORM_DB_PORT;
+        else process.env.DANXBOT_PLATFORM_DB_PORT = prevPort;
+      }
     });
 
     it("DX-571: skips the .env symlink when the consumer repo is Laravel-pgsql", async () => {

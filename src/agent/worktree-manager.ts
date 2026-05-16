@@ -754,10 +754,24 @@ async function provisionWorktreeArtifacts(
   // the parent (silently re-coupling the worktree to the primary DB).
   // For non-Laravel consumer repos this is a quick no-op skip.
   const worktreeName = basename(worktreePath);
+  // Host-mode operator override — danxbot's docker workers reach the
+  // consumer Laravel postgres via the shared docker network (`pgsql`
+  // DNS in the parent .env). Host-mode workers run outside any docker
+  // network and must reach the same DB via 127.0.0.1:<host-mapped-port>.
+  // The `make launch-worker-host` target exports DANXBOT_PLATFORM_DB_*
+  // after sniffing `docker port <repo>-pgsql-1 5432/tcp`; honour those
+  // overrides here when present so the admin pg client opened by
+  // `provisionWorktreeDatabase` actually connects.
+  const pgHostOverride = process.env.DANXBOT_PLATFORM_DB_HOST || undefined;
+  const pgPortOverride = process.env.DANXBOT_PLATFORM_DB_PORT
+    ? Number(process.env.DANXBOT_PLATFORM_DB_PORT)
+    : undefined;
   await provisionWorktreeDatabase({
     repoRoot,
     worktreePath,
     worktreeName,
+    pgHostOverride,
+    pgPortOverride,
   });
   provisionNodeModules(repoRoot, worktreePath);
   provisionDashboardNodeModules(repoRoot, worktreePath);

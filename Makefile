@@ -206,6 +206,8 @@ launch-worker-host: ## Start a worker on the host (usage: make launch-worker-hos
 	set -a && . ./.env && . "$$REPO_ENV" && set +a; \
 	if [ -z "$$DANXBOT_WORKER_PORT" ]; then echo "Error: DANXBOT_WORKER_PORT missing in $$REPO_ENV"; exit 1; fi; \
 	./scripts/check-worker-port.sh host "$(REPO)" "$$DANXBOT_WORKER_PORT" || exit 1; \
+	./scripts/host-db-overrides.sh "$(REPO)" || exit 1; \
+	eval "$$(./scripts/host-db-overrides.sh "$(REPO)" --export)"; \
 	DANXBOT_REPO_NAME=$(REPO) npx tsx src/index.ts
 
 launch-dashboard-host: ## Start the dashboard on the host

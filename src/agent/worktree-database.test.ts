@@ -27,7 +27,6 @@ import {
   rewriteDotenv,
   writeWorktreeEnvFile,
   WorktreeDatabaseError,
-  type MigrationRunner,
   type PgAdminClient,
   type PgClientFactory,
   type WorktreeSecretStore,
@@ -94,15 +93,6 @@ function factoryReturning(
   };
   f.configs = configs;
   return f;
-}
-
-function noopMigrationRunner(): MigrationRunner & { calls: any[] } {
-  const calls: any[] = [];
-  const r: any = async (opts: any) => {
-    calls.push(opts);
-  };
-  r.calls = calls;
-  return r;
 }
 
 function memorySecretStore(): WorktreeSecretStore & { reads: any[]; writes: any[] } {
@@ -347,7 +337,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factory,
-      migrationRunner: noopMigrationRunner(),
       secretStore: memorySecretStore(),
     });
     expect(result.kind).toBe("skipped");
@@ -361,7 +350,6 @@ describe("provisionWorktreeDatabase", () => {
     seedEnv(LARAVEL_ENV);
     const client = fakeClient();
     const factory = factoryReturning(client);
-    const migration = noopMigrationRunner();
     const secrets = memorySecretStore();
 
     const result = await provisionWorktreeDatabase({
@@ -369,7 +357,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factory,
-      migrationRunner: migration,
       secretStore: secrets,
     });
 
@@ -409,10 +396,6 @@ describe("provisionWorktreeDatabase", () => {
     expect(secrets.writes).toHaveLength(1);
     // .env written
     expect(lstatSync(join(worktreePath, ".env")).isFile()).toBe(true);
-    // Migration runner invoked with the right shape
-    expect(migration.calls).toHaveLength(1);
-    expect(migration.calls[0].workerDb).toBe("laravel_buildy");
-    expect(migration.calls[0].workerRole).toBe("agent_buildy");
   });
 
   it("is idempotent — second run with existing role + db reuses them", async () => {
@@ -431,7 +414,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factory,
-      migrationRunner: noopMigrationRunner(),
       secretStore: secrets,
     });
 
@@ -463,7 +445,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factoryReturning(client),
-      migrationRunner: noopMigrationRunner(),
       secretStore: memorySecretStore(),
     });
 
@@ -485,7 +466,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factoryReturning(fakeClient()),
-      migrationRunner: noopMigrationRunner(),
       secretStore: secrets,
     });
     const firstWrite = secrets.writes[0].pw;
@@ -502,7 +482,6 @@ describe("provisionWorktreeDatabase", () => {
           existingDatabases: ["laravel_buildy"],
         }),
       ),
-      migrationRunner: noopMigrationRunner(),
       secretStore: secrets,
     });
     expect(secrets.writes.length).toBe(writeCountBefore);
@@ -519,7 +498,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factory,
-      migrationRunner: noopMigrationRunner(),
       secretStore: memorySecretStore(),
       pgHostOverride: "localhost",
       pgPortOverride: 5444,
@@ -536,7 +514,6 @@ describe("provisionWorktreeDatabase", () => {
       worktreePath,
       worktreeName: "buildy",
       pgClientFactory: factoryReturning(client),
-      migrationRunner: noopMigrationRunner(),
       secretStore: memorySecretStore(),
     });
     const revokes = client.queries.filter((q) => /REVOKE CONNECT/.test(q.sql));
@@ -554,7 +531,6 @@ describe("provisionWorktreeDatabase", () => {
         worktreePath,
         worktreeName: "buildy",
         pgClientFactory: factoryReturning(fakeClient()),
-        migrationRunner: noopMigrationRunner(),
         secretStore: memorySecretStore(),
       }),
     ).rejects.toThrow(WorktreeDatabaseError);
@@ -568,7 +544,6 @@ describe("provisionWorktreeDatabase", () => {
         worktreePath,
         worktreeName: "buildy",
         pgClientFactory: factoryReturning(fakeClient()),
-        migrationRunner: noopMigrationRunner(),
         secretStore: memorySecretStore(),
       }),
     ).rejects.toThrow(/DB_DATABASE \/ DB_USERNAME \/ DB_PASSWORD/);
@@ -591,7 +566,6 @@ describe("provisionWorktreeDatabase", () => {
         worktreePath,
         worktreeName: "buildy",
         pgClientFactory: async () => throwingClient,
-        migrationRunner: noopMigrationRunner(),
         secretStore: memorySecretStore(),
       }),
     ).rejects.toThrow("pg connection lost");
