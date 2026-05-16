@@ -16,6 +16,7 @@ import type {
   IssueListItem,
   IssuePatch,
   JsonlBlock,
+  RepairErrorWithAttempts,
   SystemError,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
@@ -111,6 +112,60 @@ export async function fetchSystemErrors(opts: {
   if (!res.ok) throw new Error(`fetchSystemErrors failed: ${res.status}`);
   const body = (await res.json()) as { events: SystemError[] };
   return body.events;
+}
+
+/**
+ * DX-565 (Phase 5 of DX-560 — Self-Repair): typed fetchers for the
+ * persistent `system_errors` table + per-attempt repair history the
+ * Self-Repair tab renders. Distinct from `fetchSystemErrors` (DX-134),
+ * which surfaces the ephemeral in-memory event ring used by the banner.
+ */
+export async function fetchRepairErrors(opts: {
+  repo?: string;
+  limit?: number;
+} = {}): Promise<RepairErrorWithAttempts[]> {
+  const params = new URLSearchParams();
+  if (opts.repo) params.set("repo", opts.repo);
+  if (typeof opts.limit === "number") params.set("limit", String(opts.limit));
+  const qs = params.toString();
+  const res = await fetchWithAuth(
+    `/api/self-repair/errors${qs ? `?${qs}` : ""}`,
+  );
+  if (!res.ok) throw new Error(`fetchRepairErrors failed: ${res.status}`);
+  const body = (await res.json()) as { errors: RepairErrorWithAttempts[] };
+  return body.errors;
+}
+
+export async function fetchRepairErrorDetail(
+  id: number,
+): Promise<RepairErrorWithAttempts> {
+  const res = await fetchWithAuth(
+    `/api/self-repair/errors/${encodeURIComponent(String(id))}`,
+  );
+  if (!res.ok) throw new Error(`fetchRepairErrorDetail failed: ${res.status}`);
+  return res.json();
+}
+
+export async function resetRepairErrorById(
+  id: number,
+): Promise<{ row: RepairErrorWithAttempts["error"] }> {
+  const res = await fetchWithAuth(
+    `/api/self-repair/errors/${encodeURIComponent(String(id))}/reset`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`resetRepairError failed: ${res.status}`);
+  return res.json();
+}
+
+export async function markRepairErrorUnfixable(
+  id: number,
+): Promise<{ row: RepairErrorWithAttempts["error"] }> {
+  const res = await fetchWithAuth(
+    `/api/self-repair/errors/${encodeURIComponent(String(id))}/unfixable`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw new Error(`markUnfixable failed: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchIssues(

@@ -8,6 +8,7 @@ import SystemErrorsBanner from "./components/SystemErrorsBanner.vue";
 import BrokenAgentsBanner from "./components/BrokenAgentsBanner.vue";
 import AgentsPage from "./components/agents/AgentsPage.vue";
 import IssuesPage from "./components/issues/IssuesPage.vue";
+import SelfRepairTab from "./components/self-repair/SelfRepairTab.vue";
 import SettingsPage from "./components/SettingsPage.vue";
 import Login from "./components/auth/Login.vue";
 import { useDispatches } from "./composables/useDispatches";
@@ -22,7 +23,13 @@ const repos = ref<RepoInfo[]>([]);
 const selectedDispatch = ref<Dispatch | null>(null);
 const authReady = ref(false);
 
-const VALID_TABS: readonly TabId[] = ["dispatches", "issues", "agents", "settings"];
+const VALID_TABS: readonly TabId[] = [
+  "dispatches",
+  "issues",
+  "agents",
+  "self-repair",
+  "settings",
+];
 
 function readUrlTab(): TabId {
   const params = new URLSearchParams(window.location.search);
@@ -198,6 +205,8 @@ function onOpenAgent(): void {
       />
 
       <AgentsPage v-else-if="activeTab === 'agents'" :selected-repo="selectedRepo" :repos="repos" />
+
+      <SelfRepairTab v-else-if="activeTab === 'self-repair'" :selected-repo="selectedRepo" />
 
       <SettingsPage v-else-if="activeTab === 'settings'" :selected-repo="selectedRepo" :repos="repos" />
     </div>

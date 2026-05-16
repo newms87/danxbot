@@ -19,6 +19,7 @@ import type {
   SystemErrorRepairRow,
   SystemErrorStatus,
 } from "./types.js";
+import { publishRepairErrorUpdated } from "./publish.js";
 
 const VALID_STATUSES: ReadonlySet<SystemErrorStatus> = new Set([
   "open",
@@ -143,10 +144,15 @@ export async function setRepairAttemptCard(
   input: SetRepairAttemptCardInput,
 ): Promise<void> {
   const { db, attemptId, cardId } = input;
-  await db.query(
-    `UPDATE system_error_repairs SET card_id = $1 WHERE id = $2`,
+  const { rows } = await db.query<{ error_id: number }>(
+    `UPDATE system_error_repairs SET card_id = $1 WHERE id = $2 RETURNING error_id`,
     [cardId, attemptId],
   );
+  // DX-565: fan out post-write snapshot. `error_id` is RETURNING'd so
+  // we don't need a second SELECT to find it.
+  if (rows.length > 0) {
+    void publishRepairErrorUpdated({ db, errorId: Number(rows[0].error_id) });
+  }
 }
 
 export interface FlipErrorStatusInput {
@@ -163,4 +169,6 @@ export async function flipErrorStatus(
     `UPDATE system_errors SET status = $1 WHERE id = $2`,
     [status, errorId],
   );
+  // DX-565: fan out post-flip snapshot for the Self-Repair tab.
+  void publishRepairErrorUpdated({ db, errorId });
 }

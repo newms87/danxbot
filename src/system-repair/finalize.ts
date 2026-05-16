@@ -42,6 +42,7 @@ import type {
   SystemErrorRepairRow,
   SystemErrorRepairVerdict,
 } from "./types.js";
+import { publishRepairErrorUpdated } from "./publish.js";
 
 /**
  * `nextErrorStatus` is `null` when the verdict leaves the error row
@@ -109,6 +110,12 @@ export async function finalizeSelfRepair(
       [nextErrorStatus, row.error_id],
     );
   }
+
+  // DX-565: fan out the post-finalize snapshot for the Self-Repair tab.
+  // Fires once at the end of the finalize transition so subscribers see
+  // both the attempt row's terminal verdict + the error row's possibly-
+  // flipped status in a single payload.
+  void publishRepairErrorUpdated({ db, errorId: Number(row.error_id) });
 
   return {
     kind: "finalized",

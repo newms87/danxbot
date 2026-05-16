@@ -8,7 +8,15 @@
  * against a live `system_errors` + `system_error_repairs` schema.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// DX-565: spy on the SSE fan-out — the helpers MUST publish post-write
+// for the Self-Repair tab to live-update.
+const { publishSpy } = vi.hoisted(() => ({ publishSpy: vi.fn() }));
+vi.mock("./publish.js", () => ({
+  publishRepairErrorUpdated: publishSpy,
+}));
+
 import {
   getDispatchCandidate,
   getPriorAttempts,
@@ -100,17 +108,34 @@ describe("insertRepairAttempt", () => {
 
 describe("setRepairAttemptCard", () => {
   it("updates card_id for the given attempt id", async () => {
-    const db = mockPool([[]]);
+    const db = mockPool([[{ error_id: 99 }]]);
     await setRepairAttemptCard({ db: db as any, attemptId: 42, cardId: "DX-700" });
     const [sql, params] = db.query.mock.calls[0];
     expect(sql).toMatch(/UPDATE system_error_repairs/);
     expect(sql).toMatch(/SET card_id = \$1/);
     expect(sql).toMatch(/WHERE id = \$2/);
+    expect(sql).toMatch(/RETURNING error_id/);
     expect(params).toEqual(["DX-700", 42]);
+  });
+
+  it("DX-565: publishes the post-write snapshot for the linked error", async () => {
+    publishSpy.mockReset();
+    const db = mockPool([[{ error_id: 99 }]]);
+    await setRepairAttemptCard({ db: db as any, attemptId: 42, cardId: "DX-700" });
+    expect(publishSpy).toHaveBeenCalledWith({ db: expect.anything(), errorId: 99 });
+  });
+
+  it("DX-565: skips publish when the attempt id has no matching row", async () => {
+    publishSpy.mockReset();
+    const db = mockPool([[]]);
+    await setRepairAttemptCard({ db: db as any, attemptId: 9999, cardId: "DX-700" });
+    expect(publishSpy).not.toHaveBeenCalled();
   });
 });
 
 describe("flipErrorStatus", () => {
+  beforeEach(() => publishSpy.mockReset());
+
   it("flips the system_errors row to the new status", async () => {
     const db = mockPool([[]]);
     await flipErrorStatus({ db: db as any, errorId: 7, status: "repairing" });
@@ -119,5 +144,11 @@ describe("flipErrorStatus", () => {
     expect(sql).toMatch(/SET status = \$1/);
     expect(sql).toMatch(/WHERE id = \$2/);
     expect(params).toEqual(["repairing", 7]);
+  });
+
+  it("DX-565: publishes the post-flip snapshot", async () => {
+    const db = mockPool([[]]);
+    await flipErrorStatus({ db: db as any, errorId: 7, status: "repairing" });
+    expect(publishSpy).toHaveBeenCalledWith({ db: expect.anything(), errorId: 7 });
   });
 });

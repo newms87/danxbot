@@ -124,3 +124,11 @@ export type {
   SystemErrorSource,
   SystemErrorSeverity,
 } from "@backend/dashboard/system-errors.js";
+export type {
+  SystemErrorRow,
+  SystemErrorRepairRow,
+  SystemErrorStatus,
+  SystemErrorRepairVerdict,
+  SystemErrorSamplePayload,
+} from "@backend/system-repair/types.js";
+export type { RepairErrorWithAttempts } from "@backend/system-repair/db-reads.js";

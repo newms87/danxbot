@@ -20,6 +20,7 @@ import type { JsonlBlock } from "./jsonl-reader.js";
 import type { AgentSnapshot } from "./agents-list.js";
 import type { SystemError } from "./system-errors.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import type { RepairErrorWithAttempts } from "../system-repair/db-reads.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -30,6 +31,7 @@ export type EventTopic =
   | "issue-prefix:changed"
   | "issue:updated"
   | "system-errors"
+  | "system-repair-error:updated"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
 export interface DispatchCreatedPayload {
@@ -99,6 +101,31 @@ export type IssueUpdatedPayload = {
     | { repoName: string; id: string; removed: true };
 };
 
+/**
+ * DX-565 (Phase 5 of DX-560 — Self-Repair): emitted on every mutation
+ * of `system_errors` / `system_error_repairs` so the Self-Repair tab
+ * live-updates without polling. Producers:
+ *
+ *   - `recordError` (Phase 2 — every callsite that bumps the count)
+ *   - `flipErrorStatus` (Phase 3 dispatcher — `open` → `repairing`)
+ *   - `setRepairAttemptCard` (Phase 3 — card_id stamped on attempt)
+ *   - `finalizeSelfRepair` (Phase 3 finalize hook — verdict + status)
+ *   - `resetRepairError` / `markUnfixable` (Phase 5 operator actions)
+ *
+ * Payload is the full {error, attempts[]} shape — same as the
+ * `GET /api/self-repair/errors/:id` response — so the reducer can
+ * project the row without a refetch.
+ *
+ * For row deletions (out of scope today), use `removed: true` with
+ * just the error_id.
+ */
+export type SystemRepairErrorUpdatedPayload = {
+  topic: "system-repair-error:updated";
+  data:
+    | { error_id: number; row: RepairErrorWithAttempts; removed?: false }
+    | { error_id: number; removed: true };
+};
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
@@ -106,7 +133,8 @@ export type BusEvent =
   | AgentUpdatedPayload
   | SystemErrorPayload
   | IssuePrefixChangedPayload
-  | IssueUpdatedPayload;
+  | IssueUpdatedPayload
+  | SystemRepairErrorUpdatedPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

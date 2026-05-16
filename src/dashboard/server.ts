@@ -74,6 +74,13 @@ import {
 } from "./issue-import.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
+  handleGetRepairError,
+  handleListRepairErrors,
+  handleMarkUnfixable,
+  handleResetRepairError,
+} from "./self-repair-routes.js";
+import { getPool } from "../db/connection.js";
+import {
   handleLogin,
   handleLogout,
   handleMe,
@@ -703,6 +710,35 @@ async function route(
   if (method === "GET" && url.pathname === "/api/system-errors") {
     handleListSystemErrors(res, url.searchParams);
     return true;
+  }
+
+  // DX-565 (Phase 5 of DX-560) — Self-Repair tab REST surface. The
+  // DB-backed `system_errors` + `system_error_repairs` tables Phases 1-4
+  // populate. Auth is enforced by the blanket /api/* gate above.
+  if (method === "GET" && url.pathname === "/api/self-repair/errors") {
+    await handleListRepairErrors(res, url.searchParams, { db: getPool() });
+    return true;
+  }
+  {
+    const detailMatch = url.pathname.match(/^\/api\/self-repair\/errors\/(\d+)$/);
+    if (method === "GET" && detailMatch) {
+      await handleGetRepairError(res, detailMatch[1], { db: getPool() });
+      return true;
+    }
+    const resetMatch = url.pathname.match(
+      /^\/api\/self-repair\/errors\/(\d+)\/reset$/,
+    );
+    if (method === "POST" && resetMatch) {
+      await handleResetRepairError(req, res, resetMatch[1], { db: getPool() });
+      return true;
+    }
+    const unfixMatch = url.pathname.match(
+      /^\/api\/self-repair\/errors\/(\d+)\/unfixable$/,
+    );
+    if (method === "POST" && unfixMatch) {
+      await handleMarkUnfixable(req, res, unfixMatch[1], { db: getPool() });
+      return true;
+    }
   }
 
   if (method === "GET" && url.pathname === "/api/issues") {

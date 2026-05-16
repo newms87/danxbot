@@ -58,6 +58,7 @@ const VALID_STATIC_TOPICS = new Set([
   "agent:updated",
   "issue:updated",
   "system-errors",
+  "system-repair-error:updated",
 ]);
 
 function isValidTopic(topic: string): boolean {

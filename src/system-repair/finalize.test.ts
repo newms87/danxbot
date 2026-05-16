@@ -10,10 +10,18 @@
  * `system_errors` row based on the verdict.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+// DX-565: spy on the SSE fan-out so tests can keep asserting db.query
+// call counts AND prove finalize fires the publish on terminal verdicts.
+const { publishSpy } = vi.hoisted(() => ({ publishSpy: vi.fn() }));
+vi.mock("./publish.js", () => ({
+  publishRepairErrorUpdated: publishSpy,
+}));
+
 import {
   parseVerdictFromSummary,
   computeErrorStatusFromVerdict,
@@ -124,6 +132,11 @@ function writeCardYaml(repoLocalPath: string, id: string, comments: Array<{ auth
 }
 
 describe("finalizeSelfRepair", () => {
+  beforeEach(() => {
+    publishSpy.mockReset();
+    publishSpy.mockResolvedValue(undefined);
+  });
+
   it("no-ops when no repair row matches the issueId", async () => {
     const db = mockPool([[]]);
     const result = await finalizeSelfRepair({ db: db as any, issueId: "DX-700", summary: "fixed", repoLocalPath: "/nonexistent" });
@@ -201,6 +214,18 @@ describe("finalizeSelfRepair", () => {
     // error row stays at `repairing` per AC5; Phase 6 owns the next
     // transition once the 3-attempt cap is reached.
     expect(db.query).toHaveBeenCalledTimes(2);
+  });
+
+  it("DX-565: publishes the post-finalize snapshot on every terminal verdict", async () => {
+    const repoLocalPath = mkdtempSync(join(tmpdir(), "self-repair-finalize-"));
+    writeCardYaml(repoLocalPath, "DX-710", []);
+    const db = mockPool([
+      [{ id: 17, error_id: 21, attempt_n: 1, card_id: "DX-710", dispatch_id: null, started_at: new Date(), ended_at: null, verdict: null, report_md: null }],
+      [],
+      [],
+    ]);
+    await finalizeSelfRepair({ db: db as any, issueId: "DX-710", summary: "fixed", repoLocalPath });
+    expect(publishSpy).toHaveBeenCalledWith({ db: expect.anything(), errorId: 21 });
   });
 
   it("no-ops when the repair row is already ended_at (idempotent on duplicate calls)", async () => {

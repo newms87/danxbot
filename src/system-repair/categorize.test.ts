@@ -1,4 +1,12 @@
-import { describe, it, expect, afterAll } from "vitest";
+import { describe, it, expect, afterAll, vi } from "vitest";
+
+// DX-565: spy on the SSE fan-out — recordError MUST publish so the
+// Self-Repair tab live-updates when a new error is captured.
+const { publishSpy } = vi.hoisted(() => ({ publishSpy: vi.fn() }));
+vi.mock("./publish.js", () => ({
+  publishRepairErrorUpdated: publishSpy,
+}));
+
 import {
   normalizeMessage,
   signatureHash,
@@ -243,6 +251,24 @@ describe("signatureHash", () => {
 });
 
 describe("recordError", () => {
+  it.skipIf(!handle)(
+    "DX-565: publishes the post-upsert snapshot for the SSE fan-out",
+    async () => {
+      publishSpy.mockReset();
+      const row = await recordError({
+        db: handle!.pool,
+        repo: "danxbot",
+        component: "publish-probe",
+        err: makeErr("ProbeError", "probe message"),
+        samplePayload: { raw_msg: "probe message" },
+      });
+      expect(publishSpy).toHaveBeenCalledWith({
+        db: handle!.pool,
+        errorId: row.id,
+      });
+    },
+  );
+
   it.skipIf(!handle)(
     "first call inserts a row with count=1 and first_seen=last_seen=now",
     async () => {

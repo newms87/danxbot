@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Pool } from "pg";
+
+// DX-565: silence the SSE fan-out so `db.query` call counts stay
+// authoritative for the underlying recordError contract.
+vi.mock("./publish.js", () => ({
+  publishRepairErrorUpdated: vi.fn(),
+}));
+
 import { reportSystemError, _resetWarnDedupForTest } from "./report.js";
 
 /**

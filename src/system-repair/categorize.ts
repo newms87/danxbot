@@ -5,6 +5,7 @@ import type {
   SystemErrorSamplePayload,
   SystemErrorStatus,
 } from "./types.js";
+import { publishRepairErrorUpdated } from "./publish.js";
 
 const VALID_STATUSES: ReadonlySet<SystemErrorStatus> = new Set([
   "open",
@@ -166,7 +167,12 @@ export async function recordError(
       repo,
     ],
   );
-  return rowToSystemError(rows[0]);
+  const row = rowToSystemError(rows[0]);
+  // DX-565: fan out to the Self-Repair tab. Fire-and-forget; the
+  // publisher never throws, and the underlying upsert has already
+  // committed by the time we get here.
+  void publishRepairErrorUpdated({ db, errorId: row.id });
+  return row;
 }
 
 export interface GetOpenErrorsRankedInput {

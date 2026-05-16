@@ -5,7 +5,12 @@ import { useTheme } from "../composables/useTheme";
 import { useAuth } from "../composables/useAuth";
 import type { RepoInfo } from "../api";
 
-export type TabId = "dispatches" | "issues" | "agents" | "settings";
+export type TabId =
+  | "dispatches"
+  | "issues"
+  | "agents"
+  | "self-repair"
+  | "settings";
 
 const props = defineProps<{
   connected: boolean;
@@ -33,6 +38,7 @@ const tabs = computed<DanxTab[]>(() => [
   { value: "dispatches", label: "Dispatches", count: props.eventCount },
   { value: "issues", label: "Issues" },
   { value: "agents", label: "Agents" },
+  { value: "self-repair", label: "Self-Repair" },
   { value: "settings", label: "Settings" },
 ]);
 
@@ -75,7 +81,7 @@ const activeTabModel = computed<string>({
       </span>
 
       <select
-        v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues' || activeTab === 'settings' || activeTab === 'agents')"
+        v-if="repos.length > 1 && (activeTab === 'dispatches' || activeTab === 'issues' || activeTab === 'settings' || activeTab === 'agents' || activeTab === 'self-repair')"
         :value="selectedRepo"
         class="px-3 py-1.5 bg-gray-200 dark:bg-gray-800 hover:bg-gray-300 dark:hover:bg-gray-700 rounded text-sm text-gray-600 dark:text-gray-300 border-0 outline-none cursor-pointer"
         @change="emit('update:selectedRepo', ($event.target as HTMLSelectElement).value)"
