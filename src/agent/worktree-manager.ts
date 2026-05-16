@@ -77,6 +77,10 @@ import {
   provisionWorktreeDatabase,
 } from "./worktree-database.js";
 import { cleanupWorktreeArtifacts } from "./worktree-cleanup.js";
+import {
+  provisionConsumerStack,
+  teardownConsumerStack,
+} from "./worktree-compose.js";
 
 /**
  * Minimal repo shape — needs `localPath` (where the actual repo lives,
@@ -92,7 +96,7 @@ import { cleanupWorktreeArtifacts } from "./worktree-cleanup.js";
  * `RepoConfig` (dashboard) and `RepoContext` (worker) satisfy this via
  * structural subtyping. See `src/agent/portable-path.ts`.
  */
-export type WorktreeRepo = Pick<RepoConfig, "localPath" | "hostPath">;
+export type WorktreeRepo = Pick<RepoConfig, "name" | "localPath" | "hostPath">;
 
 const execFile = promisify(execFileCb);
 const log = createLogger("worktree-manager");
@@ -415,6 +419,23 @@ export function createWorktreeManager(
       // symlinks are gitignored so they never appear in `git
       // status`.
       await provisionWorktreeArtifacts(ctx.hostPath, path);
+
+      // Per-worktree consumer-stack lifecycle. Silently skipped when
+      // the worktree has no `docker-compose.yml` (non-app repos) or
+      // when the docker daemon is unreachable (CI host, host-mode
+      // worker without local docker). Throws on real compose failures
+      // (bind error, build error) so the caller (handlePostAgent)
+      // routes through the symmetric rollback path.
+      const stackResult = await provisionConsumerStack({
+        worktreePath: path,
+        repoName: ctx.name,
+        worktreeName: agentName,
+      });
+      if (stackResult.kind === "provisioned") {
+        log.info(
+          `bootstrap(${agentName}): consumer stack ${stackResult.projectName} up`,
+        );
+      }
       log.info(`bootstrap(${agentName}): created worktree at ${path}`);
     },
 
@@ -436,6 +457,23 @@ export function createWorktreeManager(
     async teardown(ctx, agentName) {
       assertAgentName(agentName);
       const path = this.worktreePath(ctx, agentName);
+
+      // Tear down the consumer compose stack BEFORE git worktree
+      // remove — containers may hold bind mounts into the worktree
+      // dir, and `git worktree remove --force` is happier when nothing
+      // has an open fd on the tree. Fail-soft (logged + swallowed) so
+      // a wedged compose stack does not block the rest of teardown.
+      try {
+        await teardownConsumerStack({
+          worktreePath: path,
+          repoName: ctx.name,
+          worktreeName: agentName,
+        });
+      } catch (composeErr) {
+        log.warn(
+          `teardown(${agentName}): consumer stack teardown failed — continuing: ${(composeErr as Error).message}`,
+        );
+      }
 
       // `--force` so a worktree with uncommitted changes still tears down
       // (operator deleted the agent — they accept losing in-flight WIP).
