@@ -68,6 +68,7 @@ import { syncRepoFiles } from "../inject/sync.js";
 import { runAuditPass } from "./audit-pass.js";
 import { runInboundFetch } from "./inbound-fetch.js";
 import { firePickerWithMutex } from "../dispatch/scheduler.js";
+import { hasRepoRootSyncError, syncRepoRoot } from "../worker/sync-root.js";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -353,6 +354,16 @@ async function _sync(repo: RepoContext): Promise<void> {
       log.warn(
         `[${repo.name}] audit pass: ${audit.drifted.length} drift / ${audit.errors.length} errors / ${audit.scanned} scanned`,
       );
+    }
+
+    // DX-558 — root-clone sync retry. The post-dispatch hook runs
+    // `syncRepoRoot` after every terminal dispatch. This per-tick
+    // retry fires ONLY when the prior attempt is in the error state
+    // so the green steady-state path pays a single map lookup. The
+    // outer `_sync` try/catch already isolates the tick from any
+    // unexpected throw.
+    if (hasRepoRootSyncError(repo.name)) {
+      await syncRepoRoot({ repoName: repo.name, repoLocalPath: repo.localPath });
     }
 
     // DX-368 — cron-tick safety net for missed event-driven picker

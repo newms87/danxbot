@@ -25,6 +25,12 @@ import { startDbChangeDetector } from "./dispatch-stream.js";
 import { startSelfRepairStream } from "./self-repair-stream.js";
 import { startIssuesWatcher } from "./issues-watcher.js";
 import { startAgentsWatcher } from "./agents-watcher.js";
+import { startSyncRootWatcher } from "./sync-root-watcher.js";
+import {
+  handleListSyncRootStates,
+  handleSyncRootRetryProxy,
+  type SyncRootRouteDeps,
+} from "./sync-root-routes.js";
 import { eventBus } from "./event-bus.js";
 import {
   handleLaunchProxy,
@@ -140,6 +146,7 @@ async function route(
   url: URL,
   dispatchDeps: DispatchProxyDeps,
   playwrightDeps: PlaywrightProxyDeps,
+  syncRootDeps: SyncRootRouteDeps,
 ): Promise<boolean> {
   const method = req.method?.toUpperCase() ?? "GET";
 
@@ -295,6 +302,23 @@ async function route(
       res,
       decodeURIComponent(agentCriticalFailureMatch[1]),
       dispatchDeps,
+    );
+    return true;
+  }
+
+  // DX-558 — root-clone sync routes. Matched ahead of the generic
+  // /api/* gate so the handler's own `requireUser` produces the 401.
+  if (method === "GET" && url.pathname === "/api/sync-root") {
+    await handleListSyncRootStates(req, res, syncRootDeps);
+    return true;
+  }
+  const syncRootRetryMatch = url.pathname.match(/^\/api\/sync-root\/([^/]+)$/);
+  if (method === "POST" && syncRootRetryMatch) {
+    await handleSyncRootRetryProxy(
+      req,
+      res,
+      decodeURIComponent(syncRootRetryMatch[1]),
+      syncRootDeps,
     );
     return true;
   }
@@ -880,12 +904,33 @@ export async function startDashboard(): Promise<void> {
   // outside the dashboard process.
   await startAgentsWatcher(repos, { resolveHost });
 
+  // DX-558 — per-repo chokidar watcher on
+  // `<repoRoot>/.danxbot/sync-root-state.json`. The worker writes the
+  // file on every root-clone sync state transition; this watcher
+  // republishes the change as `repo-root-sync:error` / `:clear` SSE
+  // events so the dashboard banner appears / clears live.
+  const syncRootWatcher = await startSyncRootWatcher(repos);
+  const workerPortByRepo = new Map(repos.map((r) => [r.name, r.workerPort]));
+  const syncRootDeps: SyncRootRouteDeps = {
+    repos: repos.map((r) => ({ name: r.name })),
+    watcher: syncRootWatcher,
+    proxy: dispatchDeps,
+    resolveWorkerPort: (name) => workerPortByRepo.get(name) ?? null,
+  };
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://localhost:${PORT}`);
     res.setHeader("Access-Control-Allow-Origin", "*");
 
     try {
-      const handled = await route(req, res, url, dispatchDeps, playwrightDeps);
+      const handled = await route(
+        req,
+        res,
+        url,
+        dispatchDeps,
+        playwrightDeps,
+        syncRootDeps,
+      );
       if (!handled) {
         json(res, 404, { error: "Not found" });
       }

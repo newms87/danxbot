@@ -349,4 +349,81 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
       ).resolves.toBeUndefined();
     });
   });
+
+  describe("DX-558 — root-clone sync hook", () => {
+    it("invokes syncRoot once with the repo's {name, localPath} after reconcile", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: "TEST-50" });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const order: string[] = [];
+      const reconcile = vi.fn().mockImplementation(async () => {
+        order.push("reconcile");
+      });
+      const syncRoot = vi.fn().mockImplementation(async () => {
+        order.push("syncRoot");
+        return { status: "synced", error: null };
+      });
+
+      await autoSyncTrackedIssue("dispatch-50", repo, {
+        getDispatch,
+        reconcile,
+        syncRoot,
+      });
+
+      expect(syncRoot).toHaveBeenCalledOnce();
+      expect(syncRoot).toHaveBeenCalledWith({
+        repoName: repo.name,
+        repoLocalPath: repo.localPath,
+      });
+      expect(order).toEqual(["reconcile", "syncRoot"]);
+    });
+
+    it("invokes syncRoot even when reconcile rejects (sync is best-effort, not gated on tracker push)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: "TEST-51" });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockRejectedValue(new Error("tracker boom"));
+      const syncRoot = vi.fn().mockResolvedValue({ status: "synced", error: null });
+
+      await autoSyncTrackedIssue("dispatch-51", repo, {
+        getDispatch,
+        reconcile,
+        syncRoot,
+      });
+
+      expect(syncRoot).toHaveBeenCalledOnce();
+    });
+
+    it("swallows syncRoot rejection so dispatch state still lands", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: "TEST-52" });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn().mockResolvedValue(undefined);
+      const syncRoot = vi.fn().mockRejectedValue(new Error("sync boom"));
+
+      await expect(
+        autoSyncTrackedIssue("dispatch-52", repo, { getDispatch, reconcile, syncRoot }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("does NOT invoke syncRoot when the dispatch carries no issueId (no-issue dispatches skip the entire reconcile branch)", async () => {
+      const repo = makeRepoContext({ localPath, trelloEnabled: true });
+      const row = fakeDispatchRow({ issueId: null });
+      const getDispatch = vi.fn().mockResolvedValue(row);
+      const reconcile = vi.fn();
+      const syncRoot = vi.fn();
+
+      await autoSyncTrackedIssue("dispatch-53", repo, {
+        getDispatch,
+        reconcile,
+        syncRoot,
+      });
+
+      // syncRoot runs OUTSIDE the issueId guard — it fires unconditionally on
+      // every dispatch terminal save so root drift is corrected regardless of
+      // whether the dispatch was bound to a card YAML (free-form /api/launch,
+      // Slack chats, board-chat sessions all drop main commits too).
+      expect(syncRoot).toHaveBeenCalledOnce();
+    });
+  });
 });
