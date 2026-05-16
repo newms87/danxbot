@@ -83,3 +83,6 @@ deploy/targets/.cache/
 # read by handleChat; survives worker restart but is repo-local runtime
 # state, never committed).
 .danxbot/chat-sessions/
+# DX-558 — repo-root sync error state. Worker rewrites on every transition;
+# never committed.
+.danxbot/sync-root-state.json

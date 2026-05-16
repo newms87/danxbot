@@ -1,0 +1,37 @@
+lists:
+  - id: cd226e56-3243-4271-a066-76ffe83e06d3
+    name: Backlog
+    type: archived
+    order: 0
+    is_default_for_type: true
+  - id: 683b7717-5b74-4344-9453-150f5a951753
+    name: Review
+    type: review
+    order: 1
+    is_default_for_type: true
+  - id: 7b0ecae6-07fa-4e89-9b3a-52d7a95b0e4b
+    name: To Do
+    type: ready
+    order: 2
+    is_default_for_type: true
+  - id: 2e5d230b-19d9-4700-b3b6-11642c1c737f
+    name: Blocked
+    type: blocked
+    order: 3
+    is_default_for_type: true
+  - id: bff54631-a0fe-4fdd-af48-7afc5b429a87
+    name: In Progress
+    type: in_progress
+    order: 4
+    is_default_for_type: true
+  - id: 1914f59f-1563-42e0-b0ac-748a7eda9409
+    name: Done
+    type: completed
+    order: 5
+    is_default_for_type: true
+  - id: 26df66da-da27-4450-b1c2-5fdd68980da7
+    name: Cancelled
+    type: cancelled
+    order: 6
+    is_default_for_type: true
+tombstone_ids: []
