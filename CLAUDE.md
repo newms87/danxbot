@@ -16,6 +16,39 @@ Every data shape in this codebase (issue YAMLs, settings.json, dispatch rows, ev
 
 The forbidden tokens — `back-compat`, `forward-compat`, `auto-migrate`, `schema_version` literals other than the canonical one — appear in this codebase ONLY in this section (as quoted forbidden patterns) and in `.claude/rules/agent-dispatch.md` "Forbidden Patterns" table (also as quoted forbidden patterns). Anything else is a regression.
 
+## Core Principle: Computed Card State — Status is Derived, Not Written (DX-575)
+
+Every issue YAML's `status` field is **derivation-owned by `deriveStatus()`** at `src/issue/derive-status.ts`. The seven-rule precedence reads lifecycle timestamps (`cancelled_at`, `completed_at`, `ready_at`, `archived_at`) + gate fields (`blocked.at`, `dispatch`) and projects them into the `IssueStatus` value the dashboard + tracker render. **Agent skills never instruct direct writes of `status: "<terminal>"`.** Trigger writes only.
+
+The lifecycle-trigger contract (DX-584 worker write paths, Phase 4):
+
+| Transition | Trigger write | Derived rule |
+|---|---|---|
+| Pickup (ToDo → In Progress) | Worker sets `dispatch != null` in `dispatch/core.ts` BEFORE `spawnAgent` | rule 4 → `In Progress` |
+| Ready (Review → ToDo) | Triage Approve / agent / move-to-ready-list → `ready_at = <now ISO>` | rule 5 → `ToDo` |
+| Complete (In Progress → Done) | Worker `stampIssueCompleted` on `danxbot_complete({status: "completed"})` → `completed_at = <now ISO>` + `dispatch: null` | rule 2 → `Done` |
+| Cancel (any → Cancelled) | Worker `stampIssueCancelled` / triage Cancel → `cancelled_at = <now ISO>` + `dispatch: null` | rule 1 → `Cancelled` |
+| Block (any → Blocked) | Agent self-block / worker `stampIssueBlocked` → `blocked: {at: <now ISO>, reason}` + `dispatch: null` | rule 3 → `Blocked` |
+| Park (any → Backlog) | Move-to-archived-list → `archived_at = <now ISO>` (also clear `ready_at`) | rule 6 → `Backlog` |
+
+`list_name` is **display-only** — workers never read it for state-machine decisions. The auto-resolve write path resolves it to the derived semantic type's default list (DX-584); humans may override via dashboard list moves. Backend logic = 100% timestamps + `dispatch` + `blocked.at` + `waiting_on` + `requires_human` + `conflict_on[]`.
+
+**Forbidden Patterns — direct `status:` writes in agent skills:**
+
+| Forbidden | Use instead |
+|---|---|
+| Edit YAML: `status: "In Progress"` (pickup) | Worker auto-flips `dispatch != null` before spawn — no agent edit |
+| Edit YAML: `status: "ToDo"` (triage Approve) | Stamp `ready_at = <now ISO>` |
+| Edit YAML: `status: "Done"` (complete) | Call `danxbot_complete({status: "completed"})`; worker stamps `completed_at` |
+| Edit YAML: `status: "Cancelled"` (cancel) | Stamp `cancelled_at = <now ISO>` (triage) or call `danxbot_complete({status: "cancelled"})` |
+| Edit YAML: `status: "Blocked"` + `blocked: {reason, timestamp}` (self-block) | Stamp `blocked: {at: <now ISO>, reason}` (single write — derives via rule 3) |
+| `blocked: {reason, timestamp}` (deprecated shape) | `blocked: {at, reason}` (v10 canonical) |
+| `blocked.by[]` (never existed in v10) | `waiting_on.by[]` (the v10 dep-gate primitive) |
+
+The only legitimate `status:` literal at write time is `Review` on a freshly created card — that lands as the raw on-disk value, and `deriveStatus` rule 7 falls through to it when no lifecycle trigger is populated. Every other status surface is derived.
+
+`status` remains a writable serializer field for round-trip stability (DX-582 description rule 7 fallthrough), but the canonical read path is `parseIssue` → `deriveStatus`. Direct on-disk drift never leaks into business logic.
+
 ## CRITICAL Pointers Before Touching Sensitive Areas
 
 Auto-loaded rules + skills. Trigger the right one BEFORE editing.
@@ -249,7 +282,7 @@ Full table + implications: `.claude/rules/agent-dispatch.md` Forbidden Patterns 
 
 ### Trello Board
 
-IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interface (`src/issue-tracker/`). Lists: Review → ToDo → In Progress → Blocked / Done / Cancelled + Action Items. `status: "Blocked"` populates `Issue.blocked = {reason, timestamp}`; cards waiting on OTHER cards use `Issue.waiting_on` (independent dispatch gate — picker skips dispatch while any dep is non-terminal; the field itself is a durable record decoupled from status).
+IDs in `<repo>/.danxbot/config/trello.yml`. Resolved via `IssueTracker` interface (`src/issue-tracker/`). Lists: Review → ToDo → In Progress → Blocked / Done / Cancelled + Action Items. The card's derived status comes from `deriveStatus()` reading the lifecycle triggers — stamping `blocked: {at, reason}` derives the card to `Blocked` via rule 3; cards waiting on OTHER cards use `Issue.waiting_on` (independent dispatch gate — picker skips dispatch while any dep is non-terminal; the field itself is a durable record decoupled from status).
 
 ### Card Workflow (Orchestrator)
 
