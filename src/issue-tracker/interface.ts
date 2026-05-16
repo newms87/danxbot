@@ -569,8 +569,8 @@ export interface Issue {
    * `updated_at` DESC and ignore priority. Out-of-range / missing
    * values are clamped to `[0.01, 5.99]` on read by `parseIssue` and
    * missing values default to `3.0`. ISS-210 introduced the field with
-   * a v4 → v5 schema bump and the one-off `migrate-issues-priority.ts`
-   * backfill; DX-521 widened the bounds without a schema version bump
+   * a v4 → v5 schema bump and a one-off backfill migration (retired in
+   * DX-595); DX-521 widened the bounds without a schema version bump
    * (value shape unchanged, only the clamp range widened).
    */
   priority: number;

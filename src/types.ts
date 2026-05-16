@@ -133,9 +133,10 @@ export interface TrelloConfig {
    * `setLabels({requires_human})`) so a card needing human action surfaces
    * visually on the Trello board. Empty string = the operator has not yet
    * provisioned the label — `setLabels` skips applying / stripping so the
-   * field stays a no-op on legacy boards. The card stays in its current
-   * Trello list (Review / ToDo / Blocked / In Progress) regardless;
-   * `requires_human` is the orthogonal indicator label, not a list move.
+   * field stays a no-op on not-yet-upgraded boards. The card stays in its
+   * current Trello list (Review / ToDo / Blocked / In Progress)
+   * regardless; `requires_human` is the orthogonal indicator label, not a
+   * list move.
    *
    * DX-231 introduced this field as the replacement for the retired
    * `Needs Approval` parking status. Provisioned by the setup skill on
@@ -178,10 +179,11 @@ export interface RepoContext {
   /**
    * Per-repo issue id namespace prefix (`DX`, `SG`, `FD`, …). Loaded from
    * `<repo>/.danxbot/config/config.yml` `issue_prefix` field; validated
-   * against `^[A-Z]{2,4}$`. Defaults to `"ISS"` (one warn-once log) when
-   * the field is missing — Phase 1 of ISS-99 keeps the legacy default so
-   * existing repos continue to parse + dispatch unchanged. Phase 4 will
-   * drop the fallback once every connected repo has the field set.
+   * against `^[A-Z]{2,4}$`. Phase 4 of ISS-99 retired the warn-once
+   * `"ISS"` fallback — a missing `issue_prefix` field now fails loud
+   * (`loadIssuePrefix` throws) instead of silently defaulting. Flip via
+   * the dashboard's `PUT /api/agents/:repo/issue-prefix` route to
+   * rewrite YAMLs + config in lockstep.
    */
   issuePrefix: string;
 }

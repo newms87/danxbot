@@ -1160,15 +1160,6 @@ describe("DX-594 — strict canonical reader", () => {
       },
     );
 
-    it("does NOT emit the retired `migrate-issues-to-v3.ts` pointer for schema_version 1 or 2", () => {
-      // Previously v1/v2 had a special-case error mentioning the migration
-      // script. After DX-594 they share the generic < MIN error path.
-      const txt = strictCanonical({ schema_version: "1" });
-      expect(() => parseIssue(txt, { expectedPrefix: "DX" })).not.toThrow(
-        /migrate-issues-to-v3/,
-      );
-    });
-
     it("accepts schema_version === KNOWN_SCHEMA_MIN via migrateForward (defense-in-depth)", () => {
       // v9 → v10 migration: the registry stamps schema_version: 10 + adds
       // the five v10 computed-timestamp fields. The boot sweep handles

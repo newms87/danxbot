@@ -42,7 +42,7 @@ vi.mock("../issue-tracker/load-issue-prefix.js", () => ({
 }));
 
 const mockRunMigration = vi.fn();
-vi.mock("../../scripts/migrate-issue-prefix.js", () => ({
+vi.mock("../issue-tracker/rename-prefix.js", () => ({
   runMigration: (...args: unknown[]) => mockRunMigration(...args),
 }));
 

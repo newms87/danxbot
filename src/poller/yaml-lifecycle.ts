@@ -299,40 +299,25 @@ export async function hydrateFromRemote(
  * where the local YAML is authoritative for everything except the
  * dispatch record (which the poller refreshes for every new dispatch).
  *
- * Two call shapes:
+ * Caller passes the full `IssueDispatch` record (id, pid, host, kind,
+ * started_at, ttl_seconds) — typically built via `buildStartStamp` in
+ * `multi-agent-pick.ts`. DX-595 (Phase 4 of the schema-invariant epic)
+ * retired the "id-only string" overload that synthesized placeholder
+ * `pid: 0` / `host: ""` / `started_at: ""` / `ttl_seconds: 0` values;
+ * every production caller already builds the structured form.
  *
- *   - `string` — the legacy "id only" form. Stamps a placeholder
- *     record with `pid: 0`, `host: ""`, `kind: "work"`, empty
- *     `started_at`, `ttl_seconds: 0`. The placeholder is what the
- *     pre-spawn write produces — the poller then enriches it
- *     post-spawn via the full-record form below.
- *   - `IssueDispatch` — the Phase 2 enriched form. Caller has captured
- *     real PID + host + kind + started_at + ttl_seconds (typically
- *     after `dispatch()` returns). Writes verbatim.
- *
- * Both forms persist via `writeIssue`. Validation lives in
- * `validateIssue` — `IssueDispatch.id` must be non-empty, the
- * placeholder shape passes the strict validator because Phase 1
- * deliberately allows `pid: 0` / `host: ""` / `started_at: ""` /
- * `ttl_seconds: 0` for in-flight migrations.
+ * Persists via `writeIssue`. Validation lives in `validateIssue` —
+ * `IssueDispatch.id` must be non-empty; the strict validator still
+ * tolerates `pid: 0` / `host: ""` / `started_at: ""` / `ttl_seconds: 0`
+ * for in-flight stamping scenarios (the caller fills these
+ * post-spawn).
  */
 export function stampDispatchAndWrite(
   repoLocalPath: string,
   issue: Issue,
-  dispatchOrId: string | IssueDispatch,
+  dispatch: IssueDispatch,
 ): Promise<Issue> {
-  const dispatch: IssueDispatch =
-    typeof dispatchOrId === "string"
-      ? {
-          id: dispatchOrId,
-          pid: 0,
-          host: "",
-          kind: "work",
-          started_at: "",
-          ttl_seconds: 0,
-        }
-      : { ...dispatchOrId };
-  const updated: Issue = { ...issue, dispatch };
+  const updated: Issue = { ...issue, dispatch: { ...dispatch } };
   // writeIssue's SYNC phase runs sync — any fs throw propagates from
   // this call directly into the caller's stack frame, preserving the
   // pre-DX-154 try/catch semantics. The returned Promise resolves once

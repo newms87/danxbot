@@ -31,7 +31,6 @@ export type SystemErrorSource =
   | "stop-replay"
   | "prep-verdict-replay"
   | "orphan-reaper"
-  | "legacy-cleanup"
   | "audit-drift";
 
 /**
@@ -41,9 +40,11 @@ export type SystemErrorSource =
  * filters info entries out by default (it only renders warn/error);
  * info entries are observable via the REST list endpoint and SSE.
  *
- * DX-265 introduced this for the worker-boot legacy-cleanup pass so
- * operators have a "what got archived?" audit trail without an
- * always-on banner shout.
+ * DX-265 introduced the severity for the worker-boot legacy-cleanup
+ * pass (retired in DX-595) so operators had a "what got archived?"
+ * audit trail without an always-on banner shout; the tier remains for
+ * the same shape of routine audit-trail events (e.g. orphan reaps,
+ * audit-drift heals).
  */
 export type SystemErrorSeverity = "info" | "warn" | "error";
 

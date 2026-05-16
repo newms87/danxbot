@@ -21,7 +21,7 @@ import { requireUser } from "./auth-middleware.js";
 import { eventBus } from "./event-bus.js";
 import { ISSUE_PREFIX_SHAPE } from "../issue-tracker/yaml.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
-import { runMigration } from "../../scripts/migrate-issue-prefix.js";
+import { runMigration } from "../issue-tracker/rename-prefix.js";
 
 const log = createLogger("agents-prefix");
 

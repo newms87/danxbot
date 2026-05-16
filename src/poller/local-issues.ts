@@ -208,10 +208,10 @@ export async function listInProgressYamls(
  * whether a dead-PID dispatch row is salvageable via `claude --resume`.
  *
  * Returns `null` when no matching In Progress YAML exists — caller falls
- * through to the legacy orphan-mark behavior. The dispatch may have
- * already moved its YAML to `closed/` (status: Done) before the worker
- * died, in which case auto-resume must NOT fire (the work is done; the
- * dispatch row just never got finalized).
+ * through to the orphan-mark behavior. The dispatch may have already
+ * moved its YAML to `closed/` (status: Done) before the worker died, in
+ * which case auto-resume must NOT fire (the work is done; the dispatch
+ * row just never got finalized).
  */
 export async function findInProgressIssueByDispatchId(
   repoLocalPath: string,

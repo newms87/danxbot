@@ -80,19 +80,9 @@ vi.mock("./yaml-lifecycle.js", async () => {
       ...issue,
       assigned_agent: name,
     })),
-    stampDispatchAndWrite: vi.fn(async (_p, issue, dispatchOrId) => ({
+    stampDispatchAndWrite: vi.fn(async (_p, issue, dispatch) => ({
       ...issue,
-      dispatch:
-        typeof dispatchOrId === "string"
-          ? {
-              id: dispatchOrId,
-              pid: 0,
-              host: "",
-              kind: "work" as const,
-              started_at: "",
-              ttl_seconds: 0,
-            }
-          : dispatchOrId,
+      dispatch: { ...dispatch },
     })),
     clearDispatchAndWrite: vi.fn(async (_p, issue) => ({
       ...issue,

@@ -137,8 +137,8 @@ vi.mock("../../poller/yaml-lifecycle.js", () => ({
   stampDispatchAndWrite: (
     _repo: string,
     issue: Record<string, unknown>,
-    dispatchId: string,
-  ) => ({ ...issue, dispatch: { id: dispatchId, pid: 0, host: "", kind: "work", started_at: "", ttl_seconds: 0 } }),
+    dispatch: Record<string, unknown>,
+  ) => ({ ...issue, dispatch: { ...dispatch } }),
   clearDispatchAndWrite: async (
     _repo: string,
     issue: Record<string, unknown>,

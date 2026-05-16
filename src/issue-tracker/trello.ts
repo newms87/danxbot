@@ -79,9 +79,7 @@ export class TrelloTracker implements IssueTracker {
     const refs: IssueRef[] = [];
     for (const entry of openLists) {
       // `loadTrelloIds` requires every list id, so a non-empty value is
-      // an invariant by the time the request reaches this loop. The
-      // legacy `Needs Approval` rollout-empty exemption was retired in
-      // DX-231 alongside the parking status itself.
+      // an invariant by the time the request reaches this loop.
       if (!entry.listId) continue;
       const cards = await this.fetchListCards(entry.listId);
       for (const card of cards) {
@@ -133,10 +131,11 @@ export class TrelloTracker implements IssueTracker {
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
-      // DX / SG / FD plus legacy ISS). Cards pre-dating the id epoch (or
-      // human-created without the prefix) surface here with `id: ""` —
-      // sync.ts and higher-level callers are responsible for handling
-      // that case (typically by ignoring or running the migration script).
+      // every per-repo prefix the operator has provisioned). Cards
+      // pre-dating the id epoch (or human-created without the prefix)
+      // surface here with `id: ""` — sync.ts and higher-level callers are
+      // responsible for handling that case (typically by ignoring or by
+      // flipping the prefix via the dashboard route).
       id: parsed.id,
       external_id: card.id,
       // `parent_id` and `children` are local-only metadata. Trello has no
@@ -330,17 +329,17 @@ export class TrelloTracker implements IssueTracker {
     const next = Array.from(new Set([...preserved, ...desiredIds]));
     // Content-identity short-circuit. Skip the PUT when the resolved
     // next idLabels match the current set exactly. The dominant case
-    // this guards is the DX-234 legacy-board scenario: the sync diff
-    // predicate fires `setLabels` because local `requires_human` is
-    // non-null but `projectLabels` returned `false` (no provisioned
-    // label id to match) — the resolveLabelIds + managed-set filter
-    // collapse `next` back to the existing idLabels because the empty
-    // id short-circuits at every layer. Without this guard the sync
-    // layer issues 1 no-op PUT/tick per flagged-on-legacy-board card
-    // (~1440/day per card), reintroducing the exact Trello-quota
-    // churn Phase 1 of DX-231 was built to prevent. Sync's
-    // `remoteWriteCount` still increments per intent; the actual API
-    // mutation is what we suppress.
+    // this guards is the un-provisioned-requires-human-label scenario
+    // (DX-234): the sync diff predicate fires `setLabels` because local
+    // `requires_human` is non-null but `projectLabels` returned `false`
+    // (no provisioned label id to match) — the resolveLabelIds +
+    // managed-set filter collapse `next` back to the existing idLabels
+    // because the empty id short-circuits at every layer. Without this
+    // guard the sync layer issues 1 no-op PUT/tick per such card
+    // (~1440/day per card), reintroducing the exact Trello-quota churn
+    // Phase 1 of DX-231 was built to prevent. Sync's `remoteWriteCount`
+    // still increments per intent; the actual API mutation is what we
+    // suppress.
     const currentSet = new Set<string>(card.idLabels ?? []);
     const sameMembership =
       next.length === currentSet.size && next.every((id) => currentSet.has(id));
@@ -379,13 +378,13 @@ export class TrelloTracker implements IssueTracker {
       // indicator. DX-234 (Phase 3 of DX-231) wires the Trello label id
       // through `TrelloConfig.requiresHumanLabelId`. When the operator
       // has provisioned the label, the projection reads its membership
-      // on the card; when the slot is the empty-string fallback (legacy
-      // boards), the projection short-circuits to `false`. The sync diff
-      // predicate then mismatches against a flagged local card and
-      // fires `setLabels` — but the tracker's setLabels detects the
-      // content-identical idLabels and skips the PUT, so no API quota
-      // is consumed until the operator pastes in the label id and runs
-      // the next dispatch.
+      // on the card; when the slot is the empty-string fallback (label
+      // not yet provisioned), the projection short-circuits to `false`.
+      // The sync diff predicate then mismatches against a flagged local
+      // card and fires `setLabels` — but the tracker's setLabels detects
+      // the content-identical idLabels and skips the PUT, so no API
+      // quota is consumed until the operator pastes in the label id and
+      // runs the next dispatch.
       requires_human: this.trello.requiresHumanLabelId
         ? idLabels.includes(this.trello.requiresHumanLabelId)
         : false,
@@ -498,104 +497,6 @@ export class TrelloTracker implements IssueTracker {
     await this.deleteCheckItem(checklistId, checkItemId);
   }
 
-  // ---------- Board-cleanup helpers (DX-265) ----------
-  //
-  // These helpers exist for one-shot administrative cleanup of legacy
-  // board artifacts (specifically the retired `Needs Approval` list +
-  // label from DX-231). They are NOT part of the abstract
-  // {@link IssueTracker} interface — every method here is a Trello-
-  // specific REST call with no analog on other backends. Consumers
-  // (`src/worker/legacy-cleanup.ts`) type-narrow the tracker via
-  // `instanceof TrelloTracker` before invoking, and skip cleanup
-  // entirely on non-Trello backends.
-
-  /**
-   * Find an open (non-archived) list on the configured board whose name
-   * matches `name` exactly. Returns `null` when no list matches — the
-   * orchestrator treats that as "already cleaned up" and short-circuits.
-   * Archived lists are ignored: the cleanup pass marks the legacy list
-   * `closed: true` once, and a re-run after archival should be a no-op.
-   */
-  async findListByName(
-    name: string,
-  ): Promise<{ id: string; name: string } | null> {
-    const url = this.buildUrl(`/boards/${this.trello.boardId}/lists`, {
-      fields: "id,name,closed",
-      filter: "open",
-    });
-    const lists = await this.requestJson<
-      Array<{ id: string; name: string; closed: boolean }>
-    >(url, { method: "GET" }, `GET /boards/${this.trello.boardId}/lists`);
-    const found = lists.find((l) => l.name === name && !l.closed);
-    return found ? { id: found.id, name: found.name } : null;
-  }
-
-  /**
-   * Find a label on the configured board whose name matches `name`
-   * exactly. Returns `null` when absent. Trello labels are not archived
-   * (there is no `closed` flag) — a missing label means the operator
-   * (or a prior cleanup pass) already deleted it.
-   */
-  async findLabelByName(
-    name: string,
-  ): Promise<{ id: string; name: string } | null> {
-    const url = this.buildUrl(`/boards/${this.trello.boardId}/labels`, {
-      fields: "id,name",
-    });
-    const labels = await this.requestJson<
-      Array<{ id: string; name: string }>
-    >(url, { method: "GET" }, `GET /boards/${this.trello.boardId}/labels`);
-    const found = labels.find((l) => l.name === name);
-    return found ? { id: found.id, name: found.name } : null;
-  }
-
-  /**
-   * Public counterpart to the private `fetchListCards` used internally
-   * by `fetchOpenCards`. Exposed so the legacy-cleanup orchestrator can
-   * enumerate cards on a list NOT in the active status map (the legacy
-   * `Needs Approval` list isn't routed through `statusToListId`).
-   */
-  async listCards(
-    listId: string,
-  ): Promise<Array<{ id: string; name: string }>> {
-    return this.fetchListCards(listId);
-  }
-
-  /**
-   * Archive (Trello's term for "close") a list. Reversible — the
-   * operator can re-open via the Trello UI ("More → Archive list" →
-   * "Send to Archive"). Used by the legacy-cleanup pass to retire the
-   * `Needs Approval` list after migrating any stray cards off it.
-   *
-   * Trello API: `PUT /lists/:id/closed?value=true`.
-   */
-  async archiveList(listId: string): Promise<void> {
-    const url = this.buildUrl(`/lists/${listId}/closed`, { value: "true" });
-    await this.requestVoid(
-      url,
-      { method: "PUT" },
-      `PUT /lists/${listId}/closed`,
-    );
-  }
-
-  /**
-   * Permanently delete a label from the board. Unlike list archival,
-   * label deletion is NOT reversible via the Trello UI. The legacy-
-   * cleanup pass uses this to retire the `Needs Approval` label; the
-   * orchestrator only calls this AFTER confirming the label is no
-   * longer referenced (post-migration of any cards that carried it).
-   *
-   * Trello API: `DELETE /labels/:id`.
-   */
-  async deleteLabel(labelId: string): Promise<void> {
-    const url = this.buildUrl(`/labels/${labelId}`);
-    await this.requestVoid(
-      url,
-      { method: "DELETE" },
-      `DELETE /labels/${labelId}`,
-    );
-  }
-
   // ---------- internals ----------
 
   private async fetchListCards(
@@ -688,7 +589,8 @@ export class TrelloTracker implements IssueTracker {
     // `requires_human` (DX-231 Phase 3 / DX-234) → the orthogonal
     // "needs human action" Trello label provisioned by the setup skill.
     // Skip when the label id is the empty-string fallback (operator has
-    // not yet provisioned the label on a legacy board) — `setLabels`
+    // not yet provisioned the label on a not-yet-upgraded board; not
+    // schema-legacy — refers to label provisioning state) — `setLabels`
     // becomes a no-op on the boolean. Strip-on-`false` is handled by the
     // managed-set filter in `allManagedLabelIdsForFiltering` (the id is
     // in the managed set when non-empty, so an existing label is filtered
@@ -728,7 +630,9 @@ export class TrelloTracker implements IssueTracker {
    */
   // DX-231 Phase 3 (DX-234) wires `requiresHumanLabelId` into the
   // managed set when the operator has provisioned the matching label.
-  // The empty-string fallback (legacy boards) is excluded so the filter
+  // The empty-string fallback (not-yet-upgraded boards where the
+  // operator has not provisioned the requires-human label; not
+  // schema-legacy) is excluded so the filter
   // never collapses an empty id into the managed set — that would let
   // the operator's blank slot accidentally strip every non-managed
   // label whose id happens to compare empty.
@@ -902,14 +806,16 @@ export function formatCardTitle(id: string, title: string): string {
 /**
  * Inverse of `formatCardTitle`. Splits a Trello card name into
  * `{ id, title }`. Cards without the `#<PREFIX>-N: ` shape (human-created,
- * pre-migration legacy, etc.) return `id: ""` and the entire name as
- * `title` — sync layers must handle that case explicitly (typically by
- * skipping the card or running the migration script).
+ * pre-id-epoch legacy titles — refers to pre-Phase-1-ISS-99 cards on a
+ * connected board, not schema-legacy) return `id: ""` and the entire name
+ * as `title` — sync layers must handle that case explicitly (typically by
+ * skipping the card or flipping the prefix via the dashboard route).
  *
  * Phase 2 of ISS-99 broadened the prefix from a hardcoded `ISS` to any
  * 2-4 uppercase ASCII letters so connected repos with prefixes like
  * `DX` (danxbot), `SG` (gpt-manager), or `FD` (platform) parse identically
- * to legacy `ISS-` titles. The shape mirrors `ISSUE_PREFIX_SHAPE` in
+ * to pre-prefix-rollout `ISS-` titles (the historical default before
+ * ISS-99 — not schema-legacy). The shape mirrors `ISSUE_PREFIX_SHAPE` in
  * `src/issue-tracker/yaml.ts`. Per-card prefix validation against the
  * repo's configured `issue_prefix` happens at YAML parse time
  * (`parseIssue` with `expectedPrefix`), not here — this function is

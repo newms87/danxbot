@@ -111,7 +111,7 @@ function warnMismatchedPrefix(dir: string, stem: string, prefix: string): void {
   if (warnedStems.has(key)) return;
   warnedStems.add(key);
   log.warn(
-    `[id-generator] Skipping ${path.join(dir, `${stem}.yml`)} — stem does not match repo prefix "${prefix}". Run scripts/migrate-issue-prefix.ts (Phase 3 of ISS-99) to migrate.`,
+    `[id-generator] Skipping ${path.join(dir, `${stem}.yml`)} — stem does not match repo prefix "${prefix}". Flip via the dashboard's PUT /api/agents/:repo/issue-prefix to rename existing YAMLs.`,
   );
 }
 

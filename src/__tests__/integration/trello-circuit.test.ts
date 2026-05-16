@@ -109,7 +109,7 @@ describe("Trello circuit breaker — concurrent callers fan-in (DX-300)", () => 
     const tracker = new TrelloTracker(TRELLO);
 
     // Trip the breaker with a single (await-ed) 429.
-    await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(/429/);
+    await expect(tracker.getComments("card-probe")).rejects.toThrow(/429/);
     expect(getCircuitState()).toBe("open");
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
@@ -119,7 +119,7 @@ describe("Trello circuit breaker — concurrent callers fan-in (DX-300)", () => 
     const concurrent = 20;
     const results = await Promise.allSettled(
       Array.from({ length: concurrent }, () =>
-        tracker.findLabelByName("Triaged"),
+        tracker.getComments("card-probe"),
       ),
     );
 
@@ -149,13 +149,13 @@ describe("Trello circuit breaker — concurrent callers fan-in (DX-300)", () => 
     const tracker = new TrelloTracker(TRELLO);
 
     // Trip.
-    await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(/429/);
+    await expect(tracker.getComments("card-probe")).rejects.toThrow(/429/);
     expect(getCircuitState()).toBe("open");
 
     // Concurrent reads during cooldown — all short-circuit.
     fetchMock.mockClear();
     const blocked = await Promise.allSettled(
-      Array.from({ length: 5 }, () => tracker.findLabelByName("Triaged")),
+      Array.from({ length: 5 }, () => tracker.getComments("card-probe")),
     );
     expect(fetchMock).not.toHaveBeenCalled();
     expect(
@@ -168,19 +168,17 @@ describe("Trello circuit breaker — concurrent callers fan-in (DX-300)", () => 
     nowMs += 60_000;
 
     // Probe success closes the breaker.
-    fetchMock.mockResolvedValueOnce(jsonOk([{ id: "lbl-x", name: "Triaged" }]));
-    const probeResult = await tracker.findLabelByName("Triaged");
-    expect(probeResult).toEqual({ id: "lbl-x", name: "Triaged" });
+    fetchMock.mockResolvedValueOnce(jsonOk([]));
+    const probeResult = await tracker.getComments("card-probe");
+    expect(probeResult).toEqual([]);
     expect(getCircuitState()).toBe("closed");
     expect(infoSpy.mock.calls[0]![0]).toMatch(/TrelloCircuit: closed/);
 
     // Subsequent concurrent reads all hit Trello (breaker is closed).
-    fetchMock.mockImplementation(async () =>
-      jsonOk([{ id: "lbl-x", name: "Triaged" }]),
-    );
+    fetchMock.mockImplementation(async () => jsonOk([]));
     fetchMock.mockClear();
     const after = await Promise.all(
-      Array.from({ length: 5 }, () => tracker.findLabelByName("Triaged")),
+      Array.from({ length: 5 }, () => tracker.getComments("card-probe")),
     );
     expect(fetchMock).toHaveBeenCalledTimes(5);
     expect(after).toHaveLength(5);

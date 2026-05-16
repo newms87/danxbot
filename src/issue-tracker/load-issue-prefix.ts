@@ -56,7 +56,7 @@ export function loadIssuePrefix(repoLocalPath: string): string {
   const raw = (cfg.issue_prefix ?? "").trim();
   if (raw.length === 0) {
     throw new Error(
-      `${configPath} is missing required field issue_prefix; run scripts/migrate-issue-prefix.ts or set it manually.`,
+      `${configPath} is missing required field issue_prefix; set it manually (2-4 uppercase letters) or flip via the dashboard's PUT /api/agents/:repo/issue-prefix.`,
     );
   }
   if (!ISSUE_PREFIX_SHAPE.test(raw)) {

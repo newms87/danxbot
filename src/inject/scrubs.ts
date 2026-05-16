@@ -75,11 +75,13 @@ export function scrubDanxArtifacts(
 
 /**
  * Remove the legacy singular `<repo>/.danxbot/workspace/` dir created
- * by the retired `generateWorkspace` helper. Pre-refactor this dir was
- * the dispatched-agent cwd; post-refactor every dispatch resolves a
- * plural workspace under `<repo>/.danxbot/workspaces/<name>/` and the
- * singular dir is dead weight that shadows nothing but still confuses
- * humans grepping the tree. Idempotent — absent dir is a no-op.
+ * by the retired `generateWorkspace` helper (workspace-dispatch
+ * legacy, NOT schema-legacy — refers to the pre-plural dispatched-agent
+ * cwd dir). Pre-refactor this dir was the dispatched-agent cwd; post-
+ * refactor every dispatch resolves a plural workspace under
+ * `<repo>/.danxbot/workspaces/<name>/` and the singular dir is dead
+ * weight that shadows nothing but still confuses humans grepping the
+ * tree. Idempotent — absent dir is a no-op.
  */
 export function scrubLegacySingularWorkspace(repoLocalPath: string): void {
   const dir = resolve(repoLocalPath, ".danxbot/workspace");

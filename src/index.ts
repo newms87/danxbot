@@ -65,7 +65,6 @@ import { createWorktreeManager } from "./agent/worktree-manager.js";
 import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned.js";
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
 import { replayPrepVerdictQueue } from "./worker/replay-prep-verdict-queue.js";
-import { cleanupLegacyNeedsApproval } from "./worker/legacy-cleanup.js";
 import { startEvaluatorDispatcher } from "./agent/evaluator-dispatcher.js";
 import {
   preflightSystemdRun,
@@ -661,35 +660,6 @@ async function startWorkerMode(): Promise<void> {
   // worker sits idle with cards available. Kick once after rehydrate so
   // the picker observes the consistent disk + DB snapshot.
   kickPickerOnceAtBoot(repo.name);
-
-  // DX-265: one-shot cleanup of legacy `Needs Approval` Trello list +
-  // label (retired in DX-231; DX-234 left the fossils in place "for
-  // the operator to remove by hand" — this is the automated
-  // follow-through). Idempotent + per-step graceful-degradation; a
-  // failure logs warn-level system events but never blocks boot. Runs
-  // AFTER `bootScheduler` (so the tracker is fully registered) and
-  // BEFORE `startPoller` (so the poller's first tick sees the
-  // post-cleanup board state).
-  //
-  // DX-342 — YAML-only mode has no Trello board to clean. Skip
-  // entirely; the helper would no-op on `tracker instanceof
-  // TrelloTracker` anyway, but the explicit skip keeps the boot log
-  // free of "skipped: true" noise.
-  if (repoTracker !== null) {
-    try {
-      await cleanupLegacyNeedsApproval({ repo, tracker: repoTracker });
-    } catch (err) {
-      log.error(`[${repo.name}] Legacy cleanup pass failed`, err);
-      recordSystemError({
-        source: "legacy-cleanup",
-        severity: "warn",
-        repo: repo.name,
-        message: `Legacy cleanup pass threw — next boot will retry`,
-        details: { error: err instanceof Error ? err.message : String(err) },
-      });
-    }
-  }
-
 
   // DX-342 — the retry queue exists to re-arm failed tracker pushes. No
   // tracker means no pushes were ever attempted, so the queue dir is

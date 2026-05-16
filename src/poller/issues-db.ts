@@ -172,10 +172,10 @@ export async function dbSelectIssueByExternalId(
 /**
  * Fetch every non-terminal (not Done / Cancelled) issue for the repo.
  * Replaces the YAML walk over `<repo>/.danxbot/issues/open/`. The result
- * mirrors the legacy walker's output exactly: every Issue whose YAML
- * lived in `open/` had a non-terminal status; a closed YAML lived in
- * `closed/` and was skipped. Done / Cancelled rows in the DB correspond
- * to closed/ entries — the status filter excludes them.
+ * mirrors the file-walk it replaced: every Issue whose YAML lived in
+ * `open/` had a non-terminal status; a closed YAML lived in `closed/`
+ * and was skipped. Done / Cancelled rows in the DB correspond to closed/
+ * entries — the status filter excludes them.
  *
  * `mirrorUpdatedAtMs` is the FIFO sort signal that replaces file mtime.
  */

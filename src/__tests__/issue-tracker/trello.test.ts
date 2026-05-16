@@ -1000,14 +1000,14 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
       const tracker = new TrelloTracker(TRELLO);
 
       fetchMock.mockResolvedValueOnce(rateLimited());
-      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(
+      await expect(tracker.getComments("card-probe")).rejects.toThrow(
         /Trello API error: 429/,
       );
       expect(getCircuitState()).toBe("open");
 
       // Second call must NOT hit fetch — short-circuit.
       fetchMock.mockClear();
-      await expect(tracker.findLabelByName("Triaged")).rejects.toBeInstanceOf(
+      await expect(tracker.getComments("card-probe")).rejects.toBeInstanceOf(
         TrelloCircuitOpen,
       );
       expect(fetchMock).not.toHaveBeenCalled();
@@ -1024,14 +1024,14 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
           statusText: "Server Error",
         }),
       );
-      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(
+      await expect(tracker.getComments("card-probe")).rejects.toThrow(
         /Trello API error: 500/,
       );
       expect(getCircuitState()).toBe("closed");
 
       // Next call still issues fetch.
-      fetchMock.mockResolvedValueOnce(jsonOk([{ id: "lbl-x", name: "Other" }]));
-      await tracker.findLabelByName("Other");
+      fetchMock.mockResolvedValueOnce(jsonOk([]));
+      await tracker.getComments("card-other");
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
@@ -1063,7 +1063,7 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
 
       // Trip → 60s cooldown.
       fetchMock.mockResolvedValueOnce(rateLimited());
-      await expect(tracker.findLabelByName("Triaged")).rejects.toThrow(/429/);
+      await expect(tracker.getComments("card-probe")).rejects.toThrow(/429/);
       expect(getCircuitState()).toBe("open");
 
       // Advance past cooldown → state becomes half-open on observation.
@@ -1071,8 +1071,8 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
       expect(getCircuitState()).toBe("half-open");
 
       // Probe success → closed.
-      fetchMock.mockResolvedValueOnce(jsonOk([{ id: "lbl-x", name: "Triaged" }]));
-      await tracker.findLabelByName("Triaged");
+      fetchMock.mockResolvedValueOnce(jsonOk([]));
+      await tracker.getComments("card-probe");
       expect(getCircuitState()).toBe("closed");
     });
   });

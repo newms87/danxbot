@@ -9,7 +9,7 @@
  * state inspection ALL live on the agent's worktree as the first step
  * of every dispatch.
  *
- * DX-297 deleted the legacy `validate → dispatchInRecoveryMode` dirty
+ * DX-297 deleted the prior `validate → dispatchInRecoveryMode` dirty
  * branch (recovery prompt, last-modified-card scan, Needs Help comment
  * append) — the prep skill's `verdict: "abort"` path now handles every
  * blocked-worktree scenario via the prep-verdict route's

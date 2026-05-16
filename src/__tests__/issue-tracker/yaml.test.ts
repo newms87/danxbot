@@ -463,13 +463,11 @@ describe("serializeIssue / parseIssue", () => {
     // DX-594 dropped the bespoke v1/v2 migration-pointer branch in
     // favour of the canonical < KNOWN_SCHEMA_MIN error. The boot sweep
     // handles forward migration end-to-end; the validator just rejects
-    // anything older than MIN with a single uniform message.
+    // anything older than MIN with a single uniform message. DX-595
+    // retired the migration scripts themselves.
     const yaml = "schema_version: 1\ntracker: trello\n";
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
       /schema_version must be an integer >= 9/,
-    );
-    expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).not.toThrow(
-      /migrate-issues-to-v3/,
     );
   });
 
@@ -950,7 +948,7 @@ describe("validateIssue", () => {
     }
   });
 
-  it("schema_version: 1 produces the canonical < MIN error (DX-594 — no migration-script pointer)", () => {
+  it("schema_version: 1 produces the canonical < MIN error (DX-594 / DX-595 — no migration-script pointer)", () => {
     const result = validateIssue(valid({ schema_version: 1 }), { expectedPrefix: "ISS" });
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -959,9 +957,6 @@ describe("validateIssue", () => {
           /schema_version must be an integer >= 9/.test(e),
         ),
       ).toBe(true);
-      expect(
-        result.errors.some((e) => e.includes("migrate-issues-to-v3")),
-      ).toBe(false);
     }
   });
 

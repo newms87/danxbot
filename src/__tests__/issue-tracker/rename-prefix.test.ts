@@ -16,7 +16,7 @@ import {
   rewriteIdFields,
   rewriteFreeText,
   setConfigPrefix,
-} from "../../../scripts/migrate-issue-prefix.js";
+} from "../../issue-tracker/rename-prefix.js";
 
 interface RepoLayout {
   root: string;

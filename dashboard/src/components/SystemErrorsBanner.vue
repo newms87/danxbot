@@ -14,8 +14,10 @@ defineEmits<{
  * Banner renders warn + error only. `info` is audit-grade — visible via
  * `/api/system-errors` and the SSE stream, but never promotes the banner
  * (DX-265 introduced the severity for the worker-boot legacy-cleanup
- * audit trail). Filtering here rather than in the composable keeps the
- * underlying event log complete for any future audit-log UI.
+ * audit trail, retired in DX-595; the tier remains for the same shape
+ * of routine audit-trail events). Filtering here rather than in the
+ * composable keeps the underlying event log complete for any future
+ * audit-log UI.
  */
 const displayErrors = computed(() =>
   props.errors.filter((e) => e.severity !== "info"),

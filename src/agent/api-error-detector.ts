@@ -67,8 +67,10 @@ export interface WatcherLike {
  * `attach-monitoring-stack.ts` routes on this BEFORE incrementing the
  * recover counter:
  *
- *   - `"stream_idle"`: legacy Anthropic stream-idle synthetic; the
- *     recover loop bumps `recoverCount` and POSTs `/api/resume`.
+ *   - `"stream_idle"`: legacy Anthropic stream-idle synthetic (NOT
+ *     schema-legacy — refers to the prior Anthropic detector tier
+ *     before DX-322 widened it to cover rate-limit too); the recover
+ *     loop bumps `recoverCount` and POSTs `/api/resume`.
  *   - `"rate_limit"`: account-wide Anthropic rate-limit ("You've hit
  *     your limit · resets …"). The recover loop is GUARANTEED to waste
  *     tokens — none of the retries land until the reset deadline — so

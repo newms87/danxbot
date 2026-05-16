@@ -614,28 +614,7 @@ describe("yaml-lifecycle", () => {
       );
       await writeIssue(repoRoot, original);
 
-      const updated = await stampDispatchAndWrite(repoRoot, original, "did-2");
-      expect(updated.dispatch?.id).toBe("did-2");
-
-      const reloaded = readYamlFile(repoRoot, "ISS-13");
-      expect(reloaded.dispatch?.id).toBe("did-2");
-    });
-
-    it("string form stamps the placeholder dispatch shape", async () => {
-      const tracker = new FakeTracker();
-      const { external_id } = await tracker.createCard(
-        defaultCreate({ id: "ISS-14" }),
-      );
-      const original = await hydrateFromRemote(
-        tracker,
-        external_id,
-        "did-1",
-        repoRoot, "ISS",
-      );
-      await writeIssue(repoRoot, original);
-
-      const updated = await stampDispatchAndWrite(repoRoot, original, "did-2");
-      expect(updated.dispatch).toEqual({
+      const updated = await stampDispatchAndWrite(repoRoot, original, {
         id: "did-2",
         pid: 0,
         host: "",
@@ -643,6 +622,10 @@ describe("yaml-lifecycle", () => {
         started_at: "",
         ttl_seconds: 0,
       });
+      expect(updated.dispatch?.id).toBe("did-2");
+
+      const reloaded = readYamlFile(repoRoot, "ISS-13");
+      expect(reloaded.dispatch?.id).toBe("did-2");
     });
 
     it("IssueDispatch form stamps the full record verbatim", async () => {
