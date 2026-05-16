@@ -86,6 +86,15 @@ All repo config in `<repo>/.danxbot/config/` (version controlled). Secrets in `<
 
 Per-repo secrets use standardized `DANX_*` prefix: `DANX_SLACK_BOT_TOKEN`, `DANX_SLACK_APP_TOKEN`, `DANX_SLACK_CHANNEL_ID`, `DANX_DB_HOST/USER/PASSWORD/NAME`, `DANX_GITHUB_TOKEN`, `DANX_TRELLO_API_KEY`, `DANX_TRELLO_API_TOKEN`. Danxbot's own `.env` keeps shared infra only: `ANTHROPIC_API_KEY`, `REPOS`, `DANXBOT_DB_*`, `DASHBOARD_PORT`, `DANXBOT_GIT_EMAIL`.
 
+### Dashboard-side Trello creds (DX-610)
+
+The dashboard process keeps its OWN Trello bearer pair — `DASHBOARD_TRELLO_API_KEY` + `DASHBOARD_TRELLO_API_TOKEN` — read at request time in `src/dashboard/trello-api.ts` for the operator-facing list-mapping routes (`/api/trello/board-lists`, `/api/trello/list-mapping`). These are **separate from** the per-repo `DANX_TRELLO_API_KEY` / `DANX_TRELLO_API_TOKEN` pair under `<repo>/.danxbot/.env` (used by the worker poller / inbound fetcher only). Reason: the worker container does not expose its env into the dashboard container, and granting the dashboard the worker's Trello bearer would cross the dashboard / agent trust boundary.
+
+Wire locations:
+
+- Local dev — drop into the danxbot root `.env` (the dashboard container `env_file`'s it).
+- Per-target deploy — overlay into `.env.<target>` next to the danxbot root `.env`; `deploy/secrets.ts` carries any `DASHBOARD_*` key through to the dashboard container. Routes 503 when either var is missing or empty.
+
 ## Portable Repo Path (DX-230)
 
 Every per-repo `compose.yml` MUST declare `DANXBOT_REPO_HOST_PATH: ${DANXBOT_REPO_ROOT}` in `environment:` AND a second mirror-bind volume `${DANXBOT_REPO_ROOT}:${DANXBOT_REPO_HOST_PATH:?...}`. The mirror-bind makes the repo visible at TWO real paths inside the container — the container-internal `/danxbot/app/repos/<name>` and the host's absolute path — so `git worktree add` (which calls `realpath()` on its cwd before writing metadata) bakes runtime-agnostic paths. Adding a new connected repo without these two lines = worker boot fails loud (`ensurePortableRepoPath` throws). `scripts/worker-env.sh` exports `DANXBOT_REPO_HOST_PATH=DANXBOT_REPO_ROOT` for compose-up; both `make launch-worker` and `make launch-worker-host` source it. See `src/agent/portable-path.ts`.

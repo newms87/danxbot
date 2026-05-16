@@ -585,3 +585,128 @@ describe("pushTrelloDiff — orchestrator (DX-218)", () => {
     });
   });
 });
+
+describe("pushTrelloDiff — DX-610 outbound list-mapping gate", () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = mkdtempSync(join(tmpdir(), "danxbot-trello-push-gate-"));
+    _resetPushSlots();
+    vi.mocked(syncIssue).mockReset();
+    vi.mocked(enqueueRetry).mockReset();
+    const { _clearSystemErrors } = await import("../../dashboard/system-errors.js");
+    _clearSystemErrors();
+    const { ensureListsFile, _resetForTesting: resetLists } =
+      await import("../../lists-file.js");
+    resetLists();
+    await ensureListsFile(tmpDir);
+    const { _resetForTesting: resetMap } = await import("../../trello-list-map.js");
+    resetMap();
+  });
+
+  afterEach(() => {
+    _resetPushSlots();
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("skips push + records warn when card's list_name is unmapped", async () => {
+    const { readLists } = await import("../../lists-file.js");
+    const firstList = readLists(tmpDir).lists[0];
+    const issue = { ...makeIssue({ id: "DX-700" }), list_name: firstList.name };
+    writeOpenIssueToDisk(tmpDir, issue);
+
+    const result = await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      pushed: false,
+      remoteWriteCount: 0,
+      retryEnqueued: false,
+      errors: [],
+      updatedLocal: null,
+    });
+    const { listSystemErrors } = await import("../../dashboard/system-errors.js");
+    const errors = listSystemErrors({ repo: "test-repo" });
+    expect(errors.length).toBe(1);
+    expect(errors[0].source).toBe("trello-list-mapping");
+    expect(errors[0].severity).toBe("warn");
+    expect(errors[0].message).toContain("DX-700");
+  });
+
+  it("skips push + records warn when card's list_name no longer matches any configured list", async () => {
+    const issue = { ...makeIssue({ id: "DX-701" }), list_name: "Ghost List" };
+    writeOpenIssueToDisk(tmpDir, issue);
+
+    const result = await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).not.toHaveBeenCalled();
+    expect(result.pushed).toBe(false);
+    const { listSystemErrors } = await import("../../dashboard/system-errors.js");
+    const errors = listSystemErrors({ repo: "test-repo" });
+    expect(errors.length).toBe(1);
+    expect(errors[0].message).toContain('Ghost List');
+  });
+
+  it("pushes normally when the mapping resolves to a Trello list id", async () => {
+    const { readLists } = await import("../../lists-file.js");
+    const firstList = readLists(tmpDir).lists[0];
+    const { writeTrelloListMap } = await import("../../trello-list-map.js");
+    await writeTrelloListMap(
+      tmpDir,
+      { list_id_to_trello_list_id: { [firstList.id]: "trello-mapped" } },
+      new Set(readLists(tmpDir).lists.map((l) => l.id)),
+    );
+
+    const issue = { ...makeIssue({ id: "DX-702" }), list_name: firstList.name };
+    writeOpenIssueToDisk(tmpDir, issue);
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: issue,
+      remoteWriteCount: 0,
+    });
+
+    const result = await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual([]);
+    const { listSystemErrors } = await import("../../dashboard/system-errors.js");
+    expect(listSystemErrors({ repo: "test-repo" })).toEqual([]);
+  });
+
+  it("does not gate when list_name is null (legacy fallback path)", async () => {
+    const issue = makeIssue({ id: "DX-703", list_name: null });
+    writeOpenIssueToDisk(tmpDir, issue);
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: issue,
+      remoteWriteCount: 0,
+    });
+
+    const result = await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).toHaveBeenCalledTimes(1);
+    expect(result.errors).toEqual([]);
+  });
+});

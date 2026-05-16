@@ -50,6 +50,9 @@ import { enqueueRetry } from "../../issue-tracker/retry-queue.js";
 import { persistIfDifferent } from "./trello-persist.js";
 import { issuePath } from "../../issue-tracker/paths.js";
 import { IssueParseError, parseIssue } from "../../issue-tracker/yaml.js";
+import { readLists } from "../../lists-file.js";
+import { readTrelloListMap } from "../../trello-list-map.js";
+import { recordSystemError } from "../../dashboard/system-errors.js";
 import type { Issue, IssueTracker } from "../../issue-tracker/interface.js";
 import { createLogger } from "../../logger.js";
 
@@ -169,6 +172,77 @@ export function pushTrelloDiff(
 }
 
 /**
+ * DX-610 — resolve the issue's `list_name` to a danxbot list id, look
+ * it up in the per-repo Trello list-mapping file, and decide whether
+ * to skip the outbound push. Returns `true` when the card is on a
+ * danxbot list with no Trello mapping (unmapped) — in that case the
+ * caller records a warning to the dashboard stream and stops.
+ *
+ * The function is read-only on disk and tolerant of missing /
+ * unparseable files (treats them as "no mapping configured" — skip).
+ * Pre-DX-575 cards (no `list_name`) are not gated by the caller, so
+ * this only fires once cards carry the v10 denormalized field.
+ */
+function shouldSkipPushForUnmappedList(
+  repoLocalPath: string,
+  repoName: string,
+  issue: Issue,
+): boolean {
+  if (issue.list_name === null) return false;
+  let lists;
+  try {
+    lists = readLists(repoLocalPath).lists;
+  } catch (err) {
+    log.warn(
+      `[${repoName}] ${issue.id} could not read lists.yaml for push gate; allowing push`,
+      err,
+    );
+    return false;
+  }
+  const danxbotList = lists.find((l) => l.name === issue.list_name);
+  if (!danxbotList) {
+    // The card carries a `list_name` that no longer matches any
+    // configured list. Skip + record so the operator notices their
+    // stale projection rather than silently pushing the card based on
+    // the legacy status→list mapping.
+    recordSystemError({
+      source: "trello-list-mapping",
+      severity: "warn",
+      repo: repoName,
+      message: `Skipped Trello push for ${issue.id}: list_name "${issue.list_name}" no longer maps to a configured danxbot list.`,
+      details: { issueId: issue.id, listName: issue.list_name },
+    });
+    return true;
+  }
+  let map;
+  try {
+    map = readTrelloListMap(repoLocalPath);
+  } catch (err) {
+    log.warn(
+      `[${repoName}] ${issue.id} could not read trello-list-map.yaml for push gate; allowing push`,
+      err,
+    );
+    return false;
+  }
+  const trelloListId = map.list_id_to_trello_list_id[danxbotList.id];
+  if (typeof trelloListId !== "string" || trelloListId.length === 0) {
+    recordSystemError({
+      source: "trello-list-mapping",
+      severity: "warn",
+      repo: repoName,
+      message: `Skipped Trello push for ${issue.id}: danxbot list "${danxbotList.name}" has no Trello mapping.`,
+      details: {
+        issueId: issue.id,
+        listName: issue.list_name,
+        danxbotListId: danxbotList.id,
+      },
+    });
+    return true;
+  }
+  return false;
+}
+
+/**
  * Re-read the YAML from disk at dequeue time so a serialized push always
  * sees the freshest bytes. With chokidar churn, multiple reconciles can
  * chain pushes for the same card on the slot; without this re-read,
@@ -217,6 +291,24 @@ async function doPush(args: TrelloPushArgs): Promise<TrelloPushResult> {
   // useful for orphan-recovery (`external_id === ""`).
   const fresh = readFreshIssue(args);
   const issue = fresh ?? args.issue;
+
+  // DX-610 outbound push gate. When the card carries a `list_name` that
+  // resolves to a danxbot list id NOT mapped to a Trello list (via the
+  // operator-configured `<repo>/.danxbot/trello-list-map.yaml` from
+  // DX-609), skip the push so cards on operator-private lists never
+  // mirror to Trello. `list_name === null` is the legacy fallback (no
+  // tracker projection yet) — the existing status→list resolution in
+  // `syncIssue.moveToStatus` continues to drive the move there. Errors
+  // surface on the dashboard system-errors stream; the agent never sees
+  // them.
+  if (issue.list_name !== null) {
+    const skip = shouldSkipPushForUnmappedList(
+      args.repoLocalPath,
+      args.repoName,
+      issue,
+    );
+    if (skip) return result;
+  }
 
   let actionItemTitles;
   try {

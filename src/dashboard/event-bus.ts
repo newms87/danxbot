@@ -23,6 +23,7 @@ import type { Issue } from "../issue-tracker/interface.js";
 import type { RepairErrorWithAttempts } from "../system-repair/db-reads.js";
 import type { RepoRootSyncError } from "../worker/sync-root.js";
 import type { ListsFile } from "../lists-file.js";
+import type { TrelloListMap } from "../trello-list-map.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -37,6 +38,7 @@ export type EventTopic =
   | "repo-root-sync:error"
   | "repo-root-sync:clear"
   | "lists:updated"
+  | "trello-list-map:updated"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
 export interface DispatchCreatedPayload {
@@ -162,6 +164,17 @@ export interface ListsUpdatedPayload {
   data: { repoName: string; file: ListsFile };
 }
 
+/**
+ * DX-610 — emitted by `src/dashboard/trello-list-mapping-routes.ts`
+ * after every successful PATCH on the per-repo Trello list-mapping
+ * file. Phase 8b.3's Settings UI subscribes by this topic to repaint
+ * mapping status without a refetch.
+ */
+export interface TrelloListMapUpdatedPayload {
+  topic: "trello-list-map:updated";
+  data: { repoName: string; map: TrelloListMap };
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
@@ -173,7 +186,8 @@ export type BusEvent =
   | SystemRepairErrorUpdatedPayload
   | RepoRootSyncErrorPayload
   | RepoRootSyncClearPayload
-  | ListsUpdatedPayload;
+  | ListsUpdatedPayload
+  | TrelloListMapUpdatedPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

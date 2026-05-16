@@ -59,6 +59,13 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // a read-then-decide branch — the read exists to preserve operator
   // state across a transient revert.
   "dispatch/core.ts",
+  // DX-610 Phase 8b.2 outbound list-mapping gate: reads list_name on
+  // the tracker PUSH side (post auto-resolve) to decide whether the
+  // operator-configured trello-list-map.yaml has a Trello target for
+  // this card's list. Same trust boundary as the other Trello-side
+  // entries in this allowlist — the read drives the outbound tracker
+  // mirror, not a worker dispatch decision.
+  "issue/reconcile/trello.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {

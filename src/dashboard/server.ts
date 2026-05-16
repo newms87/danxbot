@@ -86,6 +86,11 @@ import {
   handleSwapListOrder,
   handleUpdateList,
 } from "./lists-routes.js";
+import {
+  handleGetBoardLists,
+  handleGetListMapping,
+  handlePatchListMapping,
+} from "./trello-list-mapping-routes.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleGetRepairError,
@@ -604,6 +609,22 @@ async function route(
       url.searchParams.get("repo"),
       dispatchDeps,
     );
+    return true;
+  }
+
+  // DX-610 — Trello list-mapping routes. Same pattern as the Lists
+  // routes above (each handler runs its own `requireUser`). Successful
+  // PATCH publishes `trello-list-map:updated` on the SSE bus.
+  if (method === "GET" && url.pathname === "/api/trello/board-lists") {
+    await handleGetBoardLists(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  if (method === "GET" && url.pathname === "/api/trello/list-mapping") {
+    await handleGetListMapping(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  if (method === "PATCH" && url.pathname === "/api/trello/list-mapping") {
+    await handlePatchListMapping(req, res, url.searchParams.get("repo"), dispatchDeps);
     return true;
   }
 
