@@ -70,7 +70,7 @@ export function applyEvent(
  * rows. Inner `error` shape validation delegates to the backend's
  * `isRepoRootSyncError` re-exported via the type bundle.
  */
-import { isRepoRootSyncError } from "@backend/worker/sync-root.js";
+import { isRepoRootSyncError } from "@backend/worker/sync-root-types.js";
 
 function isErrorPayload(data: unknown): data is { repoName: string; error: RepoRootSyncError } {
   if (typeof data !== "object" || data === null) return false;

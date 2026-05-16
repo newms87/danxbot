@@ -22,18 +22,9 @@ import { createLogger } from "../logger.js";
 
 const log = createLogger("sync-root");
 
-export type RepoRootSyncReason = "dirty" | "rebase-conflict";
-
-export interface RepoRootSyncError {
-  /** Stable category for the banner template's branching. */
-  reason: RepoRootSyncReason;
-  /** Human-readable detail — operator reads this on the banner. */
-  detail: string;
-  /** First time this error state was observed (preserved across re-tries while error persists). */
-  since: string;
-  /** Most recent retry attempt time — updates every sync that lands in this state. */
-  lastTriedAt: string;
-}
+export type { RepoRootSyncReason, RepoRootSyncError } from "./sync-root-types.js";
+export { isRepoRootSyncError } from "./sync-root-types.js";
+import type { RepoRootSyncError, RepoRootSyncReason } from "./sync-root-types.js";
 
 /** Subset of a `child_process.spawn` result we care about. */
 export interface ExecResult {
@@ -68,18 +59,6 @@ export function getRepoRootSyncError(repoName: string): RepoRootSyncError | null
 
 export function hasRepoRootSyncError(repoName: string): boolean {
   return errors.has(repoName);
-}
-
-/** Shared guard for SSE/file payloads. Used by the dashboard watcher + the SPA composable. */
-export function isRepoRootSyncError(v: unknown): v is RepoRootSyncError {
-  if (typeof v !== "object" || v === null) return false;
-  const r = v as Record<string, unknown>;
-  return (
-    (r.reason === "dirty" || r.reason === "rebase-conflict") &&
-    typeof r.detail === "string" &&
-    typeof r.since === "string" &&
-    typeof r.lastTriedAt === "string"
-  );
 }
 
 /** Test-only — clears the in-memory map. State files are not cleaned (tests use temp dirs). */

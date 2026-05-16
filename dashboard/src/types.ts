@@ -41,7 +41,7 @@ export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-list
 export type {
   RepoRootSyncError,
   RepoRootSyncReason,
-} from "@backend/worker/sync-root.js";
+} from "@backend/worker/sync-root-types.js";
 export type {
   SyncRootStateEntry,
 } from "@backend/dashboard/sync-root-routes.js";
