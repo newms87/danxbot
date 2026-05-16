@@ -33,9 +33,9 @@ const SRC_INDEX_TEXT = readFileSync(SRC_INDEX_PATH, "utf-8");
  *
  *   1. A v9 YAML on disk MUST be migrated to KNOWN_SCHEMA_MAX
  *      post-boot.
- *   2. A v2 YAML (below the legacy-to-v10 bridge floor, no
- *      registered migration)
- *      MUST land in `result.failed[]` AND the boot path MUST write
+ *   2. A v2 YAML (below the registry's lowest registered key of 3 —
+ *      the legacy-to-v10 bridge covers v3-v8) MUST land in
+ *      `result.failed[]` AND the boot path MUST write
  *      `<repo>/.danxbot/CRITICAL_FAILURE` with
  *      `source: "boot-migration-sweep"`. A v9 alongside still
  *      migrates cleanly — partial failure does not abort the sweep.
@@ -98,8 +98,7 @@ const v9Yaml = (id: string): string =>
 // Pre-bridge legacy schemas (3-8) all migrate cleanly via the
 // `legacy-to-v10` registry entry; v2 (and below) have no registered
 // migration, so they are the canonical "boot sweep refuses to load"
-// fixture. The historical name `v3Yaml` is preserved as an alias to
-// keep the regression-test diff narrow.
+// fixture.
 const v2Yaml = (id: string): string =>
   [
     "schema_version: 2",
@@ -107,7 +106,7 @@ const v2Yaml = (id: string): string =>
     `id: ${id}`,
     "status: ToDo",
     "type: Feature",
-    `title: ${id} prehistoric`,
+    `title: ${id} pre-bridge`,
     "description: body",
     "",
   ].join("\n");
@@ -163,11 +162,11 @@ describe("boot-sweep regression coverage (DX-597)", () => {
     expect(parsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
   });
 
-  it("regression #2: v3 + v9 mix — v9 migrates, v3 lands in failed[], CRITICAL_FAILURE written", async () => {
+  it("regression #2: v2 + v9 mix — v9 migrates, v2 lands in failed[], CRITICAL_FAILURE written", async () => {
     const v9Path = resolve(dir, ".danxbot", "issues", "open", "DX-2.yml");
-    const v3Path = resolve(dir, ".danxbot", "issues", "open", "DX-3.yml");
+    const v2Path = resolve(dir, ".danxbot", "issues", "open", "DX-3.yml");
     writeYaml(v9Path, v9Yaml("DX-2"));
-    writeYaml(v3Path, v2Yaml("DX-3"));
+    writeYaml(v2Path, v2Yaml("DX-3"));
 
     // Pre-flag absent.
     expect(existsSync(flagPath(dir))).toBe(false);
@@ -176,7 +175,7 @@ describe("boot-sweep regression coverage (DX-597)", () => {
       nowMs: Date.now(),
     });
 
-    // v9 migrated cleanly even though v3 alongside failed.
+    // v9 migrated cleanly even though v2 alongside failed.
     expect(result.migrated).toBe(1);
     const v9Parsed = parseYamlText(readFileSync(v9Path, "utf-8")) as Record<
       string,
@@ -184,11 +183,11 @@ describe("boot-sweep regression coverage (DX-597)", () => {
     >;
     expect(v9Parsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
 
-    // v3 surfaced in failed[] with the offending path.
+    // v2 surfaced in failed[] with the offending path.
     expect(result.failed.length).toBe(1);
-    expect(result.failed[0]!.path).toBe(v3Path);
-    // Tight match: v3 fails with the registry's "no migration
-    // registered for schema_version 3" message. A regex broad enough
+    expect(result.failed[0]!.path).toBe(v2Path);
+    // Tight match: v2 fails with the registry's "no migration
+    // registered for schema_version 2" message. A regex broad enough
     // to pass on any error string would hide actual regressions.
     expect(result.failed[0]!.error).toMatch(/no migration registered for schema_version 2/i);
 
@@ -199,7 +198,7 @@ describe("boot-sweep regression coverage (DX-597)", () => {
     expect(flag).not.toBeNull();
     expect(flag!.source).toBe("boot-migration-sweep");
     expect(flag!.reason).toMatch(/Boot migration sweep failed for 1 file/);
-    expect(flag!.detail).toContain(v3Path);
+    expect(flag!.detail).toContain(v2Path);
   });
 
   it("regression #3: closed mtime gate — 49h-old deleted, 47h-old migrated to v10", async () => {
