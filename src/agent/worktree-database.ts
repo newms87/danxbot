@@ -92,6 +92,11 @@ export type PgClientFactory = (
 export interface WorktreeSecretStore {
   read(repoRoot: string, worktreeName: string): string | null;
   write(repoRoot: string, worktreeName: string, password: string): void;
+  /**
+   * Idempotent remove — used by the bootstrap rollback path and the
+   * teardown path to drop a persisted password. Missing-file is success.
+   */
+  remove(repoRoot: string, worktreeName: string): void;
 }
 
 export interface ProvisionWorktreeDatabaseOpts {
@@ -119,6 +124,24 @@ export type ProvisionResult =
       workerDb: string;
       workerRole: string;
       created: { database: boolean; role: boolean };
+    };
+
+export interface DropWorktreeDatabaseOpts {
+  repoRoot: string;
+  worktreeName: string;
+  pgClientFactory?: PgClientFactory;
+  secretStore?: WorktreeSecretStore;
+  pgHostOverride?: string;
+  pgPortOverride?: number;
+}
+
+export type DropResult =
+  | { kind: "skipped"; reason: string }
+  | {
+      kind: "dropped";
+      workerDb: string;
+      workerRole: string;
+      dropped: { database: boolean; role: boolean };
     };
 
 export class WorktreeDatabaseError extends Error {
@@ -225,6 +248,10 @@ export const defaultSecretStore: WorktreeSecretStore = {
     const path = join(dir, `${worktreeName}.txt`);
     writeFileSync(path, `${password}\n`, { mode: 0o600 });
     chmodSync(path, 0o600);
+  },
+  remove(repoRoot, worktreeName) {
+    const path = join(repoRoot, DEFAULT_SECRET_DIR, `${worktreeName}.txt`);
+    rmSync(path, { force: true });
   },
 };
 
@@ -526,4 +553,121 @@ export function writeWorktreeEnvFile(
     rmSync(tmp, { force: true });
     throw err;
   }
+}
+
+// --------------------------------------------------------------------
+// Symmetric inverse of provisionWorktreeDatabase.
+//
+// Called by:
+//   - WorktreeManager.bootstrap rollback when a later provision step
+//     throws after the DB step succeeded
+//   - WorktreeManager.teardown when an agent is deleted via the
+//     dashboard
+//
+// Idempotent — running against an already-cleaned worktree returns
+// `{ kind: "dropped", dropped: { database: false, role: false } }`
+// without throwing. Partial-state recovery is supported (DB gone but
+// role still around, vice versa).
+// --------------------------------------------------------------------
+
+export async function dropWorktreeDatabase(
+  opts: DropWorktreeDatabaseOpts,
+): Promise<DropResult> {
+  if (!isLaravelPgsqlRepo(opts.repoRoot)) {
+    return { kind: "skipped", reason: "not a Laravel-pgsql consumer repo" };
+  }
+
+  const parentEnvPath = join(opts.repoRoot, ".env");
+  const parentContent = readFileSync(parentEnvPath, "utf-8");
+  const parentEnv = parseDotenv(parentContent);
+
+  const primaryDb = parentEnv.DB_DATABASE;
+  const rootUser = parentEnv.DB_USERNAME;
+  const rootPassword = parentEnv.DB_PASSWORD;
+  if (!primaryDb || !rootUser || rootPassword === undefined) {
+    throw new WorktreeDatabaseError(
+      `Parent .env at ${parentEnvPath} is missing DB_DATABASE / DB_USERNAME / DB_PASSWORD; cannot drop`,
+    );
+  }
+
+  const dbHost = opts.pgHostOverride ?? parentEnv.DB_HOST ?? "localhost";
+  const dbPort = opts.pgPortOverride ?? Number(parentEnv.DB_PORT ?? "5432");
+  if (!Number.isInteger(dbPort) || dbPort <= 0) {
+    throw new WorktreeDatabaseError(
+      `Invalid DB_PORT ${parentEnv.DB_PORT} — must be a positive integer`,
+    );
+  }
+
+  assertPgIdent(primaryDb, "primary_db");
+  const { workerDb, workerRole } = deriveWorktreeIdentifiers(
+    primaryDb,
+    opts.worktreeName,
+  );
+
+  const secretStore = opts.secretStore ?? defaultSecretStore;
+  const factory = opts.pgClientFactory ?? defaultPgClientFactory;
+  const client = await factory({
+    host: dbHost,
+    port: dbPort,
+    database: primaryDb,
+    user: rootUser,
+    password: rootPassword,
+  });
+
+  let dropped: { database: boolean; role: boolean };
+  try {
+    dropped = await dropDdl(client, { workerDb, workerRole });
+  } finally {
+    await client.end();
+  }
+
+  // Remove the secret file LAST — only after the DB-side teardown has
+  // returned. Removing first would leave a credentialled role on the
+  // server with no operator record of its password.
+  secretStore.remove(opts.repoRoot, opts.worktreeName);
+
+  log.info(
+    `dropWorktreeDatabase(${opts.worktreeName}): ${workerDb} / ${workerRole} cleared ` +
+      `(dropped db=${dropped.database}, role=${dropped.role})`,
+  );
+
+  return { kind: "dropped", workerDb, workerRole, dropped };
+}
+
+async function dropDdl(
+  client: PgAdminClient,
+  ctx: { workerDb: string; workerRole: string },
+): Promise<{ database: boolean; role: boolean }> {
+  // Database first — DROP ROLE with active OWNER-of relationships throws.
+  // Dropping the database removes the OWNER relationship, then ROLE drops
+  // cleanly.
+  const dbExists = await client.query(
+    `SELECT 1 FROM pg_database WHERE datname = $1`,
+    [ctx.workerDb],
+  );
+  let droppedDb = false;
+  if (dbExists.rows.length > 0) {
+    // Cancel any lingering sessions on the per-worktree DB so DROP doesn't
+    // race a still-open connection. Defense-in-depth — the per-worktree DB
+    // should be quiescent by the time teardown fires, but a leaked agent
+    // PID is exactly the kind of orphan this cleanup exists to handle.
+    await client.query(
+      `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+      [ctx.workerDb],
+    );
+    await client.query(`DROP DATABASE "${ctx.workerDb}"`);
+    droppedDb = true;
+  }
+
+  const roleExists = await client.query(
+    `SELECT 1 FROM pg_roles WHERE rolname = $1`,
+    [ctx.workerRole],
+  );
+  let droppedRole = false;
+  if (roleExists.rows.length > 0) {
+    await client.query(`DROP ROLE "${ctx.workerRole}"`);
+    droppedRole = true;
+  }
+
+  return { database: droppedDb, role: droppedRole };
 }

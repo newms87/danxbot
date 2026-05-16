@@ -110,6 +110,9 @@ function memorySecretStore(): WorktreeSecretStore & { reads: any[]; writes: any[
       writes.push({ repoRoot, name, pw });
       map.set(`${repoRoot}|${name}`, pw);
     },
+    remove(repoRoot, name) {
+      map.delete(`${repoRoot}|${name}`);
+    },
   };
 }
 
@@ -572,3 +575,141 @@ describe("provisionWorktreeDatabase", () => {
     expect((throwingClient as any).ended).toBe(true);
   });
 });
+
+// --------------------------------------------------------------------
+// dropWorktreeDatabase — symmetric inverse of provisionWorktreeDatabase.
+// Used by both the bootstrap-rollback path (failed create) and the
+// teardown path (operator-driven delete) to drop the per-worktree DB +
+// role + remove the persisted secret. Idempotent — running against an
+// already-cleaned worktree is a no-op return, not a throw.
+// --------------------------------------------------------------------
+
+import { dropWorktreeDatabase } from "./worktree-database.js";
+
+describe("dropWorktreeDatabase", () => {
+  it("returns skipped + makes ZERO postgres calls for non-Laravel repos", async () => {
+    mkdirSync(repoRoot, { recursive: true });
+    seedEnv("DB_CONNECTION=mysql\nDB_DATABASE=app\n");
+    const client = fakeClient();
+    const factory = factoryReturning(client);
+    const result = await dropWorktreeDatabase({
+      repoRoot,
+      worktreeName: "buildy",
+      pgClientFactory: factory,
+      secretStore: memorySecretStore(),
+    });
+    expect(result.kind).toBe("skipped");
+    expect(factory.configs).toHaveLength(0);
+    expect(client.queries).toHaveLength(0);
+  });
+
+  it("drops DB + role and removes the secret file", async () => {
+    seedEnv(LARAVEL_ENV);
+    const client = fakeClient({
+      existingRoles: ["agent_buildy"],
+      existingDatabases: ["laravel_buildy"],
+    });
+    const secrets = memorySecretStore();
+    secrets.write(repoRoot, "buildy", "to-be-removed");
+
+    const result = await dropWorktreeDatabase({
+      repoRoot,
+      worktreeName: "buildy",
+      pgClientFactory: factoryReturning(client),
+      secretStore: secrets,
+    });
+
+    expect(result.kind).toBe("dropped");
+    if (result.kind !== "dropped") return;
+    expect(result.workerDb).toBe("laravel_buildy");
+    expect(result.workerRole).toBe("agent_buildy");
+    expect(result.dropped).toEqual({ database: true, role: true });
+
+    const sqls = client.queries.map((q) => q.sql);
+    expect(sqls.some((s) => /DROP DATABASE.*"laravel_buildy"/.test(s))).toBe(true);
+    expect(sqls.some((s) => /DROP ROLE.*"agent_buildy"/.test(s))).toBe(true);
+    expect(client.endCalls).toBe(1);
+
+    // Secret removed
+    expect(secrets.read(repoRoot, "buildy")).toBeNull();
+  });
+
+  it("is idempotent — second drop is a no-op return, no throw", async () => {
+    seedEnv(LARAVEL_ENV);
+    const client = fakeClient({ existingRoles: [], existingDatabases: [] });
+    const secrets = memorySecretStore();
+
+    const result = await dropWorktreeDatabase({
+      repoRoot,
+      worktreeName: "ghost",
+      pgClientFactory: factoryReturning(client),
+      secretStore: secrets,
+    });
+
+    expect(result.kind).toBe("dropped");
+    if (result.kind !== "dropped") return;
+    expect(result.dropped).toEqual({ database: false, role: false });
+    const sqls = client.queries.map((q) => q.sql);
+    expect(sqls.some((s) => /DROP DATABASE/.test(s))).toBe(false);
+    expect(sqls.some((s) => /DROP ROLE/.test(s))).toBe(false);
+  });
+
+  it("drops the role even when the database was already removed (partial-state recovery)", async () => {
+    seedEnv(LARAVEL_ENV);
+    const client = fakeClient({
+      existingRoles: ["agent_buildy"],
+      existingDatabases: [], // DB already gone from a prior partial drop
+    });
+    const result = await dropWorktreeDatabase({
+      repoRoot,
+      worktreeName: "buildy",
+      pgClientFactory: factoryReturning(client),
+      secretStore: memorySecretStore(),
+    });
+    if (result.kind !== "dropped") throw new Error("expected dropped");
+    expect(result.dropped).toEqual({ database: false, role: true });
+    const sqls = client.queries.map((q) => q.sql);
+    expect(sqls.some((s) => /DROP ROLE.*"agent_buildy"/.test(s))).toBe(true);
+    expect(sqls.some((s) => /DROP DATABASE/.test(s))).toBe(false);
+  });
+
+  it("drops the database even when the role was already removed", async () => {
+    seedEnv(LARAVEL_ENV);
+    const client = fakeClient({
+      existingRoles: [],
+      existingDatabases: ["laravel_buildy"],
+    });
+    const result = await dropWorktreeDatabase({
+      repoRoot,
+      worktreeName: "buildy",
+      pgClientFactory: factoryReturning(client),
+      secretStore: memorySecretStore(),
+    });
+    if (result.kind !== "dropped") throw new Error("expected dropped");
+    expect(result.dropped).toEqual({ database: true, role: false });
+  });
+
+  it("closes the pg client even when DDL throws (defense-in-depth)", async () => {
+    seedEnv(LARAVEL_ENV);
+    let ended = false;
+    const throwingClient: any = {
+      queries: [],
+      async query() {
+        throw new Error("pg drop blew up");
+      },
+      async end() {
+        ended = true;
+      },
+    };
+    await expect(
+      dropWorktreeDatabase({
+        repoRoot,
+        worktreeName: "buildy",
+        pgClientFactory: async () => throwingClient,
+        secretStore: memorySecretStore(),
+      }),
+    ).rejects.toThrow("pg drop blew up");
+    expect(ended).toBe(true);
+  });
+});
+

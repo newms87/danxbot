@@ -76,6 +76,7 @@ import {
   isLaravelPgsqlRepo,
   provisionWorktreeDatabase,
 } from "./worktree-database.js";
+import { cleanupWorktreeArtifacts } from "./worktree-cleanup.js";
 
 /**
  * Minimal repo shape — needs `localPath` (where the actual repo lives,
@@ -496,6 +497,26 @@ export function createWorktreeManager(
           );
         }
       }
+
+      // Drop per-worktree DB role+db, free port-registry offset, remove
+      // persisted DB password, defensively rm any worktree-dir residue.
+      // Every step is idempotent + fail-soft inside the helper so a
+      // teardown call against an already-cleaned worktree (double DELETE
+      // or DELETE after a partial create) returns cleanly.
+      //
+      // Host-mode operator override — same env-sniff `provisionWorktree-
+      // Artifacts` performs. The dashboard container runs against the
+      // docker network (default `pgsql` DNS), while host-mode workers
+      // reach the same DB through `127.0.0.1:<host-port>`.
+      const pgHostOverride =
+        process.env.DANXBOT_PLATFORM_DB_HOST || undefined;
+      const pgPortOverride = process.env.DANXBOT_PLATFORM_DB_PORT
+        ? Number(process.env.DANXBOT_PLATFORM_DB_PORT)
+        : undefined;
+      await cleanupWorktreeArtifacts(ctx.hostPath, path, agentName, {
+        pgHostOverride,
+        pgPortOverride,
+      });
       log.info(`teardown(${agentName}): removed worktree at ${path}`);
     },
 

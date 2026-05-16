@@ -961,6 +961,72 @@ describe("handlePostAgent — WorktreeManager wiring (DX-161)", () => {
     ]);
   });
 
+  it("POST 500 on bootstrap failure: teardown is invoked BEFORE settings rollback (symmetric inverse)", async () => {
+    const wm = mkWorktreeManager({
+      bootstrapImpl: async () => {
+        throw new Error(
+          "provisionWorktreeDatabase: getaddrinfo ENOTFOUND pgsql",
+        );
+      },
+    });
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    // The SYMMETRIC inverse — teardown drops worktree dir, DB role+db,
+    // port-registry offset, and persisted DB password. Without this
+    // call, a mid-bootstrap throw (DB DNS unreachable, partial DDL,
+    // disk-full mid-symlink) leaves orphan artifacts on disk for the
+    // operator to clean up by hand. Asserted as exactly-once with the
+    // same repo + agent name as the bootstrap call.
+    expect(wm.teardownCalls).toEqual([
+      { localPath: expect.any(String), agentName: "alice" },
+    ]);
+  });
+
+  it("POST 500 on bootstrap failure: teardown failure does NOT mask the original bootstrap error", async () => {
+    const wm = mkWorktreeManager({
+      bootstrapImpl: async () => {
+        throw new Error("bootstrap-original-error");
+      },
+      teardownImpl: async () => {
+        throw new Error("teardown-also-failed");
+      },
+    });
+    const req = authReqJSON("POST", {
+      name: "alice",
+      bio: "x",
+      capabilities: ["issue-worker"],
+      schedule: VALID_SCHEDULE,
+      enabled: true,
+    });
+    const res = createMockRes();
+    await handlePostAgent(req, res, "danxbot", {
+      ...tmpDeps(),
+      worktreeManager: wm,
+    });
+
+    expect(res._getStatusCode()).toBe(500);
+    const body = JSON.parse(res._getBody());
+    // Operator sees the ORIGINAL boot error — diagnosing a half-cleaned-
+    // up partial create is what teardown's fail-soft contract is for.
+    expect(body.error).toMatch(/bootstrap-original-error/);
+    expect(body.error).not.toMatch(/teardown-also-failed/);
+    // Settings record STILL rolls back even when teardown threw.
+    const lastWrite = mockWriteSettings.mock.calls.at(-1)![1];
+    expect(lastWrite.agents.alice).toBeUndefined();
+  });
+
   it("POST 500 on bootstrap failure: settings record rolled back, error surfaces in body", async () => {
     const wm = mkWorktreeManager({
       bootstrapImpl: async () => {

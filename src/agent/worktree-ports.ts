@@ -188,3 +188,50 @@ export function provisionWorktreePorts(
   }
   return derivePortOverrides(offset);
 }
+
+/**
+ * Symmetric inverse of `allocateOffset` — drops the worktree's entry so
+ * its offset returns to the free pool. Returns `true` when an entry was
+ * removed, `false` when the name was not registered (rollback after a
+ * failed create + teardown after delete must be idempotent — both flows
+ * may call this against a name whose allocation never landed).
+ *
+ * Caller is responsible for `writeRegistry` to persist the change.
+ */
+export function freeOffset(
+  registry: PortRegistry,
+  worktreeName: string,
+): boolean {
+  if (Object.prototype.hasOwnProperty.call(registry.offsets, worktreeName)) {
+    delete registry.offsets[worktreeName];
+    return true;
+  }
+  return false;
+}
+
+/**
+ * File-round-trip companion to `provisionWorktreePorts`. Reads the
+ * registry, frees the offset, writes back. Returns `true` when the
+ * registry actually changed (offset was present + removed), `false`
+ * when there was nothing to release (rollback after a never-allocated
+ * worktree, or double-delete).
+ *
+ * No-op + zero side effects when the registry file does not exist —
+ * a rollback against a worktree whose port allocation never landed
+ * must not create an empty registry file.
+ */
+export function releaseWorktreePorts(
+  repoRoot: string,
+  worktreeName: string,
+): boolean {
+  const path = registryPath(repoRoot);
+  if (!existsSync(path)) {
+    return false;
+  }
+  const registry = readRegistry(repoRoot);
+  const changed = freeOffset(registry, worktreeName);
+  if (changed) {
+    writeRegistry(repoRoot, registry);
+  }
+  return changed;
+}

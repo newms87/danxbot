@@ -164,19 +164,37 @@ export async function handlePostAgent(
 
   // DX-161: bootstrap the agent's worktree at
   // `<repo>/.danxbot/worktrees/<name>/`. Runs AFTER the settings record
-  // lands so a bootstrap failure has a record to roll back. On failure we
-  // attempt the rollback (delete the just-added record) and return 500;
-  // a rollback failure is logged but the original 500 is still returned —
-  // the operator sees the bootstrap error message either way.
+  // lands so a bootstrap failure has a record to roll back. On failure
+  // we run the full SYMMETRIC inverse — `worktreeManager.teardown` drops
+  // any partially-provisioned worktree dir, DB role+db, port-registry
+  // offset, and persisted DB password — then delete the settings
+  // record. Without the inverse, a mid-bootstrap throw (e.g. DB DNS
+  // unreachable from this container) leaves orphan port allocations,
+  // worktree dirs, and DB roles for the operator to clean up by hand.
   if (deps.worktreeManager) {
     try {
       await deps.worktreeManager.bootstrap(repo, name);
     } catch (bootErr) {
       const bootMsg = bootErr instanceof Error ? bootErr.message : String(bootErr);
       log.error(
-        `handlePostAgent(${repo.name}, ${name}): bootstrap failed — rolling back settings record`,
+        `handlePostAgent(${repo.name}, ${name}): bootstrap failed — rolling back artifacts + settings record`,
         bootErr,
       );
+      // 1) Artifact rollback — teardown is fail-soft (worktree-cleanup
+      //    helper logs + swallows individual step failures) so even a
+      //    cascading DB-unreachable here won't mask the original boot
+      //    error.
+      try {
+        await deps.worktreeManager.teardown(repo, name);
+      } catch (cleanupErr) {
+        log.error(
+          `handlePostAgent(${repo.name}, ${name}): artifact teardown after failed bootstrap also failed — orphans may remain on disk`,
+          cleanupErr,
+        );
+      }
+      // 2) Settings record rollback — the artifact may or may not have
+      //    been cleaned, but the settings record MUST go so the operator
+      //    can retry POST without 409.
       try {
         await mutateAgents(
           repo.localPath,
