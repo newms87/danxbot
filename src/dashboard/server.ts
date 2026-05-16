@@ -79,6 +79,12 @@ import {
   handleGetIssueSubtree,
   handleImportIssues,
 } from "./issue-import.js";
+import {
+  handleCreateList,
+  handleDeleteList,
+  handleListLists,
+  handleUpdateList,
+} from "./lists-routes.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
   handleGetRepairError,
@@ -554,6 +560,42 @@ async function route(
       req,
       res,
       decodeURIComponent(issueSubtreeMatch[1]),
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // DX-583 — Lists CRUD. Matched ahead of the blanket /api/* gate so
+  // each handler's own `requireUser` produces the 401 (mirrors the
+  // issues PATCH / POST handlers). The collection endpoints
+  // (`/api/lists`) carry the repo in `?repo=`; mutation endpoints
+  // (`/api/lists/:id`) carry the id in the path. Successful writes
+  // publish `lists:updated` on the SSE bus.
+  if (method === "GET" && url.pathname === "/api/lists") {
+    await handleListLists(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  if (method === "POST" && url.pathname === "/api/lists") {
+    await handleCreateList(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  const listDetailMatch = url.pathname.match(/^\/api\/lists\/([^/]+)$/);
+  if (method === "PATCH" && listDetailMatch) {
+    await handleUpdateList(
+      req,
+      res,
+      decodeURIComponent(listDetailMatch[1]),
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
+    return true;
+  }
+  if (method === "DELETE" && listDetailMatch) {
+    await handleDeleteList(
+      req,
+      res,
+      decodeURIComponent(listDetailMatch[1]),
       url.searchParams.get("repo"),
       dispatchDeps,
     );

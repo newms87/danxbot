@@ -22,6 +22,7 @@ import type { SystemError } from "./system-errors.js";
 import type { Issue } from "../issue-tracker/interface.js";
 import type { RepairErrorWithAttempts } from "../system-repair/db-reads.js";
 import type { RepoRootSyncError } from "../worker/sync-root.js";
+import type { ListsFile } from "../lists-file.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -35,6 +36,7 @@ export type EventTopic =
   | "system-repair-error:updated"
   | "repo-root-sync:error"
   | "repo-root-sync:clear"
+  | "lists:updated"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
 export interface DispatchCreatedPayload {
@@ -148,6 +150,18 @@ export interface RepoRootSyncClearPayload {
   data: { repoName: string };
 }
 
+/**
+ * DX-583 — emitted by `src/dashboard/lists-routes.ts` after every
+ * successful `lists.yaml` write (create / update / delete). Subscribers
+ * (Settings tab in Phase 8) project the post-write file to their local
+ * state without a refetch. The full `ListsFile` is carried so the
+ * reducer can drop in the whole-array replacement without diffing.
+ */
+export interface ListsUpdatedPayload {
+  topic: "lists:updated";
+  data: { repoName: string; file: ListsFile };
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
@@ -158,7 +172,8 @@ export type BusEvent =
   | IssueUpdatedPayload
   | SystemRepairErrorUpdatedPayload
   | RepoRootSyncErrorPayload
-  | RepoRootSyncClearPayload;
+  | RepoRootSyncClearPayload
+  | ListsUpdatedPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

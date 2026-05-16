@@ -117,6 +117,16 @@ vi.mock("./settings-file.js", async () => {
   };
 });
 
+// DX-583 — boot path seeds `<repo>/.danxbot/lists.yaml` via ensureListsFile.
+// The mock repo path is a string literal, not a real disk path; stub the
+// helper so the boot pipeline doesn't try to mkdir/write under it.
+const mockEnsureListsFile = vi.fn().mockResolvedValue(undefined);
+vi.mock("./lists-file.js", async () => {
+  const actual =
+    await vi.importActual<typeof import("./lists-file.js")>("./lists-file.js");
+  return { ...actual, ensureListsFile: mockEnsureListsFile };
+});
+
 const mockStartIssuesMirror = vi.fn().mockResolvedValue({
   repoName: "mock",
   repoLocalPath: "/mock",
