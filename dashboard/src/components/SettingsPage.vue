@@ -7,7 +7,9 @@ import {
   type RepoInfo,
 } from "../api";
 import { useAgents } from "../composables/useAgents";
+import { useRepoRootSync } from "../composables/useRepoRootSync";
 import RepoCard from "./agents/RepoCard.vue";
+import RepoRootDirtyBanner from "./agents/RepoRootDirtyBanner.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
 import type { Feature } from "../types";
@@ -38,6 +40,18 @@ const {
   saveIssuePrefix,
   refresh: refreshAgents,
 } = useAgents();
+
+// DX-558 — root-clone sync banner. Mounted on the Settings page so
+// the operator sees it the moment they open the repo's settings; the
+// SSE feed keeps it live across feature toggle / config edits.
+const {
+  entries: repoRootSyncEntries,
+  retry: retryRepoRootSync,
+} = useRepoRootSync();
+
+const activeRepoRootSyncEntry = computed(() =>
+  repoRootSyncEntries.value.find((e) => e.repoName === activeRepoName.value) ?? null,
+);
 
 // The single repo this page renders. Empty `selectedRepo` falls back to
 // the first configured repo so the page is never blank when only one
@@ -157,6 +171,13 @@ function dismissResult(): void {
       </div>
 
       <template v-else>
+        <RepoRootDirtyBanner
+          v-if="activeRepoRootSyncEntry"
+          :error="activeRepoRootSyncEntry.error"
+          :repo-name="activeRepoRootSyncEntry.repoName"
+          :retrying="activeRepoRootSyncEntry.retrying"
+          @retry="retryRepoRootSync"
+        />
         <RepoCard
           :agent="activeAgent"
           :busy-feature="busyFeature"

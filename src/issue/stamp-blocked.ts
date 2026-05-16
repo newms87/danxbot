@@ -18,9 +18,9 @@
  * the caller path is responsible for surfacing the error as the right
  * HTTP status (400 vs 500) on the route.
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { issuePath } from "../poller/yaml-lifecycle.js";
-import { parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
+import { existsSync, readFileSync } from "node:fs";
+import { issuePath, writeIssue } from "../poller/yaml-lifecycle.js";
+import { parseIssue } from "../issue-tracker/yaml.js";
 import type { Issue } from "../issue-tracker/interface.js";
 
 export interface StampIssueBlockedInput {
@@ -33,13 +33,18 @@ export interface StampIssueBlockedInput {
   timestamp: string;
 }
 
-export function stampIssueBlocked({
+// DX-552 — writes go through `writeIssue` so the synchronous DB upsert
+// lands in lockstep with the file write. A bare `writeFileSync` leaves
+// the DB row stale; the picker's onComplete → loadLocal →
+// clearDispatchAndWrite chain in `multi-agent-pick.ts` then reads the
+// stale row and writes it back, clobbering this stamp.
+export async function stampIssueBlocked({
   repoLocalPath,
   candidateId,
   expectedPrefix,
   reason,
   timestamp,
-}: StampIssueBlockedInput): void {
+}: StampIssueBlockedInput): Promise<void> {
   const filePath = issuePath(repoLocalPath, candidateId, "open");
   if (!existsSync(filePath)) {
     throw new Error(
@@ -54,5 +59,5 @@ export function stampIssueBlocked({
     status: "Blocked",
     blocked: { reason, timestamp },
   };
-  writeFileSync(filePath, serializeIssue(next));
+  await writeIssue(repoLocalPath, next);
 }

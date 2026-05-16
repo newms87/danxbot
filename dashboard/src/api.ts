@@ -17,6 +17,7 @@ import type {
   IssuePatch,
   JsonlBlock,
   RepairErrorWithAttempts,
+  SyncRootStateEntry,
   SystemError,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
@@ -1056,6 +1057,31 @@ export async function sendChatMessage(
     );
   }
   return res.json();
+}
+
+/**
+ * DX-558 — initial-hydrate fetch for the root-clone sync banner.
+ * Returns one entry per repo that is currently in error state; empty
+ * array when every root clone is in sync. Subsequent updates flow
+ * over the `/api/stream` SSE channel via `useRepoRootSync`.
+ */
+export async function fetchSyncRootStates(): Promise<SyncRootStateEntry[]> {
+  const res = await fetchWithAuth("/api/sync-root");
+  if (!res.ok) throw new Error(`fetchSyncRootStates failed: ${res.status}`);
+  const body = (await res.json()) as { states: SyncRootStateEntry[] };
+  return body.states;
+}
+
+/** DX-558 — "Retry now" button: kick a fresh sync against the named repo's root clone. */
+export async function retrySyncRoot(repoName: string): Promise<void> {
+  const res = await fetchWithAuth(
+    `/api/sync-root/${encodeURIComponent(repoName)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`retrySyncRoot failed: ${res.status}${body ? ` — ${body}` : ""}`);
+  }
 }
 
 export function followDispatch(

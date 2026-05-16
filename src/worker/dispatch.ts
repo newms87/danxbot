@@ -1522,7 +1522,7 @@ async function handleStopFromDb(
     }
     const nowIso = new Date().toISOString();
     try {
-      stampIssueBlocked({
+      await stampIssueBlocked({
         repoLocalPath: repo.localPath,
         candidateId: dispatch.issueId,
         expectedPrefix: repo.issuePrefix,

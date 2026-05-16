@@ -21,6 +21,7 @@ import type { AgentSnapshot } from "./agents-list.js";
 import type { SystemError } from "./system-errors.js";
 import type { Issue } from "../issue-tracker/interface.js";
 import type { RepairErrorWithAttempts } from "../system-repair/db-reads.js";
+import type { RepoRootSyncError } from "../worker/sync-root.js";
 
 /** All first-class topic literals. Wildcard prefix patterns are also valid but
  * callers must supply the exact topic string (e.g. `dispatch:jsonl:${id}`). */
@@ -32,6 +33,8 @@ export type EventTopic =
   | "issue:updated"
   | "system-errors"
   | "system-repair-error:updated"
+  | "repo-root-sync:error"
+  | "repo-root-sync:clear"
   | (string & {}); // open-ended for `dispatch:jsonl:<id>`
 
 export interface DispatchCreatedPayload {
@@ -123,6 +126,28 @@ export type SystemRepairErrorUpdatedPayload = {
     | { error_id: number; removed: true };
 };
 
+/**
+ * DX-558 — emitted by `src/dashboard/sync-root-watcher.ts` when the
+ * worker's `<repoRoot>/.danxbot/sync-root-state.json` file appears /
+ * changes / vanishes. The worker mirrors its in-memory error map
+ * onto that file (see `src/worker/sync-root.ts`); the watcher
+ * republishes here so the SPA banner updates via `/api/stream`
+ * without polling.
+ *
+ * `repo-root-sync:error` payload includes the full error record so
+ * subscribers project the banner without a refetch. `repo-root-sync:clear`
+ * carries only the repo name — the banner unmounts on clear.
+ */
+export interface RepoRootSyncErrorPayload {
+  topic: "repo-root-sync:error";
+  data: { repoName: string; error: RepoRootSyncError };
+}
+
+export interface RepoRootSyncClearPayload {
+  topic: "repo-root-sync:clear";
+  data: { repoName: string };
+}
+
 export type BusEvent =
   | DispatchCreatedPayload
   | DispatchUpdatedPayload
@@ -131,7 +156,9 @@ export type BusEvent =
   | SystemErrorPayload
   | IssuePrefixChangedPayload
   | IssueUpdatedPayload
-  | SystemRepairErrorUpdatedPayload;
+  | SystemRepairErrorUpdatedPayload
+  | RepoRootSyncErrorPayload
+  | RepoRootSyncClearPayload;
 
 export type BusEventCallback = (event: BusEvent) => void;
 

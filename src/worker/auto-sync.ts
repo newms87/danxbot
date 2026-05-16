@@ -44,6 +44,7 @@
 
 import { reconcileIssue } from "../issue/reconcile.js";
 import { createLogger } from "../logger.js";
+import { syncRepoRoot } from "./sync-root.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 import type { ReconcileTrigger } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
@@ -62,6 +63,11 @@ export interface AutoSyncDeps {
     id: string,
     trigger: ReconcileTrigger,
   ) => Promise<unknown>;
+  /**
+   * DX-558 — root-clone sync seam. Production binds to `syncRepoRoot`;
+   * tests inject a spy to assert call ordering relative to reconcile.
+   */
+  syncRoot?: (input: { repoName: string; repoLocalPath: string }) => Promise<unknown>;
 }
 
 /**
@@ -86,9 +92,12 @@ export async function autoSyncTrackedIssue(
     // No row → dispatch already cleaned up by another path; nothing to
     // reconcile. No `issueId` → dispatch wasn't bound to a card YAML
     // (Slack chat, board-chat, ideator, or /api/launch without an issue),
-    // so there is no YAML for reconcile to operate on.
-    if (!row || row.issueId === null) return;
-    await deps.reconcile(
+    // so there is no YAML for reconcile to operate on. Skip the
+    // reconcile + finalize branch but FALL THROUGH to the root-clone
+    // sync below — every terminal dispatch (issue-bound or not) can
+    // have advanced `origin/main`, so the root clone may still drift.
+    if (row && row.issueId !== null) {
+      await deps.reconcile(
       {
         name: repo.name,
         localPath: repo.localPath,
@@ -97,11 +106,23 @@ export async function autoSyncTrackedIssue(
       row.issueId,
       "lifecycle",
     );
+    }
   } catch (err) {
     log.error(
       `[Dispatch ${jobId}] post-dispatch reconcile failed (non-fatal)`,
       err,
     );
+  }
+  // DX-558 — root-clone sync. Pulls `origin/main` into the operator's
+  // root checkout so the next worktree spawn / dashboard source-tree
+  // view sees the commits the agent just pushed. MUST fire AFTER
+  // reconcile so a sync failure cannot block tracker mirror /
+  // scheduler poke. Errors are best-effort (logged, never rethrown).
+  try {
+    const sync = deps.syncRoot ?? syncRepoRoot;
+    await sync({ repoName: repo.name, repoLocalPath: repo.localPath });
+  } catch (err) {
+    log.error(`[Dispatch ${jobId}] post-dispatch root sync threw (non-fatal)`, err);
   }
   // The freed-agent picker poke does NOT live here. It MUST fire AFTER
   // the dispatch row is marked terminal — otherwise `pickFreeAgent`

@@ -515,6 +515,20 @@ vi.mock("../dispatch/scheduler.js", () => ({
     mockFirePickerWithMutex(...args),
 }));
 
+// DX-558: per-tick root-clone sync gate. Cron must call `syncRepoRoot`
+// ONLY when `hasRepoRootSyncError(repoName)` returns true — the steady
+// green path pays one Map lookup per tick. Mocks intercept both
+// functions so tests can flip the gate and assert the call.
+const mockHasRepoRootSyncError = vi.fn().mockReturnValue(false);
+const mockSyncRepoRoot = vi
+  .fn()
+  .mockResolvedValue({ status: "synced", error: null });
+vi.mock("../worker/sync-root.js", () => ({
+  hasRepoRootSyncError: (...args: unknown[]) =>
+    mockHasRepoRootSyncError(...args),
+  syncRepoRoot: (...args: unknown[]) => mockSyncRepoRoot(...args),
+}));
+
 // DX-368: mock runAuditPass so the ordering + audit-throws tests can
 // drive specific scenarios without the real reconcile pass touching
 // the (mocked) filesystem. Default = clean tick (no drift, no errors).
@@ -2938,6 +2952,54 @@ describe("poll — DX-368 cron-tick picker safety net", () => {
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 
+    expect(mockFirePickerWithMutex).not.toHaveBeenCalled();
+  });
+});
+
+describe("poll — DX-558 root-clone sync per-tick retry gate", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    _resetForTesting();
+    resetTrackerMocks();
+    mockSpawn.mockReturnValue(createFakeSpawnResult());
+    setupRepoConfigMocks();
+    mockIsFeatureEnabled.mockReset();
+    mockIsFeatureEnabled.mockImplementation(
+      (...args: unknown[]) =>
+        (args[1] as string) !== "ideator" &&
+        (args[1] as string) !== "autoTriage",
+    );
+    // Reset the gate mocks to the steady-state default per case.
+    mockHasRepoRootSyncError.mockReset().mockReturnValue(false);
+    mockSyncRepoRoot
+      .mockReset()
+      .mockResolvedValue({ status: "synced", error: null });
+  });
+
+  it("does NOT call syncRepoRoot when no prior error is recorded (green steady state)", async () => {
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockHasRepoRootSyncError).toHaveBeenCalledWith(
+      MOCK_REPO_CONTEXT.name,
+    );
+    expect(mockSyncRepoRoot).not.toHaveBeenCalled();
+  });
+
+  it("calls syncRepoRoot when the gate reports a prior error", async () => {
+    mockHasRepoRootSyncError.mockReturnValue(true);
+    await poll(MOCK_REPO_CONTEXT);
+    expect(mockSyncRepoRoot).toHaveBeenCalledTimes(1);
+    expect(mockSyncRepoRoot).toHaveBeenCalledWith({
+      repoName: MOCK_REPO_CONTEXT.name,
+      repoLocalPath: MOCK_REPO_CONTEXT.localPath,
+    });
+  });
+
+  it("rejection from syncRepoRoot is caught by _sync's outer guard (tick survives, picker skipped this tick)", async () => {
+    mockHasRepoRootSyncError.mockReturnValue(true);
+    mockSyncRepoRoot.mockRejectedValueOnce(new Error("boom"));
+    await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
+    // The outer catch fires before the picker line — same shape as
+    // the DX-368 "audit-pass throws" test. The next tick re-runs.
     expect(mockFirePickerWithMutex).not.toHaveBeenCalled();
   });
 });
