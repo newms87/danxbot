@@ -52,11 +52,12 @@ describe("getDispatchCandidate", () => {
     expect(sql).toMatch(/e\.status = 'open'/);
     expect(sql).toMatch(/e\.count >= \$2/);
     expect(sql).toMatch(/COUNT\(\*\) FROM system_error_repairs/);
-    expect(sql).toMatch(/< 3/);
+    expect(sql).toMatch(/< \$3/);
     expect(sql).toMatch(/r2\.ended_at IS NULL/);
     expect(sql).toMatch(/ORDER BY e\.count DESC, e\.last_seen DESC/);
     expect(sql).toMatch(/LIMIT 1/);
-    expect(params).toEqual(["danxbot", 5]);
+    // 3rd param is REPAIR_CAP from types.ts (currently 3 — DX-566).
+    expect(params).toEqual(["danxbot", 5, 3]);
   });
 
   it("returns the row when one matches", async () => {

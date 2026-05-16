@@ -37,17 +37,22 @@ import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { Pool } from "pg";
-import type {
-  SystemErrorStatus,
-  SystemErrorRepairRow,
-  SystemErrorRepairVerdict,
+import {
+  REPAIR_CAP,
+  type SystemErrorStatus,
+  type SystemErrorRepairRow,
+  type SystemErrorRepairVerdict,
 } from "./types.js";
 import { publishRepairErrorUpdated } from "./publish.js";
 
 /**
- * `nextErrorStatus` is `null` when the verdict leaves the error row
- * unchanged (the `failed` branch — Phase 6 owns any further status
- * transition). Non-null on `fixed` / `unfixable`.
+ * `nextErrorStatus` is the post-finalize status the hook stamped on
+ * the linked `system_errors` row. Always non-null since DX-566 Phase 6
+ * — every verdict now produces a deterministic status:
+ *   - `fixed` → `fixed`
+ *   - `unfixable` → `unfixable`
+ *   - `failed` + attempt_n >= 3 → `unfixable` (3-attempt cap)
+ *   - `failed` + attempt_n < 3 → `open` (next tick retries)
  */
 export type FinalizeResult =
   | { kind: "no-match" }
@@ -57,7 +62,7 @@ export type FinalizeResult =
       attemptId: number;
       errorId: number;
       verdict: SystemErrorRepairVerdict;
-      nextErrorStatus: SystemErrorStatus | null;
+      nextErrorStatus: SystemErrorStatus;
     };
 
 export interface FinalizeSelfRepairInput {
@@ -103,13 +108,11 @@ export async function finalizeSelfRepair(
     [verdict, reportMd, row.id],
   );
 
-  const nextErrorStatus = computeErrorStatusFromVerdict(verdict);
-  if (nextErrorStatus !== null) {
-    await db.query(
-      `UPDATE system_errors SET status = $1 WHERE id = $2`,
-      [nextErrorStatus, row.error_id],
-    );
-  }
+  const nextErrorStatus = computeErrorStatusFromVerdict(verdict, row.attempt_n);
+  await db.query(
+    `UPDATE system_errors SET status = $1 WHERE id = $2`,
+    [nextErrorStatus, row.error_id],
+  );
 
   // DX-565: fan out the post-finalize snapshot for the Self-Repair tab.
   // Fires once at the end of the finalize transition so subscribers see
@@ -158,22 +161,29 @@ export function parseVerdictFromSummary(
 }
 
 /**
- * Maps a Phase-3 verdict to the post-finalize `system_errors.status`
- * the hook stamps. The `failed` branch returns `null` — the error row
- * stays `repairing` (per AC5 of DX-563). Phase 6 wires the post-cap
- * flip from `repairing` (with 3 closed attempts) to `unfixable`.
+ * DX-566 Phase 6 cap rules.
+ *
+ * Maps `(verdict, attempt_n)` to the post-finalize
+ * `system_errors.status` the hook stamps:
+ *   - `fixed` → `fixed`
+ *   - `unfixable` → `unfixable` (agent self-declared)
+ *   - `failed` + attempt_n >= 3 → `unfixable` (3-attempt cap exhausted)
+ *   - `failed` + attempt_n < 3 → `open` (next dispatcher tick retries)
+ *
+ * The cap is enforced by `attempt_n` itself: the dispatcher writes
+ * `attempt_n = priorAttempts.length + 1` and refuses to dispatch a
+ * row that already has >= 3 attempts (`dispatch-pick.ts`'s WHERE
+ * clause). Phase 6 closes the loop on `system_errors.status` so the
+ * cap signal is visible in the dashboard + the picker filter.
  */
 export function computeErrorStatusFromVerdict(
   verdict: SystemErrorRepairVerdict,
-): SystemErrorStatus | null {
-  switch (verdict) {
-    case "fixed":
-      return "fixed";
-    case "unfixable":
-      return "unfixable";
-    case "failed":
-      return null;
-  }
+  attemptN: number,
+): SystemErrorStatus {
+  if (verdict === "fixed") return "fixed";
+  if (verdict === "unfixable") return "unfixable";
+  // verdict === "failed"
+  return attemptN >= REPAIR_CAP ? "unfixable" : "open";
 }
 
 const REPAIR_REPORT_HEADER_RE = /^##\s+Repair Report/m;

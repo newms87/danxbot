@@ -33,6 +33,7 @@ function row(overrides: Partial<SystemErrorRow> = {}): SystemErrorRow {
     last_seen: new Date("2026-05-15T22:00:00Z"),
     status: "open",
     repo: "danxbot",
+    recurrence_count: 0,
     ...overrides,
   };
 }

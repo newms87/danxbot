@@ -41,6 +41,7 @@ function errorRow(id: number, status: string = "open"): Record<string, unknown> 
     last_seen: new Date("2026-05-15T00:00:00Z"),
     status,
     repo: "danxbot",
+    recurrence_count: 0,
   };
 }
 
@@ -182,7 +183,7 @@ describe("resetRepairError", () => {
     expect(sqls[1]).toMatch(/SELECT/i);
     expect(sqls[1]).toMatch(/FOR UPDATE/i);
     expect(sqls[2]).toMatch(/DELETE FROM system_error_repairs/);
-    expect(sqls[3]).toMatch(/UPDATE system_errors SET status = 'open'/);
+    expect(sqls[3]).toMatch(/UPDATE system_errors SET status = 'open', recurrence_count = 0/);
     expect(sqls[4]).toMatch(/COMMIT/i);
     expect(client!.release).toHaveBeenCalled();
   });

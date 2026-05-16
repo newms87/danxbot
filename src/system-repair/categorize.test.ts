@@ -15,6 +15,7 @@ import {
 } from "./categorize.js";
 import { createTestDb, type TestDbHandle } from "../db/test-db.js";
 import { up as up021 } from "../db/migrations/021_system_errors.js";
+import { up as up022 } from "../db/migrations/022_system_errors_recurrence.js";
 import type { PoolClient } from "pg";
 
 /**
@@ -35,6 +36,7 @@ if (!handle) {
   );
 } else {
   await runMigration(handle.pool, up021);
+  await runMigration(handle.pool, up022);
 }
 
 async function runMigration(
@@ -453,6 +455,118 @@ describe("recordError", () => {
         samplePayload: { raw_msg: "nameless" },
       });
       expect(row.err_class).toBe("Error");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-566: recurrence on a `fixed` row flips back to `open` and bumps recurrence_count",
+    async () => {
+      const seed = `rec1_${Math.random().toString(36).slice(2, 8)}`;
+      const r1 = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "recurrence",
+        err: makeErr("E", "recurrence-1"),
+        samplePayload: { raw_msg: "rec" },
+      });
+      await handle!.pool.query(
+        `UPDATE system_errors SET status='fixed' WHERE id=$1`,
+        [r1.id],
+      );
+      const r2 = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "recurrence",
+        err: makeErr("E", "recurrence-1"),
+        samplePayload: { raw_msg: "rec" },
+      });
+      expect(r2.id).toBe(r1.id);
+      expect(r2.status).toBe("open");
+      expect(r2.recurrence_count).toBe(1);
+      expect(r2.count).toBe(2);
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-566: 3rd recurrence (recurrence_count would be 3) flips straight to `unfixable`",
+    async () => {
+      const seed = `rec3_${Math.random().toString(36).slice(2, 8)}`;
+      const r1 = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "recurrence",
+        err: makeErr("E", "recurrence-3"),
+        samplePayload: { raw_msg: "rec" },
+      });
+      // Simulate two prior fixed/recur cycles by stamping
+      // recurrence_count=2 + status='fixed' directly.
+      await handle!.pool.query(
+        `UPDATE system_errors SET status='fixed', recurrence_count=2 WHERE id=$1`,
+        [r1.id],
+      );
+      const r2 = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "recurrence",
+        err: makeErr("E", "recurrence-3"),
+        samplePayload: { raw_msg: "rec" },
+      });
+      expect(r2.id).toBe(r1.id);
+      expect(r2.recurrence_count).toBe(3);
+      expect(r2.status).toBe("unfixable");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-566: recurrence_count does NOT bump on `open` / `repairing` / `unfixable` rows",
+    async () => {
+      const seed = `rec_nobump_${Math.random().toString(36).slice(2, 8)}`;
+      const r1 = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "no-bump",
+        err: makeErr("E", "no-bump"),
+        samplePayload: { raw_msg: "x" },
+      });
+      // open: stays open, recurrence_count stays 0
+      const rOpen = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "no-bump",
+        err: makeErr("E", "no-bump"),
+        samplePayload: { raw_msg: "x" },
+      });
+      expect(rOpen.id).toBe(r1.id);
+      expect(rOpen.recurrence_count).toBe(0);
+      expect(rOpen.status).toBe("open");
+      // repairing: stays repairing, recurrence_count stays 0
+      await handle!.pool.query(
+        `UPDATE system_errors SET status='repairing' WHERE id=$1`,
+        [r1.id],
+      );
+      const rRepairing = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "no-bump",
+        err: makeErr("E", "no-bump"),
+        samplePayload: { raw_msg: "x" },
+      });
+      expect(rRepairing.status).toBe("repairing");
+      expect(rRepairing.recurrence_count).toBe(0);
+      // unfixable: stays unfixable, recurrence_count stays 0
+      await handle!.pool.query(
+        `UPDATE system_errors SET status='unfixable' WHERE id=$1`,
+        [r1.id],
+      );
+      const rUnfix = await recordError({
+        db: handle!.pool,
+        repo: seed,
+        component: "no-bump",
+        err: makeErr("E", "no-bump"),
+        samplePayload: { raw_msg: "x" },
+      });
+      expect(rUnfix.status).toBe("unfixable");
+      expect(rUnfix.recurrence_count).toBe(0);
     },
   );
 

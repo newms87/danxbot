@@ -74,15 +74,22 @@ describe("parseVerdictFromSummary", () => {
   });
 });
 
-describe("computeErrorStatusFromVerdict", () => {
-  it("fixed → fixed", () => {
-    expect(computeErrorStatusFromVerdict("fixed")).toBe("fixed");
+describe("computeErrorStatusFromVerdict (DX-566 Phase 6 cap)", () => {
+  it("fixed → fixed regardless of attempt_n", () => {
+    expect(computeErrorStatusFromVerdict("fixed", 1)).toBe("fixed");
+    expect(computeErrorStatusFromVerdict("fixed", 3)).toBe("fixed");
   });
-  it("unfixable → unfixable", () => {
-    expect(computeErrorStatusFromVerdict("unfixable")).toBe("unfixable");
+  it("unfixable (agent-declared) → unfixable regardless of attempt_n", () => {
+    expect(computeErrorStatusFromVerdict("unfixable", 1)).toBe("unfixable");
+    expect(computeErrorStatusFromVerdict("unfixable", 3)).toBe("unfixable");
   });
-  it("failed → null (leaves error row at 'repairing' — Phase 6 owns next-step status)", () => {
-    expect(computeErrorStatusFromVerdict("failed")).toBeNull();
+  it("failed + attempt_n < 3 → open (next tick retries)", () => {
+    expect(computeErrorStatusFromVerdict("failed", 1)).toBe("open");
+    expect(computeErrorStatusFromVerdict("failed", 2)).toBe("open");
+  });
+  it("failed + attempt_n >= 3 → unfixable (3-attempt cap)", () => {
+    expect(computeErrorStatusFromVerdict("failed", 3)).toBe("unfixable");
+    expect(computeErrorStatusFromVerdict("failed", 4)).toBe("unfixable");
   });
 });
 
@@ -198,22 +205,39 @@ describe("finalizeSelfRepair", () => {
     expect(flipParams).toEqual(["unfixable", 8]);
   });
 
-  it("on failed verdict, keeps error 'open' (no flip query)", async () => {
+  it("DX-566: on failed verdict + attempt_n < 3, flips error back to 'open' so the next tick retries", async () => {
     const repoLocalPath = mkdtempSync(join(tmpdir(), "self-repair-finalize-"));
     writeCardYaml(repoLocalPath, "DX-702", []);
     const db = mockPool([
       [{ id: 13, error_id: 9, attempt_n: 2, card_id: "DX-702", dispatch_id: null, started_at: new Date(), ended_at: null, verdict: null, report_md: null }],
       [],
+      [],
     ]);
     const result = await finalizeSelfRepair({ db: db as any, issueId: "DX-702", summary: "failed: need more debug info", repoLocalPath });
     expect(result.kind).toBe("finalized");
     if (result.kind === "finalized") {
-      expect(result.nextErrorStatus).toBeNull();
+      expect(result.nextErrorStatus).toBe("open");
     }
-    // 2 queries total: lookup + update repair row. NO flip query — the
-    // error row stays at `repairing` per AC5; Phase 6 owns the next
-    // transition once the 3-attempt cap is reached.
-    expect(db.query).toHaveBeenCalledTimes(2);
+    const [flipSql, flipParams] = db.query.mock.calls[2];
+    expect(flipSql).toMatch(/UPDATE system_errors SET status = \$1/);
+    expect(flipParams).toEqual(["open", 9]);
+  });
+
+  it("DX-566: on failed verdict + attempt_n >= 3, flips error to 'unfixable' (3-attempt cap)", async () => {
+    const repoLocalPath = mkdtempSync(join(tmpdir(), "self-repair-finalize-"));
+    writeCardYaml(repoLocalPath, "DX-712", []);
+    const db = mockPool([
+      [{ id: 23, error_id: 31, attempt_n: 3, card_id: "DX-712", dispatch_id: null, started_at: new Date(), ended_at: null, verdict: null, report_md: null }],
+      [],
+      [],
+    ]);
+    const result = await finalizeSelfRepair({ db: db as any, issueId: "DX-712", summary: "failed: still broken after retry", repoLocalPath });
+    expect(result.kind).toBe("finalized");
+    if (result.kind === "finalized") {
+      expect(result.nextErrorStatus).toBe("unfixable");
+    }
+    const [, flipParams] = db.query.mock.calls[2];
+    expect(flipParams).toEqual(["unfixable", 31]);
   });
 
   it("DX-565: publishes the post-finalize snapshot on every terminal verdict", async () => {

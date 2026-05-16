@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestDb, type TestDbHandle } from "../db/test-db.js";
 import { up as up021 } from "../db/migrations/021_system_errors.js";
+import { up as up022 } from "../db/migrations/022_system_errors_recurrence.js";
 import { recordError } from "./categorize.js";
 import { runSelfRepairDispatch } from "../cron/jobs/self-repair-dispatch.js";
 import {
@@ -31,6 +32,7 @@ if (!handle) {
   );
 } else {
   await runMigration(handle.pool, up021);
+  await runMigration(handle.pool, up022);
 }
 
 afterAll(async () => {

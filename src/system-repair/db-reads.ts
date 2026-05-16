@@ -52,7 +52,8 @@ export interface RepairErrorWithAttempts {
 
 const SELECT_ERROR_COLS =
   "id, signature_hash, category_key, component, err_class, " +
-  "normalized_msg, sample_payload, count, first_seen, last_seen, status, repo";
+  "normalized_msg, sample_payload, count, first_seen, last_seen, status, repo, " +
+  "recurrence_count";
 
 const SELECT_ATTEMPT_COLS =
   "id, error_id, attempt_n, card_id, dispatch_id, " +
@@ -150,10 +151,12 @@ export type ResetRepairErrorResult =
   | { kind: "reset"; row: SystemErrorRow };
 
 /**
- * Operator-only reset. Clears every repair attempt for the error AND
- * flips the row's status back to `open`. Idempotent — re-running on a
- * row already at `open` with no attempts is a no-op that still returns
- * the post-update row.
+ * Operator-only reset. Clears every repair attempt for the error,
+ * flips the row's status back to `open`, AND resets `recurrence_count`
+ * to 0 so the cap clock starts fresh after the operator's manual
+ * intervention (DX-566 Phase 6 AC7). Idempotent — re-running on a row
+ * already at `open` with no attempts + recurrence_count=0 returns the
+ * post-update row unchanged.
  *
  * Single transaction so concurrent dispatchers cannot pick the same
  * error while reset is mid-flight: the DELETE blocks any other
@@ -180,7 +183,7 @@ export async function resetRepairError(
       [id],
     );
     const updated = await client.query<SystemErrorRowFromDb>(
-      `UPDATE system_errors SET status = 'open' WHERE id = $1 RETURNING ${SELECT_ERROR_COLS}`,
+      `UPDATE system_errors SET status = 'open', recurrence_count = 0 WHERE id = $1 RETURNING ${SELECT_ERROR_COLS}`,
       [id],
     );
     await client.query("COMMIT");

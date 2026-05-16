@@ -73,6 +73,7 @@ function makeRow(id: number, overrides: Partial<RepairErrorWithAttempts["error"]
       last_seen: new Date("2026-05-15T00:00:00Z"),
       status: "open",
       repo: "danxbot",
+      recurrence_count: 0,
       ...overrides,
     },
     attempts: [],

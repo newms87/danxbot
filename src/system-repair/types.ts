@@ -9,6 +9,26 @@
 
 export type SystemErrorStatus = "open" | "repairing" | "fixed" | "unfixable";
 
+/**
+ * DX-566 Phase 6 — single source of truth for the self-repair cap.
+ *
+ * Three call sites read it; they MUST agree:
+ *   - `dispatch-pick.ts` — WHERE clause refuses to pick rows with
+ *     `>= REPAIR_CAP` prior attempts.
+ *   - `finalize.ts` — `failed` verdict at `attempt_n >= REPAIR_CAP`
+ *     flips the row to `unfixable`.
+ *   - `categorize.ts` — recurrence transition at
+ *     `recurrence_count + 1 >= REPAIR_CAP` flips straight to
+ *     `unfixable` instead of `open`.
+ *
+ * Changing this value here propagates to all three. The dashboard
+ * mirrors it via the `recurrence_count >= REPAIR_CAP` branch in
+ * `SelfRepairTab.vue`; keep the SPA-side literal in sync by hand if
+ * the cap ever moves (the cross-process boundary makes a runtime
+ * import inconvenient).
+ */
+export const REPAIR_CAP = 3;
+
 export interface SystemErrorRow {
   id: number;
   signature_hash: string;
@@ -22,6 +42,13 @@ export interface SystemErrorRow {
   last_seen: Date;
   status: SystemErrorStatus;
   repo: string;
+  /**
+   * DX-566 (Phase 6): bumped each time `recordError` sees a NEW
+   * occurrence of a signature whose current `status='fixed'`. The
+   * conflict clause flips the row back to `open` on the bump; on the
+   * 3rd recurrence it flips straight to `unfixable` instead.
+   */
+  recurrence_count: number;
 }
 
 export interface SystemErrorSamplePayload {

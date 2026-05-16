@@ -2,6 +2,7 @@ import { describe, it, expect, afterAll } from "vitest";
 import { reportSystemError } from "./report.js";
 import { createTestDb, type TestDbHandle } from "../db/test-db.js";
 import { up as up021 } from "../db/migrations/021_system_errors.js";
+import { up as up022 } from "../db/migrations/022_system_errors_recurrence.js";
 import type { PoolClient } from "pg";
 
 /**
@@ -32,6 +33,7 @@ if (!handle) {
   );
 } else {
   await runMigration(handle.pool, up021);
+  await runMigration(handle.pool, up022);
 }
 
 afterAll(async () => {

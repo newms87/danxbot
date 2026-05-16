@@ -14,10 +14,11 @@
  */
 
 import type { Pool } from "pg";
-import type {
-  SystemErrorRow,
-  SystemErrorRepairRow,
-  SystemErrorStatus,
+import {
+  REPAIR_CAP,
+  type SystemErrorRow,
+  type SystemErrorRepairRow,
+  type SystemErrorStatus,
 } from "./types.js";
 import { publishRepairErrorUpdated } from "./publish.js";
 
@@ -61,7 +62,7 @@ export async function getDispatchCandidate(
     `
     SELECT e.id, e.signature_hash, e.category_key, e.component, e.err_class,
            e.normalized_msg, e.sample_payload, e.count, e.first_seen, e.last_seen,
-           e.status, e.repo
+           e.status, e.repo, e.recurrence_count
     FROM system_errors e
     WHERE e.repo = $1
       AND e.status = 'open'
@@ -69,7 +70,7 @@ export async function getDispatchCandidate(
       AND (
         SELECT COUNT(*) FROM system_error_repairs r
         WHERE r.error_id = e.id
-      ) < 3
+      ) < $3
       AND NOT EXISTS (
         SELECT 1 FROM system_error_repairs r2
         WHERE r2.error_id = e.id AND r2.ended_at IS NULL
@@ -77,7 +78,7 @@ export async function getDispatchCandidate(
     ORDER BY e.count DESC, e.last_seen DESC
     LIMIT 1
     `,
-    [repo, threshold],
+    [repo, threshold, REPAIR_CAP],
   );
   if (rows.length === 0) return null;
   return rowToSystemError(rows[0]);

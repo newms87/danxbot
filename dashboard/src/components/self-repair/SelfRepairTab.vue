@@ -38,6 +38,50 @@ const {
   refresh,
 } = useSelfRepairErrors();
 
+/**
+ * DX-566 Phase 6 — distinguish the two "why unfixable" cases the
+ * pipeline can produce:
+ *   - Recurrence-based: the row's `recurrence_count >= 3` (the
+ *     `recordError` ON CONFLICT path flipped it straight to unfixable
+ *     because the agent kept claiming a fix and the producer kept
+ *     re-emitting the signature).
+ *   - Agent-declared / 3-attempt cap: `recurrence_count < 3` — either
+ *     the agent self-declared `unfixable`, or `finalizeSelfRepair`
+ *     applied the cap on the 3rd failed attempt.
+ * The operator needs to tell these apart because the right next move
+ * differs: recurrence-based wants a deeper look at why the fix didn't
+ * stick; cap-based wants a manual repair attempt or a Mark Unfixable
+ * confirmation.
+ */
+/**
+ * Mirrors `REPAIR_CAP` in `src/system-repair/types.ts`. Kept as a local
+ * literal because the SPA does not import backend runtime constants
+ * (only types). If the backend cap moves, update this literal in the
+ * same commit — there is no cross-process import to enforce lockstep.
+ */
+const RECURRENCE_CAP = 3;
+
+function unfixableReason(row: RepairErrorWithAttempts): "recurrence" | "agent-or-cap" {
+  return row.error.recurrence_count >= RECURRENCE_CAP ? "recurrence" : "agent-or-cap";
+}
+
+function unfixableBadgeTooltip(row: RepairErrorWithAttempts): string {
+  return unfixableReason(row) === "recurrence"
+    ? `Unfixable due to recurrence — agent claimed a fix but the producer re-emitted the signature ${row.error.recurrence_count} times.`
+    : "Unfixable — agent self-declared OR 3 repair attempts exhausted without a fix.";
+}
+
+const unfixableBreakdown = computed<{ recurrence: number; agentOrCap: number }>(() => {
+  let recurrence = 0;
+  let agentOrCap = 0;
+  for (const row of errors.value) {
+    if (row.error.status !== "unfixable") continue;
+    if (unfixableReason(row) === "recurrence") recurrence++;
+    else agentOrCap++;
+  }
+  return { recurrence, agentOrCap };
+});
+
 const now = useNowTick();
 const selectedId = ref<number | null>(null);
 
@@ -135,8 +179,15 @@ function close(): void {
           {{ unfixableCount }} unfixable error{{ unfixableCount === 1 ? '' : 's' }}
         </div>
         <div class="text-red-200/80">
-          One or more signatures hit the 3-attempt cap or were manually marked
-          unfixable. Inspect, reset to retry, or investigate manually.
+          <span v-if="unfixableBreakdown.recurrence > 0" data-testid="banner-recurrence-line">
+            {{ unfixableBreakdown.recurrence }} due to recurrence (agent
+            claimed a fix, producer re-emitted){{ unfixableBreakdown.agentOrCap > 0 ? ';' : '.' }}
+          </span>
+          <span v-if="unfixableBreakdown.agentOrCap > 0" data-testid="banner-agent-or-cap-line">
+            {{ unfixableBreakdown.agentOrCap }} agent-declared or 3-attempt
+            cap exhausted.
+          </span>
+          Operator must inspect, reset to retry, or fix manually.
         </div>
       </div>
     </div>
@@ -199,7 +250,25 @@ function close(): void {
               </DanxTooltip>
             </td>
             <td class="p-3">
+              <DanxTooltip
+                v-if="row.error.status === 'unfixable'"
+                :tooltip="unfixableBadgeTooltip(row)"
+              >
+                <template #trigger>
+                  <span
+                    class="inline-block px-2 rounded-full text-[11.5px] font-semibold"
+                    :class="statusClasses(row.error.status)"
+                    :data-testid="`status-badge-unfixable-${unfixableReason(row)}`"
+                  >
+                    {{ row.error.status }}
+                    <span class="ml-1 text-[10px] opacity-80">
+                      {{ unfixableReason(row) === 'recurrence' ? '↻' : '✗' }}
+                    </span>
+                  </span>
+                </template>
+              </DanxTooltip>
               <span
+                v-else
                 class="inline-block px-2 rounded-full text-[11.5px] font-semibold"
                 :class="statusClasses(row.error.status)"
                 :data-testid="`status-badge-${row.error.status}`"

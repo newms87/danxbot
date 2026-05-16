@@ -1,9 +1,10 @@
 import { createHash } from "crypto";
 import type { Pool } from "pg";
-import type {
-  SystemErrorRow,
-  SystemErrorSamplePayload,
-  SystemErrorStatus,
+import {
+  REPAIR_CAP,
+  type SystemErrorRow,
+  type SystemErrorSamplePayload,
+  type SystemErrorStatus,
 } from "./types.js";
 import { publishRepairErrorUpdated } from "./publish.js";
 
@@ -122,13 +123,22 @@ export interface RecordErrorInput {
 
 /**
  * Upsert a system_errors row keyed on signature_hash. First occurrence:
- * INSERT with count=1, first_seen=last_seen=now. Subsequent occurrences:
- * count++, last_seen=now, sample_payload=excluded (latest sample wins
- * for context freshness — the dispatcher reads the most recent stack /
- * path when designing the repair). Status is NOT touched on conflict —
- * a row already marked `repairing` / `fixed` / `unfixable` stays there
- * even as occurrences continue accumulating; the dispatcher decides
- * when to re-open.
+ * INSERT with count=1, first_seen=last_seen=now, recurrence_count=0.
+ * Subsequent occurrences: count++, last_seen=now, sample_payload=
+ * excluded (latest sample wins for context freshness).
+ *
+ * Status transitions on conflict (DX-566 Phase 6):
+ *  - When existing `status='fixed'` — a previously-fixed signature is
+ *    firing again. Flip back to `open` AND bump `recurrence_count`. If
+ *    the bumped count >= 3, the cycle proved unfixable: flip to
+ *    `unfixable` instead so the dispatcher stops trying.
+ *  - When existing status is `open` / `repairing` / `unfixable` —
+ *    leave status + recurrence_count alone. A row marked `repairing`
+ *    while occurrences keep landing is the expected state during a
+ *    repair attempt; the dispatcher decides when to re-open. A row at
+ *    `unfixable` stays there until an operator resets it. A row at
+ *    `open` is already a dispatch candidate; bumping it would clobber
+ *    history without changing dispatcher behavior.
  */
 export async function recordError(
   input: RecordErrorInput,
@@ -148,14 +158,27 @@ export async function recordError(
     )
     VALUES ($1, $2, $3, $4, $5, $6::jsonb, 1, NOW(), NOW(), 'open', $7)
     ON CONFLICT (signature_hash) DO UPDATE SET
-      count          = system_errors.count + 1,
-      last_seen      = NOW(),
-      sample_payload = EXCLUDED.sample_payload,
-      repo           = EXCLUDED.repo
+      count            = system_errors.count + 1,
+      last_seen        = NOW(),
+      sample_payload   = EXCLUDED.sample_payload,
+      repo             = EXCLUDED.repo,
+      recurrence_count = CASE
+        WHEN system_errors.status = 'fixed'
+          THEN system_errors.recurrence_count + 1
+        ELSE system_errors.recurrence_count
+      END,
+      status = CASE
+        WHEN system_errors.status = 'fixed'
+             AND system_errors.recurrence_count + 1 >= $8
+          THEN 'unfixable'
+        WHEN system_errors.status = 'fixed'
+          THEN 'open'
+        ELSE system_errors.status
+      END
     RETURNING
       id, signature_hash, category_key, component, err_class,
       normalized_msg, sample_payload, count, first_seen, last_seen,
-      status, repo
+      status, repo, recurrence_count
     `,
     [
       sigHash,
@@ -165,6 +188,7 @@ export async function recordError(
       normalizedMsg,
       JSON.stringify(samplePayload),
       repo,
+      REPAIR_CAP,
     ],
   );
   const row = rowToSystemError(rows[0]);
@@ -195,7 +219,7 @@ export async function getOpenErrorsRanked(
     SELECT
       id, signature_hash, category_key, component, err_class,
       normalized_msg, sample_payload, count, first_seen, last_seen,
-      status, repo
+      status, repo, recurrence_count
     FROM system_errors
     WHERE repo = $1 AND status = 'open'
     ORDER BY count DESC, last_seen DESC
