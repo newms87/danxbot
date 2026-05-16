@@ -68,6 +68,20 @@ describe("defaultLists", () => {
   it("validates clean against validateLists", () => {
     expect(() => validateLists(defaultLists())).not.toThrow();
   });
+
+  it("seeds the canonical color per type (DX-601)", () => {
+    const file = defaultLists({ uuid: deterministicUuid("color") });
+    const byType = Object.fromEntries(
+      file.lists.map((l) => [l.type, { name: l.name, color: l.color }]),
+    );
+    expect(byType.archived).toEqual({ name: "Backlog", color: "#64748b" });
+    expect(byType.review).toEqual({ name: "Review", color: "#3b82f6" });
+    expect(byType.ready).toEqual({ name: "To Do", color: "#22d3ee" });
+    expect(byType.blocked).toEqual({ name: "Blocked", color: "#ef4444" });
+    expect(byType.in_progress).toEqual({ name: "In Progress", color: "#f59e0b" });
+    expect(byType.completed).toEqual({ name: "Done", color: "#22c55e" });
+    expect(byType.cancelled).toEqual({ name: "Cancelled", color: "#71717a" });
+  });
 });
 
 describe("validateLists", () => {
@@ -85,6 +99,7 @@ describe("validateLists", () => {
       type: "review",
       order: 99,
       is_default_for_type: true,
+      color: "#3b82f6",
     });
     expect(() => validateLists(file)).toThrowError(/Type "review" has 2 defaults/);
   });
@@ -106,6 +121,50 @@ describe("validateLists", () => {
     const file = defaultLists();
     file.tombstone_ids = [file.lists[0].id];
     expect(() => validateLists(file)).toThrowError(/previously deleted — ids never reused/);
+  });
+
+  it("rejects invalid color (DX-601)", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], color: "not-a-color" };
+    expect(() => validateLists(file)).toThrowError(/color must be a hex color/);
+  });
+
+  it("rejects empty color string (DX-601)", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], color: "" };
+    expect(() => validateLists(file)).toThrowError(
+      /color must be a hex color|missing required field/,
+    );
+  });
+
+  it("accepts 3-digit and 6-digit hex with mixed case (DX-601)", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], color: "#aBc" };
+    file.lists[1] = { ...file.lists[1], color: "#AaBbCc" };
+    expect(() => validateLists(file)).not.toThrow();
+  });
+
+  it("rejects non-string color (DX-601)", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], color: 123 as unknown as string };
+    expect(() => validateLists(file)).toThrowError(
+      /missing required field|color must be a hex/,
+    );
+  });
+
+  it("rejects 4-digit and 5-digit hex AND missing # (DX-601)", () => {
+    const cases = ["#abcd", "#12345", "abcdef", "#xyz"];
+    for (const bad of cases) {
+      const file = defaultLists();
+      file.lists[0] = { ...file.lists[0], color: bad };
+      expect(() => validateLists(file)).toThrowError();
+    }
+  });
+
+  it("rejects negative order on validateLists (AC #5, DX-601)", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], order: -1 };
+    expect(() => validateLists(file)).toThrowError(/order must be ≥ 0/);
   });
 
   it("gathers multiple errors", () => {
@@ -161,6 +220,31 @@ describe("file round-trip", () => {
     writeFileSync(listsFilePath(dir), "{not valid yaml: [: : :", "utf-8");
     const file = readLists(dir);
     expect(file.lists).toHaveLength(7);
+  });
+
+  it("readLists backfills missing color from the type's seed color (DX-601 migration)", () => {
+    // Simulate a pre-DX-601 lists.yaml on disk: shape matches except
+    // every entry lacks `color`. Read must NOT throw (preserves
+    // existing-repo dispatch flow) and must return entries with the
+    // canonical seed color per type.
+    const dir = makeDir();
+    const legacy = `lists:
+  - id: a
+    name: Review
+    type: review
+    order: 1
+    is_default_for_type: true
+  - id: b
+    name: To Do
+    type: ready
+    order: 2
+    is_default_for_type: true
+tombstone_ids: []
+`;
+    writeFileSync(listsFilePath(dir), legacy, "utf-8");
+    const file = readLists(dir);
+    expect(file.lists.find((l) => l.type === "review")?.color).toBe("#3b82f6");
+    expect(file.lists.find((l) => l.type === "ready")?.color).toBe("#22d3ee");
   });
 });
 
@@ -245,6 +329,55 @@ describe("applyCreateList", () => {
       applyCreateList(file, { name: "x", type: "nope" as never }),
     ).toThrowError(ListsValidationError);
   });
+
+  it("rejects invalid color on create (DX-601)", () => {
+    const file = defaultLists();
+    expect(() =>
+      applyCreateList(file, { name: "Bad", type: "review", color: "not-hex" }),
+    ).toThrowError(/color must be a hex color/);
+  });
+
+  it("inherits the default-of-type color when caller omits color (DX-601)", () => {
+    const file = defaultLists({ uuid: deterministicUuid("ci") });
+    const { created } = applyCreateList(
+      file,
+      { name: "Second Review", type: "review" },
+      { uuid: deterministicUuid("sr") },
+    );
+    expect(created.color).toBe("#3b82f6"); // review's seeded color
+  });
+
+  it("takes caller-supplied color when provided (DX-601)", () => {
+    const file = defaultLists();
+    const { created } = applyCreateList(file, {
+      name: "Custom",
+      type: "review",
+      color: "#abcdef",
+    });
+    expect(created.color).toBe("#abcdef");
+  });
+
+  it("falls back to neutral gray when type has no existing default-of-type (DX-601)", () => {
+    const file: ListsFile = {
+      lists: defaultLists({ uuid: deterministicUuid("nf") }).lists.filter(
+        (l) => l.type !== "cancelled",
+      ),
+      tombstone_ids: [],
+    };
+    const { created } = applyCreateList(
+      file,
+      { name: "First Cancelled", type: "cancelled" },
+      { uuid: deterministicUuid("fc") },
+    );
+    expect(created.color).toBe("#94a3b8");
+  });
+
+  it("rejects negative order on create (DX-601)", () => {
+    const file = defaultLists();
+    expect(() =>
+      applyCreateList(file, { name: "Bad", type: "review", order: -1 }),
+    ).toThrowError(/order must be ≥ 0/);
+  });
 });
 
 describe("applyCreateList — auto-promote first-of-new-type", () => {
@@ -302,6 +435,30 @@ describe("applyUpdateList", () => {
     expect(() => applyUpdateList(file, "nope", { name: "x" })).toThrowError(
       /No list with id "nope"/,
     );
+  });
+
+  it("recolor patches color (DX-601)", () => {
+    const file = defaultLists({ uuid: deterministicUuid("ru") });
+    const target = file.lists.find((l) => l.type === "review")!;
+    const next = applyUpdateList(file, target.id, { color: "#123456" });
+    expect(next.lists.find((l) => l.id === target.id)!.color).toBe("#123456");
+    expect(() => validateLists(next)).not.toThrow();
+  });
+
+  it("rejects invalid color on update (DX-601)", () => {
+    const file = defaultLists();
+    const target = file.lists[0];
+    expect(() =>
+      applyUpdateList(file, target.id, { color: "bad-color" }),
+    ).toThrowError(/color must be a hex color/);
+  });
+
+  it("rejects negative order on update (DX-601)", () => {
+    const file = defaultLists();
+    const target = file.lists[0];
+    expect(() =>
+      applyUpdateList(file, target.id, { order: -1 }),
+    ).toThrowError(/order must be ≥ 0/);
   });
 });
 
@@ -371,6 +528,7 @@ describe("tombstone enforcement on write", () => {
           type: "review",
           order: 5,
           is_default_for_type: false,
+          color: "#3b82f6",
         },
       ],
     };

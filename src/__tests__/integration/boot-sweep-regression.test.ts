@@ -33,7 +33,8 @@ const SRC_INDEX_TEXT = readFileSync(SRC_INDEX_PATH, "utf-8");
  *
  *   1. A v9 YAML on disk MUST be migrated to KNOWN_SCHEMA_MAX
  *      post-boot.
- *   2. A v3 YAML (below KNOWN_SCHEMA_MIN, no registered migration)
+ *   2. A v2 YAML (below the legacy-to-v10 bridge floor, no
+ *      registered migration)
  *      MUST land in `result.failed[]` AND the boot path MUST write
  *      `<repo>/.danxbot/CRITICAL_FAILURE` with
  *      `source: "boot-migration-sweep"`. A v9 alongside still
@@ -94,9 +95,14 @@ const v9Yaml = (id: string): string =>
     "",
   ].join("\n");
 
-const v3Yaml = (id: string): string =>
+// Pre-bridge legacy schemas (3-8) all migrate cleanly via the
+// `legacy-to-v10` registry entry; v2 (and below) have no registered
+// migration, so they are the canonical "boot sweep refuses to load"
+// fixture. The historical name `v3Yaml` is preserved as an alias to
+// keep the regression-test diff narrow.
+const v2Yaml = (id: string): string =>
   [
-    "schema_version: 3",
+    "schema_version: 2",
     "tracker: trello",
     `id: ${id}`,
     "status: ToDo",
@@ -161,7 +167,7 @@ describe("boot-sweep regression coverage (DX-597)", () => {
     const v9Path = resolve(dir, ".danxbot", "issues", "open", "DX-2.yml");
     const v3Path = resolve(dir, ".danxbot", "issues", "open", "DX-3.yml");
     writeYaml(v9Path, v9Yaml("DX-2"));
-    writeYaml(v3Path, v3Yaml("DX-3"));
+    writeYaml(v3Path, v2Yaml("DX-3"));
 
     // Pre-flag absent.
     expect(existsSync(flagPath(dir))).toBe(false);
@@ -184,7 +190,7 @@ describe("boot-sweep regression coverage (DX-597)", () => {
     // Tight match: v3 fails with the registry's "no migration
     // registered for schema_version 3" message. A regex broad enough
     // to pass on any error string would hide actual regressions.
-    expect(result.failed[0]!.error).toMatch(/no migration registered for schema_version 3/i);
+    expect(result.failed[0]!.error).toMatch(/no migration registered for schema_version 2/i);
 
     // Boot-side caller (mirrored from src/index.ts) writes the flag.
     bootSweepEmulator(dir, result.failed);

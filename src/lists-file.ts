@@ -85,7 +85,16 @@ export interface List {
   type: ListType;
   order: number;
   is_default_for_type: boolean;
+  color: string;
 }
+
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+export function isValidHexColor(value: unknown): value is string {
+  return typeof value === "string" && HEX_COLOR_RE.test(value);
+}
+
+const NEUTRAL_LIST_COLOR = "#94a3b8";
 
 export interface ListsFile {
   lists: List[];
@@ -131,16 +140,17 @@ interface SeedSpec {
   type: ListType;
   name: string;
   order: number;
+  color: string;
 }
 
 const SEED_SPECS: readonly SeedSpec[] = [
-  { type: "archived",    name: "Backlog",     order: 0 },
-  { type: "review",      name: "Review",      order: 1 },
-  { type: "ready",       name: "To Do",       order: 2 },
-  { type: "blocked",     name: "Blocked",     order: 3 },
-  { type: "in_progress", name: "In Progress", order: 4 },
-  { type: "completed",   name: "Done",        order: 5 },
-  { type: "cancelled",   name: "Cancelled",   order: 6 },
+  { type: "archived",    name: "Backlog",     order: 0, color: "#64748b" },
+  { type: "review",      name: "Review",      order: 1, color: "#3b82f6" },
+  { type: "ready",       name: "To Do",       order: 2, color: "#22d3ee" },
+  { type: "blocked",     name: "Blocked",     order: 3, color: "#ef4444" },
+  { type: "in_progress", name: "In Progress", order: 4, color: "#f59e0b" },
+  { type: "completed",   name: "Done",        order: 5, color: "#22c55e" },
+  { type: "cancelled",   name: "Cancelled",   order: 6, color: "#71717a" },
 ] as const;
 
 export function defaultLists(deps: SeedDeps = {}): ListsFile {
@@ -152,6 +162,7 @@ export function defaultLists(deps: SeedDeps = {}): ListsFile {
       type: s.type,
       order: s.order,
       is_default_for_type: true,
+      color: s.color,
     })),
     tombstone_ids: [],
   };
@@ -178,7 +189,28 @@ export function readLists(localPath: string): ListsFile {
 
 function normalize(raw: Partial<ListsFile> | null | undefined): ListsFile {
   if (!raw || typeof raw !== "object") return defaultLists();
-  const lists = Array.isArray(raw.lists) ? raw.lists.filter(isValidListShape) : [];
+  const rawLists = Array.isArray(raw.lists) ? raw.lists : [];
+  // Deterministic color backfill for legacy files that pre-date the
+  // `color` field (DX-601). A pre-bump file shape passes every other
+  // invariant; we map type → seeded color so reads stay non-throwing
+  // and the next operator write re-persists the backfilled shape.
+  // Non-default entries fall back to the type's seed color too — a
+  // user-created "Triage" list seeded from a "Review" parent gets the
+  // review hue, matching applyCreateList's inheritance path.
+  const seedColorByType = new Map<ListType, string>(
+    SEED_SPECS.map((s) => [s.type, s.color] as const),
+  );
+  const backfilled = rawLists
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return entry;
+      const e = entry as unknown as Record<string, unknown>;
+      if (typeof e.color === "string" && e.color.length > 0) return entry;
+      const fallback = LIST_TYPES_SET.has(e.type as string)
+        ? seedColorByType.get(e.type as ListType) ?? NEUTRAL_LIST_COLOR
+        : NEUTRAL_LIST_COLOR;
+      return { ...e, color: fallback };
+    });
+  const lists = backfilled.filter(isValidListShape);
   const tombstone_ids = Array.isArray(raw.tombstone_ids)
     ? raw.tombstone_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
     : [];
@@ -197,7 +229,8 @@ function isValidListShape(raw: unknown): raw is List {
     typeof r.name === "string" && r.name.length > 0 &&
     typeof r.type === "string" && LIST_TYPES_SET.has(r.type) &&
     typeof r.order === "number" && Number.isFinite(r.order) &&
-    typeof r.is_default_for_type === "boolean"
+    typeof r.is_default_for_type === "boolean" &&
+    isValidHexColor(r.color)
   );
 }
 
@@ -219,7 +252,25 @@ export function validateLists(file: ListsFile): void {
   for (let i = 0; i < file.lists.length; i++) {
     const l = file.lists[i];
     if (!isValidListShape(l)) {
-      errors.push(`lists[${i}] missing required field or wrong type`);
+      // Pinpoint the failing field for the operator — bad color is the
+      // common case so call it out separately from a fully-malformed entry.
+      const lr = l as unknown as Record<string, unknown> | null;
+      if (
+        lr &&
+        typeof lr === "object" &&
+        typeof lr.id === "string" && (lr.id as string).length > 0 &&
+        typeof lr.name === "string" && (lr.name as string).length > 0 &&
+        typeof lr.type === "string" && LIST_TYPES_SET.has(lr.type as string) &&
+        typeof lr.order === "number" && Number.isFinite(lr.order) &&
+        typeof lr.is_default_for_type === "boolean" &&
+        !isValidHexColor(lr.color)
+      ) {
+        errors.push(
+          `lists[${i}].color must be a hex color like "#abc" or "#aabbcc" (got ${JSON.stringify(lr.color)})`,
+        );
+      } else {
+        errors.push(`lists[${i}] missing required field or wrong type`);
+      }
       continue;
     }
     if (seenIds.has(l.id)) {
@@ -228,6 +279,9 @@ export function validateLists(file: ListsFile): void {
     seenIds.add(l.id);
     if (tombstone.has(l.id)) {
       errors.push(`lists[${i}].id "${l.id}" was previously deleted — ids never reused`);
+    }
+    if (l.order < 0) {
+      errors.push(`lists[${i}].order must be ≥ 0 (got ${l.order})`);
     }
   }
 
@@ -457,6 +511,7 @@ export interface CreateListInput {
   type: ListType;
   order?: number;
   is_default_for_type?: boolean;
+  color?: string;
 }
 
 /**
@@ -472,6 +527,7 @@ export interface UpdateListInput {
   name?: string;
   order?: number;
   is_default_for_type?: boolean;
+  color?: string;
 }
 
 /**
@@ -513,12 +569,20 @@ export function applyCreateList(
       ? { ...l, is_default_for_type: false }
       : l,
   );
+  // Inherit color from the existing default-of-type when the caller
+  // does not supply one, so a "+ Add list" affordance can leave it
+  // empty and still produce a visually-coherent row. Falls back to
+  // a neutral gray when the type is freshly empty.
+  const inheritedColor =
+    file.lists.find((l) => l.type === input.type && l.is_default_for_type)?.color ??
+    NEUTRAL_LIST_COLOR;
   const created: List = {
     id,
     name: input.name,
     type: input.type,
     order,
     is_default_for_type: becomesDefault,
+    color: input.color ?? inheritedColor,
   };
   lists.push(created);
   return { file: { ...file, lists }, created };
@@ -542,10 +606,15 @@ function validateCreateInput(input: CreateListInput): void {
   if (input.order !== undefined) {
     if (typeof input.order !== "number" || !Number.isFinite(input.order)) {
       errors.push("order must be a finite number");
+    } else if (input.order < 0) {
+      errors.push("order must be ≥ 0");
     }
   }
   if (input.is_default_for_type !== undefined && typeof input.is_default_for_type !== "boolean") {
     errors.push("is_default_for_type must be a boolean");
+  }
+  if (input.color !== undefined && !isValidHexColor(input.color)) {
+    errors.push(`color must be a hex color like "#abc" or "#aabbcc"`);
   }
   if (errors.length > 0) throw new ListsValidationError(errors);
 }
@@ -590,6 +659,7 @@ export function applyUpdateList(
         ...(patch.is_default_for_type !== undefined
           ? { is_default_for_type: patch.is_default_for_type }
           : {}),
+        ...(patch.color !== undefined ? { color: patch.color } : {}),
       };
     }
     // Demote any other default-of-target-type when promoting this one.
@@ -612,10 +682,15 @@ function validateUpdateInput(patch: UpdateListInput): void {
   if (patch.order !== undefined) {
     if (typeof patch.order !== "number" || !Number.isFinite(patch.order)) {
       errors.push("order must be a finite number");
+    } else if (patch.order < 0) {
+      errors.push("order must be ≥ 0");
     }
   }
   if (patch.is_default_for_type !== undefined && typeof patch.is_default_for_type !== "boolean") {
     errors.push("is_default_for_type must be a boolean");
+  }
+  if (patch.color !== undefined && !isValidHexColor(patch.color)) {
+    errors.push(`color must be a hex color like "#abc" or "#aabbcc"`);
   }
   if (Object.keys(patch).length === 0) {
     errors.push("Empty patch");

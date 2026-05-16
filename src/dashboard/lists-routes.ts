@@ -324,6 +324,13 @@ function parseCreateInput(body: Record<string, unknown>): CreateListInput {
       out.is_default_for_type = body.is_default_for_type;
     }
   }
+  if ("color" in body && body.color !== undefined) {
+    if (typeof body.color !== "string") {
+      errors.push("color must be a string");
+    } else {
+      out.color = body.color;
+    }
+  }
   if (errors.length > 0) throw new ListsValidationError(errors);
   return out as CreateListInput;
 }
@@ -331,7 +338,7 @@ function parseCreateInput(body: Record<string, unknown>): CreateListInput {
 function parseUpdateInput(body: Record<string, unknown>): UpdateListInput {
   // `type` is intentionally not patchable — see UpdateListInput in
   // lists-file.ts for rationale.
-  const ALLOWED = new Set(["name", "order", "is_default_for_type"]);
+  const ALLOWED = new Set(["name", "order", "is_default_for_type", "color"]);
   const errors: string[] = [];
   for (const k of Object.keys(body)) {
     if (!ALLOWED.has(k)) errors.push(`Field not patchable: ${k}`);
@@ -357,6 +364,13 @@ function parseUpdateInput(body: Record<string, unknown>): UpdateListInput {
       errors.push("is_default_for_type must be a boolean");
     } else {
       out.is_default_for_type = body.is_default_for_type;
+    }
+  }
+  if ("color" in body) {
+    if (typeof body.color !== "string") {
+      errors.push("color must be a string");
+    } else {
+      out.color = body.color;
     }
   }
   if (errors.length > 0) throw new ListsValidationError(errors);
