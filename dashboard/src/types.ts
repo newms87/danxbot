@@ -97,6 +97,7 @@ export type {
   IssueListChildAssignment,
   IssueDetail,
 } from "@backend/dashboard/issues-reader.js";
+export { ISSUE_TYPES, ISSUE_STATUSES } from "@backend/issue-tracker/interface.js";
 export type {
   Issue,
   IssueStatus,

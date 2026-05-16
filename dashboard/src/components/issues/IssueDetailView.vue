@@ -2,6 +2,7 @@
 import { computed, ref, watch } from "vue";
 import type { Issue, IssueDetail, IssueListItem } from "../../types";
 import DrawerHeader from "./DrawerHeader.vue";
+import DispatchGatesSection from "./DispatchGatesSection.vue";
 import OverviewTab from "./OverviewTab.vue";
 import ACTab from "./ACTab.vue";
 import ChildrenTab from "./ChildrenTab.vue";
@@ -10,8 +11,8 @@ import RetroTab from "./RetroTab.vue";
 import RawTab from "./RawTab.vue";
 import HistoryTab from "./HistoryTab.vue";
 import TriageTab from "./TriageTab.vue";
-import RequiresHumanPanel from "./RequiresHumanPanel.vue";
 import IssueChatTab from "./IssueChatTab.vue";
+import RequiresHumanEditor from "./RequiresHumanEditor.vue";
 import { acCounts } from "./acCounts";
 
 type TabId = "overview" | "ac" | "children" | "chat" | "comments" | "history" | "triage" | "retro" | "raw";
@@ -155,6 +156,16 @@ function selectTab(id: TabId, disabled: boolean): void {
 function onUpdateIssue(issue: Issue): void {
   emit("update:issue", issue);
 }
+
+// IssueDetailView owns the RequiresHumanEditor modal so both the
+// DrawerHeader flag icon (always visible) and the DispatchGatesSection
+// banner's Edit button (visible iff requires_human is set) can open it.
+// Mounting at this level decouples "is there a banner to expand?" from
+// "can the operator flag the card?".
+const rhEditorOpen = ref(false);
+function onOpenRhEditor(): void {
+  rhEditorOpen.value = true;
+}
 </script>
 
 <template>
@@ -166,15 +177,22 @@ function onUpdateIssue(issue: Issue): void {
       <DrawerHeader
         :issue="issue"
         :repo="props.selectedRepo"
-        :scoped-epic-id="props.scopedEpicId"
         :show-close="showCloseButton"
         @close="emit('close')"
         @jump-issue="(id) => emit('jump-issue', id)"
-        @toggle-scope="emit('toggle-scope')"
         @open-agent="emit('open-agent')"
+        @open-rh-editor="onOpenRhEditor"
         @update:issue="onUpdateIssue"
       />
-      <RequiresHumanPanel
+      <DispatchGatesSection
+        :issue="issue"
+        :repo="props.selectedRepo"
+        @jump-issue="(id) => emit('jump-issue', id)"
+        @update:issue="onUpdateIssue"
+        @open-rh-editor="onOpenRhEditor"
+      />
+      <RequiresHumanEditor
+        v-model="rhEditorOpen"
         :issue="issue"
         :repo="props.selectedRepo"
         @patched="(updated) => emit('issue-patched', updated)"
@@ -203,7 +221,6 @@ function onUpdateIssue(issue: Issue): void {
           v-if="tab === 'overview'"
           :issue="issue"
           :repo="props.selectedRepo"
-          @jump-issue="(id) => emit('jump-issue', id)"
           @update:issue="onUpdateIssue"
         />
         <ACTab

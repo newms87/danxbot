@@ -2,3 +2,12 @@
 @import "@thehammer/danx-ui/shared/tokens" layer(tokens);
 @import "@thehammer/danx-ui/styles" layer(components);
 @custom-variant dark (&:where(.dark, .dark *));
+
+/* DanxDialog wrapper has no height — when the box uses height=Nvh the
+   wrapper stretches in the flex column, putting its top: 0 origin (and
+   the close-x's `position: absolute; top: 0`) above the visible box.
+   Make the wrapper shrink to the box so close-x sits on the box corner. */
+.danx-dialog__wrapper {
+  display: inline-flex;
+  flex-direction: column;
+}

@@ -420,6 +420,8 @@ watch(
       width="90vw"
       height="90vh"
       close-x
+      :close-button="false"
+      :confirm-button="false"
       @update:model-value="(v: boolean) => { if (!v) closeDrawer(); }"
       @close="closeDrawer"
     >

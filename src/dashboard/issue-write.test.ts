@@ -125,6 +125,35 @@ describe("applyIssuePatch — allowlist + body shape", () => {
     ).rejects.toMatchObject({ status: 400, body: { error: "title must be a non-empty string" } });
   });
 
+  it("rejects invalid type with 400", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { type: "Bogus" as never },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("accepts a type flip (Feature → Epic) and lands on disk", async () => {
+    writeFixture(makeIssue({ type: "Feature" }), "open");
+    const issue = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { type: "Epic" },
+      "alice",
+    );
+    expect(issue.type).toBe("Epic");
+    const onDisk = parseYamlText(
+      readFileSync(issuePath(repoLocalPath, "DX-1", "open"), "utf-8"),
+    );
+    expect(onDisk).toMatchObject({ type: "Epic" });
+  });
+
   it("rejects ac items missing required fields with 400", async () => {
     writeFixture(makeIssue(), "open");
     await expect(

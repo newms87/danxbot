@@ -102,6 +102,20 @@ export interface RequiresHumanPatchInput {
  */
 export interface IssuePatch {
   status?: IssueStatus;
+  /**
+   * Card type label. Allowed values are `IssueType` (Feature / Bug / Epic /
+   * Chore / Spike / Refactor / etc — see `ISSUE_TYPES`). The type is mostly
+   * a UI label, but flipping to/from `Epic` has two backend consequences:
+   *   1. Poller dispatch filter skips `type === "Epic"` — flipping a card
+   *      to Epic stops it from being picked up; flipping away makes it
+   *      dispatchable again (subject to other gates).
+   *   2. UI hides the AC tab on Epics and labels children as "Phases".
+   * Parent-status derivation gates on `children.length > 0`, NOT on type,
+   * so a card with children has its status derived regardless of type.
+   * No flip guards — the operator is trusted; the type-menu UI surfaces
+   * the dispatch implication.
+   */
+  type?: IssueType;
   title?: string;
   description?: string;
   /** Full array replace — server does not merge ac items. */
@@ -170,6 +184,7 @@ export interface IssuePatch {
 
 const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "status",
+  "type",
   "title",
   "description",
   "ac",
@@ -375,6 +390,15 @@ function validatePatchShape(body: unknown): IssuePatch {
       });
     }
     patch.status = v as IssueStatus;
+  }
+  if ("type" in raw) {
+    const v = raw.type;
+    if (typeof v !== "string" || !ISSUE_TYPES.includes(v as IssueType)) {
+      throw new IssuePatchError(400, {
+        error: `type must be one of [${ISSUE_TYPES.join(", ")}]`,
+      });
+    }
+    patch.type = v as IssueType;
   }
   if ("title" in raw) {
     if (typeof raw.title !== "string" || raw.title.length === 0) {
@@ -631,6 +655,7 @@ function applyValidatedPatch(
     },
   };
 
+  if (patch.type !== undefined) next.type = patch.type;
   if (patch.title !== undefined) next.title = patch.title;
   if (patch.description !== undefined) next.description = patch.description;
   if (patch.ac !== undefined) next.ac = patch.ac.map((a) => ({ ...a }));
