@@ -121,6 +121,16 @@ Each connected repo can define a `tools.md` in `.danxbot/config/`. The poller sy
 
 Five runtime toggles per repo (Slack / Issue poller / Dispatch API / Ideator / Auto-triage) live at `<repo>/.danxbot/settings.json` — three-valued (`true` / `false` / `null` defers to env default). Workers re-read on every event so toggles take effect with no restart. Operator overrides survive every redeploy. `autoTriage` (env default `false` — explicit opt-in) lets the poller spawn the `danx-triage` agent in `auto` mode when the ToDo queue is empty AND there are untriaged Action Items / Review cards; triage spawn preempts the ideator on the same tick. Full ownership contract + schema: `.claude/rules/settings-file.md`. Spec: `docs/superpowers/specs/2026-04-20-agents-tab-design.md`.
 
+## Self-Repair — WORKER FAULTS ONLY
+
+Self-repair concept is valid **only for broken workers** — worker boot failure, MCP server load failure, unexpected exception in dispatch/poller code, anything where the worker itself is broken and a fresh agent dispatched against the worker codebase can plausibly fix it. The previous card-creating implementation (DX-560 epic) was retired — it conflated agent-domain YAML errors (`audit-pass:ReconcileValidationError`, `orphan-ip-heal`, `invariant-heal`) with worker faults and spawned card-based repairs that looped because the YAML status never flipped terminal.
+
+**Hard rules:**
+- Agent failures (mid-dispatch crash, timeout, can't complete a card) do NOT trigger self-repair. They use the existing strike→Blocked-agent flow (`agents.<name>.broken` after 3 strikes, surfaced in the dashboard Agents tab).
+- An agent that can't complete its card stamps the card itself (`status: Blocked` + `blocked.reason` OR `requires_human` OR `conflict_on[]`). The card carries the failure mode; no second agent is dispatched to "fix" the first agent's card.
+- Self-repair, when rebuilt, will be card-LESS — `dispatch()` fires with an inline task body (worker repair instructions + signature + sample payload), no YAML, no issueId, lifecycle keyed on the dispatch row.
+- `recordSystemError` / `reportSystemError` keep recording errors to `system_errors` for operator visibility on the Self-Repair dashboard tab. No auto-dispatch fires off that table today.
+
 ## External Dispatch API + Deployment
 
 Workers bind only on `danxbot-net`; dashboard (Caddy → 443) proxies auth-gated dispatch via `DANXBOT_DISPATCH_TOKEN` bearer. Per-target AWS deploys at `deploy/targets/<target>.yml`. Current targets: `gpt`.

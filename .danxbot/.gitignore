@@ -56,3 +56,9 @@ workspaces/system-evaluator/workspace-shape.test.ts
 workspaces/system-evaluator/.mcp.json
 workspaces/system-evaluator/.claude/settings.json
 workspaces/system-evaluator/.claude/skills/danx-prep/
+workspaces/self-repair/CLAUDE.md
+workspaces/self-repair/workspace.yml
+workspaces/self-repair/workspace-shape.test.ts
+workspaces/self-repair/.mcp.json
+workspaces/self-repair/.claude/settings.json
+workspaces/self-repair/.claude/skills/danx-prep/

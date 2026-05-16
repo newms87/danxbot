@@ -3,9 +3,9 @@
  * SSE bridge for `system_errors` / `system_error_repairs` changes.
  *
  * **Why this exists.** DX-565 wired `publishRepairErrorUpdated` into
- * every worker-side write path (`recordError`, `flipErrorStatus`,
- * `setRepairAttemptCard`, `finalizeSelfRepair`). Those writes run in
- * the per-repo worker process; `eventBus` is a process-local in-memory
+ * every worker-side write path (only `recordError` remains after the
+ * card-creating dispatcher was retired). Those writes run in the
+ * per-repo worker process; `eventBus` is a process-local in-memory
  * singleton; the dashboard process's SSE subscribers never see them.
  * Operator actions (POST reset / unfixable) DO deliver live because
  * they execute in the dashboard process.

@@ -859,8 +859,7 @@ export async function startDashboard(): Promise<void> {
   // in-process eventBus, but those events never cross the process
   // boundary into the dashboard's SSE subscribers. Poll the table from
   // here, diff against a snapshot, and re-emit so the Self-Repair tab
-  // live-updates when `recordError` / `flipErrorStatus` /
-  // `setRepairAttemptCard` / `finalizeSelfRepair` fire on the worker.
+  // live-updates when `recordError` fires on the worker.
   startSelfRepairStream();
 
   // DX-226 — per-repo chokidar watcher on `.danxbot/issues/{open,closed}/`.

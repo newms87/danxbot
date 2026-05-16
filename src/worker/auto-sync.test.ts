@@ -10,14 +10,6 @@ import { autoSyncTrackedIssue } from "./auto-sync.js";
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 
-// DX-563 — stub the self-repair finalize hook at the module boundary.
-// `auto-sync.ts` imports `finalizeSelfRepair` directly (no deps seam),
-// so the test asserts on the mock fn returned by `vi.mock`.
-const finalizeSelfRepairMock = vi.hoisted(() => vi.fn().mockResolvedValue({ kind: "no-match" }));
-vi.mock("../system-repair/finalize.js", () => ({
-  finalizeSelfRepair: finalizeSelfRepairMock,
-}));
-
 /**
  * Post-dispatch reconcile — fires for every dispatch carrying an
  * `issueId`, regardless of trigger source or `trelloSync` setting.
@@ -281,72 +273,4 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
     });
   });
 
-  describe("Self-Repair finalize hook (DX-563)", () => {
-    beforeEach(() => {
-      finalizeSelfRepairMock.mockClear();
-    });
-
-    it("calls finalizeSelfRepair after reconcile with summary override", async () => {
-      const repo = makeRepoContext({ localPath, trelloEnabled: true });
-      const order: string[] = [];
-      const row = fakeDispatchRow({ issueId: "TEST-9", summary: "row-summary-stale" });
-      const getDispatch = vi.fn().mockResolvedValue(row);
-      const reconcile = vi.fn().mockImplementation(async () => {
-        order.push("reconcile");
-      });
-      finalizeSelfRepairMock.mockImplementation(async () => {
-        order.push("finalize");
-        return { kind: "no-match" };
-      });
-
-      await autoSyncTrackedIssue("dispatch-1", repo, { getDispatch, reconcile }, "fresh-agent-summary");
-
-      expect(order).toEqual(["reconcile", "finalize"]);
-      expect(finalizeSelfRepairMock).toHaveBeenCalledTimes(1);
-      const arg = finalizeSelfRepairMock.mock.calls[0][0] as {
-        issueId: string;
-        summary: string | null;
-        repoLocalPath: string;
-      };
-      expect(arg.issueId).toBe("TEST-9");
-      // summaryOverride wins over the row's stale summary
-      expect(arg.summary).toBe("fresh-agent-summary");
-      expect(arg.repoLocalPath).toBe(localPath);
-    });
-
-    it("falls back to row.summary when summaryOverride is omitted", async () => {
-      const repo = makeRepoContext({ localPath, trelloEnabled: true });
-      const row = fakeDispatchRow({ issueId: "TEST-10", summary: "row-summary" });
-      const getDispatch = vi.fn().mockResolvedValue(row);
-      const reconcile = vi.fn().mockResolvedValue(undefined);
-
-      await autoSyncTrackedIssue("dispatch-2", repo, { getDispatch, reconcile });
-
-      const arg = finalizeSelfRepairMock.mock.calls[0][0] as { summary: string | null };
-      expect(arg.summary).toBe("row-summary");
-    });
-
-    it("does NOT call finalizeSelfRepair when dispatch row has no issueId", async () => {
-      const repo = makeRepoContext({ localPath, trelloEnabled: true });
-      const row = fakeDispatchRow({ issueId: null });
-      const getDispatch = vi.fn().mockResolvedValue(row);
-      const reconcile = vi.fn();
-
-      await autoSyncTrackedIssue("dispatch-3", repo, { getDispatch, reconcile }, "x");
-
-      expect(finalizeSelfRepairMock).not.toHaveBeenCalled();
-    });
-
-    it("swallows finalize errors — dispatch state still lands", async () => {
-      const repo = makeRepoContext({ localPath, trelloEnabled: true });
-      const row = fakeDispatchRow({ issueId: "TEST-11" });
-      const getDispatch = vi.fn().mockResolvedValue(row);
-      const reconcile = vi.fn().mockResolvedValue(undefined);
-      finalizeSelfRepairMock.mockRejectedValueOnce(new Error("DB hiccup"));
-
-      await expect(
-        autoSyncTrackedIssue("dispatch-4", repo, { getDispatch, reconcile }, "fixed"),
-      ).resolves.toBeUndefined();
-    });
-  });
 });

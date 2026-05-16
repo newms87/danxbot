@@ -1,8 +1,0 @@
-name: self-repair
-description: Per-error repair dispatch (DX-564 — Phase 4 of DX-560 Self-Repair). Spawned by the picker when the candidate card matches `isSelfRepairCard` (title prefix `Self-Repair > Attempt N:`). Agent runs the 7-step `danxbot:self-repair` plugin skill — investigator + builder subagents, inline verifier, `## Repair Report` comment, verdict-prefixed `danxbot_complete` (`fixed:` / `failed:` / `unfixable:`) the Phase-3 finalize hook parses.
-required-placeholders:
-  - DANXBOT_STOP_URL
-  - DANX_REPO_ROOT
-optional-placeholders: []
-required-gates: []
-staging-paths: []

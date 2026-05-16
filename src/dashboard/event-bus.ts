@@ -104,13 +104,10 @@ export type IssueUpdatedPayload = {
 /**
  * DX-565 (Phase 5 of DX-560 — Self-Repair): emitted on every mutation
  * of `system_errors` / `system_error_repairs` so the Self-Repair tab
- * live-updates without polling. Producers:
+ * live-updates without polling. Producers (post card-dispatcher rip):
  *
- *   - `recordError` (Phase 2 — every callsite that bumps the count)
- *   - `flipErrorStatus` (Phase 3 dispatcher — `open` → `repairing`)
- *   - `setRepairAttemptCard` (Phase 3 — card_id stamped on attempt)
- *   - `finalizeSelfRepair` (Phase 3 finalize hook — verdict + status)
- *   - `resetRepairError` / `markUnfixable` (Phase 5 operator actions)
+ *   - `recordError` (every callsite that bumps the count)
+ *   - `resetRepairError` / `markUnfixable` (operator actions)
  *
  * Payload is the full {error, attempts[]} shape — same as the
  * `GET /api/self-repair/errors/:id` response — so the reducer can

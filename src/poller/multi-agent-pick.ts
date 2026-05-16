@@ -156,11 +156,6 @@ import { recordSystemError } from "../dashboard/system-errors.js";
 import { listDispatchesByIssueId } from "../dashboard/dispatches-db.js";
 import { listInProgressYamls } from "./local-issues.js";
 import {
-  SELF_REPAIR_SLASH_COMMAND,
-  SELF_REPAIR_WORKSPACE,
-  isSelfRepairCard,
-} from "../system-repair/is-repair-card.js";
-import {
   buildStartStamp,
 } from "./dispatch-liveness-yaml.js";
 import {
@@ -515,24 +510,7 @@ export async function tryMultiAgentDispatch(
     // cross-environment coordinate, so the tracker-comment lock is a
     // no-op by design. Same structural safety as the no-external_id
     // skip: the card is only visible to THIS worker.
-    // DX-564 — repair-attempt cards (title prefix
-    // `Self-Repair > Attempt N:`) dispatch into the `self-repair`
-    // workspace + skill instead of the default `issue-worker` flow.
-    // Detector ignores phase cards under epic DX-560 (`Self-Repair >
-    // Phase N:`); they route normally.
-    //
-    // Reconcile dispatches (DX-501) ALWAYS force `issue-worker` — the
-    // reconcile body releases duplicate stamps + delegates to
-    // `/danx-next`; it expects the issue-worker plugin's tool surface
-    // and would mis-fire if landed in the self-repair workspace's
-    // narrower MCP set. Reconcile-by-repair-card is rare but possible
-    // when one agent accumulates duplicate stamps across multiple
-    // attempts of the same signature.
-    const isRepairDispatch =
-      isSelfRepairCard(card) && reconcileOwnedCards.length === 0;
-    const dispatchWorkspace = isRepairDispatch
-      ? SELF_REPAIR_WORKSPACE
-      : "issue-worker";
+    const dispatchWorkspace = "issue-worker";
 
     if (hasTrackerCoordinate(card) && tracker !== null) {
       const lockInfo = buildLockHolderInfo({
@@ -652,19 +630,11 @@ export async function tryMultiAgentDispatch(
         ? `In Progress cards: [${inProgressSiblings.join(", ")}]\n\n`
         : "In Progress cards: []\n\n";
 
-    // DX-564 — the work-pass slash command branches on the workspace
-    // routing decision. Self-repair cards dispatch the `/self-repair`
-    // skill body instead of `/danx-next`. Prep-only dispatches keep
-    // the generic prep slash command — the prep skill is workspace-
-    // agnostic (worktree recovery + branch sync).
-    const workCommand = isRepairDispatch
-      ? SELF_REPAIR_SLASH_COMMAND
-      : "danx-next";
     const taskBody = isReconcileDispatch
       ? buildReconcileTaskBody(agent.name, reconcileOwnedCards)
       : isPrepOnlyDispatch
         ? `/danx-prep ${stamped.id}`
-        : `/danx-prep ${stamped.id}\n\n/${workCommand} ${stamped.id}`;
+        : `/danx-prep ${stamped.id}\n\n/danx-next ${stamped.id}`;
     // Prepend the siblings line to non-reconcile dispatches. Reconcile
     // builds its own task body and operates on owned cards only — no
     // need to surface siblings there.

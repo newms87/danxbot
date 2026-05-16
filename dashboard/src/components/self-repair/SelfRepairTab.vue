@@ -39,19 +39,15 @@ const {
 } = useSelfRepairErrors();
 
 /**
- * DX-566 Phase 6 — distinguish the two "why unfixable" cases the
- * pipeline can produce:
- *   - Recurrence-based: the row's `recurrence_count >= 3` (the
+ * "Why unfixable" classification (post card-dispatcher rip):
+ *   - Recurrence-based: the row's `recurrence_count >= 3` — the
  *     `recordError` ON CONFLICT path flipped it straight to unfixable
- *     because the agent kept claiming a fix and the producer kept
- *     re-emitting the signature).
- *   - Agent-declared / 3-attempt cap: `recurrence_count < 3` — either
- *     the agent self-declared `unfixable`, or `finalizeSelfRepair`
- *     applied the cap on the 3rd failed attempt.
+ *     because the same signature keeps re-emitting.
+ *   - Operator-declared: `recurrence_count < 3` and the operator used
+ *     the dashboard "Mark Unfixable" action.
  * The operator needs to tell these apart because the right next move
- * differs: recurrence-based wants a deeper look at why the fix didn't
- * stick; cap-based wants a manual repair attempt or a Mark Unfixable
- * confirmation.
+ * differs: recurrence-based wants a deeper look at why the producer
+ * keeps firing; operator-declared is already terminal.
  */
 /**
  * Mirrors `REPAIR_CAP` in `src/system-repair/types.ts`. Kept as a local

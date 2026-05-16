@@ -1,8 +1,7 @@
 /**
  * DX-565 (Phase 5 of DX-560 — Self-Repair): one-call publisher for
  * the `system-repair-error:updated` SSE topic. Consumers of write
- * paths (`recordError`, `flipErrorStatus`, `setRepairAttemptCard`,
- * `finalizeSelfRepair`, `resetRepairError`, `markUnfixable`) invoke
+ * paths (`recordError`, `resetRepairError`, `markUnfixable`) invoke
  * this after the DB write commits so the Self-Repair tab projects
  * the new state without a refetch.
  *

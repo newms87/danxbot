@@ -29,6 +29,7 @@ import userIcon from "danx-icon/src/fontawesome/regular/user.svg?raw";
 import type {
   Issue,
   IssueDetail,
+  IssueListItem,
   IssueStatus,
   IssueType,
 } from "../../types";
@@ -56,10 +57,18 @@ const props = withDefaults(
   defineProps<{
     issue: IssueDetail;
     repo: string;
+    allIssues?: IssueListItem[];
     showClose?: boolean;
   }>(),
-  { showClose: true },
+  { showClose: true, allIssues: () => [] },
 );
+
+const parentMeta = computed(() => {
+  if (!props.issue.parent_id) return null;
+  const parent = props.allIssues.find((i) => i.id === props.issue.parent_id);
+  if (!parent) return null;
+  return ISSUE_TYPE_META[typeToId(parent.type)];
+});
 
 const emit = defineEmits<{
   close: [];
@@ -346,6 +355,7 @@ const rhVariant = computed(() =>
         class="meta-btn parent-btn"
         :tooltip="`Open parent ${issue.parent_id}`"
         :data-test="`drawer-parent-${issue.parent_id}`"
+        :style="parentMeta ? { color: parentMeta.fg, background: parentMeta.bg, borderColor: parentMeta.border } : undefined"
         @click="emit('jump-issue', issue.parent_id!)"
       >↑ {{ issue.parent_id }}</DanxButton>
 
@@ -546,20 +556,16 @@ const rhVariant = computed(() =>
   flex: 1;
 }
 .id {
-  font-size: 14px;
+  font-size: 18px;
   font-weight: 700;
-  color: #e2e8f0;
+  color: #f1f5f9;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.02em;
-  padding: 0 4px;
+  padding: 0 6px;
 }
 .parent-btn :deep(button) {
-  font-size: 10px;
-  font-weight: 500;
-  opacity: 0.65;
-}
-.parent-btn:hover :deep(button) {
-  opacity: 1;
+  font-size: 11px;
+  font-weight: 600;
 }
 .type-btn :deep(button) {
   font-weight: 600;

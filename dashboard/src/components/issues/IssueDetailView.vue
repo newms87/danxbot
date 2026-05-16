@@ -177,6 +177,7 @@ function onOpenRhEditor(): void {
       <DrawerHeader
         :issue="issue"
         :repo="props.selectedRepo"
+        :all-issues="allIssues"
         :show-close="showCloseButton"
         @close="emit('close')"
         @jump-issue="(id) => emit('jump-issue', id)"

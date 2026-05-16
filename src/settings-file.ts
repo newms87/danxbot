@@ -153,10 +153,11 @@ export interface SettingsDisplay {
 }
 
 /**
- * DX-563 — Self-Repair Phase 3 runtime config. The dispatcher
- * (`src/cron/jobs/self-repair-dispatch.ts`) reads `threshold` to decide
- * when an open `system_errors` row's `count` clears the bar for an
- * automated repair card. Default is 3 (see `DEFAULT_SELF_REPAIR_THRESHOLD`).
+ * Self-Repair runtime config. Reserved for the rebuilt worker-fault
+ * dispatcher; the card-creating dispatcher this used to drive was
+ * removed (system_errors entries are now operator-viewed only via the
+ * dashboard self-repair tab — no auto-dispatch). Default is 3 (see
+ * {@link DEFAULT_SELF_REPAIR_THRESHOLD}).
  */
 export interface SelfRepairSettings {
   threshold?: number;
