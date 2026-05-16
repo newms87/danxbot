@@ -213,6 +213,20 @@ describe("POST /api/lists", () => {
     );
     expect(res._getStatusCode()).toBe(400);
   });
+
+  it("returns 400 on invalid hex color", async () => {
+    const res = createMockRes();
+    await handleCreateList(
+      authedReq("POST", { name: "X", type: "review", color: "not-a-hex" }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(400);
+    const body = bodyOf(res);
+    expect((body.errors as string[]).join(" ")).toMatch(/hex color/);
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
 });
 
 describe("PATCH /api/lists/:id", () => {
@@ -257,6 +271,45 @@ describe("PATCH /api/lists/:id", () => {
       deps,
     );
     expect(res._getStatusCode()).toBe(404);
+  });
+});
+
+describe("PATCH promote-default — atomic demote", () => {
+  it("promoting a sibling to default demotes the prior default in the same write", async () => {
+    // Seed: create a second review list (auto-non-default since one
+    // already exists with is_default_for_type=true).
+    const create = createMockRes();
+    await handleCreateList(
+      authedReq("POST", { name: "Second Review", type: "review" }),
+      create,
+      "danxbot",
+      deps,
+    );
+    const second = bodyOf(create).list as { id: string; is_default_for_type: boolean };
+    expect(second.is_default_for_type).toBe(false);
+    mockEventBusPublish.mockClear();
+
+    // Promote the second list to default-of-type.
+    const res = createMockRes();
+    await handleUpdateList(
+      authedReq("PATCH", { is_default_for_type: true }),
+      res,
+      second.id,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(200);
+
+    // Re-read the file: exactly one default per type, and it's the
+    // newly-promoted list. The prior "Review" default is now false.
+    const after = readLists(repoLocalPath);
+    const reviewLists = after.lists.filter((l) => l.type === "review");
+    const defaults = reviewLists.filter((l) => l.is_default_for_type);
+    expect(defaults).toHaveLength(1);
+    expect(defaults[0].id).toBe(second.id);
+    const priorDefault = reviewLists.find((l) => l.name === "Review")!;
+    expect(priorDefault.is_default_for_type).toBe(false);
+    expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
   });
 });
 
