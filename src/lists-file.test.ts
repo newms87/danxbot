@@ -16,6 +16,7 @@ import {
   _resetForTesting,
   applyCreateList,
   applyDeleteList,
+  applySwapOrder,
   applyUpdateList,
   defaultLists,
   ensureListsFile,
@@ -459,6 +460,63 @@ describe("applyUpdateList", () => {
     expect(() =>
       applyUpdateList(file, target.id, { order: -1 }),
     ).toThrowError(/order must be ≥ 0/);
+  });
+});
+
+describe("applySwapOrder", () => {
+  it("swaps order values between two same-type lists", () => {
+    let file = defaultLists({ uuid: deterministicUuid("sw") });
+    file = applyCreateList(
+      file,
+      { name: "Triage", type: "review", order: 5 },
+      { uuid: deterministicUuid("triage") },
+    ).file;
+    const a = file.lists.find((l) => l.type === "review" && l.name === "Review")!;
+    const b = file.lists.find((l) => l.name === "Triage")!;
+    const aOrig = a.order;
+    const bOrig = b.order;
+    const next = applySwapOrder(file, a.id, b.id);
+    const aNext = next.lists.find((l) => l.id === a.id)!;
+    const bNext = next.lists.find((l) => l.id === b.id)!;
+    expect(aNext.order).toBe(bOrig);
+    expect(bNext.order).toBe(aOrig);
+    // Untouched fields preserved.
+    expect(aNext.name).toBe(a.name);
+    expect(bNext.name).toBe(b.name);
+    expect(() => validateLists(next)).not.toThrow();
+  });
+
+  it("rejects cross-type swap", () => {
+    const file = defaultLists({ uuid: deterministicUuid("sw2") });
+    const review = file.lists.find((l) => l.type === "review")!;
+    const ready = file.lists.find((l) => l.type === "ready")!;
+    expect(() => applySwapOrder(file, review.id, ready.id)).toThrowError(
+      /Cross-type swap rejected/,
+    );
+  });
+
+  it("rejects unknown ids", () => {
+    const file = defaultLists({ uuid: deterministicUuid("sw3") });
+    const review = file.lists.find((l) => l.type === "review")!;
+    expect(() => applySwapOrder(file, review.id, "bogus")).toThrowError(
+      /No list with id "bogus"/,
+    );
+    expect(() => applySwapOrder(file, "nope", review.id)).toThrowError(
+      /No list with id "nope"/,
+    );
+  });
+
+  it("rejects identical ids", () => {
+    const file = defaultLists({ uuid: deterministicUuid("sw4") });
+    const review = file.lists.find((l) => l.type === "review")!;
+    expect(() => applySwapOrder(file, review.id, review.id)).toThrowError(
+      /a_id and b_id must differ/,
+    );
+  });
+
+  it("rejects empty string ids", () => {
+    const file = defaultLists({ uuid: deterministicUuid("sw5") });
+    expect(() => applySwapOrder(file, "", "x")).toThrowError(ListsValidationError);
   });
 });
 

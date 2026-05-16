@@ -47,6 +47,7 @@ import {
   ListsValidationError,
   applyCreateList,
   applyDeleteList,
+  applySwapOrder,
   applyUpdateList,
   readLists,
   writeLists,
@@ -189,6 +190,64 @@ export async function handleUpdateList(
     }
     log.error(`handleUpdateList(${repo.name}, ${id}) failed`, err);
     json(res, 500, { error: err instanceof Error ? err.message : "Update failed" });
+  }
+}
+
+/**
+ * DX-608 — `POST /api/lists/swap-order?repo=<name>` body `{a_id, b_id}`.
+ * Reads the current taxonomy, swaps the two lists' `order` integers
+ * atomically under the same lock + validator pipeline as the other
+ * CRUD routes, and publishes `lists:updated`. Replaces the client-side
+ * paired-PATCH dance in `ListsManager.vue#swapOrder` whose transactional
+ * gap could leave the taxonomy with two lists sharing an `order`.
+ *
+ * Status codes:
+ *  - 200 — swap landed; body `{file: ListsFile}`.
+ *  - 400 — missing / non-string ids OR identical ids OR cross-type swap
+ *    (clients have no UI affordance for cross-type; this is server-side
+ *    defense). The cross-type case returns 409 to distinguish "wrong
+ *    semantic state" from "wrong shape".
+ *  - 404 — one or both ids unknown.
+ *  - 401 — no/invalid bearer.
+ */
+export async function handleSwapListOrder(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoQuery: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  if (!(await requireAuth(req, res))) return;
+  const repo = resolveRepo(res, repoQuery, deps);
+  if (!repo) return;
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(req);
+  } catch {
+    json(res, 400, { error: "Invalid JSON body" });
+    return;
+  }
+  const aId = typeof body.a_id === "string" ? body.a_id : "";
+  const bId = typeof body.b_id === "string" ? body.b_id : "";
+  if (!aId || !bId) {
+    json(res, 400, { errors: ["a_id and b_id must be non-empty strings"] });
+    return;
+  }
+  try {
+    const current = readLists(repo.localPath);
+    const next = applySwapOrder(current, aId, bId);
+    const written = await writeLists(repo.localPath, next);
+    publishUpdate(repo.name, written);
+    json(res, 200, { file: written });
+  } catch (err) {
+    if (err instanceof ListsValidationError) {
+      const isNotFound = err.errors.some((e) => /No list with id/.test(e));
+      const isCrossType = err.errors.some((e) => /Cross-type swap rejected/.test(e));
+      const status = isNotFound ? 404 : isCrossType ? 409 : 400;
+      json(res, status, { errors: err.errors });
+      return;
+    }
+    log.error(`handleSwapListOrder(${repo.name}) failed`, err);
+    json(res, 500, { error: err instanceof Error ? err.message : "Swap failed" });
   }
 }
 

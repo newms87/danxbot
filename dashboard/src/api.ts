@@ -938,6 +938,31 @@ export async function patchList(
   return res.json();
 }
 
+/**
+ * POST /api/lists/swap-order?repo=<name> — DX-608. Atomically swap two
+ * lists' `order` integers under the per-repo lock. Replaces the
+ * client-side paired-PATCH dance whose transactional gap could leave
+ * the taxonomy with two lists sharing one `order` if the second PATCH
+ * raced. Returns the post-swap `ListsFile`; SSE reconciles in parallel.
+ */
+export async function swapListOrder(
+  repo: string,
+  aId: string,
+  bId: string,
+): Promise<ListsFile> {
+  const res = await fetchWithAuth(
+    `/api/lists/swap-order?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ a_id: aId, b_id: bId }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readListsError(res));
+  const body = (await res.json()) as { file: ListsFile };
+  return body.file;
+}
+
 export interface DeleteListResult {
   deleted: List;
   reassignTo: List;

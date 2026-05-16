@@ -83,6 +83,7 @@ import {
   handleCreateList,
   handleDeleteList,
   handleListLists,
+  handleSwapListOrder,
   handleUpdateList,
 } from "./lists-routes.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
@@ -578,6 +579,10 @@ async function route(
   }
   if (method === "POST" && url.pathname === "/api/lists") {
     await handleCreateList(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  if (method === "POST" && url.pathname === "/api/lists/swap-order") {
+    await handleSwapListOrder(req, res, url.searchParams.get("repo"), dispatchDeps);
     return true;
   }
   const listDetailMatch = url.pathname.match(/^\/api\/lists\/([^/]+)$/);

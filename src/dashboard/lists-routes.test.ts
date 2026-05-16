@@ -40,12 +40,15 @@ import {
   handleCreateList,
   handleDeleteList,
   handleListLists,
+  handleSwapListOrder,
   handleUpdateList,
 } from "./lists-routes.js";
 import {
   _resetForTesting as resetListsForTesting,
+  applyCreateList,
   ensureListsFile,
   readLists,
+  writeLists,
 } from "../lists-file.js";
 import {
   createMockReq,
@@ -271,6 +274,107 @@ describe("PATCH /api/lists/:id", () => {
       deps,
     );
     expect(res._getStatusCode()).toBe(404);
+  });
+});
+
+describe("POST /api/lists/swap-order", () => {
+  async function seedSecondReview(): Promise<{ aId: string; bId: string }> {
+    const current = readLists(repoLocalPath);
+    const review = current.lists.find((l) => l.type === "review")!;
+    const { file: next, created } = applyCreateList(current, {
+      name: "Second Review",
+      type: "review",
+      order: 5,
+    });
+    await writeLists(repoLocalPath, next);
+    return { aId: review.id, bId: created.id };
+  }
+
+  it("returns 401 without bearer", async () => {
+    const res = createMockRes();
+    await handleSwapListOrder(
+      unauthedReq("POST", { a_id: "x", b_id: "y" }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("swaps order atomically and publishes SSE", async () => {
+    const { aId, bId } = await seedSecondReview();
+    const before = readLists(repoLocalPath);
+    const aOrig = before.lists.find((l) => l.id === aId)!.order;
+    const bOrig = before.lists.find((l) => l.id === bId)!.order;
+    expect(aOrig).not.toBe(bOrig);
+    mockEventBusPublish.mockClear();
+    const res = createMockRes();
+    await handleSwapListOrder(
+      authedReq("POST", { a_id: aId, b_id: bId }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(200);
+    const after = readLists(repoLocalPath);
+    expect(after.lists.find((l) => l.id === aId)!.order).toBe(bOrig);
+    expect(after.lists.find((l) => l.id === bId)!.order).toBe(aOrig);
+    expect(mockEventBusPublish).toHaveBeenCalledTimes(1);
+    const event = mockEventBusPublish.mock.calls[0][0] as { topic: string };
+    expect(event.topic).toBe("lists:updated");
+  });
+
+  it("returns 400 on missing ids", async () => {
+    const res = createMockRes();
+    await handleSwapListOrder(
+      authedReq("POST", { a_id: "" }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 on unknown id", async () => {
+    const current = readLists(repoLocalPath);
+    const review = current.lists.find((l) => l.type === "review")!;
+    const res = createMockRes();
+    await handleSwapListOrder(
+      authedReq("POST", { a_id: review.id, b_id: "bogus" }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("returns 409 on cross-type swap", async () => {
+    const current = readLists(repoLocalPath);
+    const review = current.lists.find((l) => l.type === "review")!;
+    const ready = current.lists.find((l) => l.type === "ready")!;
+    const res = createMockRes();
+    await handleSwapListOrder(
+      authedReq("POST", { a_id: review.id, b_id: ready.id }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(409);
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 on identical ids", async () => {
+    const current = readLists(repoLocalPath);
+    const review = current.lists.find((l) => l.type === "review")!;
+    const res = createMockRes();
+    await handleSwapListOrder(
+      authedReq("POST", { a_id: review.id, b_id: review.id }),
+      res,
+      "danxbot",
+      deps,
+    );
+    expect(res._getStatusCode()).toBe(400);
   });
 });
 

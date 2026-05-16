@@ -17,11 +17,10 @@
  * No setInterval, no manual refetch beyond the explicit `refresh()` on
  * error retry — matches the `.claude/rules/dashboard.md` SSE-mandate.
  *
- * Reorder semantics: arrow buttons swap the moved list's `order` with
- * its in-type neighbor's via two sequential PATCH calls. The validator
- * does not require contiguous `order` values, so the partial-state
- * window between the two patches is benign (a brief duplicate order is
- * still sortable). SSE reconciles the final state.
+ * Reorder semantics (DX-608): arrow buttons call the atomic
+ * `POST /api/lists/swap-order` primitive — the server swaps the two
+ * `order` integers under its per-repo lock, so there is no transactional
+ * gap. SSE reconciles the new state in parallel.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
@@ -31,7 +30,7 @@ import {
   DanxTooltip,
   useDialog,
 } from "@thehammer/danx-ui";
-import { createList, deleteList, patchList } from "../../api";
+import { createList, deleteList, patchList, swapListOrder } from "../../api";
 import { useListColors } from "../../composables/useListColors";
 import { LIST_TYPE_LABELS, LIST_TYPE_LADDER } from "../../types";
 import type { CreateListInput, List, ListType } from "../../types";
@@ -120,33 +119,6 @@ async function runPatch(
   }
 }
 
-/**
- * Like `runPatch` but does NOT swallow the failure — the caller is the
- * paired-swap orchestrator (`onMoveUp` / `onMoveDown`) and needs to
- * roll back on the second leg of the swap. Returns true on success,
- * false on caught failure (with `rowErrors` already populated).
- */
-async function runPatchOrThrow(
-  id: string,
-  patch: Parameters<typeof patchList>[2],
-): Promise<boolean> {
-  if (busyById.value.has(id)) return false;
-  markBusy(id);
-  setRowError(id, null);
-  try {
-    await patchList(props.repo, id, patch);
-    return true;
-  } catch (err) {
-    setRowError(
-      id,
-      err instanceof Error ? err.message : "Update failed",
-    );
-    return false;
-  } finally {
-    clearBusy(id);
-  }
-}
-
 // ── Row actions ───────────────────────────────────────────────────────
 
 function onRename(list: List, nextName: string): void {
@@ -161,31 +133,34 @@ function onRecolor(list: List, nextColor: string): void {
 }
 
 /**
- * Reorder is a paired swap of two `order` integers. We patch the moved
- * list first, then patch the neighbor. If the second patch fails (race,
- * concurrent operator edit, server validator catches the partner mid-
- * edit), best-effort revert the first patch and surface the error on
- * the originating row so the operator sees a single coherent failure
- * instead of a silently-corrupt taxonomy. (Action Item filed to add a
- * server-side `POST /api/lists/swap-order` atomic primitive so this
- * client-side dance can retire — see retro on DX-603.)
+ * Reorder = single atomic call to `POST /api/lists/swap-order` (DX-608).
+ * The server swaps the two `order` integers under its per-repo lock,
+ * eliminating the client-side paired-PATCH transactional gap that
+ * DX-603's earlier implementation had. SSE reconciles in parallel.
+ *
+ * Row-busy is set on BOTH partners so the operator can't kick a second
+ * reorder while the first is in flight; the row error surfaces on the
+ * originating row on failure.
  */
 async function swapOrder(
   moved: List,
   partner: List,
 ): Promise<void> {
-  const movedOriginal = moved.order;
-  const partnerOriginal = partner.order;
-  const firstOk = await runPatchOrThrow(moved.id, { order: partnerOriginal });
-  if (!firstOk) return;
-  const secondOk = await runPatchOrThrow(partner.id, { order: movedOriginal });
-  if (secondOk) return;
-  // Best-effort rollback so the swap is atomic from the operator's
-  // POV. We tolerate a failed rollback (network is genuinely down) —
-  // the SSE feed reconciles whatever the server's final state is on
-  // the next `lists:updated` payload; the row error already surfaces
-  // the original failure so the operator knows to inspect.
-  await runPatchOrThrow(moved.id, { order: movedOriginal });
+  if (busyById.value.has(moved.id) || busyById.value.has(partner.id)) return;
+  markBusy(moved.id);
+  markBusy(partner.id);
+  setRowError(moved.id, null);
+  try {
+    await swapListOrder(props.repo, moved.id, partner.id);
+  } catch (err) {
+    setRowError(
+      moved.id,
+      err instanceof Error ? err.message : "Reorder failed",
+    );
+  } finally {
+    clearBusy(moved.id);
+    clearBusy(partner.id);
+  }
 }
 
 async function onMoveUp(list: List, section: GroupedSection): Promise<void> {

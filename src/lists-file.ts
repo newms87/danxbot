@@ -763,6 +763,45 @@ export function applyDeleteList(
 }
 
 /**
+ * DX-608 — atomic swap of two lists' `order` integers. Replaces the
+ * client-side paired-PATCH dance from DX-603 whose transactional gap
+ * left the taxonomy with two lists at one `order` value if the second
+ * PATCH raced. Both partners must share the same `type` — a cross-type
+ * swap has no UI affordance and is rejected here so the server's
+ * invariant (`order` only meaningful within a type) survives.
+ */
+export function applySwapOrder(
+  file: ListsFile,
+  aId: string,
+  bId: string,
+): ListsFile {
+  if (typeof aId !== "string" || aId.length === 0 ||
+      typeof bId !== "string" || bId.length === 0) {
+    throw new ListsValidationError(["a_id and b_id must be non-empty strings"]);
+  }
+  if (aId === bId) {
+    throw new ListsValidationError([`a_id and b_id must differ (got "${aId}")`]);
+  }
+  const a = file.lists.find((l) => l.id === aId);
+  const b = file.lists.find((l) => l.id === bId);
+  if (!a) throw new ListsValidationError([`No list with id "${aId}"`]);
+  if (!b) throw new ListsValidationError([`No list with id "${bId}"`]);
+  if (a.type !== b.type) {
+    throw new ListsValidationError([
+      `Cross-type swap rejected: "${aId}" is type "${a.type}", "${bId}" is type "${b.type}"`,
+    ]);
+  }
+  const aOrder = a.order;
+  const bOrder = b.order;
+  const lists = file.lists.map((l) => {
+    if (l.id === aId) return { ...l, order: bOrder };
+    if (l.id === bId) return { ...l, order: aOrder };
+    return l;
+  });
+  return { ...file, lists };
+}
+
+/**
  * Test-only — clear the in-process queue so a previous test's
  * unresolved write doesn't leak into the next.
  */
