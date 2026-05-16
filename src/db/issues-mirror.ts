@@ -590,6 +590,35 @@ export async function startIssuesMirror(
   ): Promise<string | null> {
     const parsed = readAndParse(path, repoName);
     if (!parsed) return null; // ENOENT race — unlink will catch up
+    // FAIL LOUDLY on a card id that violates the universal `<PREFIX>-<N>`
+    // shape (e.g. a draft YAML whose filename slug leaked into the id
+    // field because the writer forgot to call `danx_issue_create` to
+    // allocate a real id). Downstream consumers — the dispatches table's
+    // VARCHAR(32) `issue_id` column, parseIssue's id-shape regex,
+    // every tracker push — assume this shape. A bad id silently mirrors
+    // here, then triggers an infinite spawn/reap loop the moment the
+    // picker chooses the card (observed 2026-05-16). Write CRITICAL_FAILURE
+    // so the poller halts and the operator must rename the YAML before
+    // dispatch resumes.
+    if (!parsed.data._malformed && !/^[A-Z]+-\d+$/.test(parsed.id)) {
+      const reason = `Card id ${JSON.stringify(parsed.id)} from ${path} violates <PREFIX>-<N> shape — rename the YAML (and update parent children[]) before clearing CRITICAL_FAILURE`;
+      log.error(`[${repoName}] ${reason}`);
+      try {
+        writeFlag(repoLocalPath, {
+          source: "issues-db-mirror",
+          dispatchId: "issues-db-mirror",
+          reason,
+          cardId: parsed.id,
+          detail: `path: ${path}`,
+        });
+      } catch (flagErr) {
+        log.error(
+          `[${repoName}] CRITICAL_FAILURE write also failed for invalid id ${parsed.id}`,
+          flagErr,
+        );
+      }
+      return null;
+    }
     const contentHash = sha256(canonicalize(parsed.data));
     let existing:
       | { data: Record<string, unknown>; content_hash: string }

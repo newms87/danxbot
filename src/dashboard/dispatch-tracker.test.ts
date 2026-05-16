@@ -608,7 +608,14 @@ describe("startDispatchTracking", () => {
     });
   });
 
-  it("insert failure does not throw (agent run continues)", async () => {
+  it("insert failure throws (fail loudly — agent run aborts; CRITICAL_FAILURE flag halts the poller)", async () => {
+    // Prior behavior swallowed the insert error and continued the spawn, which
+    // produced an infinite spawn/reap loop in prod (the orphan-reaper joins
+    // live scope units against the dispatches table and SIGTERMs every PID
+    // whose row is absent; the picker then re-picked the same card every
+    // tick). The fix in `startDispatchTracking` re-throws so the spawn aborts
+    // at the source; the caller's repoLocalPath argument (when present) gets
+    // a CRITICAL_FAILURE flag written so the poller halts on its next tick.
     mockInsertDispatch.mockRejectedValueOnce(new Error("db down"));
     const watcher = makeMockWatcher();
     await expect(
@@ -621,7 +628,7 @@ describe("startDispatchTracking", () => {
         agentName: null,
         watcher: watcher as never,
       }),
-    ).resolves.toBeDefined();
+    ).rejects.toThrow("db down");
   });
 });
 
@@ -646,18 +653,20 @@ describe("startDispatchTracking — EventBus publishing", () => {
     );
   });
 
-  it("does NOT publish dispatch:created when insertDispatch throws", async () => {
+  it("does NOT publish dispatch:created when insertDispatch throws (fail loud — call rejects)", async () => {
     mockInsertDispatch.mockRejectedValueOnce(new Error("db down"));
     const watcher = makeMockWatcher();
-    await startDispatchTracking({
-      jobId: "job-ev2",
-      repoName: "r",
-      trigger: slackTrigger,
-      runtimeMode: "docker",
-      danxbotCommit: null,
-      agentName: null,
-      watcher: watcher as never,
-    });
+    await expect(
+      startDispatchTracking({
+        jobId: "job-ev2",
+        repoName: "r",
+        trigger: slackTrigger,
+        runtimeMode: "docker",
+        danxbotCommit: null,
+        agentName: null,
+        watcher: watcher as never,
+      }),
+    ).rejects.toThrow("db down");
 
     expect(mockPublish).not.toHaveBeenCalledWith(
       expect.objectContaining({ topic: "dispatch:created" }),

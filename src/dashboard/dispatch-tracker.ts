@@ -15,6 +15,7 @@ import {
   type RuntimeMode,
 } from "./dispatches.js";
 import { eventBus } from "./event-bus.js";
+import { writeFlag } from "../critical-failure.js";
 
 /**
  * DX-365 — `error` slice cap for `agent.strikes.history[].raw_error`.
@@ -274,10 +275,30 @@ export async function startDispatchTracking(
     // waiting for the next DB change-detector poll cycle.
     eventBus.publish({ topic: "dispatch:created", data: row });
   } catch (err) {
-    // Dispatch insertion must not block the agent spawn — the agent still runs
-    // even if the DB is temporarily unavailable. Log and continue; subsequent
-    // updateDispatch calls will also fail noisily if the problem persists.
+    // FAIL LOUDLY. A missing dispatch row is not "transient DB
+    // unavailable" — the orphan-reaper joins live scope units with the
+    // dispatches table and SIGTERMs every PID whose row is absent, so a
+    // swallowed insert error guarantees the spawned claude is killed
+    // before its first turn AND the picker re-picks the same card every
+    // tick (infinite spawn/reap loop, observed in prod 2026-05-16 with
+    // a malformed card id that violated the VARCHAR(32) column width).
+    // Write the per-repo CRITICAL_FAILURE flag so the poller halts, then
+    // re-throw so the spawn aborts at the source.
     log.error(`[Job ${args.jobId}] Failed to insert dispatch row`, err);
+    if (args.repoLocalPath) {
+      try {
+        writeFlag(args.repoLocalPath, {
+          source: "agent",
+          dispatchId: args.jobId,
+          reason: "Failed to insert dispatch row — agent spawn aborted to avoid orphan-reaper/picker infinite loop",
+          cardId: args.issueId ?? undefined,
+          detail: err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err),
+        });
+      } catch (flagErr) {
+        log.error(`[Job ${args.jobId}] Failed to write CRITICAL_FAILURE flag`, flagErr);
+      }
+    }
+    throw err;
   }
 
   let sessionResolved = false;
