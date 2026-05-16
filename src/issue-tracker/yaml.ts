@@ -3,6 +3,7 @@ import {
   stringify as stringifyYaml,
   YAMLParseError,
 } from "yaml";
+import { deriveStatus } from "../issue/derive-status.js";
 import {
   EFFORT_LEVEL_NAMES,
   ISSUE_STATUSES,
@@ -589,7 +590,16 @@ export function parseIssue(text: string, options: ParseIssueOptions): Issue {
       `Invalid Issue YAML:\n  - ${result.errors.join("\n  - ")}`,
     );
   }
-  return result.issue;
+  // Phase 2 of DX-575 (DX-582): status is the derived projection of the
+  // v10 lifecycle timestamp + gate fields — `cancelled_at`,
+  // `completed_at`, `dispatch`, `blocked.at`, `ready_at`, `archived_at`
+  // — never raw-read from disk. The serializer (`serializeIssue`)
+  // keeps emitting `issue.status` for round-trip stability; the value
+  // serialized BACK is whatever was last derived. Drift between the raw
+  // on-disk field and the derived value heals on the next save. See
+  // `src/issue/derive-status.ts` for the precedence table + rule-7
+  // deviation rationale.
+  return { ...result.issue, status: deriveStatus(result.issue) };
 }
 
 /**

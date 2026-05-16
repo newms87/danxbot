@@ -51,6 +51,7 @@ export type IssueStatus =
   | "ToDo"
   | "In Progress"
   | "Blocked"
+  | "Backlog"
   | "Done"
   | "Cancelled";
 
@@ -949,6 +950,7 @@ export const ISSUE_STATUSES: readonly IssueStatus[] = [
   "ToDo",
   "In Progress",
   "Blocked",
+  "Backlog",
   "Done",
   "Cancelled",
 ] as const;

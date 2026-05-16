@@ -1327,4 +1327,51 @@ triaged:
       );
     });
   });
+
+  describe("DX-582 — parseIssue applies deriveStatus on every read", () => {
+    function buildAndParse(mutate: (issue: Issue) => void): Issue {
+      const base = createEmptyIssue({
+        id: "DX-1",
+        type: "Feature",
+        title: "t",
+        description: "d",
+      });
+      mutate(base);
+      return parseIssue(serializeIssue(base), { expectedPrefix: "DX" });
+    }
+
+    it("on-disk Review + completed_at populated → parsed.status === 'Done' (derivation overrides raw)", () => {
+      const issue = buildAndParse((i) => {
+        i.status = "Review";
+        i.completed_at = "2026-05-16T10:00:00Z";
+      });
+      expect(issue.status).toBe("Done");
+    });
+
+    it("on-disk ToDo + cancelled_at populated → parsed.status === 'Cancelled'", () => {
+      const issue = buildAndParse((i) => {
+        i.status = "ToDo";
+        i.cancelled_at = "2026-05-16T10:00:00Z";
+      });
+      expect(issue.status).toBe("Cancelled");
+    });
+
+    it("on-disk Review + archived_at populated → parsed.status === 'Backlog'", () => {
+      const issue = buildAndParse((i) => {
+        i.status = "Review";
+        i.archived_at = "2026-05-16T10:00:00Z";
+      });
+      expect(issue.status).toBe("Backlog");
+    });
+
+    it("all-null timestamps → parsed.status falls through to raw on-disk value (rule-7 deviation)", () => {
+      // Pin the migration-safety deviation at the loader boundary:
+      // every v10 card currently on disk has all-null timestamps;
+      // the derivation MUST NOT flip them to Review.
+      const issue = buildAndParse((i) => {
+        i.status = "In Progress";
+      });
+      expect(issue.status).toBe("In Progress");
+    });
+  });
 });

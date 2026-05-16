@@ -12,14 +12,22 @@
  * audit pass) calls this same helper for drift detection; the source of
  * truth is here.
  *
- * Priority rules (first match wins):
+ * Priority rules (first match wins). Each rule consults the child's
+ * DERIVED status (`deriveStatus(child)`) — never the raw on-disk
+ * `child.status` — so a parent rollup never lags the child's
+ * timestamp-driven transitions. See `src/issue/derive-status.ts`.
  *
  *  1. Any child `Blocked` → parent `Blocked`.
  *  2. Any child `In Progress` → parent `In Progress`.
  *  3. Any child `ToDo` → parent `ToDo`.
  *  4. All non-cancelled children `Review` → parent `Review`.
- *  5. All non-cancelled children `Done` → parent `Done`.
- *  6. All children `Cancelled` (no exclusion) → parent `Cancelled`.
+ *  5. All non-cancelled children `Backlog` → parent `Backlog` (DX-582).
+ *     Mixed Backlog + Done counts as the project being shelved with
+ *     completed work behind it — rule 6 (Done) still wins when every
+ *     non-cancelled child is Done. Rule 5 fires only when every
+ *     non-cancelled child is parked.
+ *  6. All non-cancelled children `Done` → parent `Done`.
+ *  7. All children `Cancelled` (no exclusion) → parent `Cancelled`.
  *
  * `Needs Approval` was retired in DX-231 (schema_version 6). The
  * orthogonal `requires_human` field replaces the parking status —
@@ -47,6 +55,7 @@ import type {
   IssueStatus,
 } from "../../issue-tracker/interface.js";
 import { appendHistory } from "../../issue-tracker/yaml.js";
+import { deriveStatus } from "../derive-status.js";
 
 export interface DeriveParentStatusResult {
   status: IssueStatus;
@@ -58,28 +67,36 @@ export function deriveParentStatus(
 ): DeriveParentStatusResult | null {
   if (children.length === 0) return null;
 
-  if (children.some((c) => c.status === "Blocked")) {
+  const derived = children.map((c) => deriveStatus(c));
+
+  if (derived.some((s) => s === "Blocked")) {
     return { status: "Blocked", rule: "Any child Blocked — parent Blocked" };
   }
-  if (children.some((c) => c.status === "In Progress")) {
+  if (derived.some((s) => s === "In Progress")) {
     return {
       status: "In Progress",
       rule: "Any child In Progress — parent In Progress",
     };
   }
-  if (children.some((c) => c.status === "ToDo")) {
+  if (derived.some((s) => s === "ToDo")) {
     return { status: "ToDo", rule: "Any child ToDo — parent ToDo" };
   }
 
-  const nonCancelled = children.filter((c) => c.status !== "Cancelled");
+  const nonCancelled = derived.filter((s) => s !== "Cancelled");
   const hasNonCancelled = nonCancelled.length > 0;
-  if (hasNonCancelled && nonCancelled.every((c) => c.status === "Review")) {
+  if (hasNonCancelled && nonCancelled.every((s) => s === "Review")) {
     return {
       status: "Review",
       rule: "All non-cancelled children Review — parent Review",
     };
   }
-  if (hasNonCancelled && nonCancelled.every((c) => c.status === "Done")) {
+  if (hasNonCancelled && nonCancelled.every((s) => s === "Backlog")) {
+    return {
+      status: "Backlog",
+      rule: "All non-cancelled children Backlog — parent Backlog",
+    };
+  }
+  if (hasNonCancelled && nonCancelled.every((s) => s === "Done")) {
     return {
       status: "Done",
       rule: "All non-cancelled children Done — parent Done",

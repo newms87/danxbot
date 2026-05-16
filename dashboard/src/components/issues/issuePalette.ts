@@ -52,6 +52,7 @@ export type ColumnId =
   | "todo"
   | "in_progress"
   | "blocked"
+  | "backlog"
   | "done"
   | "cancelled";
 
@@ -104,6 +105,7 @@ export const COLUMN_ACCENTS: Record<IssueStatus, ColumnAccent> = {
   "ToDo":        { id: "todo",        label: "To Do",       accent: "#64748b", collapsedByDefault: false },
   "In Progress": { id: "in_progress", label: "In Progress", accent: "#fcd34d", collapsedByDefault: false },
   "Blocked":     { id: "blocked",     label: "Blocked",     accent: "#ef4444", collapsedByDefault: false },
+  "Backlog":     { id: "backlog",     label: "Backlog",     accent: "#7dd3fc", collapsedByDefault: true  },
   "Done":        { id: "done",        label: "Done",        accent: "#10b981", collapsedByDefault: true  },
   "Cancelled":   { id: "cancelled",   label: "Cancelled",   accent: "#475569", collapsedByDefault: true  },
 };

@@ -9,10 +9,16 @@
  *
  * ## Per-status order
  *
- * | Status                          | Sort                                                             |
- * |---------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked           | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → priority DESC → ICE total DESC (untriaged = +Inf) → id numeric ASC (FIFO by creation) |
- * | In Progress, Done, Cancelled    | updated_at DESC                                                   |
+ * | Status                                 | Sort                                                             |
+ * |----------------------------------------|------------------------------------------------------------------|
+ * | Review, ToDo, Blocked                  | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → priority DESC → ICE total DESC (untriaged = +Inf) → id numeric ASC (FIFO by creation) |
+ * | In Progress, Backlog, Done, Cancelled  | updated_at DESC                                                  |
+ *
+ * DX-582 added `Backlog` (computed-card-state derivation rule 6 —
+ * `archived_at` set without a terminal timestamp). Cards in Backlog
+ * are shelved / parked, so recency-bucket ordering applies — freshly
+ * shelved cards top the column, oldest sink. Operators looking at a
+ * parking-lot column most often want to see what was just put there.
  *
  * Priority becomes the primary sort key for Review/ToDo/Blocked in
  * DX-521 (pre-DX-521 ICE was primary and priority was the
@@ -111,6 +117,7 @@ const PRIORITY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
 
 const RECENCY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   "In Progress",
+  "Backlog",
   "Done",
   "Cancelled",
 ]);

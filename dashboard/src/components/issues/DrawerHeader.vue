@@ -49,6 +49,7 @@ const ALL_STATUSES: readonly IssueStatus[] = [
   "ToDo",
   "In Progress",
   "Blocked",
+  "Backlog",
   "Done",
   "Cancelled",
 ] as const;

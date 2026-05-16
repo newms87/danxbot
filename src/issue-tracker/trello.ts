@@ -541,6 +541,12 @@ export class TrelloTracker implements IssueTracker {
         return this.trello.inProgressListId;
       case "Blocked":
         return this.trello.needsHelpListId;
+      case "Backlog":
+        // Transitional: DX-589 (Phase 9 of DX-575) will wire a real
+        // Backlog list. Until then Backlog cards visually live in
+        // Review on the tracker — the derived status carries the real
+        // signal on the dashboard.
+        return this.trello.reviewListId;
       case "Done":
         return this.trello.doneListId;
       case "Cancelled":

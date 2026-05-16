@@ -176,6 +176,92 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
       deriveParentStatus([child("DX-2", "Cancelled")])?.rule,
     ).toContain("Cancelled");
   });
+
+  describe("priority rule 5b — all non-cancelled Backlog (DX-582)", () => {
+    it("single Backlog child → parent Backlog", () => {
+      const result = deriveParentStatus([child("DX-2", "Backlog")]);
+      expect(result?.status).toBe("Backlog");
+      expect(result?.rule).toContain("Backlog");
+    });
+
+    it("Backlog + Cancelled mix → Backlog (Cancelled excluded)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "Cancelled"),
+      ]);
+      expect(result?.status).toBe("Backlog");
+    });
+
+    it("Backlog + Done returns null (mixed non-cancelled — no rule fires)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "Done"),
+      ]);
+      expect(result).toBeNull();
+    });
+
+    it("Backlog beaten by Blocked (rule 1 fires first)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "Blocked"),
+      ]);
+      expect(result?.status).toBe("Blocked");
+    });
+
+    it("Backlog beaten by In Progress (rule 2 fires before rule 5b)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "In Progress"),
+      ]);
+      expect(result?.status).toBe("In Progress");
+    });
+
+    it("Backlog beaten by ToDo (rule 3 fires before rule 5b)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "ToDo"),
+      ]);
+      expect(result?.status).toBe("ToDo");
+    });
+
+    it("Backlog + Review mixed (no Cancelled) → null (neither all-Backlog nor all-Review)", () => {
+      const result = deriveParentStatus([
+        child("DX-2", "Backlog"),
+        child("DX-3", "Review"),
+      ]);
+      expect(result).toBeNull();
+    });
+
+    it("all-Backlog with archived_at-driven derivation → parent Backlog", () => {
+      // Child with raw status ToDo + archived_at populated derives to
+      // Backlog via rule 6; parent picks rule 5b.
+      const c1 = child("DX-2", "ToDo");
+      c1.archived_at = "2026-05-16T00:00:00Z";
+      const c2 = child("DX-3", "ToDo");
+      c2.archived_at = "2026-05-16T00:00:00Z";
+      const result = deriveParentStatus([c1, c2]);
+      expect(result?.status).toBe("Backlog");
+    });
+  });
+
+  describe("derived child status drives rollup (not raw on-disk status)", () => {
+    it("child with completed_at populated derives to Done regardless of raw status field", () => {
+      const c = child("DX-2", "ToDo");
+      c.completed_at = "2026-05-16T00:00:00Z";
+      const result = deriveParentStatus([c]);
+      // Rollup walks `deriveStatus(c)` → "Done"; parent picks rule 6.
+      expect(result?.status).toBe("Done");
+    });
+
+    it("child with blocked.at populated derives to Blocked even if raw status is ToDo", () => {
+      const c = child("DX-2", "ToDo");
+      c.blocked = { reason: "self-block", at: "2026-05-16T00:00:00Z" };
+      const result = deriveParentStatus([c]);
+      // Derivation rule 4 (blocked.at → Blocked) overrides raw `ToDo`;
+      // parent picks rule 1 (any Blocked → Blocked).
+      expect(result?.status).toBe("Blocked");
+    });
+  });
 });
 
 function makeParent(
