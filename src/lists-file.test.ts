@@ -21,6 +21,7 @@ import {
   defaultLists,
   ensureListsFile,
   getDefaultListForType,
+  httpStatusForListsValidationCode,
   listsFilePath,
   readLists,
   validateLists,
@@ -560,6 +561,137 @@ describe("applyDeleteList", () => {
     const remainingReview = result.file.lists.filter((l) => l.type === "review");
     expect(remainingReview).toHaveLength(1);
     expect(remainingReview[0].is_default_for_type).toBe(true);
+  });
+});
+
+describe("ListsValidationError.code (DX-616)", () => {
+  it("defaults code to \"shape\" for batched validation errors", () => {
+    const file = defaultLists();
+    file.lists[0] = { ...file.lists[0], color: "not-a-color" };
+    try {
+      validateLists(file);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ListsValidationError);
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+  });
+
+  it("defaults code to \"shape\" for validateCreateInput", () => {
+    const file = defaultLists();
+    try {
+      applyCreateList(file, { name: "", type: "review" });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+  });
+
+  it("defaults code to \"shape\" for validateUpdateInput (empty patch)", () => {
+    const file = defaultLists();
+    const target = file.lists[0];
+    try {
+      applyUpdateList(file, target.id, {});
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+  });
+
+  it("stamps \"not_found\" on applyUpdateList unknown id", () => {
+    const file = defaultLists();
+    try {
+      applyUpdateList(file, "nope", { name: "x" });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("not_found");
+    }
+  });
+
+  it("stamps \"shape\" on applyUpdateList cannot-demote-only-default", () => {
+    const file = defaultLists();
+    const review = file.lists.find((l) => l.type === "review")!;
+    try {
+      applyUpdateList(file, review.id, { is_default_for_type: false });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+  });
+
+  it("stamps \"not_found\" on applyDeleteList unknown id", () => {
+    const file = defaultLists();
+    try {
+      applyDeleteList(file, "nope");
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("not_found");
+    }
+  });
+
+  it("stamps \"last_of_type\" on applyDeleteList last-of-type", () => {
+    const file = defaultLists();
+    const review = file.lists.find((l) => l.type === "review")!;
+    try {
+      applyDeleteList(file, review.id);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("last_of_type");
+    }
+  });
+
+  it("stamps \"not_found\" on applySwapOrder unknown id", () => {
+    const file = defaultLists();
+    const review = file.lists.find((l) => l.type === "review")!;
+    try {
+      applySwapOrder(file, review.id, "bogus");
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("not_found");
+    }
+  });
+
+  it("stamps \"cross_type\" on applySwapOrder cross-type swap", () => {
+    const file = defaultLists();
+    const review = file.lists.find((l) => l.type === "review")!;
+    const ready = file.lists.find((l) => l.type === "ready")!;
+    try {
+      applySwapOrder(file, review.id, ready.id);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("cross_type");
+    }
+  });
+
+  it("stamps \"shape\" on applySwapOrder empty / identical ids", () => {
+    const file = defaultLists();
+    const review = file.lists.find((l) => l.type === "review")!;
+    try {
+      applySwapOrder(file, "", "x");
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+    try {
+      applySwapOrder(file, review.id, review.id);
+      throw new Error("expected throw");
+    } catch (err) {
+      expect((err as ListsValidationError).code).toBe("shape");
+    }
+  });
+
+  it("accepts an explicit code override in constructor", () => {
+    const err = new ListsValidationError(["x"], "tombstoned");
+    expect(err.code).toBe("tombstoned");
+    expect(err.errors).toEqual(["x"]);
+  });
+
+  it("httpStatusForListsValidationCode maps every code to its HTTP status", () => {
+    expect(httpStatusForListsValidationCode("not_found")).toBe(404);
+    expect(httpStatusForListsValidationCode("cross_type")).toBe(409);
+    expect(httpStatusForListsValidationCode("last_of_type")).toBe(409);
+    expect(httpStatusForListsValidationCode("shape")).toBe(400);
+    expect(httpStatusForListsValidationCode("tombstoned")).toBe(400);
   });
 });
 

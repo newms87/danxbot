@@ -49,6 +49,7 @@ import {
   applyDeleteList,
   applySwapOrder,
   applyUpdateList,
+  httpStatusForListsValidationCode,
   readLists,
   writeLists,
   type CreateListInput,
@@ -184,8 +185,7 @@ export async function handleUpdateList(
     json(res, 200, { list: updated, file: written });
   } catch (err) {
     if (err instanceof ListsValidationError) {
-      const isNotFound = err.errors.some((e) => /No list with id/.test(e));
-      json(res, isNotFound ? 404 : 400, { errors: err.errors });
+      json(res, httpStatusForListsValidationCode(err.code), { errors: err.errors });
       return;
     }
     log.error(`handleUpdateList(${repo.name}, ${id}) failed`, err);
@@ -240,10 +240,7 @@ export async function handleSwapListOrder(
     json(res, 200, { file: written });
   } catch (err) {
     if (err instanceof ListsValidationError) {
-      const isNotFound = err.errors.some((e) => /No list with id/.test(e));
-      const isCrossType = err.errors.some((e) => /Cross-type swap rejected/.test(e));
-      const status = isNotFound ? 404 : isCrossType ? 409 : 400;
-      json(res, status, { errors: err.errors });
+      json(res, httpStatusForListsValidationCode(err.code), { errors: err.errors });
       return;
     }
     log.error(`handleSwapListOrder(${repo.name}) failed`, err);
@@ -289,10 +286,7 @@ export async function handleDeleteList(
     });
   } catch (err) {
     if (err instanceof ListsValidationError) {
-      const isLastOfType = err.errors.some((e) => /last list of type/.test(e));
-      const isNotFound = err.errors.some((e) => /No list with id/.test(e));
-      const status = isNotFound ? 404 : isLastOfType ? 409 : 400;
-      json(res, status, { errors: err.errors });
+      json(res, httpStatusForListsValidationCode(err.code), { errors: err.errors });
       return;
     }
     log.error(`handleDeleteList(${repo.name}, ${id}) failed`, err);

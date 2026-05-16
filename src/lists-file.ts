@@ -85,12 +85,61 @@ export function isValidHexColor(value: unknown): value is string {
 
 const NEUTRAL_LIST_COLOR = "#94a3b8";
 
+/**
+ * Discriminator for `ListsValidationError` (DX-616). Dashboard route
+ * handlers branch on `err.code` to map an error to its HTTP status
+ * instead of regex-matching `errors[]` prose — user-visible strings are
+ * mutable and a copy-edit would silently flip the HTTP contract.
+ *
+ * - `shape` — default for batched shape / invariant validation
+ *   (`validateLists`, `validateCreateInput`, `validateUpdateInput`) and
+ *   for one-off logic violations that map to 400 (cannot demote the
+ *   only default, empty / identical ids on swap-order).
+ * - `not_found` — id-lookup miss in `applyUpdateList`,
+ *   `applyDeleteList`, `applySwapOrder` → handler maps to 404.
+ * - `cross_type` — `applySwapOrder` rejects two lists of different
+ *   semantic types → handler maps to 409.
+ * - `last_of_type` — `applyDeleteList` rejects removal of the only
+ *   list of a type → handler maps to 409.
+ * - `tombstoned` — reserved for a future throw site that wants to
+ *   surface "this id was previously deleted" distinctly from other
+ *   batched `validateLists` errors. Today `validateLists` lumps a
+ *   tombstone-reuse message into its `shape`-coded batch.
+ */
+export type ListsValidationCode =
+  | "shape"
+  | "not_found"
+  | "cross_type"
+  | "last_of_type"
+  | "tombstoned";
+
 export class ListsValidationError extends Error {
   public readonly errors: readonly string[];
-  constructor(errors: readonly string[]) {
+  public readonly code: ListsValidationCode;
+  constructor(errors: readonly string[], code: ListsValidationCode = "shape") {
     super(errors.join("; "));
     this.name = "ListsValidationError";
     this.errors = errors;
+    this.code = code;
+  }
+}
+
+/**
+ * Single canonical mapping from `ListsValidationCode` → HTTP status code
+ * (DX-616). The exhaustive switch lets TS flag a missed enum member
+ * when a new code lands; route handlers call this directly so the
+ * status ladder lives in one place.
+ */
+export function httpStatusForListsValidationCode(code: ListsValidationCode): number {
+  switch (code) {
+    case "not_found":
+      return 404;
+    case "cross_type":
+    case "last_of_type":
+      return 409;
+    case "shape":
+    case "tombstoned":
+      return 400;
   }
 }
 
@@ -586,7 +635,7 @@ export function applyUpdateList(
   validateUpdateInput(patch);
   const target = file.lists.find((l) => l.id === id);
   if (!target) {
-    throw new ListsValidationError([`No list with id "${id}"`]);
+    throw new ListsValidationError([`No list with id "${id}"`], "not_found");
   }
   const promotingDefault = patch.is_default_for_type === true;
   const demotingDefault =
@@ -676,15 +725,18 @@ export function applyDeleteList(
 ): DeleteListResult {
   const target = file.lists.find((l) => l.id === id);
   if (!target) {
-    throw new ListsValidationError([`No list with id "${id}"`]);
+    throw new ListsValidationError([`No list with id "${id}"`], "not_found");
   }
   const siblings = file.lists.filter(
     (l) => l.type === target.type && l.id !== id,
   );
   if (siblings.length === 0) {
-    throw new ListsValidationError([
-      `Cannot delete "${target.name}" — it is the last list of type "${target.type}". Create another list of this type first.`,
-    ]);
+    throw new ListsValidationError(
+      [
+        `Cannot delete "${target.name}" — it is the last list of type "${target.type}". Create another list of this type first.`,
+      ],
+      "last_of_type",
+    );
   }
 
   // Pick the reassignment target: existing default of the type if the
@@ -738,12 +790,15 @@ export function applySwapOrder(
   }
   const a = file.lists.find((l) => l.id === aId);
   const b = file.lists.find((l) => l.id === bId);
-  if (!a) throw new ListsValidationError([`No list with id "${aId}"`]);
-  if (!b) throw new ListsValidationError([`No list with id "${bId}"`]);
+  if (!a) throw new ListsValidationError([`No list with id "${aId}"`], "not_found");
+  if (!b) throw new ListsValidationError([`No list with id "${bId}"`], "not_found");
   if (a.type !== b.type) {
-    throw new ListsValidationError([
-      `Cross-type swap rejected: "${aId}" is type "${a.type}", "${bId}" is type "${b.type}"`,
-    ]);
+    throw new ListsValidationError(
+      [
+        `Cross-type swap rejected: "${aId}" is type "${a.type}", "${bId}" is type "${b.type}"`,
+      ],
+      "cross_type",
+    );
   }
   const aOrder = a.order;
   const bOrder = b.order;
