@@ -284,14 +284,45 @@ async function confirmUnblock(): Promise<void> {
 }
 .reason {
   margin-top: 8px;
-  background: rgba(255, 255, 255, 0.97);
-  color: #0f172a;
+  background: #0f172a;
+  color: #f1f5f9;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   padding: 4px 12px;
   font-size: 13px;
 }
+.reason :deep(*) {
+  color: #f1f5f9;
+}
 .reason :deep(p) {
   margin: 6px 0;
+}
+.reason :deep(a) {
+  color: #93c5fd;
+}
+.reason :deep(code) {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fde68a;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.reason :deep(pre) {
+  background: rgba(0, 0, 0, 0.5);
+  color: #f1f5f9;
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+.reason :deep(pre code) {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+}
+.reason :deep(blockquote) {
+  border-left: 3px solid #475569;
+  margin: 6px 0;
+  padding-left: 10px;
+  color: #cbd5e1;
 }
 .strikes {
   margin-top: 8px;
