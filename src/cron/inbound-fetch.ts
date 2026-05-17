@@ -230,6 +230,12 @@ async function bulkSyncMissingYamls(
   targets: IssueRef[],
 ): Promise<string[]> {
   const hydrated: string[] = [];
+  // DX-619 — read both files ONCE per bulk-sync tick. `readLists` +
+  // `readTrelloListMap` are filesystem hits; hoisting them above the
+  // loop keeps the per-card hydration loop O(card-count) IO instead of
+  // O(card-count * 2) IO.
+  const listsFile = readLists(repo.localPath);
+  const trelloMap = readTrelloListMap(repo.localPath);
   for (const card of targets) {
     if (await findByExternalId(repo.localPath, card.external_id)) continue;
     try {
@@ -249,7 +255,12 @@ async function bulkSyncMissingYamls(
       // degrade to the Review default. Decoupling invariant — this is
       // inside `inbound-fetch.ts`, one of the three allowed Trello
       // surfaces per CLAUDE.md.
-      issue.list_name = resolveInboundListName(repo, card.external_list_id);
+      issue.list_name = resolveInboundListName(
+        repo,
+        card.external_list_id,
+        listsFile,
+        trelloMap,
+      );
       await writeIssue(repo.localPath, issue);
       log.info(
         `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${issue.id}`,
@@ -271,20 +282,26 @@ async function bulkSyncMissingYamls(
  * first match in `lists.yaml` order and records a `warn`-severity
  * system error so the operator sees the configuration drift in the
  * dashboard. Any miss falls back to the `review`-type default list.
+ *
+ * `listsFile` + `trelloMap` are passed in by the caller so a bulk-sync
+ * loop hits the filesystem ONCE per tick (not once per card). The
+ * Review fallback is the only branch that re-reads — `getDefaultListForType`
+ * walks `lists.yaml` itself; that's an N+1 read tolerable only on the
+ * rare fallback branch.
  */
 function resolveInboundListName(
   repo: RepoContext,
   externalListId: string | undefined,
+  listsFile: ReturnType<typeof readLists>,
+  trelloMap: ReturnType<typeof readTrelloListMap>,
 ): string {
   if (!externalListId) {
     return getDefaultListForType(repo.localPath, "review").name;
   }
-  const map = readTrelloListMap(repo.localPath);
-  const matchedIds = reverseLookupDanxbotListId(map, externalListId);
+  const matchedIds = reverseLookupDanxbotListId(trelloMap, externalListId);
   if (matchedIds.length === 0) {
     return getDefaultListForType(repo.localPath, "review").name;
   }
-  const listsFile = readLists(repo.localPath);
   const matchedSet = new Set(matchedIds);
   const picked = listsFile.lists.find((l) => matchedSet.has(l.id));
   if (!picked) {
