@@ -11,6 +11,7 @@ import { useRepoRootSync } from "../composables/useRepoRootSync";
 import RepoCard from "./agents/RepoCard.vue";
 import RepoRootDirtyBanner from "./agents/RepoRootDirtyBanner.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
+import BacklogBootstrapBanner from "./settings/BacklogBootstrapBanner.vue";
 import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
 import ListsManager from "./settings/ListsManager.vue";
 import TrelloListMapping from "./settings/TrelloListMapping.vue";
@@ -209,7 +210,16 @@ function dismissResult(): void {
           the panel hides itself entirely when no Trello board id is
           wired up in the repo's trello.yml. The `:key` re-mount mirrors
           ListsManager's pattern for repo switches.
+
+          DX-620 — BacklogBootstrapBanner mounts above TrelloListMapping;
+          self-gates on the archived-type default list being unmapped, so
+          a fully-paired repo never shows it. Same `:key` repo switch
+          pattern.
         -->
+        <BacklogBootstrapBanner
+          :key="`backlog-bootstrap-${activeRepoName}`"
+          :repo="activeRepoName"
+        />
         <TrelloListMapping
           :key="`trello-${activeRepoName}`"
           :repo="activeRepoName"

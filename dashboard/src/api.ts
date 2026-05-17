@@ -1106,6 +1106,40 @@ export async function patchTrelloListMapping(
   return body.map;
 }
 
+/**
+ * DX-620 — POST /api/trello/list-mapping/bootstrap-backlog?repo=<name>.
+ *
+ * One-click bootstrap when the archived-type danxbot list (default
+ * "Backlog") is unmapped. The endpoint is idempotent + non-destructive:
+ *  - `status: "created"`     — new Trello list materialized + mapping persisted.
+ *  - `status: "already-mapped"` — archived default already has a non-empty entry.
+ *  - `status: "name-conflict"` — a Trello list already exists with the name;
+ *                                 surface a "use the dropdown" message.
+ *
+ * 503 when the repo has no board configured or dashboard creds missing;
+ * 502 when Trello upstream rejects either the probe or the create call.
+ */
+export type BootstrapBacklogResponse =
+  | { status: "created"; trello_list_id: string; trello_list_name: string }
+  | { status: "already-mapped"; trello_list_id: string }
+  | {
+      status: "name-conflict";
+      trello_list_id: string;
+      trello_list_name: string;
+      message: string;
+    };
+
+export async function bootstrapBacklogTrelloList(
+  repo: string,
+): Promise<BootstrapBacklogResponse> {
+  const res = await fetchWithAuth(
+    `/api/trello/list-mapping/bootstrap-backlog?repo=${encodeURIComponent(repo)}`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as BootstrapBacklogResponse;
+}
+
 export interface ResetAllDataResult {
   tablesCleared: string[];
   rowsDeleted: number;

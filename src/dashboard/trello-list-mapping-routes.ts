@@ -24,7 +24,7 @@ import { json, parseBody } from "../http/helpers.js";
 import { createLogger } from "../logger.js";
 import { requireUser } from "./auth-middleware.js";
 import { eventBus } from "./event-bus.js";
-import { readLists } from "../lists-file.js";
+import { getDefaultListForType, readLists } from "../lists-file.js";
 import { loadTrelloIds } from "../poller/constants.js";
 import {
   TrelloListMapValidationError,
@@ -36,6 +36,7 @@ import {
 } from "../trello-list-map.js";
 import {
   TrelloApiError,
+  createList,
   fetchBoardLists,
   getTrelloCreds,
   type TrelloListSummary,
@@ -260,6 +261,186 @@ export async function handlePatchListMapping(
     log.error(`handlePatchListMapping(${repo.name}) failed`, err);
     json(res, 500, { error: err instanceof Error ? err.message : "Write failed" });
   }
+}
+
+/**
+ * DX-620 — POST /api/trello/list-mapping/bootstrap-backlog?repo=<name>.
+ *
+ * One-click affordance for the Settings UI when the operator's Trello
+ * board has no list paired with the danxbot `archived`-type default
+ * (seeded as "Backlog"). Creates a "Backlog" list on the board at
+ * position `bottom`, persists the mapping, publishes the SSE topic.
+ *
+ * Three terminal outcomes the SPA branches on (all 200):
+ *  - `{status: "created", trello_list_id, trello_list_name}` — new list
+ *    materialized + mapping written.
+ *  - `{status: "already-mapped", trello_list_id}` — the archived default
+ *    already had a non-empty entry in the map. Idempotent against
+ *    operator double-clicks.
+ *  - `{status: "name-conflict", trello_list_id, trello_list_name, message}`
+ *    — a list already exists on the board with the danxbot list's name
+ *    (case-insensitive). The route deliberately does NOT auto-pair —
+ *    the operator may have meant a different list. Surfaces a "use the
+ *    dropdown to map the existing list" message instead.
+ *
+ * Failure cases:
+ *  - 503 when no Trello board configured / dashboard creds missing
+ *    (matches the GET routes' shape).
+ *  - 502 when Trello upstream rejects the create (carries the upstream
+ *    status when available).
+ */
+export async function handlePostBootstrapBacklog(
+  req: IncomingMessage,
+  res: ServerResponse,
+  repoQuery: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  if (!(await requireAuth(req, res))) return;
+  const repo = resolveRepo(res, repoQuery, deps);
+  if (!repo) return;
+
+  // Resolve the danxbot archived-type default list. `readLists` throws
+  // on a broken lists.yaml; let it bubble — the dashboard global error
+  // handler renders a 500 rather than papering over a corrupt file.
+  let archived;
+  try {
+    archived = getDefaultListForType(repo.localPath, "archived");
+  } catch (err) {
+    log.error(`bootstrap-backlog: no archived default in lists.yaml`, err);
+    json(res, 500, {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return;
+  }
+
+  // Idempotent guard — operator double-click / SPA stale-state. Read
+  // BEFORE touching Trello so a transient creds outage doesn't surface
+  // 503 when the work is already done.
+  const map = readTrelloListMap(repo.localPath);
+  const existing = map.list_id_to_trello_list_id[archived.id];
+  if (typeof existing === "string" && existing.length > 0) {
+    json(res, 200, { status: "already-mapped", trello_list_id: existing });
+    return;
+  }
+
+  // Board + creds gates. Mirror the GET routes' shape so the SPA's
+  // error rendering is consistent.
+  const boardId = readBoardId(repo.localPath);
+  if (!boardId) {
+    json(res, 503, { error: "Trello board is not configured for this repo" });
+    return;
+  }
+  const creds = getTrelloCreds();
+  if (!creds) {
+    json(res, 503, {
+      error:
+        "Dashboard Trello credentials are not configured (set DASHBOARD_TRELLO_API_KEY + DASHBOARD_TRELLO_API_TOKEN)",
+    });
+    return;
+  }
+
+  // Name-conflict probe. Force a fresh fetch (bypass the 30s cache) so
+  // operators rotating board state see the live shape — the SPA is
+  // about to mutate the board, so up-to-date inputs matter.
+  let boardLists: TrelloListSummary[];
+  try {
+    boardLists = await fetchBoardLists(boardId, creds);
+    boardListCache.set(repo.name, { fetchedAt: Date.now(), lists: boardLists });
+  } catch (err) {
+    if (err instanceof TrelloApiError) {
+      json(res, 502, { error: err.message, trello_status: err.trelloStatus });
+      return;
+    }
+    json(res, 502, {
+      error: err instanceof Error ? err.message : String(err),
+      trello_status: null,
+    });
+    return;
+  }
+  const want = archived.name.trim().toLowerCase();
+  const conflict = boardLists.find((l) => l.name.trim().toLowerCase() === want);
+  if (conflict) {
+    json(res, 200, {
+      status: "name-conflict",
+      trello_list_id: conflict.id,
+      trello_list_name: conflict.name,
+      message:
+        `A Trello list named "${conflict.name}" already exists on this board. ` +
+        `Use the list-mapping dropdown to pair it with the danxbot "${archived.name}" list — ` +
+        `bootstrap will not duplicate the name.`,
+    });
+    return;
+  }
+
+  // Create on Trello, then persist the mapping.
+  let created: TrelloListSummary;
+  try {
+    created = await createList(boardId, archived.name, creds, { pos: "bottom" });
+  } catch (err) {
+    if (err instanceof TrelloApiError) {
+      json(res, 502, { error: err.message, trello_status: err.trelloStatus });
+      return;
+    }
+    json(res, 502, {
+      error: err instanceof Error ? err.message : String(err),
+      trello_status: null,
+    });
+    return;
+  }
+
+  // Read-then-merge with the same last-writer-wins semantics PATCH has:
+  // the on-disk map is the source of truth; the read at this point may
+  // race a concurrent PATCH between the read and `writeTrelloListMap`'s
+  // lock acquisition (PATCH has the same window). The window is narrow
+  // and operator-level concurrent edits are vanishingly rare in practice;
+  // a future tightening would move the read+merge inside the write lock.
+  const fresh = readTrelloListMap(repo.localPath);
+  const merged: TrelloListMap = {
+    list_id_to_trello_list_id: {
+      ...fresh.list_id_to_trello_list_id,
+      [archived.id]: created.id,
+    },
+  };
+  const knownDanxbotListIds = new Set(
+    readLists(repo.localPath).lists.map((l) => l.id),
+  );
+  let written: TrelloListMap;
+  try {
+    written = await writeTrelloListMap(repo.localPath, merged, knownDanxbotListIds);
+  } catch (err) {
+    if (err instanceof TrelloListMapValidationError) {
+      // Defensive — would only fire if lists.yaml mutated between the
+      // archived lookup and the validator (operator deleted the list
+      // mid-request). The Trello list was created but cannot be persisted;
+      // surface the validation errors so the operator can re-pair via
+      // the dropdown.
+      json(res, 409, { errors: err.errors, trello_list_id: created.id });
+      return;
+    }
+    log.error(
+      `bootstrap-backlog(${repo.name}): write failed after Trello list created`,
+      err,
+    );
+    json(res, 500, {
+      error: err instanceof Error ? err.message : "Write failed",
+      trello_list_id: created.id,
+    });
+    return;
+  }
+
+  // Invalidate the cache so the next GET reflects the new list without
+  // waiting 30s, and notify SSE subscribers (Settings panel's
+  // `useTrelloListMapping` re-renders the badges).
+  boardListCache.delete(repo.name);
+  eventBus.publish({
+    topic: "trello-list-map:updated",
+    data: { repoName: repo.name, map: written },
+  });
+  json(res, 200, {
+    status: "created",
+    trello_list_id: created.id,
+    trello_list_name: created.name,
+  });
 }
 
 function parseMap(body: Record<string, unknown>): TrelloListMap {

@@ -90,6 +90,7 @@ import {
   handleGetBoardLists,
   handleGetListMapping,
   handlePatchListMapping,
+  handlePostBootstrapBacklog,
 } from "./trello-list-mapping-routes.js";
 import { handleListSystemErrors } from "./system-errors-routes.js";
 import {
@@ -632,6 +633,18 @@ async function route(
   }
   if (method === "PATCH" && url.pathname === "/api/trello/list-mapping") {
     await handlePatchListMapping(req, res, url.searchParams.get("repo"), dispatchDeps);
+    return true;
+  }
+  if (
+    method === "POST" &&
+    url.pathname === "/api/trello/list-mapping/bootstrap-backlog"
+  ) {
+    await handlePostBootstrapBacklog(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
     return true;
   }
 

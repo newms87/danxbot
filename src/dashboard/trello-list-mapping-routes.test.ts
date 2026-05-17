@@ -33,11 +33,13 @@ vi.mock("./event-bus.js", () => ({
 }));
 
 const mockFetchBoardLists = vi.hoisted(() => vi.fn());
+const mockCreateList = vi.hoisted(() => vi.fn());
 vi.mock("./trello-api.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./trello-api.js")>();
   return {
     ...actual,
     fetchBoardLists: mockFetchBoardLists,
+    createList: mockCreateList,
   };
 });
 
@@ -46,6 +48,7 @@ import {
   handleGetBoardLists,
   handleGetListMapping,
   handlePatchListMapping,
+  handlePostBootstrapBacklog,
 } from "./trello-list-mapping-routes.js";
 import {
   _resetForTesting as resetListsForTesting,
@@ -124,6 +127,7 @@ beforeEach(async () => {
   _resetBoardListCache();
   mockEventBusPublish.mockClear();
   mockFetchBoardLists.mockReset();
+  mockCreateList.mockReset();
   tmpRoot = mkdtempSync(resolve(tmpdir(), "trello-list-mapping-test-"));
   repoLocalPath = resolve(tmpRoot, "danxbot");
   mkdirSync(resolve(repoLocalPath, ".danxbot"), { recursive: true });
@@ -156,6 +160,22 @@ function readListsFile(): { ids: string[] } {
     ),
   ) as { lists: Array<{ id: string }> };
   return { ids: yml.lists.map((l) => l.id) };
+}
+
+function archivedDefaultListId(): string {
+  const yml = require("yaml").parse(
+    require("node:fs").readFileSync(
+      resolve(repoLocalPath, ".danxbot", "lists.yaml"),
+      "utf-8",
+    ),
+  ) as {
+    lists: Array<{ id: string; type: string; is_default_for_type: boolean }>;
+  };
+  const archived = yml.lists.find(
+    (l) => l.type === "archived" && l.is_default_for_type,
+  );
+  if (!archived) throw new Error("seed missing archived default");
+  return archived.id;
 }
 
 describe("GET /api/trello/board-lists", () => {
@@ -416,5 +436,191 @@ describe("PATCH /api/trello/list-mapping", () => {
       deps,
     );
     expect(res._getStatusCode()).toBe(200);
+  });
+});
+
+describe("POST /api/trello/list-mapping/bootstrap-backlog (DX-620)", () => {
+  it("401 without bearer", async () => {
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(unauthedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(401);
+  });
+
+  it("400 missing repo", async () => {
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, null, deps);
+    expect(res._getStatusCode()).toBe(400);
+  });
+
+  it("404 unknown repo", async () => {
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "nope", deps);
+    expect(res._getStatusCode()).toBe(404);
+  });
+
+  it("happy path: creates Trello list, persists map, publishes SSE, returns created", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([
+      { id: "tl-review", name: "Review" },
+      { id: "tl-todo", name: "To Do" },
+    ]);
+    mockCreateList.mockResolvedValueOnce({ id: "tl-backlog-new", name: "Backlog" });
+    const archivedId = archivedDefaultListId();
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      status: "created",
+      trello_list_id: "tl-backlog-new",
+      trello_list_name: "Backlog",
+    });
+    expect(mockCreateList).toHaveBeenCalledWith(
+      "board-1",
+      "Backlog",
+      { apiKey: "k", apiToken: "t" },
+      { pos: "bottom" },
+    );
+    expect(readTrelloListMap(repoLocalPath)).toEqual({
+      list_id_to_trello_list_id: { [archivedId]: "tl-backlog-new" },
+    });
+    expect(mockEventBusPublish).toHaveBeenCalledWith({
+      topic: "trello-list-map:updated",
+      data: {
+        repoName: "danxbot",
+        map: { list_id_to_trello_list_id: { [archivedId]: "tl-backlog-new" } },
+      },
+    });
+  });
+
+  it("idempotent: already-mapped returns 200 status=already-mapped without touching Trello", async () => {
+    const archivedId = archivedDefaultListId();
+    const { writeTrelloListMap } = await import("../trello-list-map.js");
+    await writeTrelloListMap(
+      repoLocalPath,
+      { list_id_to_trello_list_id: { [archivedId]: "tl-pre-existing" } },
+      new Set(danxbotListIds),
+    );
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    expect(JSON.parse(res._getBody())).toEqual({
+      status: "already-mapped",
+      trello_list_id: "tl-pre-existing",
+    });
+    expect(mockCreateList).not.toHaveBeenCalled();
+    expect(mockFetchBoardLists).not.toHaveBeenCalled();
+  });
+
+  it("name-conflict: existing Trello list named Backlog → 200 status=name-conflict, no create", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([
+      { id: "tl-pre", name: "Backlog" },
+      { id: "tl-other", name: "Review" },
+    ]);
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.status).toBe("name-conflict");
+    expect(body.trello_list_id).toBe("tl-pre");
+    expect(body.trello_list_name).toBe("Backlog");
+    expect(body.message).toContain("dropdown");
+    expect(mockCreateList).not.toHaveBeenCalled();
+    // Map left unchanged.
+    expect(readTrelloListMap(repoLocalPath)).toEqual({ list_id_to_trello_list_id: {} });
+  });
+
+  it("name-conflict is case-insensitive + trim-insensitive", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([{ id: "tl-pre", name: "  BACKLOG  " }]);
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    const body = JSON.parse(res._getBody());
+    expect(body.status).toBe("name-conflict");
+    expect(mockCreateList).not.toHaveBeenCalled();
+  });
+
+  it("503 when board not configured", async () => {
+    writeTrelloYml(null);
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(503);
+  });
+
+  it("503 when dashboard Trello creds missing", async () => {
+    delete process.env.DASHBOARD_TRELLO_API_KEY;
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(503);
+  });
+
+  it("502 when Trello upstream errors during the name-conflict probe", async () => {
+    mockFetchBoardLists.mockRejectedValueOnce(new TrelloApiError("rate-limited", 429));
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(502);
+    expect(JSON.parse(res._getBody()).trello_status).toBe(429);
+    expect(mockCreateList).not.toHaveBeenCalled();
+  });
+
+  it("502 when Trello rejects the create call", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([]);
+    mockCreateList.mockRejectedValueOnce(new TrelloApiError("forbidden", 403));
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(502);
+    const body = JSON.parse(res._getBody());
+    expect(body.trello_status).toBe(403);
+    // Map untouched on failure.
+    expect(readTrelloListMap(repoLocalPath)).toEqual({ list_id_to_trello_list_id: {} });
+    expect(mockEventBusPublish).not.toHaveBeenCalled();
+  });
+
+  it("409 when writeTrelloListMap rejects post-create (defensive race — list deleted mid-request); response carries trello_list_id for recovery", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([]);
+    mockCreateList.mockResolvedValueOnce({ id: "tl-orphan", name: "Backlog" });
+    // Force the post-create write to fail by deleting the archived
+    // list from lists.yaml between createList and writeTrelloListMap.
+    // Done via a spy that intercepts writeTrelloListMap after createList
+    // returns — simulates the operator-deleted-list race.
+    const trelloMapMod = await import("../trello-list-map.js");
+    const original = trelloMapMod.writeTrelloListMap;
+    const spy = vi
+      .spyOn(trelloMapMod, "writeTrelloListMap")
+      .mockImplementationOnce(async () => {
+        throw new trelloMapMod.TrelloListMapValidationError([
+          'list_id_to_trello_list_id["whatever"] references unknown danxbot list id "whatever"',
+        ]);
+      });
+    try {
+      const res = createMockRes();
+      await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+      expect(res._getStatusCode()).toBe(409);
+      const body = JSON.parse(res._getBody());
+      expect(body.trello_list_id).toBe("tl-orphan");
+      expect(body.errors).toBeDefined();
+      expect(body.errors.length).toBeGreaterThan(0);
+      expect(mockEventBusPublish).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      // Restore identity (defensive — vi.spyOn already does this on mockRestore)
+      void original;
+    }
+  });
+
+  it("preserves other mappings (merges, does not overwrite)", async () => {
+    // Pre-seed a non-archived mapping.
+    const otherDanxbotId = danxbotListIds.find((id) => id !== archivedDefaultListId())!;
+    const { writeTrelloListMap } = await import("../trello-list-map.js");
+    await writeTrelloListMap(
+      repoLocalPath,
+      { list_id_to_trello_list_id: { [otherDanxbotId]: "tl-other-existing" } },
+      new Set(danxbotListIds),
+    );
+    mockFetchBoardLists.mockResolvedValueOnce([]);
+    mockCreateList.mockResolvedValueOnce({ id: "tl-backlog-new", name: "Backlog" });
+    const res = createMockRes();
+    await handlePostBootstrapBacklog(authedReq("POST"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    const map = readTrelloListMap(repoLocalPath);
+    expect(map.list_id_to_trello_list_id[otherDanxbotId]).toBe("tl-other-existing");
+    expect(map.list_id_to_trello_list_id[archivedDefaultListId()]).toBe("tl-backlog-new");
   });
 });

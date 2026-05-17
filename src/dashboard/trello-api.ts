@@ -134,3 +134,92 @@ export async function fetchBoardLists(
   }
   return out;
 }
+
+export interface CreateListOptions {
+  /** Position on the board. Trello accepts "top" | "bottom" | a number. Defaults to "bottom" — the bootstrap-backlog route always lands new lists at the right edge. */
+  pos?: "top" | "bottom" | number;
+  timeoutMs?: number;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Create a new list on the given Trello board. Used by the
+ * `POST /api/trello/list-mapping/bootstrap-backlog` route (DX-620) to
+ * one-click materialize a Backlog list on the operator's board when the
+ * archived-type danxbot list is unmapped.
+ *
+ * Throws `TrelloApiError` on non-2xx HTTP, timeout, network failure,
+ * or invalid response body. The returned summary mirrors `fetchBoardLists`
+ * — `{id, name}` — so callers can persist the new id without a second
+ * lookup.
+ */
+export async function createList(
+  boardId: string,
+  name: string,
+  creds: TrelloCreds,
+  opts: CreateListOptions = {},
+): Promise<TrelloListSummary> {
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const pos = opts.pos ?? "bottom";
+  const params = new URLSearchParams({
+    key: creds.apiKey,
+    token: creds.apiToken,
+    name,
+    idBoard: boardId,
+    pos: typeof pos === "number" ? String(pos) : pos,
+  });
+  const url = `${TRELLO_BASE}/lists?${params.toString()}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let response: Response;
+  try {
+    response = await fetchImpl(url, { method: "POST", signal: controller.signal });
+  } catch (err) {
+    const aborted = (err as { name?: string } | undefined)?.name === "AbortError";
+    throw new TrelloApiError(
+      aborted
+        ? `Trello create-list timed out after ${timeoutMs}ms`
+        : `Trello create-list failed: ${err instanceof Error ? err.message : String(err)}`,
+      null,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (!response.ok) {
+    let bodySnippet = "";
+    try {
+      bodySnippet = (await response.text()).slice(0, 200);
+    } catch {
+      /* best-effort */
+    }
+    throw new TrelloApiError(
+      `Trello returned ${response.status}${bodySnippet ? `: ${bodySnippet}` : ""}`,
+      response.status,
+    );
+  }
+
+  let raw: unknown;
+  try {
+    raw = await response.json();
+  } catch (err) {
+    throw new TrelloApiError(
+      `Trello response was not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
+      response.status,
+    );
+  }
+  if (!raw || typeof raw !== "object") {
+    throw new TrelloApiError("Trello /lists response was not an object", response.status);
+  }
+  const id = (raw as { id?: unknown }).id;
+  const returnedName = (raw as { name?: unknown }).name;
+  if (typeof id !== "string" || id.length === 0) {
+    throw new TrelloApiError("Trello /lists response missing id", response.status);
+  }
+  if (typeof returnedName !== "string") {
+    throw new TrelloApiError("Trello /lists response missing name", response.status);
+  }
+  return { id, name: returnedName };
+}
