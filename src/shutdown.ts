@@ -7,6 +7,7 @@ import { unwatchAllSettingsFiles } from "./dispatch/scheduler.js";
 import { unwatchAllRepoEnvFiles } from "./dashboard/repo-env-writer.js";
 import { stopAllIssuesWatchers } from "./dashboard/issues-watcher.js";
 import { stopAllAgentsWatchers } from "./dashboard/agents-watcher.js";
+import { shutdownAllHmr } from "./template-hmr/index.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 import type { WorkerCronLoopHandle } from "./cron/worker-loop.js";
@@ -87,6 +88,12 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // agents-watcher chokidar instances on `<repo>/.danxbot/settings.json`.
   // Same dashboard-mode-only ownership as the issues watcher above.
   await stopAllAgentsWatchers();
+
+  // SG-189 — kill every Vite child spawned by the template-hmr module so
+  // a graceful shutdown does not leak dev-server processes onto the
+  // operator's box. Worker restart re-acquires HMR per live dispatch on
+  // the next dispatch reattach pass.
+  await shutdownAllHmr();
 
   // Close database connection pools
   await closePool();

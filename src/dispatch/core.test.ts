@@ -19,6 +19,15 @@ import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 
 const mockSpawnAgent = vi.fn();
+const mockStartTemplateHmr = vi.fn();
+const mockStopTemplateHmr = vi.fn();
+
+vi.mock("../template-hmr/index.js", () => ({
+  startTemplateHmrForDispatch: (...args: unknown[]) =>
+    mockStartTemplateHmr(...args),
+  stopTemplateHmrForDispatch: (...args: unknown[]) =>
+    mockStopTemplateHmr(...args),
+}));
 
 vi.mock("../agent/launcher.js", async () => {
   const actual = await vi.importActual<typeof import("../agent/launcher.js")>(
@@ -216,6 +225,28 @@ describe("dispatch() — slack-worker integration", () => {
       messageText: "why the deploy is stuck?",
     },
   };
+
+  it("SG-189 — startTemplateHmrForDispatch is invoked with the dispatch's stagedFilePaths after spawn succeeds", async () => {
+    // The HMR lifecycle module is wired into runResolved AFTER
+    // spawnForDispatch returns. Verify the contract: start receives both
+    // the dispatch id and the resolved stagedFilePaths. The lifecycle
+    // function itself is unit-tested in src/template-hmr/lifecycle.test.ts
+    // — this assertion exists to catch the case where someone removes
+    // the void call from dispatch/core.ts during a refactor.
+    mockStartTemplateHmr.mockResolvedValue([]);
+    await dispatch({
+      repo: slackRepo,
+      task: "investigate",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: SLACK_META,
+    });
+    expect(mockStartTemplateHmr).toHaveBeenCalledTimes(1);
+    const call = mockStartTemplateHmr.mock.calls[0][0];
+    expect(call).toHaveProperty("dispatchId");
+    expect(call).toHaveProperty("stagedFilePaths");
+    expect(Array.isArray(call.stagedFilePaths)).toBe(true);
+  });
 
   it("a caller-supplied DANXBOT_WORKER_PORT in the overlay wins over the auto-injected value (precedence contract documented on `DispatchInput.overlay`)", async () => {
     // The `DispatchInput.overlay` docstring says "Caller overlay wins

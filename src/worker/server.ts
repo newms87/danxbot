@@ -57,6 +57,8 @@ import {
   handleTemplateBuild,
   handleRecentBuilds,
 } from "../template-build/handler.js";
+import { handleTemplateHmrActive } from "./template-hmr-route.js";
+import { shutdownAllHmr } from "../template-hmr/index.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -196,6 +198,11 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "GET" && url.pathname === "/api/template-build/recent") {
       handleRecentBuilds(req, res);
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/template-hmr/active") {
+      handleTemplateHmrActive(req, res);
       return;
     }
 

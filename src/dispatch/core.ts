@@ -86,6 +86,10 @@ import { deriveStatus } from "../issue/derive-status.js";
 import { resolveEffortToFlags } from "../settings-file.js";
 import { resolveDispatchEffort } from "./resolve-dispatch-effort.js";
 import { syncRepoFiles } from "../inject/sync.js";
+import {
+  startTemplateHmrForDispatch,
+  stopTemplateHmrForDispatch,
+} from "../template-hmr/index.js";
 
 const ttlTimerDeps: TtlTimerDeps = {
   isPidAlive,
@@ -847,6 +851,14 @@ async function runResolved(
           if (!respawnInProgress) {
             fireLockReleaseOnce();
           }
+          // SG-189 — release every per-template HMR entry this dispatch
+          // was holding open. Skipped during stall-recovery respawn
+          // because the dispatch is logically still running and would
+          // re-acquire on the same templates. Fire-and-forget — HMR
+          // teardown failures must not block dispatch onComplete chain.
+          if (!respawnInProgress) {
+            void stopTemplateHmrForDispatch(dispatchId);
+          }
           input.onComplete?.(completedJob);
         },
       });
@@ -981,6 +993,18 @@ async function runResolved(
 
   const job = await spawnForDispatch(taskWithInstruction, false);
   setupStallDetection(job);
+
+  // SG-189 — start a per-template Vite dev-server for every template
+  // referenced in the dispatch's staged source paths. Best-effort:
+  // failures inside HMR start are logged and swallowed; the dispatch
+  // proceeds either way because HMR is a developer affordance, not a
+  // dispatch-critical path. The stop side rides the spawn's onComplete
+  // callback (registered above) so every terminal path releases the
+  // refs.
+  void startTemplateHmrForDispatch({
+    dispatchId,
+    stagedFilePaths: resolved.stagedFilePaths,
+  });
 
   // Phase 4b.2 (DX-289) — arm the per-dispatch TTL timer. Only the
   // poller path stamps a per-issue YAML; non-poller dispatches (Slack,
