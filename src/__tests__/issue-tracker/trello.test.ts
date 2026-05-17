@@ -80,10 +80,12 @@ describe("TrelloTracker", () => {
     // picks them up alongside the Review list. DX-231 retired the
     // `Needs Approval` list — only five open lists remain.
     expect(refs).toEqual([
-      { id: "ISS-1", external_id: "r1", title: "R1", status: "Review" },
-      { id: "", external_id: "t1", title: "T1", status: "ToDo" },
-      { id: "ISS-3", external_id: "n1", title: "N1", status: "Blocked" },
-      { id: "ISS-4", external_id: "a1", title: "A1", status: "Review" },
+      // DX-619 — every ref carries the trello list id it came from so the
+      // inbound hydration path can reverse-map → assign list_name.
+      { id: "ISS-1", external_id: "r1", title: "R1", status: "Review", external_list_id: "list-review" },
+      { id: "", external_id: "t1", title: "T1", status: "ToDo", external_list_id: "list-todo" },
+      { id: "ISS-3", external_id: "n1", title: "N1", status: "Blocked", external_list_id: "list-nh" },
+      { id: "ISS-4", external_id: "a1", title: "A1", status: "Review", external_list_id: "list-ai" },
     ]);
     // Pin the call count so a future regression that drops one of the
     // five open-list statuses (Review, ToDo, In Progress, Needs Help,
@@ -93,12 +95,13 @@ describe("TrelloTracker", () => {
     // Belt-and-suspenders: no ref carries any `list_kind` field at all
     // (the field is gone from the schema in Phase 5).
     expect(refs.every((r) => !("list_kind" in r))).toBe(true);
-    // Positive contract pin — every ref carries EXACTLY these four
-    // keys. Catches any future stowaway field (e.g. `list_kind_v2`,
-    // `triage_due`, `kind`) that a `not-in` assertion would miss.
+    // Positive contract pin — every ref carries EXACTLY these five keys
+    // (four base + DX-619 `external_list_id`). Catches any future stowaway
+    // field that a `not-in` assertion would miss.
     for (const ref of refs) {
       expect(Object.keys(ref).sort()).toEqual([
         "external_id",
+        "external_list_id",
         "id",
         "status",
         "title",

@@ -17,6 +17,7 @@ import {
   emptyTrelloListMap,
   ensureTrelloListMapFile,
   readTrelloListMap,
+  reverseLookupDanxbotListId,
   trelloListMapFilePath,
   validateTrelloListMap,
   writeTrelloListMap,
@@ -328,5 +329,45 @@ describe("classifyTrelloListMapping", () => {
       list_id_to_trello_list_id: { "dx-1": "" as string },
     });
     expect(result["dx-1"]).toEqual({ status: "unmapped" });
+  });
+});
+
+describe("reverseLookupDanxbotListId", () => {
+  it("returns the single danxbot list id for a 1:1 mapping", () => {
+    const map: TrelloListMap = {
+      list_id_to_trello_list_id: { "dx-1": "trello-a", "dx-2": "trello-b" },
+    };
+    expect(reverseLookupDanxbotListId(map, "trello-a")).toEqual(["dx-1"]);
+    expect(reverseLookupDanxbotListId(map, "trello-b")).toEqual(["dx-2"]);
+  });
+
+  it("returns [] when the trello id is not in the map (unmapped)", () => {
+    const map: TrelloListMap = {
+      list_id_to_trello_list_id: { "dx-1": "trello-a" },
+    };
+    expect(reverseLookupDanxbotListId(map, "trello-unknown")).toEqual([]);
+  });
+
+  it("returns [] for an empty trello id (defensive)", () => {
+    const map: TrelloListMap = {
+      list_id_to_trello_list_id: { "dx-1": "trello-a" },
+    };
+    expect(reverseLookupDanxbotListId(map, "")).toEqual([]);
+  });
+
+  it("returns every danxbot list id when multiple map to the same trello list (ambiguous)", () => {
+    const map: TrelloListMap = {
+      list_id_to_trello_list_id: {
+        "dx-1": "trello-a",
+        "dx-2": "trello-a",
+        "dx-3": "trello-b",
+      },
+    };
+    const matches = reverseLookupDanxbotListId(map, "trello-a");
+    expect(matches.sort()).toEqual(["dx-1", "dx-2"]);
+  });
+
+  it("is pure — empty map returns []", () => {
+    expect(reverseLookupDanxbotListId(emptyTrelloListMap(), "trello-a")).toEqual([]);
   });
 });

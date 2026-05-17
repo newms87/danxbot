@@ -103,6 +103,13 @@ export interface IssueRef {
   external_id: string;
   title: string;
   status: IssueStatus;
+  /**
+   * Tracker-native list id the card lives on at fetch time (e.g. Trello's
+   * `idList`). Optional because pre-DX-619 tracker implementations did not
+   * populate it; consumers (`src/cron/inbound-fetch.ts` reverse-map lookup)
+   * MUST tolerate `undefined` by falling back to the Review default list.
+   */
+  external_list_id?: string;
 }
 
 export interface IssueAcItem {

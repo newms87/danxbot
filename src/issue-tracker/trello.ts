@@ -89,6 +89,10 @@ export class TrelloTracker implements IssueTracker {
           external_id: card.id,
           title,
           status: entry.status,
+          // DX-619 — propagate the Trello list id so the inbound hydration
+          // path can reverse-lookup the operator-configured map and assign
+          // `list_name` on the freshly-written YAML.
+          external_list_id: entry.listId,
         });
       }
     }

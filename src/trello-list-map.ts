@@ -367,6 +367,32 @@ export function classifyTrelloListMapping(
 }
 
 /**
+ * Reverse-walk the map: return every danxbot list id pointing at
+ * `trelloListId`. Returns:
+ *  - `[]` when the trello id is empty OR no entry references it.
+ *  - `[danxbotListId]` for the typical 1:1 mapping.
+ *  - `[id1, id2, ...]` when the operator mapped multiple danxbot lists
+ *    to the same Trello list — the inbound hydration path
+ *    (`src/cron/inbound-fetch.ts`) reconciles ambiguity by picking the
+ *    first match in `lists.yaml` order and logging a system error.
+ *
+ * Pure function — no filesystem access. Caller passes the `TrelloListMap`
+ * it already has in hand so this composes with the inbound hot path
+ * without a re-read.
+ */
+export function reverseLookupDanxbotListId(
+  map: TrelloListMap,
+  trelloListId: string,
+): string[] {
+  if (typeof trelloListId !== "string" || trelloListId.length === 0) return [];
+  const out: string[] = [];
+  for (const [danxbotId, mapped] of Object.entries(map.list_id_to_trello_list_id)) {
+    if (mapped === trelloListId) out.push(danxbotId);
+  }
+  return out;
+}
+
+/**
  * Test-only — clear the in-process queue so a previous test's
  * unresolved write doesn't leak into the next.
  */

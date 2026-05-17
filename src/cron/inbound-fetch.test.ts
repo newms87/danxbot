@@ -19,6 +19,10 @@ const isFeatureEnabledMock = vi.hoisted(() => vi.fn());
 const findByExternalIdMock = vi.hoisted(() => vi.fn());
 const hydrateFromRemoteMock = vi.hoisted(() => vi.fn());
 const writeIssueMock = vi.hoisted(() => vi.fn());
+const readListsMock = vi.hoisted(() => vi.fn());
+const getDefaultListForTypeMock = vi.hoisted(() => vi.fn());
+const readTrelloListMapMock = vi.hoisted(() => vi.fn());
+const recordSystemErrorMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../settings-file.js", () => ({
   isFeatureEnabled: isFeatureEnabledMock,
@@ -27,6 +31,22 @@ vi.mock("../poller/yaml-lifecycle.js", () => ({
   findByExternalId: findByExternalIdMock,
   hydrateFromRemote: hydrateFromRemoteMock,
   writeIssue: writeIssueMock,
+}));
+vi.mock("../lists-file.js", () => ({
+  readLists: readListsMock,
+  getDefaultListForType: getDefaultListForTypeMock,
+}));
+vi.mock("../trello-list-map.js", async () => {
+  const actual = await vi.importActual<typeof import("../trello-list-map.js")>(
+    "../trello-list-map.js",
+  );
+  return {
+    ...actual,
+    readTrelloListMap: readTrelloListMapMock,
+  };
+});
+vi.mock("../dashboard/system-errors.js", () => ({
+  recordSystemError: recordSystemErrorMock,
 }));
 
 import { runInboundFetch } from "./inbound-fetch.js";
@@ -80,11 +100,16 @@ function makeTracker(): IssueTracker {
   } as unknown as IssueTracker;
 }
 
-function makeRef(externalId: string, status: IssueRef["status"]): IssueRef {
+function makeRef(
+  externalId: string,
+  status: IssueRef["status"],
+  externalListId?: string,
+): IssueRef {
   return {
     external_id: externalId,
     title: `card ${externalId}`,
     status,
+    external_list_id: externalListId,
   } as IssueRef;
 }
 
@@ -92,8 +117,11 @@ describe("runInboundFetch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     findByExternalIdMock.mockResolvedValue(null);
-    hydrateFromRemoteMock.mockResolvedValue({ id: "DX-1" });
+    hydrateFromRemoteMock.mockResolvedValue({ id: "DX-1", list_name: null });
     writeIssueMock.mockResolvedValue(undefined);
+    readListsMock.mockReturnValue({ lists: [], tombstone_ids: [] });
+    readTrelloListMapMock.mockReturnValue({ list_id_to_trello_list_id: {} });
+    getDefaultListForTypeMock.mockReturnValue({ id: "default-review", name: "Review" });
   });
 
   it("DX-302: when trelloSync is OFF, short-circuits with zero tracker calls", async () => {
@@ -138,6 +166,127 @@ describe("runInboundFetch", () => {
     await runInboundFetch(makeRepo(), tracker);
 
     expect(tracker.moveToStatus).not.toHaveBeenCalled();
+  });
+
+  it("DX-619: hydrates with list_name resolved via reverse-map (mapped trello list)", async () => {
+    isFeatureEnabledMock.mockReturnValue(true);
+    readListsMock.mockReturnValue({
+      lists: [
+        { id: "in-prog-id", name: "In Progress", type: "in_progress", order: 0, is_default_for_type: true, color: "#f59e0b" },
+      ],
+      tombstone_ids: [],
+    });
+    readTrelloListMapMock.mockReturnValue({
+      list_id_to_trello_list_id: { "in-prog-id": "trello-ip" },
+    });
+
+    const issue: { id: string; list_name: string | null } = { id: "DX-1", list_name: null };
+    hydrateFromRemoteMock.mockResolvedValue(issue);
+
+    const tracker = makeTracker();
+    vi.mocked(tracker.fetchOpenCards)
+      .mockResolvedValueOnce([]) // checkNeedsHelp
+      .mockResolvedValueOnce([makeRef("ext-1", "In Progress", "trello-ip")]);
+
+    await runInboundFetch(makeRepo(), tracker);
+
+    expect(writeIssueMock).toHaveBeenCalledTimes(1);
+    const written = writeIssueMock.mock.calls[0][1];
+    expect(written.list_name).toBe("In Progress");
+    expect(recordSystemErrorMock).not.toHaveBeenCalled();
+  });
+
+  it("DX-619: unmapped trello list → list_name defaults to Review list", async () => {
+    isFeatureEnabledMock.mockReturnValue(true);
+    readListsMock.mockReturnValue({
+      lists: [
+        { id: "rev-id", name: "Review", type: "review", order: 0, is_default_for_type: true, color: "#3b82f6" },
+      ],
+      tombstone_ids: [],
+    });
+    readTrelloListMapMock.mockReturnValue({ list_id_to_trello_list_id: {} });
+    getDefaultListForTypeMock.mockReturnValue({
+      id: "rev-id",
+      name: "Review",
+      type: "review",
+      order: 0,
+      is_default_for_type: true,
+      color: "#3b82f6",
+    });
+
+    const issue: { id: string; list_name: string | null } = { id: "DX-1", list_name: null };
+    hydrateFromRemoteMock.mockResolvedValue(issue);
+
+    const tracker = makeTracker();
+    vi.mocked(tracker.fetchOpenCards)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeRef("ext-1", "Review", "trello-unknown")]);
+
+    await runInboundFetch(makeRepo(), tracker);
+
+    expect(writeIssueMock).toHaveBeenCalledTimes(1);
+    expect(writeIssueMock.mock.calls[0][1].list_name).toBe("Review");
+    expect(getDefaultListForTypeMock).toHaveBeenCalledWith(expect.any(String), "review");
+  });
+
+  it("DX-619: ambiguous reverse map → picks first lists.yaml match, logs system error", async () => {
+    isFeatureEnabledMock.mockReturnValue(true);
+    readListsMock.mockReturnValue({
+      lists: [
+        { id: "first-id", name: "ToDo Alpha", type: "ready", order: 0, is_default_for_type: true, color: "#22d3ee" },
+        { id: "second-id", name: "ToDo Beta", type: "ready", order: 1, is_default_for_type: false, color: "#22d3ee" },
+      ],
+      tombstone_ids: [],
+    });
+    readTrelloListMapMock.mockReturnValue({
+      list_id_to_trello_list_id: {
+        "first-id": "trello-shared",
+        "second-id": "trello-shared",
+      },
+    });
+
+    const issue: { id: string; list_name: string | null } = { id: "DX-1", list_name: null };
+    hydrateFromRemoteMock.mockResolvedValue(issue);
+
+    const tracker = makeTracker();
+    vi.mocked(tracker.fetchOpenCards)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeRef("ext-1", "ToDo", "trello-shared")]);
+
+    await runInboundFetch(makeRepo(), tracker);
+
+    expect(writeIssueMock).toHaveBeenCalledTimes(1);
+    expect(writeIssueMock.mock.calls[0][1].list_name).toBe("ToDo Alpha");
+    expect(recordSystemErrorMock).toHaveBeenCalledTimes(1);
+    const call = recordSystemErrorMock.mock.calls[0][0];
+    expect(call.source).toBe("trello-list-mapping");
+    expect(call.severity).toBe("warn");
+    expect(call.message).toContain("trello-shared");
+  });
+
+  it("DX-619: missing external_list_id on ref (legacy tracker) → falls back to Review", async () => {
+    isFeatureEnabledMock.mockReturnValue(true);
+    getDefaultListForTypeMock.mockReturnValue({
+      id: "rev-id",
+      name: "Review",
+      type: "review",
+      order: 0,
+      is_default_for_type: true,
+      color: "#3b82f6",
+    });
+
+    const issue: { id: string; list_name: string | null } = { id: "DX-1", list_name: null };
+    hydrateFromRemoteMock.mockResolvedValue(issue);
+
+    const tracker = makeTracker();
+    vi.mocked(tracker.fetchOpenCards)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([makeRef("ext-1", "Review", undefined)]);
+
+    await runInboundFetch(makeRepo(), tracker);
+
+    expect(writeIssueMock).toHaveBeenCalledTimes(1);
+    expect(writeIssueMock.mock.calls[0][1].list_name).toBe("Review");
   });
 
   it("fetchOpenCards rejection → openCards empty, no throw past catch", async () => {

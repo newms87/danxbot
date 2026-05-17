@@ -34,6 +34,12 @@ import type {
   IssueTracker,
 } from "../issue-tracker/interface.js";
 import { isFeatureEnabled } from "../settings-file.js";
+import { getDefaultListForType, readLists } from "../lists-file.js";
+import {
+  readTrelloListMap,
+  reverseLookupDanxbotListId,
+} from "../trello-list-map.js";
+import { recordSystemError } from "../dashboard/system-errors.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
 
@@ -234,6 +240,16 @@ async function bulkSyncMissingYamls(
         repo.localPath,
         repo.issuePrefix,
       );
+      // DX-619 — assign `list_name` via reverse-map lookup from the
+      // operator-configured `trello-list-map.yaml`. `hydrateFromRemote`
+      // returns `list_name: null` (tracker layer is list-name-agnostic)
+      // so this is the SOLE writer on the inbound-hydration path. The
+      // resolution is best-effort: an unmapped Trello list / a missing
+      // `external_list_id` / a stale danxbot list id in the map all
+      // degrade to the Review default. Decoupling invariant — this is
+      // inside `inbound-fetch.ts`, one of the three allowed Trello
+      // surfaces per CLAUDE.md.
+      issue.list_name = resolveInboundListName(repo, card.external_list_id);
       await writeIssue(repo.localPath, issue);
       log.info(
         `[${repo.name}] bulk-sync: hydrated ${card.external_id} → ${issue.id}`,
@@ -246,4 +262,46 @@ async function bulkSyncMissingYamls(
     }
   }
   return hydrated;
+}
+
+/**
+ * Resolve the danxbot list name a freshly-hydrated tracker card should
+ * land in. Reverse-walks `trello-list-map.yaml`; on ambiguity (operator
+ * mapped multiple danxbot lists to the same Trello list) picks the
+ * first match in `lists.yaml` order and records a `warn`-severity
+ * system error so the operator sees the configuration drift in the
+ * dashboard. Any miss falls back to the `review`-type default list.
+ */
+function resolveInboundListName(
+  repo: RepoContext,
+  externalListId: string | undefined,
+): string {
+  if (!externalListId) {
+    return getDefaultListForType(repo.localPath, "review").name;
+  }
+  const map = readTrelloListMap(repo.localPath);
+  const matchedIds = reverseLookupDanxbotListId(map, externalListId);
+  if (matchedIds.length === 0) {
+    return getDefaultListForType(repo.localPath, "review").name;
+  }
+  const listsFile = readLists(repo.localPath);
+  const matchedSet = new Set(matchedIds);
+  const picked = listsFile.lists.find((l) => matchedSet.has(l.id));
+  if (!picked) {
+    // Map references danxbot list ids that no longer exist in lists.yaml
+    // (operator deleted the list after configuring the map). Degrade
+    // to the Review default — the orphan surfaces on the Settings tab
+    // via classifyTrelloListMapping.
+    return getDefaultListForType(repo.localPath, "review").name;
+  }
+  if (matchedIds.length > 1) {
+    recordSystemError({
+      source: "trello-list-mapping",
+      severity: "warn",
+      repo: repo.name,
+      message: `Trello list ${externalListId} reverse-maps to multiple danxbot lists ${JSON.stringify(matchedIds)} — picked "${picked.name}" (first in lists.yaml order). Operator should resolve the duplicate mapping in the Settings tab.`,
+      details: { external_list_id: externalListId, candidates: matchedIds, picked: picked.id },
+    });
+  }
+  return picked.name;
 }
