@@ -709,4 +709,59 @@ describe("pushTrelloDiff — DX-610 outbound list-mapping gate", () => {
     expect(syncIssue).toHaveBeenCalledTimes(1);
     expect(result.errors).toEqual([]);
   });
+
+  // DX-618 — Phase 9a: when list_name resolves to a Trello-mapped list
+  // id, pushTrelloDiff threads the id into syncIssue as
+  // `destinationTrelloListId`. Legacy path (list_name === null) passes
+  // no destination so syncIssue's step 4b falls through to moveToStatus.
+  it("DX-618: mapped list_name threads resolved trello_list_id into syncIssue's destinationTrelloListId", async () => {
+    const { readLists } = await import("../../lists-file.js");
+    const firstList = readLists(tmpDir).lists[0];
+    const { writeTrelloListMap } = await import("../../trello-list-map.js");
+    await writeTrelloListMap(
+      tmpDir,
+      { list_id_to_trello_list_id: { [firstList.id]: "trello-mapped-Z" } },
+      new Set(readLists(tmpDir).lists.map((l) => l.id)),
+    );
+
+    const issue = { ...makeIssue({ id: "DX-704" }), list_name: firstList.name };
+    writeOpenIssueToDisk(tmpDir, issue);
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: issue,
+      remoteWriteCount: 0,
+    });
+
+    await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).toHaveBeenCalledTimes(1);
+    const [, , opts] = vi.mocked(syncIssue).mock.calls[0]!;
+    expect(opts).toMatchObject({ destinationTrelloListId: "trello-mapped-Z" });
+  });
+
+  it("DX-618: legacy path (list_name === null) passes NO destinationTrelloListId — syncIssue falls back to moveToStatus", async () => {
+    const issue = makeIssue({ id: "DX-705", list_name: null });
+    writeOpenIssueToDisk(tmpDir, issue);
+    vi.mocked(syncIssue).mockResolvedValue({
+      updatedLocal: issue,
+      remoteWriteCount: 0,
+    });
+
+    await pushTrelloDiff({
+      issue,
+      repoName: "test-repo",
+      repoLocalPath: tmpDir,
+      issuePrefix: "DX",
+      tracker,
+    });
+
+    expect(syncIssue).toHaveBeenCalledTimes(1);
+    const [, , opts] = vi.mocked(syncIssue).mock.calls[0]!;
+    expect(opts?.destinationTrelloListId).toBeUndefined();
+  });
 });

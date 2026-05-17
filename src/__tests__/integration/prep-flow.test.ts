@@ -161,6 +161,7 @@ function fakeTracker(): IssueTracker {
     createCard: async () => ({ external_id: "", ac: [] }),
     updateCard: async () => {},
     moveToStatus: async () => {},
+    moveToList: async () => {},
     setLabels: async () => {},
     addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
     editComment: async () => {},

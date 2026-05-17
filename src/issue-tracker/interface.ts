@@ -773,6 +773,16 @@ export interface Issue {
    */
   list_name: string | null;
   /**
+   * TRANSIENT, tracker-derived projection of the card's CURRENT tracker
+   * list id (Trello `idList`). Populated by `tracker.getCard()` so the
+   * outbound diff in `syncIssue` step 4b can idempotency-check a
+   * `moveToList(destinationTrelloListId)` call without a second round-
+   * trip. Mirrors the `labels?` field's discipline: NEVER serialized to
+   * YAML and NEVER written by agents — the tracker is authoritative for
+   * this projection on every read.
+   */
+  tracker_list_id?: string;
+  /**
    * TRANSIENT, tracker-derived projection of the card's managed labels.
    * Populated by `tracker.getCard()` so `syncIssue`'s outbound label diff
    * can compare against the actual remote label state (the only source of
@@ -899,6 +909,17 @@ export interface IssueTracker {
   ): Promise<void>;
 
   moveToStatus(externalId: string, status: IssueStatus): Promise<void>;
+
+  /**
+   * Move the card to an explicit tracker-native list id, bypassing the
+   * implementation's internal `status → list-id` resolution. Used by
+   * `syncIssue` step 4b when the caller has resolved the destination
+   * Trello list id via the operator-configured
+   * `<repo>/.danxbot/trello-list-map.yaml` (DX-618 / Phase 9a of the
+   * computed-card-state epic). `moveToStatus` stays as the legacy
+   * fallback for pre-v10 / unconfigured repos until Phase 9d retires it.
+   */
+  moveToList(externalId: string, trelloListId: string): Promise<void>;
 
   setLabels(externalId: string, labels: ManagedLabels): Promise<void>;
 

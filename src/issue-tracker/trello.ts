@@ -198,6 +198,10 @@ export class TrelloTracker implements IssueTracker {
       completed_at: null,
       cancelled_at: null,
       list_name: null,
+      // DX-618 — surface the Trello-side `idList` so syncIssue step 4b
+      // can idempotency-check a `moveToList(destinationTrelloListId)`
+      // without a second `GET /cards/<id>` round-trip.
+      tracker_list_id: card.idList,
       labels,
     };
   }
@@ -300,6 +304,19 @@ export class TrelloTracker implements IssueTracker {
         body: JSON.stringify({ idList: listId, pos: "top" }),
       },
       `PUT /cards/${externalId} (moveToStatus)`,
+    );
+  }
+
+  async moveToList(externalId: string, trelloListId: string): Promise<void> {
+    const url = `${TRELLO_BASE}/cards/${externalId}?${this.auth()}`;
+    await this.requestVoid(
+      url,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idList: trelloListId, pos: "top" }),
+      },
+      `PUT /cards/${externalId} (moveToList)`,
     );
   }
 

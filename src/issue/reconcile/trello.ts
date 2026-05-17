@@ -172,23 +172,36 @@ export function pushTrelloDiff(
 }
 
 /**
- * DX-610 — resolve the issue's `list_name` to a danxbot list id, look
- * it up in the per-repo Trello list-mapping file, and decide whether
- * to skip the outbound push. Returns `true` when the card is on a
- * danxbot list with no Trello mapping (unmapped) — in that case the
- * caller records a warning to the dashboard stream and stops.
+ * DX-610 + DX-618 — resolve the issue's `list_name` against the
+ * per-repo lists.yaml + trello-list-map.yaml. Three outcomes:
  *
- * The function is read-only on disk and tolerant of missing /
- * unparseable files (treats them as "no mapping configured" — skip).
- * Pre-DX-575 cards (no `list_name`) are not gated by the caller, so
- * this only fires once cards carry the v10 denormalized field.
+ *   - `{kind: "skip"}` — card is on a danxbot list with no Trello
+ *     mapping (or `list_name` no longer matches any configured list).
+ *     Caller records a dashboard warning + stops; no push fires.
+ *   - `{kind: "legacy", trelloListId: null}` — card has no `list_name`
+ *     yet (pre-v10 / unconfigured repo) OR a config file is missing /
+ *     unparseable. Caller pushes via the legacy `moveToStatus` path
+ *     so cards on unconfigured repos still mirror.
+ *   - `{kind: "mapped", trelloListId: <string>}` — operator has
+ *     mapped this list to a Trello list. Caller threads the id into
+ *     `syncIssue` so step 4b moves the card via `moveToList` (DX-618).
+ *
+ * Read-only on disk and tolerant of missing / unparseable files. The
+ * three-way return shape collapses the prior gate-vs-resolve split
+ * into ONE pass so push + skip share the same lists.yaml /
+ * trello-list-map.yaml read pair.
  */
-function shouldSkipPushForUnmappedList(
+type TrelloListMappingResolution =
+  | { kind: "skip" }
+  | { kind: "legacy"; trelloListId: null }
+  | { kind: "mapped"; trelloListId: string };
+
+function resolveTrelloListMapping(
   repoLocalPath: string,
   repoName: string,
   issue: Issue,
-): boolean {
-  if (issue.list_name === null) return false;
+): TrelloListMappingResolution {
+  if (issue.list_name === null) return { kind: "legacy", trelloListId: null };
   let lists;
   try {
     lists = readLists(repoLocalPath).lists;
@@ -197,7 +210,7 @@ function shouldSkipPushForUnmappedList(
       `[${repoName}] ${issue.id} could not read lists.yaml for push gate; allowing push`,
       err,
     );
-    return false;
+    return { kind: "legacy", trelloListId: null };
   }
   const danxbotList = lists.find((l) => l.name === issue.list_name);
   if (!danxbotList) {
@@ -212,7 +225,7 @@ function shouldSkipPushForUnmappedList(
       message: `Skipped Trello push for ${issue.id}: list_name "${issue.list_name}" no longer maps to a configured danxbot list.`,
       details: { issueId: issue.id, listName: issue.list_name },
     });
-    return true;
+    return { kind: "skip" };
   }
   let map;
   try {
@@ -222,7 +235,7 @@ function shouldSkipPushForUnmappedList(
       `[${repoName}] ${issue.id} could not read trello-list-map.yaml for push gate; allowing push`,
       err,
     );
-    return false;
+    return { kind: "legacy", trelloListId: null };
   }
   const trelloListId = map.list_id_to_trello_list_id[danxbotList.id];
   if (typeof trelloListId !== "string" || trelloListId.length === 0) {
@@ -237,9 +250,9 @@ function shouldSkipPushForUnmappedList(
         danxbotListId: danxbotList.id,
       },
     });
-    return true;
+    return { kind: "skip" };
   }
-  return false;
+  return { kind: "mapped", trelloListId };
 }
 
 /**
@@ -292,23 +305,20 @@ async function doPush(args: TrelloPushArgs): Promise<TrelloPushResult> {
   const fresh = readFreshIssue(args);
   const issue = fresh ?? args.issue;
 
-  // DX-610 outbound push gate. When the card carries a `list_name` that
-  // resolves to a danxbot list id NOT mapped to a Trello list (via the
-  // operator-configured `<repo>/.danxbot/trello-list-map.yaml` from
-  // DX-609), skip the push so cards on operator-private lists never
-  // mirror to Trello. `list_name === null` is the legacy fallback (no
-  // tracker projection yet) — the existing status→list resolution in
-  // `syncIssue.moveToStatus` continues to drive the move there. Errors
-  // surface on the dashboard system-errors stream; the agent never sees
-  // them.
-  if (issue.list_name !== null) {
-    const skip = shouldSkipPushForUnmappedList(
-      args.repoLocalPath,
-      args.repoName,
-      issue,
-    );
-    if (skip) return result;
-  }
+  // DX-610 outbound push gate + DX-618 destination-list resolution.
+  // ONE pass over lists.yaml / trello-list-map.yaml decides:
+  //   - skip (unmapped → operator-private, do not mirror), OR
+  //   - mapped (push via moveToList with the resolved Trello list id), OR
+  //   - legacy (no list_name yet / config missing → push via the
+  //     historical moveToStatus path inside syncIssue).
+  // Errors surface on the dashboard system-errors stream; the agent
+  // never sees them.
+  const resolution = resolveTrelloListMapping(
+    args.repoLocalPath,
+    args.repoName,
+    issue,
+  );
+  if (resolution.kind === "skip") return result;
 
   let actionItemTitles;
   try {
@@ -331,6 +341,9 @@ async function doPush(args: TrelloPushArgs): Promise<TrelloPushResult> {
   try {
     const out = await syncIssue(args.tracker, issue, {
       actionItemTitles,
+      ...(resolution.kind === "mapped" && {
+        destinationTrelloListId: resolution.trelloListId,
+      }),
     });
     updatedLocal = out.updatedLocal;
     remoteWriteCount = out.remoteWriteCount;

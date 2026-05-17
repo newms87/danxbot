@@ -1581,3 +1581,132 @@ describe("syncIssue — concurrent-call retro race (DX-505)", () => {
     expect(r2.remoteWriteCount).toBe(0);
   });
 });
+
+// DX-618 — Phase 9a. `syncIssue` step 4b chooses `moveToList(<exact
+// trello list id>)` when the caller supplies `destinationTrelloListId`,
+// and falls through to legacy `moveToStatus(local.status)` otherwise.
+describe("syncIssue — DX-618 destinationTrelloListId list-move", () => {
+  it("mapped path: passes destinationTrelloListId → moveToList fires with the exact id and moveToStatus does NOT fire", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local = await tracker.getCard(external_id);
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local, {
+      destinationTrelloListId: "trello-list-XYZ",
+    });
+
+    const log = tracker.getRequestLog();
+    const moveToList = log.find((l) => l.method === "moveToList");
+    expect(moveToList).toBeDefined();
+    expect(moveToList!.details).toMatchObject({
+      trelloListId: "trello-list-XYZ",
+    });
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(false);
+  });
+
+  it("legacy fallback: no destinationTrelloListId AND status differs → moveToStatus fires; moveToList does NOT", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "In Progress",
+    };
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local);
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(true);
+    expect(log.some((l) => l.method === "moveToList")).toBe(false);
+  });
+
+  it("legacy fallback fires even with destinationTrelloListId === '' (empty string treated as unset)", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "In Progress",
+    };
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local, { destinationTrelloListId: "" });
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(true);
+    expect(log.some((l) => l.method === "moveToList")).toBe(false);
+  });
+
+  it("idempotent re-sync (mapped): remote already on destinationTrelloListId → zero list-move writes", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    // Move the card so the tracker_list_id matches the destination
+    // we'll request below.
+    await tracker.moveToList(external_id, "trello-list-XYZ");
+    const local = await tracker.getCard(external_id);
+    expect(local.tracker_list_id).toBe("trello-list-XYZ");
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local, {
+      destinationTrelloListId: "trello-list-XYZ",
+    });
+
+    expect(result.remoteWriteCount).toBe(0);
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "moveToList")).toBe(false);
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(false);
+  });
+
+  it("idempotent re-sync (legacy): no destinationTrelloListId AND status equal to remote → zero list-move writes", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local = await tracker.getCard(external_id);
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local);
+
+    expect(result.remoteWriteCount).toBe(0);
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "moveToList")).toBe(false);
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(false);
+  });
+
+  it("mapped path FULLY suppresses legacy moveToStatus even when local.status differs from remote.status", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    const local: Issue = {
+      ...(await tracker.getCard(external_id)),
+      status: "In Progress",
+    };
+    tracker.clearRequestLog();
+
+    await syncIssue(tracker, local, {
+      destinationTrelloListId: "trello-list-XYZ",
+    });
+
+    const log = tracker.getRequestLog();
+    expect(log.some((l) => l.method === "moveToList")).toBe(true);
+    expect(log.some((l) => l.method === "moveToStatus")).toBe(false);
+  });
+
+  it("mapped path: remote on a DIFFERENT trello list → moveToList fires once", async () => {
+    const tracker = new FakeTracker();
+    const { external_id } = await tracker.createCard(defaultCreate());
+    await tracker.moveToList(external_id, "trello-list-OLD");
+    const local = await tracker.getCard(external_id);
+    expect(local.tracker_list_id).toBe("trello-list-OLD");
+    tracker.clearRequestLog();
+
+    const result = await syncIssue(tracker, local, {
+      destinationTrelloListId: "trello-list-NEW",
+    });
+
+    expect(result.remoteWriteCount).toBe(1);
+    const log = tracker.getRequestLog();
+    const calls = log.filter((l) => l.method === "moveToList");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.details).toMatchObject({
+      trelloListId: "trello-list-NEW",
+    });
+  });
+});

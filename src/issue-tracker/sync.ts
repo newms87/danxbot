@@ -220,10 +220,25 @@ export function _resetSyncIssueSlots(tracker?: IssueTracker): void {
   // GC takes the inner Map. No-op fallback documented for clarity.
 }
 
+/**
+ * Optional knob set by callers that resolved the destination Trello list
+ * via the operator-configured `<repo>/.danxbot/trello-list-map.yaml`
+ * (DX-618 / Phase 9a). When non-empty, `syncIssue` step 4b moves the
+ * card to that exact list via `tracker.moveToList` and SKIPS the legacy
+ * `moveToStatus(local.status)` path. When unset / empty (no `list_name`
+ * on the card, no mapping configured, lists.yaml missing), step 4b
+ * falls back to the legacy `status → list-id` resolution inside
+ * `tracker.moveToStatus` so pre-v10 / unconfigured repos still mirror.
+ */
+export interface SyncIssueOptions {
+  actionItemTitles?: ActionItemTitleResolver;
+  destinationTrelloListId?: string;
+}
+
 export function syncIssue(
   tracker: IssueTracker,
   local: Issue,
-  options: { actionItemTitles?: ActionItemTitleResolver } = {},
+  options: SyncIssueOptions = {},
 ): Promise<{ updatedLocal: Issue; remoteWriteCount: number }> {
   let trackerSlots = syncIssueSlots.get(tracker);
   if (!trackerSlots) {
@@ -249,7 +264,7 @@ export function syncIssue(
 async function doSyncIssue(
   tracker: IssueTracker,
   local: Issue,
-  options: { actionItemTitles?: ActionItemTitleResolver } = {},
+  options: SyncIssueOptions = {},
 ): Promise<{ updatedLocal: Issue; remoteWriteCount: number }> {
   // --- Step 0: orphan guard. ---
   //
@@ -333,8 +348,27 @@ async function doSyncIssue(
     writes++;
   }
 
-  // 4b: status
-  if (local.status !== remoteCard.status) {
+  // 4b: list move.
+  //
+  // DX-618 (Phase 9a) — when the caller resolved the destination Trello
+  // list id via the operator-configured trello-list-map, prefer
+  // `moveToList(<exact-trello-list-id>)` over the legacy
+  // `moveToStatus(<status enum>)`. Idempotency-check against
+  // `remoteCard.tracker_list_id` so a re-sync against a card already on
+  // the right list issues zero writes.
+  //
+  // Legacy fallback fires when no `destinationTrelloListId` is supplied
+  // (card has no `list_name`, no mapping configured, lists.yaml missing —
+  // see `pushTrelloDiff#resolveTrelloListMapping`). The status-enum
+  // resolution inside each tracker's `moveToStatus` continues to drive
+  // pre-v10 / unconfigured repos. Phase 9d retires `moveToStatus`.
+  const destinationListId = options.destinationTrelloListId;
+  if (destinationListId !== undefined && destinationListId.length > 0) {
+    if (remoteCard.tracker_list_id !== destinationListId) {
+      await tracker.moveToList(local.external_id, destinationListId);
+      writes++;
+    }
+  } else if (local.status !== remoteCard.status) {
     await tracker.moveToStatus(local.external_id, local.status);
     writes++;
   }

@@ -189,6 +189,9 @@ describe("TrelloTracker", () => {
     // Higher layers populate them on the local YAML side.
     expect(issue.parent_id).toBeNull();
     expect(issue.children).toEqual([]);
+    // DX-618: tracker_list_id surfaced from card.idList so syncIssue
+    // step 4b can idempotency-check moveToList without a re-fetch.
+    expect(issue.tracker_list_id).toBe("list-todo");
     // Verify exactly one round-trip: GET /cards/c1?... and nothing else.
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -345,6 +348,18 @@ describe("TrelloTracker", () => {
     const call = fetchMock.mock.calls[0];
     expect(JSON.parse(call[1].body as string)).toEqual({
       idList: "list-ip",
+      pos: "top",
+    });
+  });
+
+  it("DX-618: moveToList PUTs the supplied trello list id verbatim (bypasses statusToListId)", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({}));
+    const tracker = new TrelloTracker(TRELLO);
+    await tracker.moveToList("c1", "trello-list-OPERATOR-CHOSEN");
+    const call = fetchMock.mock.calls[0];
+    expect(call[1].method).toBe("PUT");
+    expect(JSON.parse(call[1].body as string)).toEqual({
+      idList: "trello-list-OPERATOR-CHOSEN",
       pos: "top",
     });
   });

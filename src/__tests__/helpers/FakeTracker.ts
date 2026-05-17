@@ -93,6 +93,14 @@ interface StoredCard {
   conflict_on: { id: string; reason: string }[];
   effort_level: import("../../issue-tracker/interface.js").EffortLevelName | null;
   labels: ManagedLabels;
+  /**
+   * Synthesized Trello-shaped `idList` so `getCard` can surface a
+   * `tracker_list_id` projection that `syncIssue` step 4b
+   * (DX-618) uses to idempotency-check `moveToList` calls. Defaults to
+   * `"list-<status>"` at create / seed time; `moveToList` updates it
+   * verbatim so a re-sync against the same id is zero-write.
+   */
+  trackerListId: string;
 }
 
 /**
@@ -219,6 +227,7 @@ export class FakeTracker implements IssueTracker {
         requires_human: false,
         triaged: isTriaged(input.triage),
       },
+      trackerListId: `list-${input.status}`,
     };
     this.cards.set(externalId, stored);
     this.log("createCard", externalId, { input });
@@ -243,7 +252,15 @@ export class FakeTracker implements IssueTracker {
     this.consumeWriteRejection();
     const card = this.requireCard(externalId);
     card.status = status;
+    card.trackerListId = `list-${status}`;
     this.log("moveToStatus", externalId, { status });
+  }
+
+  async moveToList(externalId: string, trelloListId: string): Promise<void> {
+    this.consumeWriteRejection();
+    const card = this.requireCard(externalId);
+    card.trackerListId = trelloListId;
+    this.log("moveToList", externalId, { trelloListId });
   }
 
   async setLabels(
@@ -445,6 +462,7 @@ export class FakeTracker implements IssueTracker {
       completed_at: null,
       cancelled_at: null,
       list_name: null,
+      tracker_list_id: card.trackerListId,
     };
   }
 
@@ -502,6 +520,7 @@ export class FakeTracker implements IssueTracker {
         requires_human: issue.requires_human !== null,
         triaged: isTriaged(issue.triage),
       },
+      trackerListId: issue.tracker_list_id ?? `list-${issue.status}`,
     };
   }
 }
