@@ -150,6 +150,19 @@ export type {
 export { LIST_TYPES } from "@backend/lists-types.js";
 
 /**
+ * DX-611 (Phase 8b.3) — re-export the Trello list-mapping types the
+ * dashboard's Settings UI consumes. Source of truth is the backend
+ * `src/trello-list-map.ts` module; mirroring here keeps SFCs + the
+ * `useTrelloListMapping` composable off the backend bundle path.
+ */
+export type {
+  TrelloListMap,
+  TrelloListMapStatus,
+  ClassifiedTrelloMapping,
+  TrelloListSummary,
+} from "@backend/trello-list-map.js";
+
+/**
  * UI-side ladder ordering for the seven semantic types. Matches the
  * derivation precedence + move-semantics ladder in DX-575's epic body:
  * archived → review → ready → blocked → in_progress → completed → cancelled.

@@ -617,7 +617,13 @@ async function route(
   // routes above (each handler runs its own `requireUser`). Successful
   // PATCH publishes `trello-list-map:updated` on the SSE bus.
   if (method === "GET" && url.pathname === "/api/trello/board-lists") {
-    await handleGetBoardLists(req, res, url.searchParams.get("repo"), dispatchDeps);
+    await handleGetBoardLists(
+      req,
+      res,
+      url.searchParams.get("repo"),
+      dispatchDeps,
+      { refresh: url.searchParams.get("refresh") === "1" },
+    );
     return true;
   }
   if (method === "GET" && url.pathname === "/api/trello/list-mapping") {

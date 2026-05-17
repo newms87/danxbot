@@ -211,6 +211,19 @@ describe("GET /api/trello/board-lists", () => {
     expect(mockFetchBoardLists).toHaveBeenCalledTimes(1);
   });
 
+  it("refresh=true bypasses the 30s cache (Settings Re-fetch button)", async () => {
+    mockFetchBoardLists.mockResolvedValue([{ id: "tl1", name: "ToDo" }]);
+    await handleGetBoardLists(authedReq("GET"), createMockRes(), "danxbot", deps);
+    await handleGetBoardLists(
+      authedReq("GET"),
+      createMockRes(),
+      "danxbot",
+      deps,
+      { refresh: true },
+    );
+    expect(mockFetchBoardLists).toHaveBeenCalledTimes(2);
+  });
+
   it("400 missing repo query", async () => {
     const res = createMockRes();
     await handleGetBoardLists(authedReq("GET"), res, null, deps);
@@ -291,6 +304,42 @@ describe("GET /api/trello/list-mapping", () => {
     }
   });
 
+  it("board_configured: true when trello.yml carries a board_id", async () => {
+    mockFetchBoardLists.mockResolvedValueOnce([]);
+    const res = createMockRes();
+    await handleGetListMapping(authedReq("GET"), res, "danxbot", deps);
+    const body = JSON.parse(res._getBody());
+    expect(body.board_configured).toBe(true);
+  });
+
+  it("board_configured: false when trello.yml has no board_id (SPA hides panel)", async () => {
+    writeTrelloYml(null);
+    const res = createMockRes();
+    await handleGetListMapping(authedReq("GET"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.board_configured).toBe(false);
+    expect(body.trello_available).toBe(false);
+  });
+
+  it("board_configured: true when Trello transiently down (panel stays visible)", async () => {
+    mockFetchBoardLists.mockRejectedValueOnce(new TrelloApiError("502", 502));
+    const res = createMockRes();
+    await handleGetListMapping(authedReq("GET"), res, "danxbot", deps);
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.board_configured).toBe(true);
+    expect(body.trello_available).toBe(false);
+  });
+
+  it("board_configured: true when dashboard Trello creds missing (panel stays visible)", async () => {
+    delete process.env.DASHBOARD_TRELLO_API_KEY;
+    const res = createMockRes();
+    await handleGetListMapping(authedReq("GET"), res, "danxbot", deps);
+    const body = JSON.parse(res._getBody());
+    expect(body.board_configured).toBe(true);
+    expect(body.trello_available).toBe(false);
+  });
 });
 
 describe("PATCH /api/trello/list-mapping", () => {

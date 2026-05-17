@@ -4,6 +4,7 @@ import type {
   AgentRosterResponse,
   AgentSchedule,
   AgentSnapshot,
+  ClassifiedTrelloMapping,
   CreateListInput,
   Dispatch,
   DispatchDetail,
@@ -22,6 +23,8 @@ import type {
   RepairErrorWithAttempts,
   SyncRootStateEntry,
   SystemError,
+  TrelloListMap,
+  TrelloListSummary,
   UpdateListInput,
 } from "./types";
 import { useAuth } from "./composables/useAuth";
@@ -1020,6 +1023,87 @@ async function readListsError(res: Response): Promise<string | undefined> {
     /* ignore */
   }
   return undefined;
+}
+
+// ── DX-611 (Phase 8b.3) — Trello list mapping ───────────────────────
+
+/**
+ * Wire shape of `GET /api/trello/list-mapping?repo=<name>`. The Settings
+ * UI reads ALL of it: `map` seeds the dropdown selections, `classification`
+ * drives the per-row badges, `trello_available` toggles the transient
+ * "Trello unreachable" banner, `board_configured` hides the whole panel
+ * when the repo has no Trello board id wired up in `trello.yml`.
+ */
+export interface TrelloListMappingResponse {
+  map: TrelloListMap;
+  classification: Record<string, ClassifiedTrelloMapping>;
+  trello_available: boolean;
+  board_configured: boolean;
+}
+
+export interface TrelloBoardListsResponse {
+  lists: TrelloListSummary[];
+}
+
+/**
+ * GET /api/trello/list-mapping?repo=<name>. Returns the persisted map +
+ * the live classification + the two SPA gates. 401 on auth, 400/404 on
+ * repo, otherwise 200.
+ */
+export async function fetchTrelloListMapping(
+  repo: string,
+): Promise<TrelloListMappingResponse> {
+  const res = await fetchWithAuth(
+    `/api/trello/list-mapping?repo=${encodeURIComponent(repo)}`,
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as TrelloListMappingResponse;
+}
+
+/**
+ * GET /api/trello/board-lists?repo=<name>&refresh=<0|1>. `refresh=true`
+ * appends `refresh=1` so the route bypasses the server-side 30s cache —
+ * the Settings UI's "Re-fetch board lists" button uses this to force a
+ * fresh upstream call. Trello-unreachable / no-creds surfaces as a 502 /
+ * 503 carrying `{error, trello_status?}` — the caller converts to a
+ * `ToggleError` so the panel can render the upstream message inline.
+ */
+export async function fetchTrelloBoardLists(
+  repo: string,
+  options: { refresh?: boolean } = {},
+): Promise<TrelloListSummary[]> {
+  const params = new URLSearchParams({ repo });
+  if (options.refresh) params.set("refresh", "1");
+  const res = await fetchWithAuth(
+    `/api/trello/board-lists?${params.toString()}`,
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const body = (await res.json()) as TrelloBoardListsResponse;
+  return body.lists;
+}
+
+/**
+ * PATCH /api/trello/list-mapping?repo=<name>. Server validates against
+ * the known danxbot list ids + atomically writes the file under the
+ * per-repo lock + publishes `trello-list-map:updated` on the SSE bus.
+ * Returns the post-write map (round-trip lets the SPA reconcile without
+ * waiting for SSE on the same tab).
+ */
+export async function patchTrelloListMapping(
+  repo: string,
+  map: TrelloListMap,
+): Promise<TrelloListMap> {
+  const res = await fetchWithAuth(
+    `/api/trello/list-mapping?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ map }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  const body = (await res.json()) as { map: TrelloListMap };
+  return body.map;
 }
 
 export interface ResetAllDataResult {

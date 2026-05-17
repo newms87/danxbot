@@ -13,6 +13,7 @@ import RepoRootDirtyBanner from "./agents/RepoRootDirtyBanner.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
 import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
 import ListsManager from "./settings/ListsManager.vue";
+import TrelloListMapping from "./settings/TrelloListMapping.vue";
 import type { Feature } from "../types";
 
 /**
@@ -200,6 +201,17 @@ function dismissResult(): void {
         />
         <ListsManager
           :key="activeRepoName"
+          :repo="activeRepoName"
+        />
+        <!--
+          DX-611 — TrelloListMapping self-gates on `board_configured` from
+          the GET response, so mounting it unconditionally here is safe:
+          the panel hides itself entirely when no Trello board id is
+          wired up in the repo's trello.yml. The `:key` re-mount mirrors
+          ListsManager's pattern for repo switches.
+        -->
+        <TrelloListMapping
+          :key="`trello-${activeRepoName}`"
           :repo="activeRepoName"
         />
       </template>

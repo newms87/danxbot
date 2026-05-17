@@ -155,11 +155,14 @@ export async function handleGetBoardLists(
   res: ServerResponse,
   repoQuery: string | null,
   deps: DispatchProxyDeps,
+  options: { refresh?: boolean } = {},
 ): Promise<void> {
   if (!(await requireAuth(req, res))) return;
   const repo = resolveRepo(res, repoQuery, deps);
   if (!repo) return;
-  const outcome = await fetchBoardListsForRepo(repo.name, repo.localPath);
+  const outcome = await fetchBoardListsForRepo(repo.name, repo.localPath, {
+    bypassCache: options.refresh === true,
+  });
   switch (outcome.kind) {
     case "ok":
       json(res, 200, { lists: outcome.lists });
@@ -204,6 +207,12 @@ export async function handleGetListMapping(
     map,
     classification,
     trello_available: outcome.kind === "ok",
+    // SPA reads this to hide the Settings panel entirely when no board
+    // is wired up for the repo (Phase 8b.3). `trello_available` collapses
+    // both "no board" and "creds missing / Trello down" into one signal;
+    // operators with a configured board still want the panel visible
+    // when Trello is transiently unreachable.
+    board_configured: outcome.kind !== "no-board",
   });
 }
 
