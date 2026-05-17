@@ -102,14 +102,15 @@ export interface IssueRef {
   id: string;
   external_id: string;
   title: string;
-  status: IssueStatus;
   /**
    * Tracker-native list id the card lives on at fetch time (e.g. Trello's
-   * `idList`). Optional because pre-DX-619 tracker implementations did not
-   * populate it; consumers (`src/cron/inbound-fetch.ts` reverse-map lookup)
-   * MUST tolerate `undefined` by falling back to the Review default list.
+   * `idList`). DX-621 / Phase 9d retired `IssueRef.status` — the only
+   * inbound mapping from tracker list → danxbot list type now goes
+   * through `external_list_id` + the per-repo `trello-list-map.yaml`
+   * reverse-walk. Always populated by the Trello tracker; empty string
+   * for trackers that have no native list concept.
    */
-  external_list_id?: string;
+  external_list_id: string;
 }
 
 export interface IssueAcItem {
@@ -857,6 +858,16 @@ export interface CreateCardInput {
    * when the level is already known at create time.
    */
   effort_level?: EffortLevelName | null;
+  /**
+   * DX-621 / Phase 9d — destination tracker list id for the created card.
+   * Callers resolve via the operator-mapped `trello-list-map.yaml`
+   * (`<repo>/.danxbot/trello-list-map.yaml`) before calling. Optional so
+   * the in-process fake tracker (memory) can ignore it; the Trello tracker
+   * passes it verbatim as Trello's `idList` POST field. Empty / undefined
+   * lands the card on the board's default list (operator must map the
+   * list explicitly to control placement).
+   */
+  destinationTrelloListId?: string;
 }
 
 /**
@@ -894,7 +905,16 @@ export interface ManagedLabels {
 }
 
 export interface IssueTracker {
-  fetchOpenCards(): Promise<IssueRef[]>;
+  /**
+   * Fetch every open card across the supplied tracker-native list ids.
+   * DX-621 / Phase 9d — callers pass `Object.values(map.list_id_to_trello_list_id)`
+   * from the operator-configured `trello-list-map.yaml` so the cron polls
+   * exactly the lists the operator mapped (no implicit ordering, no
+   * hard-coded status→list resolution). Tracker implementations iterate
+   * the supplied ids and surface each card's tracker-native list id in
+   * `IssueRef.external_list_id` so callers can reverse-walk the map.
+   */
+  fetchOpenCards(trelloListIds: readonly string[]): Promise<IssueRef[]>;
 
   getCard(externalId: string): Promise<Issue>;
 
@@ -915,16 +935,11 @@ export interface IssueTracker {
     patch: { title?: string; description?: string; id?: string },
   ): Promise<void>;
 
-  moveToStatus(externalId: string, status: IssueStatus): Promise<void>;
-
   /**
-   * Move the card to an explicit tracker-native list id, bypassing the
-   * implementation's internal `status → list-id` resolution. Used by
-   * `syncIssue` step 4b when the caller has resolved the destination
-   * Trello list id via the operator-configured
-   * `<repo>/.danxbot/trello-list-map.yaml` (DX-618 / Phase 9a of the
-   * computed-card-state epic). `moveToStatus` stays as the legacy
-   * fallback for pre-v10 / unconfigured repos until Phase 9d retires it.
+   * Move the card to an explicit tracker-native list id. Callers resolve
+   * the destination Trello list id via the operator-configured
+   * `<repo>/.danxbot/trello-list-map.yaml` (DX-618 / Phase 9a) — the
+   * legacy `status → list-id` resolution path is gone (DX-621 / Phase 9d).
    */
   moveToList(externalId: string, trelloListId: string): Promise<void>;
 

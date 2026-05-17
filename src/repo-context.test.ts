@@ -9,13 +9,6 @@ vi.mock("./poller/constants.js", () => ({
   getReposBase: () => "/test/repos",
   loadTrelloIds: () => ({
     boardId: "b",
-    reviewListId: "r",
-    todoListId: "t",
-    inProgressListId: "ip",
-    needsHelpListId: "nh",
-    doneListId: "d",
-    cancelledListId: "c",
-    actionItemsListId: "a",
     bugLabelId: "bug",
     featureLabelId: "feat",
     epicLabelId: "epic",

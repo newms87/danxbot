@@ -61,13 +61,6 @@ function makeRepo(): RepoContext {
       apiKey: "",
       apiToken: "",
       boardId: "",
-      reviewListId: "",
-      todoListId: "",
-      inProgressListId: "",
-      needsHelpListId: "",
-      doneListId: "",
-      cancelledListId: "",
-      actionItemsListId: "",
       bugLabelId: "",
       featureLabelId: "",
       epicLabelId: "",
@@ -91,7 +84,7 @@ function makeTracker(): IssueTracker {
     getComments: vi.fn(),
     addComment: vi.fn(),
     editComment: vi.fn(),
-    moveToStatus: vi.fn(),
+    moveToList: vi.fn(),
     updateCard: vi.fn(),
     setLabels: vi.fn(),
     addAcItem: vi.fn(),
@@ -100,17 +93,37 @@ function makeTracker(): IssueTracker {
   } as unknown as IssueTracker;
 }
 
-function makeRef(
-  externalId: string,
-  status: IssueRef["status"],
-  externalListId?: string,
-): IssueRef {
+function makeRef(externalId: string, externalListId = ""): IssueRef {
   return {
+    id: "",
     external_id: externalId,
     title: `card ${externalId}`,
-    status,
     external_list_id: externalListId,
-  } as IssueRef;
+  };
+}
+
+// DX-621 — checkNeedsHelp needs blocked + ready default lists mapped to
+// Trello list ids. Test setup helper that wires both mocks in lockstep.
+function seedMappedLists(opts: {
+  blockedTrelloListId?: string;
+  readyTrelloListId?: string;
+} = {}): { blocked: string; ready: string } {
+  const blocked = opts.blockedTrelloListId ?? "trello-blocked";
+  const ready = opts.readyTrelloListId ?? "trello-ready";
+  readListsMock.mockReturnValue({
+    lists: [
+      { id: "blocked-id", name: "Blocked", type: "blocked", order: 0, is_default_for_type: true, color: "#000" },
+      { id: "ready-id", name: "ToDo", type: "ready", order: 1, is_default_for_type: true, color: "#000" },
+    ],
+    tombstone_ids: [],
+  });
+  readTrelloListMapMock.mockReturnValue({
+    list_id_to_trello_list_id: {
+      "blocked-id": blocked,
+      "ready-id": ready,
+    },
+  });
+  return { blocked, ready };
 }
 
 describe("runInboundFetch", () => {
@@ -135,29 +148,30 @@ describe("runInboundFetch", () => {
     expect(result.openCards).toEqual([]);
     expect(tracker.fetchOpenCards).not.toHaveBeenCalled();
     expect(tracker.getComments).not.toHaveBeenCalled();
-    expect(tracker.moveToStatus).not.toHaveBeenCalled();
+    expect(tracker.moveToList).not.toHaveBeenCalled();
   });
 
-  it("moves a Blocked card to ToDo when latest comment lacks the danxbot marker", async () => {
+  it("moves a Blocked card to the mapped ToDo list when latest comment lacks the danxbot marker", async () => {
     isFeatureEnabledMock.mockReturnValue(true);
+    const { blocked, ready } = seedMappedLists();
     const tracker = makeTracker();
-    const blockedRef = makeRef("ext-1", "Blocked");
+    const blockedRef = makeRef("ext-1", blocked);
     vi.mocked(tracker.fetchOpenCards).mockResolvedValue([blockedRef]);
     vi.mocked(tracker.getComments).mockResolvedValue([
-      // ascending order — last is newest.
       { id: "c1", author: "danxbot", text: `${DANXBOT_COMMENT_MARKER} earlier reply`, timestamp: "2026-01-01" },
       { id: "c2", author: "user", text: "User: please look again", timestamp: "2026-01-02" },
     ]);
 
     await runInboundFetch(makeRepo(), tracker);
 
-    expect(tracker.moveToStatus).toHaveBeenCalledWith("ext-1", "ToDo");
+    expect(tracker.moveToList).toHaveBeenCalledWith("ext-1", ready);
   });
 
   it("does NOT move when latest comment carries the danxbot marker (still our turn)", async () => {
     isFeatureEnabledMock.mockReturnValue(true);
+    const { blocked } = seedMappedLists();
     const tracker = makeTracker();
-    const blockedRef = makeRef("ext-1", "Blocked");
+    const blockedRef = makeRef("ext-1", blocked);
     vi.mocked(tracker.fetchOpenCards).mockResolvedValue([blockedRef]);
     vi.mocked(tracker.getComments).mockResolvedValue([
       { id: "c1", author: "danxbot", text: `${DANXBOT_COMMENT_MARKER} latest is from us`, timestamp: "2026-01-02" },
@@ -165,7 +179,7 @@ describe("runInboundFetch", () => {
 
     await runInboundFetch(makeRepo(), tracker);
 
-    expect(tracker.moveToStatus).not.toHaveBeenCalled();
+    expect(tracker.moveToList).not.toHaveBeenCalled();
   });
 
   it("DX-619: hydrates with list_name resolved via reverse-map (mapped trello list)", async () => {
@@ -185,8 +199,7 @@ describe("runInboundFetch", () => {
 
     const tracker = makeTracker();
     vi.mocked(tracker.fetchOpenCards)
-      .mockResolvedValueOnce([]) // checkNeedsHelp
-      .mockResolvedValueOnce([makeRef("ext-1", "In Progress", "trello-ip")]);
+      .mockResolvedValue([makeRef("ext-1", "trello-ip")]);
 
     await runInboundFetch(makeRepo(), tracker);
 
@@ -219,8 +232,7 @@ describe("runInboundFetch", () => {
 
     const tracker = makeTracker();
     vi.mocked(tracker.fetchOpenCards)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([makeRef("ext-1", "Review", "trello-unknown")]);
+      .mockResolvedValue([makeRef("ext-1", "trello-unknown")]);
 
     await runInboundFetch(makeRepo(), tracker);
 
@@ -250,8 +262,7 @@ describe("runInboundFetch", () => {
 
     const tracker = makeTracker();
     vi.mocked(tracker.fetchOpenCards)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([makeRef("ext-1", "ToDo", "trello-shared")]);
+      .mockResolvedValue([makeRef("ext-1", "trello-shared")]);
 
     await runInboundFetch(makeRepo(), tracker);
 
@@ -280,8 +291,7 @@ describe("runInboundFetch", () => {
 
     const tracker = makeTracker();
     vi.mocked(tracker.fetchOpenCards)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([makeRef("ext-1", "Review", undefined)]);
+      .mockResolvedValue([makeRef("ext-1", undefined)]);
 
     await runInboundFetch(makeRepo(), tracker);
 

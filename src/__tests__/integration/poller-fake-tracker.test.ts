@@ -6,7 +6,7 @@
  * `make test-system-poller` (or equivalent) that drives a full
  * ToDo→Done lifecycle through the poller against FakeTracker; the
  * JSONL contains zero `mcp__trello__*` calls and the FakeTracker
- * request log shows the expected `fetchOpenCards`/`moveToStatus`/
+ * request log shows the expected `fetchOpenCards`/`moveToList`/
  * `addComment` sequence."
  *
  * The JSONL/structure assertion is covered by `test_yaml_memory`
@@ -15,7 +15,7 @@
  * covers the OTHER half of AC #4: confirming that when the poller
  * runs against a real `FakeTracker`, the request log captures the
  * expected method sequence (`fetchOpenCards`, then `getCard` for the
- * post-dispatch progress check, plus `moveToStatus`/`addComment` on
+ * post-dispatch progress check, plus `moveToList`/`addComment` on
  * recovery). A single FakeTracker survives across calls because
  * `getRepoTracker` caches the factory result — break the cache and
  * this test fails loud.
@@ -174,10 +174,14 @@ vi.mock("../../workspace/write-if-changed.js", () => ({
 // ISS-86: dispatch source is local YAML, not the tracker view. The
 // integration test mocks node:fs so the real local-issues walker
 // finds nothing. Stand in for the local-YAML scan by deriving Issue[]
-// projections from the most recent `tracker.fetchOpenCards()` value
+// projections from the most recent `tracker.fetchOpenCards([])` value
 // captured by the wrapping factory below.
-const lastOpenCards: { value: IssueRef[] } = { value: [] };
-function refToFakeIssue(ref: IssueRef): Issue {
+// DX-621 — `IssueRef.status` retired; this integration helper carries
+// the legacy status as a non-schema `_status` so the fixture flow can
+// still partition fake cards by status.
+type TestRef = IssueRef & { _status: import("../../issue-tracker/interface.js").IssueStatus };
+const lastOpenCards: { value: TestRef[] } = { value: [] };
+function refToFakeIssue(ref: TestRef): Issue {
   return {
     schema_version: 10,
     tracker: "memory",
@@ -186,7 +190,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     parent_id: null,
     children: [],
     dispatch: null,
-    status: ref.status,
+    status: ref._status,
     type: "Feature",
     title: ref.title,
     description: "",
@@ -223,17 +227,54 @@ vi.mock("../../poller/epic-status.js", () => ({
 vi.mock("../../poller/local-issues.js", () => ({
   listDispatchableYamls: async (_repoPath: string): Promise<Issue[]> =>
     lastOpenCards.value
-      .filter((r) => r.status === "ToDo")
+      .filter((r) => r._status === "ToDo")
       .map(refToFakeIssue),
   listInProgressYamls: async (_repoPath: string): Promise<Issue[]> =>
     lastOpenCards.value
-      .filter((r) => r.status === "In Progress")
+      .filter((r) => r._status === "In Progress")
       .map(refToFakeIssue),
   listTriageDueYamls: async (
     _repoPath: string,
     _now: number,
   ): Promise<Issue[]> => [],
 }));
+
+// DX-621 — runInboundFetch reads trello-list-map.yaml. Stub the readers
+// to return a populated map keyed off ListType so fetchOpenCards
+// receives non-empty Trello list ids in the integration flow.
+vi.mock("../../trello-list-map.js", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../trello-list-map.js")
+  >("../../trello-list-map.js");
+  return {
+    ...actual,
+    readTrelloListMap: () => ({
+      list_id_to_trello_list_id: {
+        "blocked-id": "list-Blocked",
+        "ready-id": "list-ToDo",
+        "in-progress-id": "list-In Progress",
+        "review-id": "list-Review",
+      },
+    }),
+  };
+});
+vi.mock("../../lists-file.js", async () => {
+  const actual = await vi.importActual<typeof import("../../lists-file.js")>(
+    "../../lists-file.js",
+  );
+  return {
+    ...actual,
+    readLists: () => ({
+      lists: [
+        { id: "blocked-id", name: "Blocked", type: "blocked", order: 0, is_default_for_type: true, color: "#000" },
+        { id: "ready-id", name: "ToDo", type: "ready", order: 1, is_default_for_type: true, color: "#000" },
+        { id: "in-progress-id", name: "In Progress", type: "in_progress", order: 2, is_default_for_type: true, color: "#000" },
+        { id: "review-id", name: "Review", type: "review", order: 3, is_default_for_type: true, color: "#000" },
+      ],
+      tombstone_ids: [],
+    }),
+  };
+});
 
 // The factory mock returns the real FakeTracker the test sets up.
 const trackerHandle: { current: FakeTracker | null } = { current: null };
@@ -251,9 +292,17 @@ vi.mock("../../issue-tracker/index.js", async () => {
       }
       const tracker = trackerHandle.current;
       const origFetch = tracker.fetchOpenCards.bind(tracker);
-      tracker.fetchOpenCards = async () => {
-        const result = await origFetch();
-        lastOpenCards.value = result;
+      tracker.fetchOpenCards = async (trelloListIds: readonly string[]) => {
+        const result = await origFetch(trelloListIds);
+        // DX-621 — annotate each ref with `_status` for the legacy
+        // fixture flow by looking up the underlying FakeTracker card.
+        const annotated: TestRef[] = result.map((r) => {
+          const card = (tracker as unknown as {
+            cards: Map<string, { status: import("../../issue-tracker/interface.js").IssueStatus }>;
+          }).cards.get(r.external_id);
+          return { ...r, _status: card?.status ?? "Review" };
+        });
+        lastOpenCards.value = annotated;
         return result;
       };
       return tracker;
@@ -277,13 +326,6 @@ const REPO: RepoContext = {
     apiKey: "test-key",
     apiToken: "test-token",
     boardId: "test-board",
-    reviewListId: "review-list",
-    todoListId: "todo-list",
-    inProgressListId: "ip-list",
-    needsHelpListId: "nh-list",
-    doneListId: "done-list",
-    cancelledListId: "cancelled-list",
-    actionItemsListId: "ai-list",
     bugLabelId: "bug-label",
     featureLabelId: "feature-label",
     epicLabelId: "epic-label",
@@ -371,8 +413,8 @@ describe("Integration: poller hot path against FakeTracker", () => {
     const methods = methodsOnly(log);
     const fetchCalls = methods.filter((m) => m === "fetchOpenCards").length;
     expect(fetchCalls).toBeGreaterThanOrEqual(2);
-    // No moveToStatus / addComment on an empty board — no cards to move.
-    expect(methods).not.toContain("moveToStatus");
+    // No moveToList / addComment on an empty board — no cards to move.
+    expect(methods).not.toContain("moveToList");
     expect(methods).not.toContain("addComment");
   });
 
@@ -467,7 +509,10 @@ describe("Integration: poller hot path against FakeTracker", () => {
     // reused. The FakeTracker still has the seeded card because we
     // never tore it down.
     expect(factorySpy).not.toHaveBeenCalled();
-    const freshFetch = await tracker.fetchOpenCards();
+    // DX-621 — fetchOpenCards now requires explicit mapped Trello list
+    // ids. Pass the same set the poller's runInboundFetch uses (matches
+    // the test's mocked trello-list-map.yaml).
+    const freshFetch = await tracker.fetchOpenCards(["list-ToDo"]);
     expect(freshFetch.find((r) => r.title === "Persistent card")).toBeDefined();
 
     // Restore the descriptor so afterEach's _resetForTesting doesn't

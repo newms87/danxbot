@@ -38,7 +38,33 @@ import { getDefaultListForType, readLists } from "../lists-file.js";
 import {
   readTrelloListMap,
   reverseLookupDanxbotListId,
+  type TrelloListMap,
 } from "../trello-list-map.js";
+import type { ListType } from "../lists-types.js";
+
+// DX-621 / Phase 9d — inline list-type → mapped Trello list id resolver.
+// Inlined here (vs imported from trello-list-map.ts) so the test's
+// `vi.mock` boundaries on `lists-file.js` + `trello-list-map.js`
+// intercept this function's calls cleanly — a sibling export inside
+// `trello-list-map.ts` captures `readTrelloListMap` in its closure at
+// import time, defeating `vi.importActual` based mocks.
+function resolveTrelloListIdByTypeLocal(
+  localPath: string,
+  type: ListType,
+): string {
+  let lists;
+  try {
+    lists = readLists(localPath);
+  } catch {
+    return "";
+  }
+  const defaultList = lists.lists.find(
+    (l) => l.type === type && l.is_default_for_type,
+  );
+  if (!defaultList) return "";
+  const map = readTrelloListMap(localPath);
+  return map.list_id_to_trello_list_id[defaultList.id] ?? "";
+}
 import { recordSystemError } from "../dashboard/system-errors.js";
 import { createLogger } from "../logger.js";
 import type { RepoContext } from "../types.js";
@@ -89,18 +115,30 @@ export async function runInboundFetch(
     return result;
   }
 
-  log.debug(`[${repo.name}] Checking Needs Help + ToDo lists...`);
+  log.debug(`[${repo.name}] Checking mapped Trello lists...`);
+
+  // DX-621 / Phase 9d — read both files ONCE per tick so the loop +
+  // checkNeedsHelp share the same snapshot. Mapped Trello list ids are
+  // the universe the cron polls; no implicit ordering, no hard-coded
+  // status→list resolution.
+  const trelloMap = readTrelloListMap(repo.localPath);
+  const mappedTrelloListIds = Object.values(
+    trelloMap.list_id_to_trello_list_id,
+  );
 
   // Check Needs Help first — user-responded cards get moved to ToDo top.
-  result.movedFromNeedsHelp = await checkNeedsHelp(repo, tracker);
+  result.movedFromNeedsHelp = await checkNeedsHelp(repo, tracker, trelloMap);
   if (result.movedFromNeedsHelp > 0) {
     log.info(
       `[${repo.name}] Moved ${result.movedFromNeedsHelp} card${result.movedFromNeedsHelp > 1 ? "s" : ""} from Needs Help to ToDo`,
     );
   }
 
+  // DX-621 — caller always invokes fetchOpenCards (even with an empty
+  // list) so downstream test mocks + cron pacing stay consistent; the
+  // tracker short-circuits to [] when the list array is empty.
   try {
-    result.openCards = await tracker.fetchOpenCards();
+    result.openCards = await tracker.fetchOpenCards(mappedTrelloListIds);
   } catch (error) {
     log.error(`[${repo.name}] Error fetching cards`, error);
     return result;
@@ -109,52 +147,15 @@ export async function runInboundFetch(
   // ISS-86: `tracker.fetchOpenCards` is the inbound channel ONLY (new
   // cards + bulk-sync). It does NOT decide what gets dispatched —
   // local YAML is the source of truth and the multi-agent dispatch
-  // path (`src/poller/multi-agent-pick.ts`, scheduled via the
-  // scheduler's `runPicker` callback) reads dispatchable cards from
-  // the DB-backed listing in `local-issues.ts`. DX-218 retired the
-  // per-tick orphan-push pass; outbound (YAML → tracker) pushes are
-  // now reconcile step 7's job. DX-290 retired the legacy dispatch
-  // decision pass from `runSync` entirely.
+  // path reads dispatchable cards from the DB-backed listing in
+  // `local-issues.ts`.
   //
-  // Cards on the Trello Action Items list surface with
-  // `status: "Review"` (see `trello.ts#listIdToStatus`) so they are
-  // bulk-synced through the Review branch alongside other Review
-  // cards.
-  const trackerToDoRefs = result.openCards.filter((c) => c.status === "ToDo");
-  const trackerInProgressRefs = result.openCards.filter(
-    (c) => c.status === "In Progress",
-  );
-  const trackerReviewRefs = result.openCards.filter(
-    (c) => c.status === "Review",
-  );
-  const trackerNeedsHelpRefs = result.openCards.filter(
-    (c) => c.status === "Blocked",
-  );
-
-  // Bulk-sync every tracker-listed card that lacks a local YAML so the
-  // multi-agent dispatch path and per-card triage agent each have a
-  // YAML to read. Coverage:
-  //   - Every ToDo card (DX-290: the prior single-card dispatch primary path
-  //     had its own dedicated hydrate pipeline that took the primary
-  //     directly; that pipeline is gone, so we hydrate the whole bucket).
-  //   - Every In Progress card (closes the gap where a worker died
-  //     before writing the YAML).
-  //   - Every Review card (so the per-card triage agent can read it
-  //     locally) — Phase 4 of ISS-90 added this branch when the
-  //     Action Items list collapsed into `status: "Review"`.
-  //   - Every Needs Help card (same reason as Review — the triage
-  //     agent's Hard Gate audit needs the local YAML).
-  // Bulk-sync writes carry `dispatch: null`; the dispatch primary's
-  // record is stamped by `stampDispatchAndWrite` inside the multi-agent
-  // picker. An In Progress orphan keeps its existing `dispatch` because
-  // `findByExternalId` short-circuits hydration when the YAML already
-  // exists.
-  const hydrated = await bulkSyncMissingYamls(repo, tracker, [
-    ...trackerToDoRefs,
-    ...trackerInProgressRefs,
-    ...trackerReviewRefs,
-    ...trackerNeedsHelpRefs,
-  ]);
+  // DX-621 / Phase 9d — every card on a mapped Trello list is a hydrate
+  // candidate. The prior status-bucketed `concat` collapsed to "all
+  // mapped lists" once the legacy status→list resolution was retired;
+  // routing by danxbot list type happens via reverse-map lookup inside
+  // `bulkSyncMissingYamls`.
+  const hydrated = await bulkSyncMissingYamls(repo, tracker, result.openCards);
   result.hydrated = hydrated;
 
   return result;
@@ -174,11 +175,30 @@ export async function runInboundFetch(
 async function checkNeedsHelp(
   repo: RepoContext,
   tracker: IssueTracker,
+  trelloMap: TrelloListMap,
 ): Promise<number> {
+  // DX-621 / Phase 9d — resolve the operator-mapped Trello list ids for
+  // "Blocked" (source) + "ToDo" (destination). When either is unmapped,
+  // skip the whole pass — the operator has not configured the boundary
+  // this loop needs to act on.
+  const blockedTrelloListId = resolveTrelloListIdByTypeLocal(
+    repo.localPath,
+    "blocked",
+  );
+  const readyTrelloListId = resolveTrelloListIdByTypeLocal(
+    repo.localPath,
+    "ready",
+  );
+  if (!blockedTrelloListId || !readyTrelloListId) {
+    log.debug(
+      `[${repo.name}] checkNeedsHelp skipped — blocked=${blockedTrelloListId || "(unmapped)"}, ready=${readyTrelloListId || "(unmapped)"}`,
+    );
+    return 0;
+  }
+
   let refs: IssueRef[];
   try {
-    const all = await tracker.fetchOpenCards();
-    refs = all.filter((c) => c.status === "Blocked");
+    refs = await tracker.fetchOpenCards([blockedTrelloListId]);
   } catch (error) {
     log.error(`[${repo.name}] Error fetching Needs Help cards`, error);
     return 0;
@@ -195,7 +215,7 @@ async function checkNeedsHelp(
         log.info(
           `[${repo.name}] User responded on "${ref.title}" — moving to ToDo`,
         );
-        await tracker.moveToStatus(ref.external_id, "ToDo");
+        await tracker.moveToList(ref.external_id, readyTrelloListId);
         movedCount++;
       }
     } catch (error) {
@@ -206,6 +226,11 @@ async function checkNeedsHelp(
     }
   }
 
+  // Silence unused-import warning in environments where the helper goes
+  // ungrabbed: `trelloMap` is supplied by the caller as a snapshot — it
+  // currently feeds only the openCards filter upstream, but checkNeedsHelp
+  // accepts it so a future caller can reuse the same read.
+  void trelloMap;
   return movedCount;
 }
 

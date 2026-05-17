@@ -180,8 +180,11 @@ export function pushTrelloDiff(
  *     Caller records a dashboard warning + stops; no push fires.
  *   - `{kind: "legacy", trelloListId: null}` — card has no `list_name`
  *     yet (pre-v10 / unconfigured repo) OR a config file is missing /
- *     unparseable. Caller pushes via the legacy `moveToStatus` path
- *     so cards on unconfigured repos still mirror.
+ *     unparseable. DX-621 / Phase 9d retired the legacy `moveToStatus`
+ *     fallback inside syncIssue, so this branch now pushes without a
+ *     list move (title/description/labels/AC still mirror). The card
+ *     stays where Trello has it until the operator maps the danxbot
+ *     list via the dashboard.
  *   - `{kind: "mapped", trelloListId: <string>}` — operator has
  *     mapped this list to a Trello list. Caller threads the id into
  *     `syncIssue` so step 4b moves the card via `moveToList` (DX-618).
@@ -309,8 +312,8 @@ async function doPush(args: TrelloPushArgs): Promise<TrelloPushResult> {
   // ONE pass over lists.yaml / trello-list-map.yaml decides:
   //   - skip (unmapped → operator-private, do not mirror), OR
   //   - mapped (push via moveToList with the resolved Trello list id), OR
-  //   - legacy (no list_name yet / config missing → push via the
-  //     historical moveToStatus path inside syncIssue).
+  //   - legacy (no list_name yet / config missing → push WITHOUT a
+  //     list move; DX-621 retired the moveToStatus fallback).
   // Errors surface on the dashboard system-errors stream; the agent
   // never sees them.
   const resolution = resolveTrelloListMapping(

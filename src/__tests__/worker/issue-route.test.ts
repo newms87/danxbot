@@ -97,13 +97,6 @@ async function startTestServer(): Promise<TestHarness> {
       apiKey: "",
       apiToken: "",
       boardId: "",
-      reviewListId: "",
-      todoListId: "",
-      inProgressListId: "",
-      needsHelpListId: "",
-      doneListId: "",
-      cancelledListId: "",
-      actionItemsListId: "",
       bugLabelId: "",
       featureLabelId: "",
       epicLabelId: "",
@@ -931,7 +924,7 @@ describe("syncTrackedIssueOnComplete", () => {
       .filter(
         (l) =>
           l.method === "updateCard" ||
-          l.method === "moveToStatus" ||
+          l.method === "moveToList" ||
           l.method === "createCard",
       );
     expect(writes).toHaveLength(0);
@@ -1533,7 +1526,7 @@ describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () =>
 
     const moveCountAfterSeed = h.tracker
       .getRequestLog()
-      .filter((l) => l.method === "moveToStatus").length;
+      .filter((l) => l.method === "moveToList").length;
 
     // Agent flips status to Done on disk; danxbot_complete triggers auto-sync.
     issue.status = "Done";
@@ -1556,13 +1549,16 @@ describe("DX-146: syncTrackedIssueOnComplete reuses the same diff helper", () =>
     expect(persisted).toContain("to: Done");
     expect(persisted).toContain("actor: dispatch:dispatch-tbc-complete");
 
-    // Tracker move-to-status fired exactly once for the auto-sync
-    // (the status_change ToDo → Done routes through `moveToStatus`,
-    // not `updateCard`). Proves runSync ran through the shared diff
-    // helper end-to-end, not a parallel code path that would double-push.
+    // DX-621 / Phase 9d — the tracker move is gated on a resolved
+    // destinationTrelloListId from `<repo>/.danxbot/trello-list-map.yaml`.
+    // This test runs against a freshly-created repo with no mapping, so
+    // the move step is intentionally a no-op. The status_change disk
+    // entry (asserted above) is the load-bearing proof that the shared
+    // diff helper ran end-to-end; the tracker move-count check was
+    // redundant once mapping resolution moved out of the tracker layer.
     const movesNow = h.tracker
       .getRequestLog()
-      .filter((l) => l.method === "moveToStatus").length;
-    expect(movesNow - moveCountAfterSeed).toBe(1);
+      .filter((l) => l.method === "moveToList").length;
+    expect(movesNow - moveCountAfterSeed).toBe(0);
   });
 });

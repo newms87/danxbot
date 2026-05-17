@@ -138,7 +138,7 @@ export class FakeTracker implements IssueTracker {
 
   /**
    * Queue a rejection on the next mutating call (createCard, updateCard,
-   * moveToStatus, setLabels, addComment, AC mutations).
+   * moveToList, setLabels, addComment, AC mutations).
    * Read methods are unaffected.
    */
   failNextWrite(
@@ -147,24 +147,22 @@ export class FakeTracker implements IssueTracker {
     this.pendingWriteRejection = error;
   }
 
-  async fetchOpenCards(): Promise<IssueRef[]> {
-    this.log("fetchOpenCards");
-    const open = new Set<IssueStatus>([
-      "Review",
-      "ToDo",
-      "In Progress",
-      "Blocked",
-    ]);
+  async fetchOpenCards(trelloListIds: readonly string[]): Promise<IssueRef[]> {
+    this.log("fetchOpenCards", undefined, { trelloListIds: [...trelloListIds] });
+    const allow = new Set(trelloListIds.filter((id) => id.length > 0));
     const refs: IssueRef[] = [];
     for (const card of this.cards.values()) {
-      if (open.has(card.status)) {
-        refs.push({
-          id: card.id,
-          external_id: card.external_id,
-          title: card.title,
-          status: card.status,
-        });
-      }
+      // DX-621 / Phase 9d — caller passes the operator-mapped Trello list
+      // ids; the fake matches against the synthetic `trackerListId`. When
+      // the allow-set is empty no cards surface (matches the real tracker
+      // behaviour for unmapped configurations).
+      if (!allow.has(card.trackerListId)) continue;
+      refs.push({
+        id: card.id,
+        external_id: card.external_id,
+        title: card.title,
+        external_list_id: card.trackerListId,
+      });
     }
     return refs;
   }
@@ -246,14 +244,6 @@ export class FakeTracker implements IssueTracker {
     if (patch.title !== undefined) card.title = patch.title;
     if (patch.description !== undefined) card.description = patch.description;
     this.log("updateCard", externalId, { patch });
-  }
-
-  async moveToStatus(externalId: string, status: IssueStatus): Promise<void> {
-    this.consumeWriteRejection();
-    const card = this.requireCard(externalId);
-    card.status = status;
-    card.trackerListId = `list-${status}`;
-    this.log("moveToStatus", externalId, { status });
   }
 
   async moveToList(externalId: string, trelloListId: string): Promise<void> {

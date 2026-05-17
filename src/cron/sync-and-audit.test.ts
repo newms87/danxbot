@@ -16,13 +16,6 @@ const MOCK_REPO_CONTEXT: RepoContext = {
     apiKey: "test-key",
     apiToken: "test-token",
     boardId: "test-board",
-    reviewListId: "review-list",
-    todoListId: "todo-list",
-    inProgressListId: "ip-list",
-    needsHelpListId: "nh-list",
-    doneListId: "done-list",
-    cancelledListId: "cancelled-list",
-    actionItemsListId: "ai-list",
     bugLabelId: "bug-label",
     featureLabelId: "feature-label",
     epicLabelId: "epic-label",
@@ -57,13 +50,6 @@ const { mockRepoContexts } = vi.hoisted(() => {
       apiKey: "test-key",
       apiToken: "test-token",
       boardId: "test-board",
-      reviewListId: "review-list",
-      todoListId: "todo-list",
-      inProgressListId: "ip-list",
-      needsHelpListId: "nh-list",
-      doneListId: "done-list",
-      cancelledListId: "cancelled-list",
-      actionItemsListId: "ai-list",
       bugLabelId: "bug-label",
       featureLabelId: "feature-label",
       epicLabelId: "epic-label",
@@ -153,12 +139,16 @@ vi.mock("../issue-tracker/index.js", async () => {
  * resolves the local YAML's internal id via `findByExternalId` /
  * `hydrateFromRemote` instead.
  */
+// DX-621 / Phase 9d — `IssueRef.status` retired. Test helper attaches a
+// non-schema `_status` for the legacy fixture flow so the per-status
+// filters below can keep partitioning fake cards.
+type TestRef = IssueRef & { _status: IssueStatus };
 function ref(
   external_id: string,
   title: string,
   status: IssueStatus,
-): IssueRef {
-  return { id: "", external_id, title, status };
+): TestRef {
+  return { id: "", external_id, title, external_list_id: "", _status: status };
 }
 
 /**
@@ -169,7 +159,7 @@ function ref(
  * default keeps every existing test scenario representative without
  * sprawling per-test plumbing.
  */
-const REVIEW_FILLER: IssueRef[] = Array.from({ length: 10 }, (_, i) =>
+const REVIEW_FILLER: TestRef[] = Array.from({ length: 10 }, (_, i) =>
   ref(`r${i}`, `Review ${i}`, "Review"),
 );
 
@@ -310,7 +300,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  * dispatch source. Tests that need a custom local-YAML scan can
  * override via `.mockReturnValueOnce`.
  */
-function refToFakeIssue(ref: IssueRef): Issue {
+function refToFakeIssue(ref: TestRef): Issue {
   return {
     schema_version: 10,
     tracker: "trello",
@@ -319,7 +309,7 @@ function refToFakeIssue(ref: IssueRef): Issue {
     parent_id: null,
     children: [],
     dispatch: null,
-    status: ref.status,
+    status: ref._status,
     type: "Feature",
     title: ref.title,
     description: "",
@@ -346,11 +336,11 @@ function refToFakeIssue(ref: IssueRef): Issue {
 
 }
 
-function _currentOpenCards(): IssueRef[] {
+function _currentOpenCards(): TestRef[] {
   const settled = mockTracker.fetchOpenCards.mock.settledResults;
   if (!settled || settled.length === 0) return [];
   const last = settled[settled.length - 1];
-  return last.type === "fulfilled" ? (last.value as IssueRef[]) : [];
+  return last.type === "fulfilled" ? (last.value as TestRef[]) : [];
 }
 
 // Mock signatures take (repoPath, prefix) since ISS-100 (prefix-aware
@@ -368,7 +358,7 @@ async function defaultListDispatchableYamls(
   _prefix?: string,
 ): Promise<Issue[]> {
   return _currentOpenCards()
-    .filter((r) => r.status === "ToDo")
+    .filter((r) => r._status === "ToDo")
     .map(refToFakeIssue);
 }
 async function defaultListInProgressYamls(
@@ -376,7 +366,7 @@ async function defaultListInProgressYamls(
   _prefix?: string,
 ): Promise<Issue[]> {
   return _currentOpenCards()
-    .filter((r) => r.status === "In Progress")
+    .filter((r) => r._status === "In Progress")
     .map(refToFakeIssue);
 }
 const mockListDispatchableYamls = vi.fn(defaultListDispatchableYamls);

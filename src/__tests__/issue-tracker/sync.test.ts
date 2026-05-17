@@ -176,7 +176,7 @@ describe("syncIssue", () => {
 
     // Mutate every inbound-forbidden field on the tracker.
     await tracker.updateCard(external_id, { description: "tracker desc" });
-    await tracker.moveToStatus(external_id, "Done");
+    await tracker.moveToList(external_id, "list-Done");
     await tracker.updateAcItem(external_id, local.ac[0].check_item_id, {
       checked: true,
     });
@@ -276,7 +276,10 @@ describe("syncIssue", () => {
     );
   });
 
-  it("status change → moveToStatus", async () => {
+  // DX-621 / Phase 9d — the legacy `moveToStatus(local.status)` fallback
+  // is gone. A status change alone produces no move; the caller must
+  // supply `destinationTrelloListId` (resolved via trello-list-map.yaml).
+  it("status change WITHOUT destinationTrelloListId → no list move fires", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -286,8 +289,8 @@ describe("syncIssue", () => {
     tracker.clearRequestLog();
     await syncIssue(tracker, local);
     expect(
-      tracker.getRequestLog().some((l) => l.method === "moveToStatus"),
-    ).toBe(true);
+      tracker.getRequestLog().some((l) => l.method === "moveToList"),
+    ).toBe(false);
   });
 
   it("type change → setLabels", async () => {
@@ -406,7 +409,7 @@ describe("syncIssue", () => {
     // Seed in Blocked so the diff fires when we move out of it.
     const { external_id } = await tracker.createCard(defaultCreate());
     // Move remote to Blocked so its labels reflect that.
-    await tracker.moveToStatus(external_id, "Blocked");
+    await tracker.moveToList(external_id, "list-Blocked");
     await tracker.setLabels(external_id, {
       type: "Feature",
       blocked: true,
@@ -669,7 +672,7 @@ describe("syncIssue", () => {
     }
   });
 
-  it("local-as-truth wins on every non-comment field", async () => {
+  it("local-as-truth wins on title/description/type; status moves via destinationTrelloListId (DX-621)", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -679,11 +682,13 @@ describe("syncIssue", () => {
       status: "Blocked",
       type: "Bug",
     };
-    await syncIssue(tracker, local);
+    // DX-621 / Phase 9d — status no longer auto-projects to a tracker
+    // list. The caller supplies the resolved Trello list id explicitly.
+    await syncIssue(tracker, local, { destinationTrelloListId: "list-Blocked" });
     const after = await tracker.getCard(external_id);
     expect(after.title).toBe("Local Title");
     expect(after.description).toBe("Local Desc");
-    expect(after.status).toBe("Blocked");
+    expect(after.tracker_list_id).toBe("list-Blocked");
     expect(after.type).toBe("Bug");
   });
 
@@ -1582,11 +1587,12 @@ describe("syncIssue — concurrent-call retro race (DX-505)", () => {
   });
 });
 
-// DX-618 — Phase 9a. `syncIssue` step 4b chooses `moveToList(<exact
-// trello list id>)` when the caller supplies `destinationTrelloListId`,
-// and falls through to legacy `moveToStatus(local.status)` otherwise.
+// DX-618 — Phase 9a + DX-621 / Phase 9d. `syncIssue` step 4b moves the
+// card to `destinationTrelloListId` when supplied; the legacy
+// `moveToStatus(local.status)` fallback was retired by Phase 9d, so
+// no destinationTrelloListId = no move.
 describe("syncIssue — DX-618 destinationTrelloListId list-move", () => {
-  it("mapped path: passes destinationTrelloListId → moveToList fires with the exact id and moveToStatus does NOT fire", async () => {
+  it("mapped path: destinationTrelloListId → moveToList fires with the exact id", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local = await tracker.getCard(external_id);
@@ -1602,10 +1608,9 @@ describe("syncIssue — DX-618 destinationTrelloListId list-move", () => {
     expect(moveToList!.details).toMatchObject({
       trelloListId: "trello-list-XYZ",
     });
-    expect(log.some((l) => l.method === "moveToStatus")).toBe(false);
   });
 
-  it("legacy fallback: no destinationTrelloListId AND status differs → moveToStatus fires; moveToList does NOT", async () => {
+  it("no destinationTrelloListId AND status differs → NO move fires (DX-621 retired legacy fallback)", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -1617,11 +1622,10 @@ describe("syncIssue — DX-618 destinationTrelloListId list-move", () => {
     await syncIssue(tracker, local);
 
     const log = tracker.getRequestLog();
-    expect(log.some((l) => l.method === "moveToStatus")).toBe(true);
     expect(log.some((l) => l.method === "moveToList")).toBe(false);
   });
 
-  it("legacy fallback fires even with destinationTrelloListId === '' (empty string treated as unset)", async () => {
+  it("destinationTrelloListId === '' (empty string treated as unset) → NO move fires", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
@@ -1633,7 +1637,6 @@ describe("syncIssue — DX-618 destinationTrelloListId list-move", () => {
     await syncIssue(tracker, local, { destinationTrelloListId: "" });
 
     const log = tracker.getRequestLog();
-    expect(log.some((l) => l.method === "moveToStatus")).toBe(true);
     expect(log.some((l) => l.method === "moveToList")).toBe(false);
   });
 

@@ -108,13 +108,6 @@ export interface TrelloConfig {
   apiKey: string;
   apiToken: string;
   boardId: string;
-  reviewListId: string;
-  todoListId: string;
-  inProgressListId: string;
-  needsHelpListId: string;
-  doneListId: string;
-  cancelledListId: string;
-  actionItemsListId: string;
   bugLabelId: string;
   featureLabelId: string;
   epicLabelId: string;

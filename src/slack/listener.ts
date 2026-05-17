@@ -18,6 +18,7 @@ import { isFeatureEnabled } from "../settings-file.js";
 import { runRouter } from "../agent/router.js";
 import type { RepoContext, ThreadMessage } from "../types.js";
 import { notifyError } from "../errors/trello-notifier.js";
+import { resolveTrelloListIdByType } from "../trello-list-map.js";
 import { dispatch } from "../dispatch/core.js";
 import { findLatestDispatchBySlackThread } from "../dashboard/dispatches-db.js";
 import type { SlackTriggerMetadata } from "../dashboard/dispatches.js";
@@ -328,6 +329,7 @@ async function launchSlackDispatch(
           user: slackMeta.user,
           channelId: slackMeta.channelId,
         },
+        { listId: resolveTrelloListIdByType(ls.repo.localPath, "review") },
       ).catch(() => {});
     }
   }
@@ -501,6 +503,7 @@ async function handleMessage(
             "Slack Dispatch Failure",
             errorMsg,
             errorContext,
+            { listId: resolveTrelloListIdByType(ls.repo.localPath, "review") },
           ).catch(() => {});
         }
       } finally {
@@ -524,7 +527,9 @@ async function handleMessage(
           routerResult.error,
           errorContext,
           {
-            listId: ls.repo.trello.needsHelpListId,
+            // DX-621 / Phase 9d — resolve via trello-list-map.yaml; operational
+            // router errors land on the Blocked list for the operator to see.
+            listId: resolveTrelloListIdByType(ls.repo.localPath, "blocked"),
             labelId: ls.repo.trello.needsHelpLabelId,
           },
         ).catch(() => {});
@@ -534,6 +539,7 @@ async function handleMessage(
           "Router Error",
           routerResult.error,
           errorContext,
+          { listId: resolveTrelloListIdByType(ls.repo.localPath, "review") },
         ).catch(() => {});
       }
     }
@@ -556,6 +562,7 @@ async function handleMessage(
         "Handler Error",
         errorMsg,
         errorContext,
+        { listId: resolveTrelloListIdByType(ls.repo.localPath, "review") },
       ).catch(() => {});
     }
   }

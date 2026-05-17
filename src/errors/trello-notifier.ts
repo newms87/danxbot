@@ -44,7 +44,18 @@ function buildCardDescription(
 }
 
 export interface NotifyErrorOptions {
-  listId?: string;
+  /**
+   * Destination Trello list id. DX-621 / Phase 9d — REQUIRED; the legacy
+   * `TrelloConfig.reviewListId` fallback is gone. Callers resolve via
+   * `resolveTrelloListIdByType(repo.localPath, "<type>")` (typically
+   * `"review"` for human triage, `"blocked"` for operational errors).
+   * Empty string / unmapped → skip the notification.
+   */
+  listId: string;
+  /**
+   * Label id to apply on the created card. Defaults to the Bug label
+   * (`TrelloConfig.bugLabelId`) when absent.
+   */
   labelId?: string;
 }
 
@@ -53,23 +64,21 @@ export async function notifyError(
   errorType: string,
   errorMessage: string,
   context: Record<string, string>,
-  options?: NotifyErrorOptions,
+  options: NotifyErrorOptions,
 ): Promise<void> {
   try {
-    const { apiKey, apiToken, reviewListId, bugLabelId } = trello;
+    const { apiKey, apiToken, bugLabelId } = trello;
 
     if (!apiKey || !apiToken) {
       log.debug("Trello creds not configured, skipping error notification");
       return;
     }
 
-    // Default routing: Review (human triage). Callers override per-call —
-    // e.g. operational router errors pass listId: needsHelpListId.
-    const targetListId = options?.listId || reviewListId;
-    const targetLabelId = options?.labelId || bugLabelId;
+    const targetListId = options.listId;
+    const targetLabelId = options.labelId || bugLabelId;
 
     if (!targetListId) {
-      log.error("notifyError: targetListId is empty (reviewListId not configured) — skipping");
+      log.debug("notifyError: targetListId is empty (caller did not resolve via trello-list-map.yaml) — skipping");
       return;
     }
 

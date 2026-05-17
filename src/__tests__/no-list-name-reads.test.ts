@@ -83,6 +83,11 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // entries in this allowlist — the read drives the outbound tracker
   // mirror, not a worker dispatch decision.
   "issue/reconcile/trello.ts",
+  // DX-621 / Phase 9d inbound hydration: writes `issue.list_name` post
+  // hydrateFromRemote based on reverse-map lookup of `external_list_id`.
+  // Pre-existing allowlist entries cover the writers / serializers; this
+  // entry pins the new inbound writer location.
+  "cron/inbound-fetch.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {

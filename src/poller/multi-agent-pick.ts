@@ -661,7 +661,10 @@ export async function tryMultiAgentDispatch(
               cardId: stamped.external_id,
               cardName: stamped.title,
               cardUrl: `https://trello.com/c/${stamped.external_id}`,
-              listId: repo.trello?.todoListId ?? "",
+              // DX-621 / Phase 9d — legacy `TrelloConfig.todoListId` removed.
+              // `listId` is advisory dispatch-metadata; operator-mapped ids
+              // live in `<repo>/.danxbot/trello-list-map.yaml`.
+              listId: "",
               listName: "ToDo",
             },
           },

@@ -172,7 +172,7 @@ function setIssueTracker(seed: Issue): {
   tracker.getCard = async (_id: string) => seedWithLabels;
   tracker.getComments = async (_id: string) => [];
   tracker.updateCard = async () => undefined;
-  tracker.moveToStatus = async () => undefined;
+  tracker.moveToList = async () => undefined;
   tracker.setLabels = async () => undefined;
   tracker.addAcItem = async () => ({ check_item_id: "" });
   tracker.updateAcItem = async () => undefined;
@@ -413,13 +413,6 @@ beforeEach(async () => {
       apiKey: "test-trello-key",
       apiToken: "test-trello-token",
       boardId: "test-board",
-      reviewListId: "list-review",
-      todoListId: "list-todo",
-      inProgressListId: "list-inprog",
-      needsHelpListId: "list-needshelp",
-      doneListId: "list-done",
-      cancelledListId: "list-cancelled",
-      actionItemsListId: "list-actionitems",
       bugLabelId: "label-bug",
       featureLabelId: "label-feature",
       epicLabelId: "label-epic",

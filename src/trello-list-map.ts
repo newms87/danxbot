@@ -32,6 +32,8 @@ import {
 import { open } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { readLists } from "./lists-file.js";
+import type { ListType } from "./lists-types.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("trello-list-map");
@@ -390,6 +392,45 @@ export function reverseLookupDanxbotListId(
     if (mapped === trelloListId) out.push(danxbotId);
   }
   return out;
+}
+
+/**
+ * DX-621 / Phase 9d — resolve the mapped Trello list id for the default
+ * danxbot list of a given semantic type. Used by error / inbound paths
+ * that previously hard-coded `TrelloConfig.{review,todo,…}ListId` —
+ * those fields are gone; this helper is the single replacement.
+ *
+ * Returns `""` when:
+ *   - lists.yaml has no list of this type (file missing / corrupt),
+ *   - the default list of this type is not mapped in trello-list-map.yaml.
+ *
+ * Callers MUST tolerate the empty-string return — typically by skipping
+ * the Trello-side action (no notification posted, no move executed,
+ * etc.) and logging a one-line warning. Failing-loud here would re-tie
+ * issue-tracker business logic to Trello availability, which is exactly
+ * what the decoupling invariant in CLAUDE.md forbids.
+ *
+ * Synchronous + filesystem-touching — fine for cron-tick callers but
+ * NOT for per-card hot paths. The poller's inbound-fetch loop hoists
+ * its `readTrelloListMap` call once per tick; new callers should do
+ * the same when invoked in a loop.
+ */
+export function resolveTrelloListIdByType(
+  localPath: string,
+  type: ListType,
+): string {
+  let lists;
+  try {
+    lists = readLists(localPath);
+  } catch {
+    return "";
+  }
+  const defaultList = lists.lists.find(
+    (l) => l.type === type && l.is_default_for_type,
+  );
+  if (!defaultList) return "";
+  const map = readTrelloListMap(localPath);
+  return map.list_id_to_trello_list_id[defaultList.id] ?? "";
 }
 
 /**

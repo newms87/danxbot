@@ -7,13 +7,6 @@ vi.mock("./poller/constants.js", () => ({
   getReposBase: () => "/danxbot/repos",
   loadTrelloIds: () => ({
     boardId: "mock-board-id",
-    reviewListId: "mock-review-list-id",
-    todoListId: "mock-todo-list-id",
-    inProgressListId: "mock-in-progress-list-id",
-    needsHelpListId: "mock-needs-help-list-id",
-    doneListId: "mock-done-list-id",
-    cancelledListId: "mock-cancelled-list-id",
-    actionItemsListId: "mock-action-items-list-id",
     bugLabelId: "mock-bug-label-id",
     featureLabelId: "mock-feature-label-id",
     epicLabelId: "mock-epic-label-id",

@@ -685,13 +685,6 @@ describe("settings-file", () => {
           apiKey: "1234567890abcdef",
           apiToken: "token-abcdefghij",
           boardId: "board123",
-          reviewListId: "",
-          todoListId: "",
-          inProgressListId: "",
-          needsHelpListId: "",
-          doneListId: "",
-          cancelledListId: "",
-          actionItemsListId: "",
           bugLabelId: "",
           featureLabelId: "",
           epicLabelId: "",
@@ -712,25 +705,18 @@ describe("settings-file", () => {
       expect(display.links?.trelloBoardUrl).toBe("https://trello.com/b/board123");
     });
 
-    // DX-304 — TrelloConfigPanel renders the ToDo list id read-only, so the
-    // panel's data source (`display.trello.todoListId`) must round-trip the
-    // value from RepoContext. The other workflow list ids are surfaced
-    // alongside it so the dashboard can grow them into the panel without a
-    // second schema bump.
-    it("surfaces trello list ids (todo/inProgress/done) for the dashboard panel", () => {
+    // DX-621 / Phase 9d — legacy `display.trello.{todo,inProgress,done}ListId`
+    // fields retired. The operator-mapped list ids live in
+    // `<repo>/.danxbot/trello-list-map.yaml` and surface via the dashboard's
+    // list-mapping route directly; the buildDisplayFromContext path no longer
+    // round-trips them.
+    it("does not surface legacy trello list ids on the display section", () => {
       const ctx = makeRepoContext({
         localPath,
         trello: {
           apiKey: "k",
           apiToken: "t",
           boardId: "board-1",
-          reviewListId: "r-list",
-          todoListId: "todo-list",
-          inProgressListId: "ip-list",
-          needsHelpListId: "nh-list",
-          doneListId: "done-list",
-          cancelledListId: "cx-list",
-          actionItemsListId: "ai-list",
           bugLabelId: "",
           featureLabelId: "",
           epicLabelId: "",
@@ -740,9 +726,10 @@ describe("settings-file", () => {
         },
       });
       const display = buildDisplayFromContext(ctx, "host");
-      expect(display.trello?.todoListId).toBe("todo-list");
-      expect(display.trello?.inProgressListId).toBe("ip-list");
-      expect(display.trello?.doneListId).toBe("done-list");
+      expect(display.trello).toBeDefined();
+      expect((display.trello as Record<string, unknown>).todoListId).toBeUndefined();
+      expect((display.trello as Record<string, unknown>).inProgressListId).toBeUndefined();
+      expect((display.trello as Record<string, unknown>).doneListId).toBeUndefined();
     });
 
     // DX-304 AC #3 — TrelloConfigPanel renders BOTH the api key and api
@@ -756,13 +743,6 @@ describe("settings-file", () => {
           apiKey: "1234567890abcdef",
           apiToken: "token-abcdefghij",
           boardId: "b",
-          reviewListId: "",
-          todoListId: "",
-          inProgressListId: "",
-          needsHelpListId: "",
-          doneListId: "",
-          cancelledListId: "",
-          actionItemsListId: "",
           bugLabelId: "",
           featureLabelId: "",
           epicLabelId: "",

@@ -1811,9 +1811,9 @@ export function buildDisplayFromContext(
       apiKey: mask(ctx.trello.apiKey),
       apiToken: mask(ctx.trello.apiToken),
       boardId: ctx.trello.boardId,
-      todoListId: ctx.trello.todoListId,
-      inProgressListId: ctx.trello.inProgressListId,
-      doneListId: ctx.trello.doneListId,
+      // DX-621 / Phase 9d — legacy `*ListId` display fields retired. The
+      // operator-mapped list ids live in `<repo>/.danxbot/trello-list-map.yaml`
+      // and surface via the dashboard's list-mapping route directly.
       configured: !!(ctx.trello.apiKey && ctx.trello.apiToken),
     },
     github: {

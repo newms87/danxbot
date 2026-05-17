@@ -44,7 +44,7 @@ describe("FakeTracker", () => {
     expect(card.ac).toHaveLength(1);
   });
 
-  it("fetchOpenCards returns only open statuses", async () => {
+  it("fetchOpenCards returns cards on the supplied trello list ids (DX-621)", async () => {
     const tracker = new FakeTracker();
     const a = await tracker.createCard(
       defaultInput({ status: "ToDo", title: "open" }),
@@ -52,7 +52,7 @@ describe("FakeTracker", () => {
     const b = await tracker.createCard(
       defaultInput({ status: "Done", title: "closed" }),
     );
-    const refs = await tracker.fetchOpenCards();
+    const refs = await tracker.fetchOpenCards(["list-ToDo"]);
     const ids = refs.map((r) => r.external_id);
     expect(ids).toContain(a.external_id);
     expect(ids).not.toContain(b.external_id);
@@ -71,11 +71,13 @@ describe("FakeTracker", () => {
     expect(card.title).toBe("New title");
   });
 
-  it("moveToStatus changes the status", async () => {
+  it("moveToList updates the tracker_list_id (DX-621)", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultInput());
-    await tracker.moveToStatus(external_id, "In Progress");
-    expect((await tracker.getCard(external_id)).status).toBe("In Progress");
+    await tracker.moveToList(external_id, "list-In Progress");
+    expect((await tracker.getCard(external_id)).tracker_list_id).toBe(
+      "list-In Progress",
+    );
   });
 
   it("setLabels overwrites the label state", async () => {
@@ -193,13 +195,13 @@ describe("FakeTracker", () => {
     const { external_id } = await tracker.createCard(defaultInput());
     await tracker.getCard(external_id);
     await tracker.updateCard(external_id, { title: "T2" });
-    await tracker.moveToStatus(external_id, "Done");
+    await tracker.moveToList(external_id, "list-Done");
     const log = tracker.getRequestLog();
     expect(log.map((l) => l.method)).toEqual([
       "createCard",
       "getCard",
       "updateCard",
-      "moveToStatus",
+      "moveToList",
     ]);
   });
 
@@ -209,13 +211,13 @@ describe("FakeTracker", () => {
     tracker.clearRequestLog();
 
     // Read methods
-    await tracker.fetchOpenCards();
+    await tracker.fetchOpenCards(["list-ToDo"]);
     await tracker.getCard(external_id);
     await tracker.getComments(external_id);
 
     // Mutating methods
     await tracker.updateCard(external_id, { title: "T2" });
-    await tracker.moveToStatus(external_id, "In Progress");
+    await tracker.moveToList(external_id, "list-In Progress");
     await tracker.setLabels(external_id, {
       type: "Bug",
       blocked: false,
@@ -240,7 +242,7 @@ describe("FakeTracker", () => {
       "getCard",
       "getComments",
       "updateCard",
-      "moveToStatus",
+      "moveToList",
       "setLabels",
       "addComment",
       "editComment",
@@ -255,7 +257,7 @@ describe("FakeTracker", () => {
     expect(byMethod("getCard")?.externalId).toBe(external_id);
     expect(byMethod("getComments")?.externalId).toBe(external_id);
     expect(byMethod("updateCard")?.externalId).toBe(external_id);
-    expect(byMethod("moveToStatus")?.externalId).toBe(external_id);
+    expect(byMethod("moveToList")?.externalId).toBe(external_id);
     expect(byMethod("setLabels")?.externalId).toBe(external_id);
     expect(byMethod("addComment")?.externalId).toBe(external_id);
     expect(byMethod("editComment")?.externalId).toBe(external_id);
@@ -267,9 +269,9 @@ describe("FakeTracker", () => {
     expect(byMethod("setLabels")?.details).toEqual({
       labels: { type: "Bug", blocked: false, requires_human: false, triaged: true },
     });
-    // moveToStatus carries the target status.
-    expect(byMethod("moveToStatus")?.details).toEqual({
-      status: "In Progress",
+    // moveToList carries the target list id (DX-621).
+    expect(byMethod("moveToList")?.details).toEqual({
+      trelloListId: "list-In Progress",
     });
     // addComment carries the comment text.
     expect(byMethod("addComment")?.details).toEqual({ text: "hi" });
@@ -310,7 +312,7 @@ describe("FakeTracker", () => {
     // Reads should pass through; the rejection is still queued.
     await tracker.getCard(external_id);
     await tracker.getComments(external_id);
-    await tracker.fetchOpenCards();
+    await tracker.fetchOpenCards([]);
     // Now the next write fires the queued error — by identity.
     await expect(tracker.updateCard(external_id, {})).rejects.toBe(err);
   });

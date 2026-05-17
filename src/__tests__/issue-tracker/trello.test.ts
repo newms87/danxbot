@@ -17,13 +17,6 @@ const TRELLO: TrelloConfig = {
   apiKey: "k",
   apiToken: "t",
   boardId: "board",
-  reviewListId: "list-review",
-  todoListId: "list-todo",
-  inProgressListId: "list-ip",
-  needsHelpListId: "list-nh",
-  doneListId: "list-done",
-  cancelledListId: "list-cancelled",
-  actionItemsListId: "list-ai",
   bugLabelId: "lbl-bug",
   featureLabelId: "lbl-feature",
   epicLabelId: "lbl-epic",
@@ -55,85 +48,54 @@ describe("TrelloTracker", () => {
     });
   }
 
-  it("fetchOpenCards calls each open list and tags status correctly", async () => {
-    // Title prefix `#ISS-N: <title>` is the v2 contract — fetchOpenCards
-    // parses the prefix and surfaces `id` separately. Cards without the
-    // prefix surface with `id: ""` (legacy / human-created).
+  // DX-621 / Phase 9d — `fetchOpenCards` now takes the operator-mapped
+  // Trello list ids (from `trello-list-map.yaml`) and returns refs WITHOUT
+  // a `status` field. Caller (inbound-fetch) maps `external_list_id` →
+  // danxbot list type via the reverse-map walk.
+  it("fetchOpenCards iterates the supplied trello list ids", async () => {
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.includes("list-review/cards"))
+      if (url.includes("L-a/cards"))
         return jsonResponse([{ id: "r1", name: "#ISS-1: R1" }]);
-      if (url.includes("list-todo/cards"))
+      if (url.includes("L-b/cards"))
         return jsonResponse([{ id: "t1", name: "T1" }]);
-      if (url.includes("list-ip/cards")) return jsonResponse([]);
-      if (url.includes("list-nh/cards"))
-        return jsonResponse([{ id: "n1", name: "#ISS-3: N1" }]);
-      if (url.includes("list-ai/cards"))
-        return jsonResponse([{ id: "a1", name: "#ISS-4: A1" }]);
+      if (url.includes("L-c/cards")) return jsonResponse([]);
       throw new Error(`unexpected url: ${url}`);
     });
     const tracker = new TrelloTracker(TRELLO);
-    const refs = await tracker.fetchOpenCards();
-    // Phase 5 of ISS-90 (ISS-95): the legacy `list_kind` field was
-    // removed from `IssueRef` entirely — refs now carry only
-    // {id, external_id, title, status}. Action Items list cards
-    // surface as `status: "Review"` so the per-card triage agent
-    // picks them up alongside the Review list. DX-231 retired the
-    // `Needs Approval` list — only five open lists remain.
+    const refs = await tracker.fetchOpenCards(["L-a", "L-b", "L-c"]);
     expect(refs).toEqual([
-      // DX-619 — every ref carries the trello list id it came from so the
-      // inbound hydration path can reverse-map → assign list_name.
-      { id: "ISS-1", external_id: "r1", title: "R1", status: "Review", external_list_id: "list-review" },
-      { id: "", external_id: "t1", title: "T1", status: "ToDo", external_list_id: "list-todo" },
-      { id: "ISS-3", external_id: "n1", title: "N1", status: "Blocked", external_list_id: "list-nh" },
-      { id: "ISS-4", external_id: "a1", title: "A1", status: "Review", external_list_id: "list-ai" },
+      { id: "ISS-1", external_id: "r1", title: "R1", external_list_id: "L-a" },
+      { id: "", external_id: "t1", title: "T1", external_list_id: "L-b" },
     ]);
-    // Pin the call count so a future regression that drops one of the
-    // five open-list statuses (Review, ToDo, In Progress, Needs Help,
-    // Action Items) gets caught here, even when the dropped list
-    // happened to be empty.
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    // Belt-and-suspenders: no ref carries any `list_kind` field at all
-    // (the field is gone from the schema in Phase 5).
-    expect(refs.every((r) => !("list_kind" in r))).toBe(true);
-    // Positive contract pin — every ref carries EXACTLY these five keys
-    // (four base + DX-619 `external_list_id`). Catches any future stowaway
-    // field that a `not-in` assertion would miss.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Positive contract pin — every ref carries EXACTLY these four keys
+    // (no `status`, no `list_kind`, no other stowaway fields).
     for (const ref of refs) {
       expect(Object.keys(ref).sort()).toEqual([
         "external_id",
         "external_list_id",
         "id",
-        "status",
         "title",
       ]);
     }
   });
 
-  it("fetchOpenCards skips the actionItemsListId when empty", async () => {
-    // The `if (!entry.listId) continue` guard inside fetchOpenCards
-    // tolerates a missing optional list id (today: only Action Items).
-    // Pin that a regression that hard-required `actionItemsListId` would
-    // surface as a fetch attempt against an empty URL.
+  it("fetchOpenCards skips empty list ids (no fetch attempted)", async () => {
     fetchMock.mockImplementation(async (url: string) => {
-      if (url.includes("list-review/cards")) return jsonResponse([]);
-      if (url.includes("list-todo/cards")) return jsonResponse([]);
-      if (url.includes("list-ip/cards")) return jsonResponse([]);
-      if (url.includes("list-nh/cards")) return jsonResponse([]);
+      if (url.includes("L-real/cards")) return jsonResponse([]);
       throw new Error(`unexpected url: ${url}`);
     });
-    const tracker = new TrelloTracker({ ...TRELLO, actionItemsListId: "" });
-    const refs = await tracker.fetchOpenCards();
+    const tracker = new TrelloTracker(TRELLO);
+    const refs = await tracker.fetchOpenCards(["", "L-real", ""]);
     expect(refs).toEqual([]);
-    // Four lists fetched (Review, ToDo, In Progress, Needs Help) —
-    // Action Items skipped because its id is empty. The legacy Needs
-    // Approval list was retired in DX-231.
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    for (const call of fetchMock.mock.calls) {
-      expect(call[0]).not.toContain("list-ai");
-    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("getCard maps a card on the Action Items list to status: Review (Phase 4 of ISS-90)", async () => {
+  // DX-621 / Phase 9d — `getCard` no longer maps idList to an IssueStatus.
+  // Status is derived locally via `deriveStatus` from lifecycle timestamps;
+  // the tracker emits a placeholder `"Review"`. Callers needing the
+  // remote list use `tracker_list_id`.
+  it("getCard returns the placeholder status; tracker_list_id carries the real Trello list", async () => {
     fetchMock.mockImplementation(async (url: string) => {
       if (url.includes("/cards/ai-card?")) {
         return jsonResponse({
@@ -150,6 +112,7 @@ describe("TrelloTracker", () => {
     const tracker = new TrelloTracker(TRELLO);
     const issue = await tracker.getCard("ai-card");
     expect(issue.status).toBe("Review");
+    expect(issue.tracker_list_id).toBe("list-ai");
     expect(issue.id).toBe("ISS-7");
   });
 
@@ -180,7 +143,9 @@ describe("TrelloTracker", () => {
     const issue = await tracker.getCard("c1");
     expect(issue.title).toBe("Title");
     expect(issue.description).toBe("Body");
-    expect(issue.status).toBe("ToDo");
+    // DX-621 / Phase 9d — tracker emits placeholder status; derivation lives
+    // in deriveStatus() against local lifecycle timestamps.
+    expect(issue.status).toBe("Review");
     expect(issue.type).toBe("Bug");
     expect(issue.ac).toEqual([
       { check_item_id: "ci-1", title: "Returns 200", checked: true },
@@ -323,6 +288,9 @@ describe("TrelloTracker", () => {
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
       waiting_on: null,
+      // DX-621 / Phase 9d — destination Trello list id is supplied by the
+      // caller (resolved via trello-list-map.yaml).
+      destinationTrelloListId: "list-todo",
     });
 
     expect(result.external_id).toBe("new-card");
@@ -344,18 +312,7 @@ describe("TrelloTracker", () => {
     });
   });
 
-  it("moveToStatus PUTs the right idList and pos top", async () => {
-    fetchMock.mockResolvedValue(jsonResponse({}));
-    const tracker = new TrelloTracker(TRELLO);
-    await tracker.moveToStatus("c1", "In Progress");
-    const call = fetchMock.mock.calls[0];
-    expect(JSON.parse(call[1].body as string)).toEqual({
-      idList: "list-ip",
-      pos: "top",
-    });
-  });
-
-  it("DX-618: moveToList PUTs the supplied trello list id verbatim (bypasses statusToListId)", async () => {
+  it("DX-618: moveToList PUTs the supplied trello list id verbatim", async () => {
     fetchMock.mockResolvedValue(jsonResponse({}));
     const tracker = new TrelloTracker(TRELLO);
     await tracker.moveToList("c1", "trello-list-OPERATOR-CHOSEN");
@@ -851,6 +808,7 @@ describe("TrelloTracker", () => {
       retro: { good: "", bad: "", action_item_ids: [], commits: [] },
       blocked: null,
       waiting_on: null,
+      destinationTrelloListId: "list-todo",
     });
     const post = fetchMock.mock.calls[0];
     expect(post[0]).toContain(authQs());
@@ -1053,7 +1011,7 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
-    it("requestVoid path (e.g. moveToStatus) also respects the breaker (independent wiring from requestJson)", async () => {
+    it("requestVoid path (e.g. moveToList) also respects the breaker (independent wiring from requestJson)", async () => {
       // `requestJson` and `requestVoid` are thin shape-adapters over a
       // shared `requestRaw`, but pin BOTH so a future refactor that
       // splits them again can't accidentally drop the gate on one side.
@@ -1061,14 +1019,14 @@ describe("parseCardTitle / formatCardTitle prefix roundtrip", () => {
       setCircuitNow(() => t);
       const tracker = new TrelloTracker(TRELLO);
 
-      // Trip via a requestVoid call (moveToStatus uses PUT → requestVoid).
+      // Trip via a requestVoid call (moveToList uses PUT → requestVoid).
       fetchMock.mockResolvedValueOnce(rateLimited());
-      await expect(tracker.moveToStatus("card-x", "Done")).rejects.toThrow(/429/);
+      await expect(tracker.moveToList("card-x", "L-done")).rejects.toThrow(/429/);
       expect(getCircuitState()).toBe("open");
 
       // Next requestVoid call must short-circuit (not hit fetch).
       fetchMock.mockClear();
-      await expect(tracker.moveToStatus("card-y", "Done")).rejects.toBeInstanceOf(
+      await expect(tracker.moveToList("card-y", "L-done")).rejects.toBeInstanceOf(
         TrelloCircuitOpen,
       );
       expect(fetchMock).not.toHaveBeenCalled();

@@ -66,33 +66,23 @@ export class TrelloTracker implements IssueTracker {
 
   // ---------- Public API ----------
 
-  async fetchOpenCards(): Promise<IssueRef[]> {
-    // Two list ids map to `status: "Review"` (review + Action Items) —
-    // see `listIdToStatus` for the rationale.
-    const openLists: Array<{ status: IssueStatus; listId: string }> = [
-      { status: "Review", listId: this.trello.reviewListId },
-      { status: "ToDo", listId: this.trello.todoListId },
-      { status: "In Progress", listId: this.trello.inProgressListId },
-      { status: "Blocked", listId: this.trello.needsHelpListId },
-      { status: "Review", listId: this.trello.actionItemsListId },
-    ];
+  async fetchOpenCards(trelloListIds: readonly string[]): Promise<IssueRef[]> {
+    // DX-621 / Phase 9d — caller (cron inbound-fetch) passes the
+    // operator-mapped Trello list ids from `trello-list-map.yaml`. No
+    // hard-coded status→list resolution; the only inbound mapping from
+    // tracker list to danxbot list type now goes through the reverse-map
+    // walk in the caller.
     const refs: IssueRef[] = [];
-    for (const entry of openLists) {
-      // `loadTrelloIds` requires every list id, so a non-empty value is
-      // an invariant by the time the request reaches this loop.
-      if (!entry.listId) continue;
-      const cards = await this.fetchListCards(entry.listId);
+    for (const listId of trelloListIds) {
+      if (!listId) continue;
+      const cards = await this.fetchListCards(listId);
       for (const card of cards) {
         const { id, title } = parseCardTitle(card.name);
         refs.push({
           id,
           external_id: card.id,
           title,
-          status: entry.status,
-          // DX-619 — propagate the Trello list id so the inbound hydration
-          // path can reverse-lookup the operator-configured map and assign
-          // `list_name` on the freshly-written YAML.
-          external_list_id: entry.listId,
+          external_list_id: listId,
         });
       }
     }
@@ -109,7 +99,12 @@ export class TrelloTracker implements IssueTracker {
       TrelloCardDto & { checklists: TrelloChecklistDto[] }
     >(cardUrl, { method: "GET" }, `GET /cards/${externalId}`);
 
-    const status = this.listIdToStatus(card.idList);
+    // DX-621 / Phase 9d — Trello list id is no longer mapped to an
+    // IssueStatus enum here. Status is derived locally from lifecycle
+    // timestamps (`deriveStatus`); the tracker-side projection is a
+    // placeholder kept for the `Issue` shape. Callers that need the
+    // remote list use `tracker_list_id` below.
+    const status: IssueStatus = "Review";
     const type = await this.deriveType(card.idLabels);
     const labels = await this.projectLabels(card.idLabels, type);
     const checklists = card.checklists ?? [];
@@ -214,7 +209,14 @@ export class TrelloTracker implements IssueTracker {
     external_id: string;
     ac: { check_item_id: string }[];
   }> {
-    const listId = this.statusToListId(input.status);
+    // DX-621 / Phase 9d — `createCard` no longer resolves a destination
+    // list from the legacy status enum. Caller (`reconcile/trello.ts`
+    // orphan-recovery path) supplies the resolved Trello list id via
+    // `input.destinationTrelloListId`, sourced from the operator-mapped
+    // `trello-list-map.yaml`. Cards created without a mapping land on
+    // the board's first list (Trello's default when `idList` is empty)
+    // — the operator maps the list explicitly to control placement.
+    const listId = input.destinationTrelloListId ?? "";
     // `requires_human: false` on every fresh card — the field is null on
     // create per the schema; agents/operators populate it later via
     // subsequent saves. Phase 3 of DX-231 wires the actual Trello label
@@ -294,20 +296,6 @@ export class TrelloTracker implements IssueTracker {
         body: JSON.stringify(body),
       },
       `PUT /cards/${externalId}`,
-    );
-  }
-
-  async moveToStatus(externalId: string, status: IssueStatus): Promise<void> {
-    const listId = this.statusToListId(status);
-    const url = `${TRELLO_BASE}/cards/${externalId}?${this.auth()}`;
-    await this.requestVoid(
-      url,
-      {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idList: listId, pos: "top" }),
-      },
-      `PUT /cards/${externalId} (moveToStatus)`,
     );
   }
 
@@ -550,44 +538,6 @@ export class TrelloTracker implements IssueTracker {
       for (const [k, v] of Object.entries(extra)) params.set(k, v);
     }
     return `${TRELLO_BASE}${path}?${params.toString()}`;
-  }
-
-  private statusToListId(status: IssueStatus): string {
-    switch (status) {
-      case "Review":
-        return this.trello.reviewListId;
-      case "ToDo":
-        return this.trello.todoListId;
-      case "In Progress":
-        return this.trello.inProgressListId;
-      case "Blocked":
-        return this.trello.needsHelpListId;
-      case "Backlog":
-        // Transitional: DX-589 (Phase 9 of DX-575) will wire a real
-        // Backlog list. Until then Backlog cards visually live in
-        // Review on the tracker — the derived status carries the real
-        // signal on the dashboard.
-        return this.trello.reviewListId;
-      case "Done":
-        return this.trello.doneListId;
-      case "Cancelled":
-        return this.trello.cancelledListId;
-    }
-  }
-
-  private listIdToStatus(listId: string): IssueStatus {
-    if (listId === this.trello.reviewListId) return "Review";
-    if (listId === this.trello.todoListId) return "ToDo";
-    if (listId === this.trello.inProgressListId) return "In Progress";
-    if (listId === this.trello.needsHelpListId) return "Blocked";
-    if (listId === this.trello.doneListId) return "Done";
-    if (listId === this.trello.cancelledListId) return "Cancelled";
-    // Phase 4 of ISS-90 collapsed the Action Items list into
-    // `status: "Review"` so the per-card triage agent picks them up
-    // alongside the Review list. The list itself stays on the Trello
-    // board (no rename), but the sync layer remaps it on hydration.
-    if (listId === this.trello.actionItemsListId) return "Review";
-    throw new Error(`Trello list id ${listId} is not mapped to a status`);
   }
 
   private async deriveType(idLabels: string[]): Promise<IssueType> {

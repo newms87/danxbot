@@ -126,7 +126,7 @@ function fakeTracker(): IssueTracker {
     },
     createCard: async () => ({ external_id: "", ac: [] }),
     updateCard: async () => {},
-    moveToStatus: async () => {},
+    
     moveToList: async () => {},
     setLabels: async () => {},
     addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
@@ -202,7 +202,7 @@ function fakeRepo(): RepoContext {
     localPath: tmpRepo,
     issuePrefix: "DX",
     workerPort: 5562,
-    trello: { todoListId: "todo-list-id" },
+    trello: {},
   } as unknown as RepoContext;
 }
 
@@ -1388,7 +1388,7 @@ describe("tryMultiAgentDispatch", () => {
         },
         createCard: async () => ({ external_id: "", ac: [] }),
         updateCard: async () => {},
-        moveToStatus: async () => {},
+        
         moveToList: async () => {},
         setLabels: async () => {},
         addComment: async () => ({ id: "lock-cmt", timestamp: "" }),
@@ -1524,7 +1524,7 @@ describe("tryMultiAgentDispatch", () => {
         },
         createCard: async () => ({ external_id: "", ac: [] }),
         updateCard: async () => {},
-        moveToStatus: async () => {},
+        
         moveToList: async () => {},
         setLabels: async () => {},
         addComment: async () => ({ id: "lock-cmt", timestamp: "" }),

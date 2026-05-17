@@ -58,15 +58,29 @@ export function loadTrelloIds(repoPath: string): Omit<TrelloConfig, "apiKey" | "
 
   const triaged = yaml["labels.triaged"];
 
+  // DX-621 (Phase 9d) — `lists.*` keys are retired. The explicit
+  // `trello-list-map.yaml` is the only source of truth for the
+  // Trello-side list ids; any `lists.*` key remaining in a connected
+  // repo's `trello.yml` is dead config left over from pre-Phase-9
+  // bootstrapping. Log a one-shot warning so the operator can delete
+  // the lines, but never fail the boot — pre-9d files load identically.
+  const legacyListKeys = [
+    "lists.review",
+    "lists.todo",
+    "lists.in_progress",
+    "lists.needs_help",
+    "lists.done",
+    "lists.cancelled",
+    "lists.action_items",
+  ].filter((k) => yaml[k] !== undefined && yaml[k] !== "");
+  if (legacyListKeys.length > 0) {
+    console.warn(
+      `[trello-config] ${trelloYmlPath}: legacy list-id keys are no longer used and can be safely deleted: ${legacyListKeys.join(", ")} (DX-621 / Phase 9d — the explicit trello-list-map.yaml replaces them).`,
+    );
+  }
+
   return {
     boardId: req("board_id"),
-    reviewListId: req("lists.review"),
-    todoListId: req("lists.todo"),
-    inProgressListId: req("lists.in_progress"),
-    needsHelpListId: req("lists.needs_help"),
-    doneListId: req("lists.done"),
-    cancelledListId: req("lists.cancelled"),
-    actionItemsListId: req("lists.action_items"),
     bugLabelId: req("labels.bug"),
     featureLabelId: req("labels.feature"),
     epicLabelId: req("labels.epic"),

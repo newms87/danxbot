@@ -121,6 +121,21 @@ vi.mock("../errors/trello-notifier.js", () => ({
   notifyError: (...args: unknown[]) => mockNotifyError(...args),
 }));
 
+// DX-621 / Phase 9d — `slack/listener.ts` resolves error-card destinations
+// via `resolveTrelloListIdByType` (operator-mapped trello-list-map.yaml).
+// Stub it so tests can pin the expected list ids without real file IO.
+const mockResolveTrelloListIdByType = vi.fn(
+  (_localPath: string, type: string) => {
+    if (type === "blocked") return "test-needs-help-list-id";
+    if (type === "review") return "test-review-list-id";
+    return "";
+  },
+);
+vi.mock("../trello-list-map.js", () => ({
+  resolveTrelloListIdByType: (...args: unknown[]) =>
+    mockResolveTrelloListIdByType(...(args as [string, string])),
+}));
+
 const mockIsFeatureEnabled = vi.fn().mockReturnValue(true);
 
 vi.mock("../settings-file.js", () => ({
@@ -610,7 +625,7 @@ describe("router error paths", () => {
     );
   });
 
-  it("routes non-operational router errors to the default list (no overrides)", async () => {
+  it("routes non-operational router errors to the review default list (DX-621)", async () => {
     mockRunRouter.mockResolvedValue(
       makeRouterResult({
         needsAgent: false,
@@ -624,7 +639,10 @@ describe("router error paths", () => {
 
     const args = mockNotifyError.mock.calls[0];
     expect(args[1]).toBe("Router Error");
-    expect(args.length).toBe(4); // No overrides argument
+    // DX-621 — every notifyError call now carries the resolved listId
+    // (mapped via trello-list-map.yaml). Non-operational errors route to
+    // the review-type default list.
+    expect(args[4]).toMatchObject({ listId: "test-review-list-id" });
   });
 });
 
@@ -646,6 +664,7 @@ describe("top-level handler errors", () => {
       "Handler Error",
       expect.stringContaining("thread db crashed"),
       expect.any(Object),
+      expect.objectContaining({ listId: "test-review-list-id" }),
     );
   });
 
