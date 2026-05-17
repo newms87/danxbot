@@ -76,6 +76,7 @@ ${DASHBOARD_REPO_HOST_PATH_ENVS}
 
   postgres:
     image: postgres:16-alpine
+    container_name: danxbot-postgres-db
     restart: always
     env_file: /danxbot/.env
     volumes:

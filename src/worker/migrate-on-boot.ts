@@ -33,6 +33,7 @@
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYamlText, stringify as stringifyYaml } from "yaml";
+import { healV10MissingFields } from "../issue-tracker/heal-v10.js";
 import { migrateForward } from "../issue-tracker/migrations/registry.js";
 import { KNOWN_SCHEMA_MAX } from "../issue-tracker/schema-versions.js";
 import { createLogger } from "../logger.js";
@@ -58,6 +59,7 @@ export interface BootSweepFailure {
 
 export interface BootSweepResult {
   migrated: number;
+  healed: number;
   unchanged: number;
   deletedClosed: number;
   failed: BootSweepFailure[];
@@ -87,11 +89,12 @@ export async function runBootMigrationSweep(
         `The worker assumes legacy reader branches still exist; reads of ` +
         `pre-v${KNOWN_SCHEMA_MAX} YAMLs will fail once P3 strips them.`,
     );
-    return { migrated: 0, unchanged: 0, deletedClosed: 0, failed: [] };
+    return { migrated: 0, healed: 0, unchanged: 0, deletedClosed: 0, failed: [] };
   }
 
   const result: BootSweepResult = {
     migrated: 0,
+    healed: 0,
     unchanged: 0,
     deletedClosed: 0,
     failed: [],
@@ -153,14 +156,47 @@ async function migrateOne(path: string, result: BootSweepResult): Promise<void> 
       `schema_version missing or not a number (got ${JSON.stringify(version)})`,
     );
   }
+  // At-MAX path: file already on canonical version; only thing left to
+  // do is heal missing required-with-default fields. The heal is
+  // idempotent — a canonical file produces zero applied[] entries and
+  // we exit through unchanged++ without writing.
   if (version === KNOWN_SCHEMA_MAX) {
-    result.unchanged++;
+    const obj = raw as Record<string, unknown>;
+    const heal = healV10MissingFields(obj);
+    if (heal.applied.length === 0) {
+      result.unchanged++;
+      return;
+    }
+    const body = stringifyYaml(heal.value, { lineWidth: 0 });
+    await atomicWriteYaml(path, body);
+    result.healed++;
+    log.warn(
+      `[boot-sweep] healed ${path}: filled missing required field(s) [${heal.applied.join(", ")}] with canonical defaults`,
+    );
     return;
   }
+  // Below-MAX path: registry migrates → heal pass catches any field the
+  // migration's `pickExisting` table doesn't cover (e.g. `v9-to-v10`
+  // only fills the five v10-new fields). Single sink for "what counts
+  // as canonical for a missing field".
   const migrated = migrateForward(raw);
-  const body = stringifyYaml(migrated, { lineWidth: 0 });
+  if (!isPlainObject(migrated)) {
+    throw new Error("migrateForward returned a non-object value");
+  }
+  const heal = healV10MissingFields(migrated);
+  const finalValue = heal.value;
+  const body = stringifyYaml(finalValue, { lineWidth: 0 });
   await atomicWriteYaml(path, body);
   result.migrated++;
+  if (heal.applied.length > 0) {
+    log.warn(
+      `[boot-sweep] migrated + healed ${path}: filled missing required field(s) [${heal.applied.join(", ")}] with canonical defaults`,
+    );
+  }
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 async function atomicWriteYaml(path: string, body: string): Promise<void> {

@@ -265,7 +265,7 @@ async function startWorkerMode(): Promise<void> {
   // sweep (emergency-only; documented in `src/worker/migrate-on-boot.ts`).
   const sweep = await runBootMigrationSweep([repo]);
   log.info(
-    `[${repo.name}] Boot migration sweep: migrated=${sweep.migrated} unchanged=${sweep.unchanged} deletedClosed=${sweep.deletedClosed} failed=${sweep.failed.length}`,
+    `[${repo.name}] Boot migration sweep: migrated=${sweep.migrated} healed=${sweep.healed} unchanged=${sweep.unchanged} deletedClosed=${sweep.deletedClosed} failed=${sweep.failed.length}`,
   );
   if (sweep.failed.length > 0) {
     log.error(

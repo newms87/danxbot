@@ -346,6 +346,7 @@ describe("runBootMigrationSweep (DX-593)", () => {
 
     expect(result).toEqual({
       migrated: 0,
+      healed: 0,
       unchanged: 0,
       deletedClosed: 0,
       failed: [],
@@ -368,6 +369,7 @@ describe("runBootMigrationSweep (DX-593)", () => {
       });
       expect(result).toEqual({
         migrated: 0,
+        healed: 0,
         unchanged: 0,
         deletedClosed: 0,
         failed: [],
@@ -393,6 +395,49 @@ describe("runBootMigrationSweep (DX-593)", () => {
     // README + .gitkeep still on disk untouched.
     expect(existsSync(resolve(openDir, "README.md"))).toBe(true);
     expect(existsSync(resolve(openDir, ".gitkeep"))).toBe(true);
+  });
+
+  it("heals an at-MAX YAML missing a required-with-default field (priority)", async () => {
+    // Repro of DX-576-class drift: a writer regression emitted a v10
+    // YAML without `priority`. Boot sweep MUST detect, fill the
+    // canonical default, write back atomically, count the file under
+    // result.healed (not result.unchanged), and produce a YAML that
+    // round-trips through strict parseIssue.
+    const openDir = resolve(dir, ".danxbot", "issues", "open");
+    const path = resolve(openDir, "DX-1.yml");
+    const malformed = V10_YAML("DX-1").replace(/\npriority: 3\n/, "\n");
+    writeYaml(path, malformed);
+
+    const result = await runBootMigrationSweep([makeRepo(dir)], {
+      nowMs: Date.now(),
+    });
+
+    expect(result.failed).toEqual([]);
+    expect(result.healed).toBe(1);
+    expect(result.unchanged).toBe(0);
+    expect(result.migrated).toBe(0);
+
+    const after = readFileSync(path, "utf-8");
+    const parsed = parseYamlText(after) as Record<string, unknown>;
+    expect(parsed.priority).toBe(3);
+    expect(parsed.schema_version).toBe(KNOWN_SCHEMA_MAX);
+
+    // Round-trips through the strict reader after the heal.
+    const issue = parseIssue(after, { expectedPrefix: "DX" });
+    expect(issue.priority).toBe(3);
+  });
+
+  it("counts an at-MAX YAML with every required field as unchanged", async () => {
+    const openDir = resolve(dir, ".danxbot", "issues", "open");
+    writeYaml(resolve(openDir, "DX-1.yml"), V10_YAML("DX-1"));
+
+    const result = await runBootMigrationSweep([makeRepo(dir)], {
+      nowMs: Date.now(),
+    });
+
+    expect(result.unchanged).toBe(1);
+    expect(result.healed).toBe(0);
+    expect(result.migrated).toBe(0);
   });
 
   it("writes atomically — no .tmp residue after a successful migration", async () => {

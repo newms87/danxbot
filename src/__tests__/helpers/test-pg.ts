@@ -4,7 +4,7 @@ import { Pool, type PoolConfig } from "pg";
 /**
  * DX-256: real-pg test suites that consume `DANXBOT_DB_*` env directly
  * inherit the production hostname `postgres` (the Docker-network DNS
- * name for `danxbot-postgres-1`), which does not resolve from the host
+ * name for `danxbot-postgres-db`), which does not resolve from the host
  * shell. `new Pool({ host: "postgres" })` then hangs on connect until
  * vitest's 10s hookTimeout fires. Substituting `127.0.0.1` (the
  * docker-compose published port) is the host-portable equivalent —

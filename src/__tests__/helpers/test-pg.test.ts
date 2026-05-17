@@ -20,8 +20,8 @@ describe("resolveTestPgHost (DX-256)", () => {
     // listening there). Substituting would actively break the
     // in-container run.
     expect(resolveTestPgHost("postgres", /* isHost */ false)).toBe("postgres");
-    expect(resolveTestPgHost("danxbot-postgres-1", false)).toBe(
-      "danxbot-postgres-1",
+    expect(resolveTestPgHost("danxbot-postgres-db", false)).toBe(
+      "danxbot-postgres-db",
     );
   });
 });
