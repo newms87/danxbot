@@ -116,27 +116,17 @@ describe("ListsManager", () => {
     w.unmount();
   });
 
-  it("HexColorInput rejects invalid hex on submit (no patchList call)", async () => {
-    const w = mountManager();
-    const colorInput = w.get(`[data-test="lists-color-u-review-input"]`);
-    await colorInput.setValue("not-a-hex");
-    await colorInput.trigger("blur");
-    expect(mockPatchList).not.toHaveBeenCalled();
-    // Reactivity-flush race under full-suite CPU contention — the
-    // computed `isInvalid` needs a tick to propagate to the v-if'd error
-    // paragraph. Wait until the error renders before asserting.
-    await vi.waitFor(() => {
-      expect(w.find(`[data-test="lists-color-u-review-error"]`).exists()).toBe(true);
-    });
-    w.unmount();
-  });
-
-  it("HexColorInput accepts valid hex and triggers patchList with the color", async () => {
+  it("color input change triggers patchList with the new color", async () => {
+    // Per fc90faa (DX-617 follow-up): ListsManager renders a native
+    // `<input type="color">` until DanxColorPicker ships in
+    // `@thehammer/danx-ui`. Native picker enforces hex format at the
+    // browser layer — invalid-hex submission is unreachable, so only
+    // the happy path is covered here.
     mockPatchList.mockResolvedValueOnce({});
     const w = mountManager();
-    const colorInput = w.get(`[data-test="lists-color-u-review-input"]`);
+    const colorInput = w.get(`[data-test="lists-color-u-review"]`);
     await colorInput.setValue("#abcdef");
-    await colorInput.trigger("blur");
+    await colorInput.trigger("change");
     await vi.waitFor(() => {
       expect(mockPatchList).toHaveBeenCalledWith("danxbot", "u-review", { color: "#abcdef" });
     });
