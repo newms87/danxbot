@@ -6,6 +6,7 @@ import { ref, watch } from "vue";
 import type { Issue, IssueDetail } from "../../types";
 import { patchIssue } from "../../api";
 import { MarkdownEditor } from "@thehammer/danx-ui";
+import CardTimeline from "./CardTimeline.vue";
 
 const props = defineProps<{
   issue: IssueDetail;
@@ -65,6 +66,7 @@ async function save(): Promise<void> {
 
 <template>
   <div class="overview">
+    <CardTimeline :issue="issue" :repo="repo" />
     <section v-if="issue.description || editing">
       <div class="section-label">
         <span>Description</span>
