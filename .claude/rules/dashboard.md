@@ -150,7 +150,7 @@ curl -sS -X PATCH \
 ## When to Restart / Rebuild
 
 - **Vue/CSS changes**: Handled by Vite HMR — no restart
-- **Backend TypeScript** (any `src/**/*.ts` the dashboard container imports — `src/dashboard/*.ts`, `src/agent/*.ts`, etc.): NO restart needed. The dashboard container runs `tsx watch src/index.ts` (default cmd in `entrypoint.sh:116` → `npm start`); `./src` is bind-mounted RW into the container; tsx watch auto-reloads the node process on file change. Confirm with `docker exec danxbot-dashboard-1 ps -ef | grep tsx`. Only force-recreate when something OUTSIDE `src/` changes (entrypoint.sh, tsconfig.json, env-file values not re-read at runtime).
+- **Backend TypeScript** (any `src/**/*.ts` the dashboard container imports — `src/dashboard/*.ts`, `src/agent/*.ts`, etc.): `docker restart danxbot-dashboard-1` (~2s). The dashboard container runs `tsx src/index.ts` (no `--watch`) so a fatal app crash actually exits PID 1 and `restart: always` reboots the container — this is what auto-heals a transient pg-connection-timeout-at-boot. Trade-off: backend TS edits no longer hot-reload in-process; restart the container after the edit. `./src` is still bind-mounted RW so the edit is visible immediately on restart. SPA HMR is unaffected (Vite owns it via `dashboard-dev` on :5566).
 - **New dependencies** (package.json): `docker compose up -d --build`
 - **Dashboard dist/ for :5555**: `npm run dashboard:build` from repo root (or `docker compose up -d --build dashboard` to rebake the image)
 

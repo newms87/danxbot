@@ -25,6 +25,16 @@ services:
         DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}
     restart: always
     stop_grace_period: 30s
+    # Run tsx WITHOUT --watch so a fatal app crash (e.g. transient pg
+    # connection timeout during boot migration) propagates: tsx exits →
+    # bash exits → PID 1 exits → docker `restart: always` reboots the
+    # container → migration retries against a now-healthy postgres.
+    # `tsx watch` (the npm-start default) traps the crash and idles
+    # waiting for a file change, leaving a husk container that fails
+    # healthchecks forever. Backend TS edits on host still hot-reload
+    # via the ./src bind mount + a manual `docker restart dashboard`
+    # (~2s); SPA HMR is unaffected (lives in `dashboard-dev`/Vite).
+    command: ["node_modules/.bin/tsx", "src/index.ts"]
     env_file: .env
     # Map host.docker.internal to the host gateway in non-Docker-Desktop
     # environments (Linux dockerd). Docker Desktop already provides this

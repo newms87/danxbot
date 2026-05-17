@@ -66,6 +66,7 @@ launch-infra: generate-dev-override ## Start shared infrastructure (MySQL + dash
 	NAMES="$(TARGET_REPO_NAMES)"; \
 	if [ -z "$$NAMES" ]; then \
 		echo "Warning: deploy/targets/$(DANXBOT_TARGET).yml lists no repos — dashboard starts with no repo binds; Agents tab will be empty"; \
+		docker compose rm -sf dashboard >/dev/null 2>&1 || true; \
 		docker compose up -d; \
 		exit 0; \
 	fi; \
@@ -77,6 +78,7 @@ launch-infra: generate-dev-override ## Start shared infrastructure (MySQL + dash
 		fi; \
 		export "$$var=$$path"; \
 	done; \
+	docker compose rm -sf dashboard >/dev/null 2>&1 || true; \
 	docker compose up -d
 
 stop-infra: ## Stop shared infrastructure
