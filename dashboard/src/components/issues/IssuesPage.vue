@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
+import { useListColors } from "../../composables/useListColors";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
 import { nextPosition } from "../../composables/cardPosition";
 import { DanxDialog, DanxSplitPanel, DanxTooltip } from "@thehammer/danx-ui";
@@ -11,8 +12,10 @@ import IssueDetailView from "./IssueDetailView.vue";
 import PasteCardsDialog from "./PasteCardsDialog.vue";
 import TriageButton from "./TriageButton.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
+import BlockedReasonDialog from "./BlockedReasonDialog.vue";
+import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
 import { typeToId } from "./issuePalette";
-import type { Issue, IssueDetail, IssueListItem, IssueStatus } from "../../types";
+import type { Issue, IssueDetail, IssueListItem, List } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
@@ -53,10 +56,28 @@ const {
   error,
   refresh,
   fetchDetail,
-  moveIssueStatus,
+  moveIssueList,
   moveIssuePosition,
   applyIssueUpdate,
 } = useIssues(toRef(selectedRepo), includeClosed);
+
+// DX-586 — single per-page `useListColors` instance owns the per-repo
+// taxonomy. The board reads `lists` for column derivation; the
+// onMove handler reads it to resolve INTO-blocked / OUT-of-blocked
+// dialog routing. Wrapped in a shallowRef so a repo flip can
+// transparently swap to a fresh instance without leaking the old
+// repo's lists into the new repo's board.
+const listsApi = shallowRef(useListColors(selectedRepo.value));
+onMounted(() => listsApi.value.init());
+onBeforeUnmount(() => listsApi.value.destroy());
+watch(selectedRepo, (next, prev) => {
+  if (next === prev) return;
+  listsApi.value.destroy();
+  listsApi.value = useListColors(next);
+  listsApi.value.init();
+});
+
+const boardLists = computed(() => listsApi.value.lists.value);
 
 function onUpdateIssue(updated: Issue): void {
   // Invalidate the cached detail entry. The board list-row updates
@@ -76,12 +97,83 @@ function onUpdateIssue(updated: Issue): void {
   }
 }
 
-function onMove(issue: IssueListItem, toStatus: IssueStatus): void {
-  // useIssues handles the optimistic mutation + revert + populates the
-  // `error` ref that drives the global banner. Swallow the rejection so
-  // an unhandled-promise warning does not leak — the banner is the
-  // operator-facing surface.
-  void moveIssueStatus(issue.id, toStatus).catch(() => {});
+// DX-586 — INTO-blocked / OUT-of-blocked dialog state. Holds the
+// destination list + the source issue so the dialog body can render
+// the prompt and the parent can dispatch the actual move on submit.
+interface PendingBlockedIn {
+  kind: "into-blocked";
+  issue: IssueListItem;
+  destList: List;
+}
+interface PendingBlockedOut {
+  kind: "out-of-blocked";
+  issue: IssueListItem;
+  destList: List;
+}
+const pendingMove = ref<PendingBlockedIn | PendingBlockedOut | null>(null);
+const moveDialogBusy = ref(false);
+const moveDialogError = ref<string | null>(null);
+
+function onMove(issue: IssueListItem, toList: List): void {
+  // Route through dialogs for the two blocked-state transitions; every
+  // other move fires the optimistic mutation + PATCH directly. The
+  // optimistic update (in `useIssues.moveIssueList`) handles its own
+  // revert + populates the global `error` banner on failure.
+  if (toList.type === "blocked") {
+    moveDialogError.value = null;
+    pendingMove.value = { kind: "into-blocked", issue, destList: toList };
+    return;
+  }
+  if (issue.blocked !== null) {
+    moveDialogError.value = null;
+    pendingMove.value = { kind: "out-of-blocked", issue, destList: toList };
+    return;
+  }
+  void moveIssueList(issue.id, { name: toList.name, type: toList.type }).catch(() => {});
+}
+
+async function onBlockedDialogSubmit(reason: string): Promise<void> {
+  const p = pendingMove.value;
+  if (!p || p.kind !== "into-blocked") return;
+  moveDialogBusy.value = true;
+  moveDialogError.value = null;
+  try {
+    await moveIssueList(
+      p.issue.id,
+      { name: p.destList.name, type: p.destList.type },
+      { blocked: { reason } },
+    );
+    pendingMove.value = null;
+  } catch (err) {
+    moveDialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    moveDialogBusy.value = false;
+  }
+}
+
+async function onUnblockDialogConfirm(): Promise<void> {
+  const p = pendingMove.value;
+  if (!p || p.kind !== "out-of-blocked") return;
+  moveDialogBusy.value = true;
+  moveDialogError.value = null;
+  try {
+    await moveIssueList(
+      p.issue.id,
+      { name: p.destList.name, type: p.destList.type },
+      { blocked: null },
+    );
+    pendingMove.value = null;
+  } catch (err) {
+    moveDialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    moveDialogBusy.value = false;
+  }
+}
+
+function onMoveDialogCancel(): void {
+  pendingMove.value = null;
+  moveDialogError.value = null;
+  moveDialogBusy.value = false;
 }
 
 function onReorder(
@@ -377,6 +469,7 @@ watch(
             <IssueBoard
               :issues="filteredIssues"
               :repo="selectedRepo"
+              :lists="boardLists"
               :show-closed="showClosed"
               :scoped-epic-id="scopedEpicId"
               :scope-mode="scopeMode"
@@ -408,14 +501,39 @@ watch(
         <IssueBoard
           :issues="filteredIssues"
           :repo="selectedRepo"
+          :lists="boardLists"
           :show-closed="showClosed"
           :scoped-epic-id="scopedEpicId"
           :scope-mode="scopeMode"
           @select="onSelect"
           @parent-click="onParentClick"
+          @move="onMove"
+          @reorder="onReorder"
         />
       </div>
     </template>
+
+    <BlockedReasonDialog
+      v-if="pendingMove?.kind === 'into-blocked'"
+      :model-value="true"
+      :issue-id="pendingMove.issue.id"
+      :dest-list-name="pendingMove.destList.name"
+      :busy="moveDialogBusy"
+      :error="moveDialogError"
+      @submit="onBlockedDialogSubmit"
+      @cancel="onMoveDialogCancel"
+    />
+    <UnblockConfirmDialog
+      v-if="pendingMove?.kind === 'out-of-blocked'"
+      :model-value="true"
+      :issue-id="pendingMove.issue.id"
+      :dest-list-name="pendingMove.destList.name"
+      :current-reason="pendingMove.issue.blocked?.reason ?? null"
+      :busy="moveDialogBusy"
+      :error="moveDialogError"
+      @confirm="onUnblockDialogConfirm"
+      @cancel="onMoveDialogCancel"
+    />
 
     <DanxDialog
       v-if="cardPresentation === 'dialog' && selectedIssueId"

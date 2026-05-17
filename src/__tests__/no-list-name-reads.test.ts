@@ -54,6 +54,23 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // tracker mirror + lists-routes CRUD cascade.
   "dashboard/issue-import.ts",
   "dashboard/lists-routes.ts",
+  // DX-586 — `issue-write.ts` reads `patch.list_name` (the inbound
+  // PATCH body field, NOT the Issue's `list_name` projection) to
+  // resolve the dest list against `lists.yaml` and apply ladder
+  // semantics. The read drives a translation to lifecycle timestamps
+  // + the `applyListMove` helper — not a worker dispatch decision.
+  "dashboard/issue-write.ts",
+  // DX-586 — `project-issue.ts` mirrors `Issue.list_name` onto the
+  // dashboard's `IssueListItem` projection so the board can group
+  // cards by their current list. This is a serializer-side passthrough
+  // for the dashboard read path, not a worker decision.
+  "dashboard/project-issue.ts",
+  // DX-586 — `list-move.ts` writes `next.list_name = destListName` as
+  // part of the ladder helper. The naive regex matches the write
+  // because the line carries `.list_name`; the helper never READS
+  // the field (current position is derived from `deriveStatus`, never
+  // from `list_name`).
+  "issue/list-move.ts",
   // Dispatch core auto-flip: reads list_name ONLY to snapshot it for
   // the spawn-failure rollback path (`priorSnapshot.list_name`). Not
   // a read-then-decide branch — the read exists to preserve operator

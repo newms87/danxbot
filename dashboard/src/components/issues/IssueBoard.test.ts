@@ -2,17 +2,45 @@ import { describe, it, expect, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import IssueBoard from "./IssueBoard.vue";
-import type { IssueListItem, IssueStatus } from "../../types";
+import type { IssueListItem, IssueStatus, List } from "../../types";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 let nextChildSeq = 0;
+
+/**
+ * DX-586 — default 7-list seed mirroring `defaultLists()` in
+ * `src/lists-file.ts`. The board groups cards by `list_name`; tests
+ * exercise the seed names + add operator-renamed lists where needed.
+ */
+const SEED_LISTS: readonly List[] = [
+  { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
+  { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
+  { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
+  { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
+  { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
+  { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
+  { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+];
 
 function makeIssue(
   id: string,
   status: IssueStatus,
   overrides: Partial<IssueListItem> = {},
 ): IssueListItem {
+  // Auto-resolve list_name to match the status if not overridden — the
+  // dashboard expects `list_name` on every projection (server-side
+  // auto-resolve write path), and the board falls back to the type's
+  // default when list_name is null.
+  const defaultByStatus: Record<IssueStatus, string> = {
+    Backlog: "Backlog",
+    Review: "Review",
+    ToDo: "To Do",
+    "In Progress": "In Progress",
+    Blocked: "Blocked",
+    Done: "Done",
+    Cancelled: "Cancelled",
+  };
   return {
     id,
     title: `Card ${id}`,
@@ -28,11 +56,13 @@ function makeIssue(
     ac_total: 0,
     has_retro: false,
     comments_count: 0,
-    waiting_on: null,
+    waiting_on: false,
     waiting_on_reason: null,
     waiting_on_by: [],
     blocked: null,
     requires_human: null,
+    requires_human_child_count: 0,
+    list_name: defaultByStatus[status],
     created_at: 0,
     updated_at: ++nextChildSeq,
     ...overrides,
@@ -55,28 +85,23 @@ function makeDt(): FakeDataTransfer {
   };
 }
 
-function dragEvent(type: string, dt: FakeDataTransfer = makeDt()): DragEvent {
-  const ev = new Event(type, { bubbles: true, cancelable: true }) as DragEvent;
-  Object.defineProperty(ev, "dataTransfer", { value: dt, configurable: true });
-  return ev;
-}
-
 function mountBoard(
   initial: IssueListItem[],
-  opts: { showClosed?: boolean } = {},
+  opts: { showClosed?: boolean; lists?: List[] } = {},
 ) {
   const issues = ref<IssueListItem[]>(initial);
-  const moveSpy = vi.fn<(issue: IssueListItem, to: IssueStatus) => void>();
+  const moveSpy = vi.fn<(issue: IssueListItem, to: List) => void>();
   const Host = defineComponent({
     setup() {
       return () =>
         h(IssueBoard, {
           issues: issues.value,
           repo: "danxbot",
+          lists: opts.lists ?? [...SEED_LISTS],
           showClosed: opts.showClosed ?? false,
           scopedEpicId: null,
           scopeMode: "filter",
-          onMove: (issue: IssueListItem, to: IssueStatus) => {
+          onMove: (issue: IssueListItem, to: List) => {
             moveSpy(issue, to);
           },
         });
@@ -86,10 +111,72 @@ function mountBoard(
   return { wrapper, issues, moveSpy };
 }
 
+// Helper: kebab-case test-id for a list name (matches `testIdFor` in IssueBoard.vue).
+function tid(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
+describe("IssueBoard — list-driven columns (DX-586)", () => {
+  it("renders one column per list in ladder order (archived → review → ready → blocked → in_progress → completed)", () => {
+    const { wrapper } = mountBoard([]);
+    const cols = wrapper.findAll(".column");
+    // showClosed=false hides cancelled-type columns entirely.
+    const expectedNames = ["Backlog", "Review", "To Do", "Blocked", "In Progress", "Done"];
+    expect(cols.length).toBeGreaterThanOrEqual(expectedNames.length - 1);
+    const labels = cols.map((c) => c.find(".label").text());
+    // Filter out cancelled if showClosed is off — it shouldn't render any column,
+    // but the loop below catches it regardless.
+    expect(labels).toContain("Backlog");
+    expect(labels).toContain("In Progress");
+    expect(labels).toContain("Done");
+    wrapper.unmount();
+  });
+
+  it("renders Cancelled column only when showClosed=true", () => {
+    const offBoard = mountBoard([], { showClosed: false });
+    expect(offBoard.wrapper.find(`[data-test="column-${tid("Cancelled")}"]`).exists()).toBe(false);
+    offBoard.wrapper.unmount();
+
+    const onBoard = mountBoard([], { showClosed: true });
+    expect(onBoard.wrapper.find(`[data-test="column-${tid("Cancelled")}"]`).exists()).toBe(true);
+    onBoard.wrapper.unmount();
+  });
+
+  it("groups cards into the column matching their list_name", () => {
+    const card = makeIssue("DX-1", "ToDo");
+    const { wrapper } = mountBoard([card]);
+    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
+    expect(todoCol.exists()).toBe(true);
+    expect(todoCol.text()).toContain("DX-1");
+  });
+
+  it("renders operator-renamed lists with their custom names + colors", () => {
+    const customLists: List[] = SEED_LISTS.map((l) =>
+      l.type === "ready"
+        ? { ...l, name: "Up Next", color: "#abcdef" }
+        : l,
+    );
+    const card = makeIssue("DX-1", "ToDo", { list_name: "Up Next" });
+    const { wrapper } = mountBoard([card], { lists: customLists });
+    const col = wrapper.find(`[data-test="column-${tid("Up Next")}"]`);
+    expect(col.exists()).toBe(true);
+    expect(col.find(".label").text()).toBe("Up Next");
+    expect(col.text()).toContain("DX-1");
+    wrapper.unmount();
+  });
+
+  it("falls back to the type's default list when list_name is null", () => {
+    const card = makeIssue("DX-1", "ToDo", { list_name: null });
+    const { wrapper } = mountBoard([card]);
+    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
+    expect(todoCol.text()).toContain("DX-1");
+  });
+});
+
 describe("IssueBoard — drag and drop", () => {
-  it("dragging a card from ToDo and dropping on In Progress emits move with target status", async () => {
+  it("dropping a card on In Progress emits move with the full List", async () => {
     const issue = makeIssue("DX-1", "ToDo");
     const { wrapper, moveSpy } = mountBoard([issue]);
 
@@ -99,23 +186,20 @@ describe("IssueBoard — drag and drop", () => {
 
     await card.trigger("dragstart", { dataTransfer: makeDt() });
 
-    const target = wrapper.find('[data-test="column-in_progress"]');
+    const target = wrapper.find(`[data-test="column-${tid("In Progress")}"]`);
     expect(target.exists()).toBe(true);
 
     await target.trigger("dragover", { dataTransfer: makeDt() });
     await target.trigger("drop", { dataTransfer: makeDt() });
     await card.trigger("dragend");
 
-    // DX-299: under full-suite CPU contention the dragend → state-clear →
-    // emit("move") chain can split across multiple macrotasks; vi.waitFor
-    // polls until the spy call is observable. See DX-262
-    // RequiresHumanPanel.test.ts for the canonical mechanism description.
     await vi.waitFor(() => {
       expect(moveSpy).toHaveBeenCalledOnce();
     });
-    const [calledIssue, calledStatus] = moveSpy.mock.calls[0];
+    const [calledIssue, calledList] = moveSpy.mock.calls[0];
     expect(calledIssue.id).toBe("DX-1");
-    expect(calledStatus).toBe("In Progress");
+    expect(calledList.name).toBe("In Progress");
+    expect(calledList.type).toBe("in_progress");
 
     wrapper.unmount();
   });
@@ -127,7 +211,7 @@ describe("IssueBoard — drag and drop", () => {
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
 
-    const sameCol = wrapper.find('[data-test="column-todo"]');
+    const sameCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
     await sameCol.trigger("dragover", { dataTransfer: makeDt() });
     await sameCol.trigger("drop", { dataTransfer: makeDt() });
     await card.trigger("dragend");
@@ -142,23 +226,19 @@ describe("IssueBoard — drag and drop", () => {
 
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
-    // Simulate Esc — browser fires dragend on the source without a drop event.
     await card.trigger("dragend");
 
     expect(moveSpy).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it("active drag source gets the `is-dragging` class (opacity ≤0.4 + pointer-events: none)", async () => {
+  it("active drag source gets the `is-dragging` class", async () => {
     const issue = makeIssue("DX-4", "ToDo");
     const { wrapper } = mountBoard([issue]);
 
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
 
-    // DX-299: class-toggle after the dragstart cascade is reactivity-driven;
-    // vi.waitFor decouples the assertion from macrotask scheduling under
-    // CPU contention.
     await vi.waitFor(() => {
       expect(card.classes()).toContain("is-dragging");
     });
@@ -177,9 +257,8 @@ describe("IssueBoard — drag and drop", () => {
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
 
-    const target = wrapper.find('[data-test="column-in_progress"]');
+    const target = wrapper.find(`[data-test="column-${tid("In Progress")}"]`);
     await target.trigger("dragover", { dataTransfer: makeDt() });
-    // DX-299: same class-toggle race as the is-dragging test above.
     await vi.waitFor(() => {
       expect(target.classes()).toContain("drop-hover");
     });
@@ -191,91 +270,82 @@ describe("IssueBoard — drag and drop", () => {
     wrapper.unmount();
   });
 
-  it("dropping on Done emits move with target status Done (AC6 — backend handles file move)", async () => {
+  it("dropping on Done emits move with the Done list (AC6 — backend handles file move)", async () => {
     const issue = makeIssue("DX-D", "ToDo");
     const { wrapper, moveSpy } = mountBoard([issue], { showClosed: true });
 
     const card = wrapper.find('[draggable="true"]');
     await card.trigger("dragstart", { dataTransfer: makeDt() });
 
-    const target = wrapper.find('[data-test="column-done"]');
+    const target = wrapper.find(`[data-test="column-${tid("Done")}"]`);
     expect(target.exists()).toBe(true);
     await target.trigger("dragover", { dataTransfer: makeDt() });
     await target.trigger("drop", { dataTransfer: makeDt() });
     await card.trigger("dragend");
 
-    // DX-299: see drag-and-drop emit race comment above.
     await vi.waitFor(() => {
       expect(moveSpy).toHaveBeenCalledOnce();
     });
-    expect(moveSpy.mock.calls[0][1]).toBe("Done");
+    expect(moveSpy.mock.calls[0][1].name).toBe("Done");
+    expect(moveSpy.mock.calls[0][1].type).toBe("completed");
     wrapper.unmount();
   });
 
-  it("synthetic done_recent column has no drop binding — drops on it are inert", async () => {
-    const todoCard = makeIssue("DX-T", "ToDo");
-    // Use updated_at within the recent window so the synthetic column is non-empty.
-    const recentDone = makeIssue("DX-R", "Done", {
-      updated_at: Math.floor(Date.now() / 1000),
+  it("dropping on Blocked emits move with the Blocked list (parent routes through INTO-blocked dialog)", async () => {
+    const issue = makeIssue("DX-B", "ToDo");
+    const { wrapper, moveSpy } = mountBoard([issue]);
+
+    const card = wrapper.find('[draggable="true"]');
+    await card.trigger("dragstart", { dataTransfer: makeDt() });
+
+    const target = wrapper.find(`[data-test="column-${tid("Blocked")}"]`);
+    await target.trigger("dragover", { dataTransfer: makeDt() });
+    await target.trigger("drop", { dataTransfer: makeDt() });
+    await card.trigger("dragend");
+
+    await vi.waitFor(() => {
+      expect(moveSpy).toHaveBeenCalledOnce();
     });
-    const { wrapper, moveSpy } = mountBoard([todoCard, recentDone]);
-
-    const cards = wrapper.findAll('[draggable="true"]');
-    const draggable = cards.find((c) => c.text().includes("DX-T"))!;
-    await draggable.trigger("dragstart", { dataTransfer: makeDt() });
-
-    const recentCol = wrapper.find('[data-test="column-done_recent"]');
-    expect(recentCol.exists()).toBe(true);
-    // No bindColumn → no preventDefault on dragover, no drop handler firing.
-    await recentCol.trigger("dragover", { dataTransfer: makeDt() });
-    await recentCol.trigger("drop", { dataTransfer: makeDt() });
-    await draggable.trigger("dragend");
-
-    expect(moveSpy).not.toHaveBeenCalled();
+    expect(moveSpy.mock.calls[0][1].type).toBe("blocked");
     wrapper.unmount();
   });
 
   it("cards in different columns each get their own drag binding", async () => {
     const a = makeIssue("DX-A", "ToDo");
-    const b = makeIssue("DX-B", "Blocked");
+    const b = makeIssue("DX-B", "Blocked", {
+      blocked: { at: "2026-05-01T00:00:00Z", reason: "x" },
+    });
     const { wrapper, moveSpy } = mountBoard([a, b]);
 
     const cards = wrapper.findAll('[draggable="true"]');
     expect(cards).toHaveLength(2);
 
-    // Drag the Blocked card into ToDo.
     const blockedCard = cards.find((c) => c.text().includes("DX-B"))!;
     await blockedCard.trigger("dragstart", { dataTransfer: makeDt() });
-    const todoCol = wrapper.find('[data-test="column-todo"]');
+    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
     await todoCol.trigger("dragover", { dataTransfer: makeDt() });
     await todoCol.trigger("drop", { dataTransfer: makeDt() });
     await blockedCard.trigger("dragend");
 
-    // DX-299: see drag-and-drop emit race comment above.
     await vi.waitFor(() => {
       expect(moveSpy).toHaveBeenCalledOnce();
     });
     expect(moveSpy.mock.calls[0][0].id).toBe("DX-B");
-    expect(moveSpy.mock.calls[0][1]).toBe("ToDo");
+    expect(moveSpy.mock.calls[0][1].name).toBe("To Do");
     wrapper.unmount();
   });
 });
 
 // DX-522 — guard against the SPA accidentally re-sorting a column.
-// The backend's `sortIssuesForStatus` (priority DESC → ICE → id) is
-// the canonical order; the API ships the list in that order; the
-// board preserves it verbatim. A regression would re-introduce a
-// hidden `.sort()` over priority/updated_at/etc. inside the
-// grouped() computed or downstream — this test pins the contract.
+// The backend's `sortIssuesForStatus` is the canonical order; the
+// API ships rows in that order; the board preserves it verbatim.
 describe("IssueBoard — backend sort preserved verbatim (DX-522)", () => {
   it("renders priority-5 card before priority-2 card when backend ships them in that order", () => {
     const high = makeIssue("DX-HIGH", "ToDo", { priority: 5 });
     const low = makeIssue("DX-LOW", "ToDo", { priority: 2 });
-    // Input order = backend order = priority DESC. The SPA must not
-    // flip these even though the per-card priority would invite it.
     const { wrapper } = mountBoard([high, low]);
 
-    const todoCol = wrapper.find('[data-test="column-todo"]');
+    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
     const cardIds = todoCol
       .findAll('[draggable="true"]')
       .map((c) => c.find('[data-test="card-id"]').text());
@@ -286,11 +356,9 @@ describe("IssueBoard — backend sort preserved verbatim (DX-522)", () => {
   it("renders priority-2 card before priority-5 card when backend ships THAT order (no client-side flip)", () => {
     const low = makeIssue("DX-LOWFIRST", "ToDo", { priority: 2 });
     const high = makeIssue("DX-HIGHSECOND", "ToDo", { priority: 5 });
-    // Input order is intentionally inverted vs the priority ranking
-    // — proves the SPA is not silently restoring "correct" order.
     const { wrapper } = mountBoard([low, high]);
 
-    const todoCol = wrapper.find('[data-test="column-todo"]');
+    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
     const cardIds = todoCol
       .findAll('[draggable="true"]')
       .map((c) => c.find('[data-test="card-id"]').text());

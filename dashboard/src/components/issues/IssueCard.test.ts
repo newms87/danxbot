@@ -100,6 +100,7 @@ function makeListItem(overrides: Partial<IssueListItem> = {}): IssueListItem {
     assigned_agent: null,
     requires_human: null,
     requires_human_child_count: 0,
+    list_name: null,
     ...overrides,
   };
 }

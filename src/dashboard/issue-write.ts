@@ -60,7 +60,6 @@ import {
 } from "../issue-tracker/yaml.js";
 import { nextIssueId } from "../issue-tracker/id-generator.js";
 import {
-  ISSUE_STATUSES,
   ISSUE_TYPES,
   type Blocked,
   type ConflictOnEntry,
@@ -71,6 +70,13 @@ import {
   type RequiresHuman,
 } from "../issue-tracker/interface.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
+import { readLists, type List, type ListType } from "../lists-file.js";
+import {
+  applyListMove,
+  ListMoveError,
+  type BlockedPatchInput,
+} from "../issue/list-move.js";
+import { randomUUID } from "node:crypto";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 
 /**
@@ -103,9 +109,14 @@ export interface RequiresHumanPatchInput {
  * Allowlisted body shape for `PATCH /api/issues/:id`. Any other field
  * triggers `400 Field not patchable: <name>` BEFORE the file is read,
  * so a typo can't accidentally land an empty patch on disk.
+ *
+ * DX-586 — `status` is NOT patchable. The board's drag/drop + drawer
+ * dropdown send `list_name` (resolved server-side to a `ListType` via
+ * `lists.yaml`); the server applies ladder semantics and writes the
+ * lifecycle timestamps + gate fields that make `deriveStatus` project
+ * the intended derived value. A client passing `status` gets a 400.
  */
 export interface IssuePatch {
-  status?: IssueStatus;
   /**
    * Card type label. Allowed values are `IssueType` (Feature / Bug / Epic /
    * Chore / Spike / Refactor / etc — see `ISSUE_TYPES`). The type is mostly
@@ -141,10 +152,32 @@ export interface IssuePatch {
   requires_human?: RequiresHumanPatchInput | RequiresHuman | null;
   /**
    * Move a Done / Cancelled card from `closed/` back to `open/`. When
-   * passed without an explicit `status`, defaults to `ToDo`. Setting
-   * `reopen: true` against a card already in `open/` is a 400.
+   * passed without an explicit `list_name`, the server resolves the
+   * `ready`-type default list from `lists.yaml`. Pairing with a
+   * `list_name` that resolves to a `completed` / `cancelled` type is
+   * rejected as contradictory. Setting `reopen: true` against a card
+   * already in `open/` is a 400.
    */
   reopen?: true;
+  /**
+   * DX-586 — move the card into a per-repo named list. The server
+   * resolves the list's `ListType` via `lists.yaml`, computes the
+   * ladder position, and applies the rightward / leftward / lateral
+   * semantics described in DX-575 epic body. Always stamps `list_name`
+   * on the card. Special cases:
+   *
+   *  - dest `ListType === "blocked"` REQUIRES `blocked: {reason}` in the
+   *    same patch (INTO-blocked dialog). Otherwise the server returns
+   *    400.
+   *  - dest `ListType === "in_progress"` auto-stamps the `dispatch`
+   *    record with the authed username (encoded in `dispatch.host`),
+   *    `kind: "work"`, `pid: 0`. No client input needed.
+   *  - Lateral move (dest's type matches current derived type) only
+   *    changes `list_name`; no triggers are touched.
+   *
+   * 404 when the list name is unknown in `<repo>/.danxbot/lists.yaml`.
+   */
+  list_name?: string;
   /**
    * Operator manual ordering knob inside the card's status column
    * (DX-264). Finite number wins over the canonical priority → ICE →
@@ -175,19 +208,23 @@ export interface IssuePatch {
    */
   conflict_on?: ConflictOnEntry[];
   /**
-   * Self-block clear (DX-309). Only `null` is accepted — operator clears
-   * via the drawer's "Clear" button on the Blocked subsection. The
-   * `status: "Blocked" ⟺ blocked !== null` invariant is preserved by
-   * pairing the clear with `status: "ToDo"` (the dashboard sends both in
-   * one patch; the validator accepts both). Setting blocked to a record
-   * is reserved for the agent path — humans flip status, the auto-stamp
-   * in `applyValidatedPatch` synthesizes the record.
+   * Self-block lifecycle trigger (DX-309 + DX-586).
+   *
+   *  - `null` — explicit unblock confirmation (OUT-of-blocked dialog
+   *    submit). The server clears `blocked` and applies the dest list's
+   *    ladder semantics. Always allowed.
+   *  - `{reason: string}` — INTO-blocked dialog submit. ONLY valid
+   *    paired with a `list_name` whose type is `blocked`; the server
+   *    stamps `blocked: {at: now, reason}` and skips the rest of the
+   *    ladder sweep. Standalone `blocked: {reason}` without a
+   *    `list_name` of type `blocked` is rejected as inconsistent.
+   *  - `undefined` — default ladder semantics apply (board drag without
+   *    the confirm dialog auto-clears `blocked` on a leftward move).
    */
-  blocked?: null;
+  blocked?: BlockedPatchInput;
 }
 
 const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
-  "status",
   "type",
   "title",
   "description",
@@ -199,13 +236,22 @@ const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "priority",
   "conflict_on",
   "blocked",
+  "list_name",
 ]);
 
-const REOPEN_ALLOWED_STATUSES: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
-  "Review",
-  "ToDo",
-  "In Progress",
-  "Blocked",
+/**
+ * `ListType`s whose default lists can be the dest of a `reopen` move.
+ * Reopen explicitly excludes the terminal-state types — pairing reopen
+ * with a `list_name` of `completed` / `cancelled` type is contradictory
+ * (the source is already terminal in `closed/`, the reopen verb means
+ * "move back to a non-terminal state").
+ */
+const REOPEN_ALLOWED_LIST_TYPES: ReadonlySet<ListType> = new Set<ListType>([
+  "archived",
+  "review",
+  "ready",
+  "blocked",
+  "in_progress",
 ]);
 
 /**
@@ -386,15 +432,6 @@ function validatePatchShape(body: unknown): IssuePatch {
 
   const patch: IssuePatch = {};
 
-  if ("status" in raw) {
-    const v = raw.status;
-    if (typeof v !== "string" || !ISSUE_STATUSES.includes(v as IssueStatus)) {
-      throw new IssuePatchError(400, {
-        error: `status must be one of [${ISSUE_STATUSES.join(", ")}]`,
-      });
-    }
-    patch.status = v as IssueStatus;
-  }
   if ("type" in raw) {
     const v = raw.type;
     if (typeof v !== "string" || !ISSUE_TYPES.includes(v as IssueType)) {
@@ -571,13 +608,32 @@ function validatePatchShape(body: unknown): IssuePatch {
     }
     patch.conflict_on = entries;
   }
-  if ("blocked" in raw) {
-    if (raw.blocked !== null) {
+  if ("list_name" in raw) {
+    const v = raw.list_name;
+    if (typeof v !== "string" || v.length === 0) {
       throw new IssuePatchError(400, {
-        error: "blocked may only be patched to null (use status to flip)",
+        error: "list_name must be a non-empty string",
       });
     }
-    patch.blocked = null;
+    patch.list_name = v;
+  }
+  if ("blocked" in raw) {
+    const v = raw.blocked;
+    if (v === null) {
+      patch.blocked = null;
+    } else if (typeof v === "object" && v !== null && !Array.isArray(v)) {
+      const r = v as Record<string, unknown>;
+      if (typeof r.reason !== "string" || r.reason.length === 0) {
+        throw new IssuePatchError(400, {
+          error: "blocked.reason must be a non-empty string",
+        });
+      }
+      patch.blocked = { reason: r.reason };
+    } else {
+      throw new IssuePatchError(400, {
+        error: 'blocked must be null OR an object {reason: string}',
+      });
+    }
   }
   return patch;
 }
@@ -615,21 +671,14 @@ function applyValidatedPatch(
     });
   }
 
-  // Reopen pre-flight: only valid against a closed source. An explicit
-  // status of Done/Cancelled paired with `reopen: true` is contradictory
-  // — reject loud rather than silently dropping the reopen.
+  // Reopen pre-flight: only valid against a closed source. The
+  // dest-list-type compatibility check happens AFTER list resolution
+  // below (a `list_name` resolving to `completed` / `cancelled` types
+  // is rejected as contradictory with the reopen verb).
   if (patch.reopen) {
     if (source.state !== "closed") {
       throw new IssuePatchError(400, {
         error: `reopen requires source to be in closed/; ${id} is in ${source.state}/`,
-      });
-    }
-    if (
-      patch.status !== undefined &&
-      !REOPEN_ALLOWED_STATUSES.has(patch.status)
-    ) {
-      throw new IssuePatchError(400, {
-        error: `reopen incompatible with status "${patch.status}" — pick one of [${[...REOPEN_ALLOWED_STATUSES].join(", ")}]`,
       });
     }
   }
@@ -645,7 +694,7 @@ function applyValidatedPatch(
   }
 
   const nowIso = new Date().toISOString();
-  const next: Issue = {
+  let next: Issue = {
     ...current,
     children: [...current.children],
     ac: current.ac.map((a) => ({ ...a })),
@@ -684,14 +733,6 @@ function applyValidatedPatch(
             set_at: nowIso,
           };
   }
-  if (patch.reopen) {
-    // Default reopen status is ToDo — caller can override via explicit `status`
-    // (ToDo / In Progress / Blocked / Review only; the pre-flight rejects Done /
-    // Cancelled paired with reopen).
-    next.status = patch.status ?? "ToDo";
-  } else if (patch.status !== undefined) {
-    next.status = patch.status;
-  }
   if (patch.position !== undefined) {
     next.position = patch.position;
   }
@@ -701,37 +742,76 @@ function applyValidatedPatch(
   if (patch.conflict_on !== undefined) {
     next.conflict_on = patch.conflict_on.map((e) => ({ ...e }));
   }
-  if (patch.blocked !== undefined) {
-    next.blocked = patch.blocked;
-  }
 
-  // Operator action (dashboard drag, manual status patch) crosses the
-  // status⟺blocked mirror invariant. Without this normalization, the
-  // YAML-level invariant `status === "Blocked" ⟺ blocked != null` would
-  // 400 every drag-into-Blocked or drag-out-of-Blocked, since the inbound
-  // patch only carries `status`. Auto-stamp / auto-clear `blocked` so the
-  // drag UX round-trips cleanly. `waiting_on`, `requires_human`, and
-  // `conflict_on[]` are status-independent — no normalization needed for
-  // those. The operator wins; if they explicitly set `blocked` in the
-  // patch, that takes precedence over this normalization.
-  if (patch.status !== undefined) {
-    if (next.status === "Blocked" && next.blocked === null) {
-      next.blocked = {
-        reason: "Manually moved to Blocked via dashboard",
-        at: nowIso,
-      };
-    } else if (next.status !== "Blocked" && next.blocked !== null) {
-      next.blocked = null;
+  // List-move semantics (DX-586). Resolve `list_name` → `List` via
+  // `lists.yaml`, then dispatch to `applyListMove` for the ladder
+  // semantics. Reopen without an explicit `list_name` defaults to the
+  // `ready`-type default list.
+  const explicitListMove = patch.list_name !== undefined;
+  const reopenMove = patch.reopen === true && !explicitListMove;
+  if (explicitListMove || reopenMove) {
+    const listsFile = readLists(repoLocalPath);
+    const destList: List | undefined = explicitListMove
+      ? listsFile.lists.find((l) => l.name === patch.list_name)
+      : listsFile.lists.find((l) => l.type === "ready" && l.is_default_for_type);
+    if (!destList) {
+      if (explicitListMove) {
+        throw new IssuePatchError(404, {
+          error: `list_name "${patch.list_name}" not found in <repo>/.danxbot/lists.yaml`,
+        });
+      }
+      throw new IssuePatchError(500, {
+        error: `No default list for type "ready" in <repo>/.danxbot/lists.yaml — file corrupt`,
+      });
     }
-    // waiting_on is independent of status (pure dispatch gate, durable
-    // record). Operator moving status off ToDo does NOT strip the
-    // dep-chain note.
+    if (patch.reopen && !REOPEN_ALLOWED_LIST_TYPES.has(destList.type)) {
+      throw new IssuePatchError(400, {
+        error: `reopen incompatible with list_name "${destList.name}" (type "${destList.type}") — pick a list whose type is one of [${[...REOPEN_ALLOWED_LIST_TYPES].join(", ")}]`,
+      });
+    }
+    try {
+      const moveResult = applyListMove({
+        current: next,
+        destListType: destList.type,
+        destListName: destList.name,
+        blockedPatch: patch.blocked,
+        authUsername,
+        nowIso,
+        uuid: randomUUID,
+      });
+      next = moveResult.next;
+    } catch (err) {
+      if (err instanceof ListMoveError) {
+        throw new IssuePatchError(err.status, { error: err.message });
+      }
+      throw err;
+    }
+  } else if (patch.blocked !== undefined) {
+    // No `list_name` in the patch — the `blocked` field is a paired
+    // field with `list_name`; standalone updates are rejected so the
+    // status⟺blocked YAML invariant (`status === "Blocked" ⟺
+    // blocked !== null`) can never be violated by a partial patch.
+    // The dashboard's Clear-Block button (`DispatchGatesSection`)
+    // always pairs `blocked: null` with `list_name: <ready-default>`;
+    // the dialogs in `IssuesPage` + `DrawerHeader` always pair
+    // `{reason}` / `null` with a `list_name` of the matching type.
+    // A future client that wants to standalone-clear must update its
+    // wire format.
+    if (patch.blocked === null) {
+      throw new IssuePatchError(400, {
+        error: `blocked: null must accompany a list_name move (pair with list_name to land the card off the Blocked list)`,
+      });
+    }
+    throw new IssuePatchError(400, {
+      error: `blocked.reason may only accompany a move into a "blocked"-type list (pair with list_name)`,
+    });
   }
 
   // Compute target state from the post-patch status. Done / Cancelled
   // close the card; everything else opens it. Reopen is a special case
-  // of "force open" — the status is set above, and the target derives
-  // from it the same way.
+  // of "force open" — the list-move helper above set `next.status` to a
+  // non-terminal value for the dest type, so this branch lands on
+  // `open` automatically.
   const targetState: "open" | "closed" =
     next.status === "Done" || next.status === "Cancelled" ? "closed" : "open";
   const targetPath = issuePath(repoLocalPath, id, targetState);

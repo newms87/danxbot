@@ -266,6 +266,16 @@ vi.mock("../issue/stamp-terminal.js", () => ({
     mockStampIssueCancelled(...args),
 }));
 
+// DX-616 — handleStop / handleStopFromDb route stamp-throws through
+// `handleStampThrow` which publishes a `stamp-terminal` system-error
+// to the dashboard banner. Mock the producer so the fail-loud tests
+// can assert the call shape without spinning up the in-memory ring
+// buffer.
+const mockRecordSystemError = vi.fn();
+vi.mock("../dashboard/system-errors.js", () => ({
+  recordSystemError: (...args: unknown[]) => mockRecordSystemError(...args),
+}));
+
 // DX-559: handleStop runs the commits-shipped enforcement before the
 // existing status branches. Mock it so tests can drive the violation /
 // no-violation path without setting up a real git repo per case (that
@@ -334,6 +344,7 @@ beforeEach(() => {
   mockStampIssueBlocked.mockReset();
   mockStampIssueCompleted.mockReset().mockResolvedValue(undefined);
   mockStampIssueCancelled.mockReset().mockResolvedValue(undefined);
+  mockRecordSystemError.mockReset();
 });
 
 describe("handleLaunch — dispatchApi feature toggle", () => {
@@ -681,6 +692,99 @@ describe("handleStop", () => {
       }),
     );
     expect(mockStampIssueCompleted).not.toHaveBeenCalled();
+  });
+
+  it("DX-616 (fail-loud): stamp throw on completed downgrades dispatch to failed, records system-error, calls job.stop(failed)", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-stamp-throws",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockGetActiveJob.mockReturnValue(mockJob);
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-stamp-throws",
+      issueId: "ISS-901",
+      agentName: "dani",
+      status: "running",
+    });
+    // Simulate the YAML stamp failing (parse / write / disk error).
+    const stampError = new Error("YAML write EROFS");
+    mockStampIssueCompleted.mockReset().mockRejectedValueOnce(stampError);
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "completed",
+      summary: "Card done @ abc1234",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-stamp-throws", MOCK_REPO);
+
+    // Response stays 200 (the agent dies via job.stop anyway).
+    expect(stopRes._getStatusCode()).toBe(200);
+    // job.stop fires with the downgraded "failed" status + the failure
+    // reason in the summary — the strike accumulator inside the
+    // dispatch tracker (mocked elsewhere) keys on this status.
+    expect(mockStop).toHaveBeenCalledTimes(1);
+    expect(mockStop).toHaveBeenCalledWith(
+      "failed",
+      expect.stringContaining("YAML write EROFS"),
+    );
+    // recordSystemError publishes a `stamp-terminal` banner so the
+    // operator sees the failure class immediately.
+    expect(mockRecordSystemError).toHaveBeenCalledTimes(1);
+    expect(mockRecordSystemError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "stamp-terminal",
+        severity: "error",
+        repo: MOCK_REPO.name,
+        message: expect.stringContaining("job-stamp-throws"),
+      }),
+    );
+  });
+
+  it("DX-616 (fail-loud): stamp throw on failed status STILL downgrades + records — failure summary preserves the original agent intent", async () => {
+    const mockStop = vi.fn().mockResolvedValue(undefined);
+    const mockJob = {
+      id: "job-stamp-throws-failed",
+      status: "running",
+      summary: "",
+      startedAt: new Date(),
+      stop: mockStop,
+    };
+    mockGetActiveJob.mockReturnValue(mockJob);
+    mockGetDispatchById.mockResolvedValue({
+      id: "job-stamp-throws-failed",
+      issueId: "ISS-902",
+      agentName: "phil",
+      status: "running",
+    });
+    const stampError = new Error("disk full");
+    mockStampIssueCancelled.mockReset().mockRejectedValueOnce(stampError);
+
+    const stopReq = createMockReqWithBody("POST", {
+      status: "failed",
+      summary: "Agent gave up",
+    });
+    const stopRes = createMockRes();
+    await handleStop(stopReq, stopRes, "job-stamp-throws-failed", MOCK_REPO);
+
+    expect(stopRes._getStatusCode()).toBe(200);
+    expect(mockStop).toHaveBeenCalledWith(
+      "failed",
+      expect.stringContaining("disk full"),
+    );
+    expect(mockRecordSystemError).toHaveBeenCalledTimes(1);
+    // The system-error message carries the agent's CLAIMED status so
+    // the operator can tell what the agent thought it was doing when
+    // the stamp blew up.
+    expect(mockRecordSystemError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "stamp-terminal",
+        message: expect.stringContaining("status=failed"),
+      }),
+    );
   });
 
   it("DX-584: skips terminal-stamp when dispatch row has no issueId (Slack / external launch)", async () => {
@@ -1131,6 +1235,52 @@ describe("handleStop", () => {
       expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
       expect(mockUpdateDispatch.mock.calls[0][1].summary).toBe(
         "MCP failed to load",
+      );
+    });
+
+    it("DX-616 (fail-loud, DB-fallback path): stamp throw downgrades to failed, records system-error, dispatch row terminates as failed + strike fires", async () => {
+      mockGetActiveJob.mockReturnValue(undefined);
+      mockGetDispatchById.mockResolvedValue({
+        id: "ghost-stamp-throws",
+        issueId: "ISS-903",
+        agentName: "carol",
+        status: "running",
+      });
+      const stampError = new Error("YAML write failed");
+      mockStampIssueCompleted.mockReset().mockRejectedValueOnce(stampError);
+
+      const stopReq = createMockReqWithBody("POST", {
+        status: "completed",
+        summary: "agent claims done",
+      });
+      const stopRes = createMockRes();
+      await handleStop(stopReq, stopRes, "ghost-stamp-throws", MOCK_REPO);
+
+      // The downgrade lands in the dispatch row.
+      expect(stopRes._getStatusCode()).toBe(200);
+      expect(JSON.parse(stopRes._getBody())).toEqual({ status: "failed" });
+      expect(mockUpdateDispatch.mock.calls[0][1].status).toBe("failed");
+      expect(mockUpdateDispatch.mock.calls[0][1].summary).toEqual(
+        expect.stringContaining("YAML write failed"),
+      );
+      // recordSystemError publishes a dashboard banner.
+      expect(mockRecordSystemError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          source: "stamp-terminal",
+          severity: "error",
+          repo: MOCK_REPO.name,
+        }),
+      );
+      // applyStrike fires for the agent on the mapped "failed" status —
+      // the strike contract makes the agent visible as broken if this
+      // happens 3× in a row.
+      expect(mockApplyStrike).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: "failed",
+          agentName: "carol",
+          dispatchId: "ghost-stamp-throws",
+          issueId: "ISS-903",
+        }),
       );
     });
 

@@ -15,7 +15,7 @@
  * OverviewTab + the pinned RequiresHumanPanel that used to sit above the
  * tabs. Single source of truth for gate UX.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   DanxButton,
   DanxIcon,
@@ -24,6 +24,7 @@ import {
 } from "@thehammer/danx-ui";
 import type { ConflictOnEntry, Issue, IssueDetail, IssueStatus } from "../../types";
 import { patchIssue } from "../../api";
+import { useListColors } from "../../composables/useListColors";
 import { relativeTime } from "../../utils/relativeTime";
 
 type GateKey = "requires_human" | "blocked" | "waiting_on" | "conflict_on";
@@ -39,6 +40,20 @@ const emit = defineEmits<{
   /** Operator clicked Edit on the requires_human banner. Parent owns the modal. */
   "open-rh-editor": [];
 }>();
+
+// DX-586 — resolve the ready-type default list name so the Clear Block
+// button can move the card to the operator's chosen "To Do" list (which
+// may be renamed per-repo). Lifecycle init/destroy keeps the SSE
+// subscription scoped to this drawer mount.
+const listsApi = useListColors(props.repo);
+onMounted(() => listsApi.init());
+onBeforeUnmount(() => listsApi.destroy());
+const readyDefaultListName = computed<string | null>(() => {
+  const hit = listsApi.lists.value.find(
+    (l) => l.type === "ready" && l.is_default_for_type,
+  );
+  return hit?.name ?? null;
+});
 
 const requiresHuman = computed(() => props.issue.requires_human);
 const selfBlocked = computed(() => props.issue.blocked);
@@ -121,9 +136,18 @@ async function clearBlocked(): Promise<void> {
   blockedBusy.value = true;
   blockedError.value = null;
   try {
+    const dest = readyDefaultListName.value;
+    if (!dest) {
+      // The list taxonomy hasn't hydrated yet (rare — useListColors fires
+      // on mount). Falling back to a standalone `blocked: null` would
+      // leave the card in a degenerate `blocked: null` + `list_name:
+      // <blocked-list>` state. Better to surface a transient error and
+      // let the operator retry once the cache lands.
+      throw new Error("List taxonomy still loading — try again");
+    }
     const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       blocked: null,
-      status: "ToDo",
+      list_name: dest,
     });
     emit("update:issue", updated);
   } catch (err) {

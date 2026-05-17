@@ -402,10 +402,10 @@ describe("useIssues — includeClosed thread-through (DX-523)", () => {
   });
 });
 
-// ─── moveIssueStatus (unchanged behavior) ────────────────────────────────────
+// ─── moveIssueList — DX-586 list-driven optimistic move ──────────────────────
 
-describe("useIssues — moveIssueStatus", () => {
-  it("optimistically updates local status before the patch resolves", async () => {
+describe("useIssues — moveIssueList (DX-586)", () => {
+  it("optimistically updates list_name + projected status before the patch resolves", async () => {
     mockFetchIssues.mockResolvedValue([makeIssue("DX-1", "ToDo")]);
     let resolvePatch!: () => void;
     mockPatchIssue.mockReturnValueOnce(
@@ -418,43 +418,91 @@ describe("useIssues — moveIssueStatus", () => {
     await flushPromises();
     expect(ret.issues.value[0].status).toBe("ToDo");
 
-    const movePromise = ret.moveIssueStatus("DX-1", "In Progress");
+    const movePromise = ret.moveIssueList("DX-1", {
+      name: "In Progress",
+      type: "in_progress",
+    });
     await Promise.resolve();
     expect(ret.issues.value[0].status).toBe("In Progress");
+    expect(ret.issues.value[0].list_name).toBe("In Progress");
 
     resolvePatch();
     await movePromise;
     expect(ret.issues.value[0].status).toBe("In Progress");
     expect(mockPatchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
-      status: "In Progress",
+      list_name: "In Progress",
     });
     wrapper.unmount();
   });
 
-  it("reverts the local status and surfaces the error when patch rejects", async () => {
+  it("forwards optional `blocked` patch to the server (INTO-blocked dialog flow)", async () => {
+    mockFetchIssues.mockResolvedValue([makeIssue("DX-1", "ToDo")]);
+    mockPatchIssue.mockResolvedValue(undefined);
+
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    await ret.moveIssueList(
+      "DX-1",
+      { name: "Blocked", type: "blocked" },
+      { blocked: { reason: "Spec ambiguous" } },
+    );
+    expect(mockPatchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
+      list_name: "Blocked",
+      blocked: { reason: "Spec ambiguous" },
+    });
+    wrapper.unmount();
+  });
+
+  it("forwards `blocked: null` for the OUT-of-blocked dialog flow", async () => {
+    mockFetchIssues.mockResolvedValue([
+      makeIssue("DX-1", "Blocked"),
+    ]);
+    mockPatchIssue.mockResolvedValue(undefined);
+
+    const { wrapper, ret } = mountWithIssues(ref("danxbot"));
+    await flushPromises();
+
+    await ret.moveIssueList(
+      "DX-1",
+      { name: "To Do", type: "ready" },
+      { blocked: null },
+    );
+    expect(mockPatchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
+      list_name: "To Do",
+      blocked: null,
+    });
+    wrapper.unmount();
+  });
+
+  it("reverts the optimistic mutation and surfaces the error when patch rejects", async () => {
     mockFetchIssues.mockResolvedValue([makeIssue("DX-2", "ToDo")]);
     mockPatchIssue.mockRejectedValueOnce(
-      Object.assign(new Error("400 status invalid"), { status: 400 }),
+      Object.assign(new Error("400 list_name invalid"), { status: 400 }),
     );
 
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
     await flushPromises();
 
     await expect(
-      ret.moveIssueStatus("DX-2", "Done"),
-    ).rejects.toThrow("400 status invalid");
+      ret.moveIssueList("DX-2", { name: "Done", type: "completed" }),
+    ).rejects.toThrow("400 list_name invalid");
 
     expect(ret.issues.value[0].status).toBe("ToDo");
-    expect(ret.error.value).toBe("400 status invalid");
+    expect(ret.error.value).toBe("400 list_name invalid");
     wrapper.unmount();
   });
 
-  it("same-status move short-circuits (no patch, no mutation)", async () => {
-    mockFetchIssues.mockResolvedValue([makeIssue("DX-3", "Blocked")]);
+  it("same-list move (matching list_name + projected status) short-circuits", async () => {
+    // makeIssue defaults list_name to null; pre-seed it to "Blocked" so the
+    // short-circuit triggers when the dest matches.
+    const seeded = makeIssue("DX-3", "Blocked");
+    (seeded as { list_name: string | null }).list_name = "Blocked";
+    mockFetchIssues.mockResolvedValue([seeded]);
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
     await flushPromises();
 
-    await ret.moveIssueStatus("DX-3", "Blocked");
+    await ret.moveIssueList("DX-3", { name: "Blocked", type: "blocked" });
 
     expect(mockPatchIssue).not.toHaveBeenCalled();
     expect(ret.issues.value[0].status).toBe("Blocked");
@@ -467,7 +515,7 @@ describe("useIssues — moveIssueStatus", () => {
     await flushPromises();
 
     await expect(
-      ret.moveIssueStatus("DX-NOPE", "Done"),
+      ret.moveIssueList("DX-NOPE", { name: "Done", type: "completed" }),
     ).rejects.toThrow(/Unknown issue/);
     expect(mockPatchIssue).not.toHaveBeenCalled();
     wrapper.unmount();
@@ -486,7 +534,10 @@ describe("useIssues — moveIssueStatus", () => {
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
     await flushPromises();
 
-    const movePromise = ret.moveIssueStatus("DX-R", "In Progress");
+    const movePromise = ret.moveIssueList("DX-R", {
+      name: "In Progress",
+      type: "in_progress",
+    });
     await Promise.resolve();
     expect(ret.issues.value[0].status).toBe("In Progress");
 
@@ -511,7 +562,7 @@ describe("useIssues — moveIssueStatus", () => {
     await flushPromises();
 
     await expect(
-      ret.moveIssueStatus("DX-1", "Done"),
+      ret.moveIssueList("DX-1", { name: "Done", type: "completed" }),
     ).rejects.toThrow(/No repo selected/);
     wrapper.unmount();
   });

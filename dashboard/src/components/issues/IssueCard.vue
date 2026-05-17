@@ -19,6 +19,16 @@ const props = withDefaults(
   defineProps<{
     issue: IssueListItem;
     repo: string;
+    /**
+     * DX-586 — column accent color from the parent's `useListColors`
+     * lookup (board passes the color of the list the card lives in).
+     * `undefined` falls back to the legacy `COLUMN_ACCENTS[status]`
+     * palette for callers that pre-date the list-driven board (drawer,
+     * dialog). Hex string (`#abcdef`); the neutral gray
+     * (`NEUTRAL_LIST_COLOR` from `useListColors`) lands here when the
+     * card's list_name is unknown / stale.
+     */
+    accent?: string;
     dimmed?: boolean;
     scoped?: boolean;
     showStatus?: boolean;
@@ -71,6 +81,11 @@ const conflictTooltip = computed(() => {
   return ids ? `${head} — ${ids}` : head;
 });
 const statusMeta = computed(() => COLUMN_ACCENTS[props.issue.status]);
+// DX-586 — single visual surface for the per-card accent. Board passes
+// `accent` from `useListColors`; legacy non-board callers (drawer card,
+// dialog card) leave it undefined and fall back to the COLUMN_ACCENTS
+// palette so the visual is identical pre-/post-DX-586.
+const cardAccent = computed(() => props.accent ?? statusMeta.value.accent);
 
 // Unified `children[]` (ISS-81). Epic = phase cards (label "Phases"),
 // non-epic = sub-cards (label "Children"). Same render shape either way.
@@ -162,7 +177,7 @@ function onParentClick(e: MouseEvent): void {
       <span
         v-if="props.showStatus"
         class="status-pill"
-        :style="{ color: statusMeta.accent, borderColor: statusMeta.accent }"
+        :style="{ color: cardAccent, borderColor: cardAccent }"
       >{{ statusMeta.label }}</span>
       <span v-if="childrenDetail.length > 0" class="children-count-chip">
         {{ childrenDetail.length }} {{ childrenLabel }}

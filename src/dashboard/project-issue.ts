@@ -140,6 +140,7 @@ export function projectIssue(
     requires_human_child_count: childrenDetail.filter((c) => c.requires_human)
       .length,
     blocked: issue.blocked,
+    list_name: issue.list_name,
     conflict_on: issue.conflict_on.map((e) => ({ ...e })),
     conflict_on_active_count:
       conflictReport.forward.length + conflictReport.reverse.length,

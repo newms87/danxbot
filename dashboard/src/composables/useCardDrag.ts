@@ -1,9 +1,24 @@
 import { ref, type Ref } from "vue";
 import type { IssueListItem, IssueStatus } from "../types";
 
-export interface DragState {
+/**
+ * DX-586 — `useCardDrag` is generic on the column identity type so the
+ * IssueBoard can pass the per-repo `List` shape (name + type + color)
+ * as the drop target. Pre-DX-586 callers passed `IssueStatus`; the
+ * generic default keeps that path working until every consumer
+ * migrates.
+ *
+ * Column identity equality MUST be value-equality, not reference. The
+ * board re-derives `columns[]` per render (sorted from the parent's
+ * `lists` prop), so two renders produce different List objects with
+ * the same `id`. `bindColumn` memoizes handlers per identity value
+ * (default `===` for primitives like IssueStatus; caller can override
+ * with `keyOf` for object-shaped columns).
+ */
+
+export interface DragState<TCol = IssueStatus> {
   issue: IssueListItem;
-  fromStatus: IssueStatus;
+  fromCol: TCol;
 }
 
 export interface CardDragHandlers {
@@ -29,7 +44,7 @@ export interface SlotDragHandlers {
   onDrop: (e: DragEvent) => void;
 }
 
-export interface UseCardDragOptions {
+export interface UseCardDragOptions<TCol = IssueStatus> {
   /**
    * Invoked when a card is released over a *different* column.
    * The composable does not own state mutation — caller patches the
@@ -38,8 +53,8 @@ export interface UseCardDragOptions {
    */
   onDrop: (
     issue: IssueListItem,
-    fromStatus: IssueStatus,
-    toStatus: IssueStatus,
+    fromCol: TCol,
+    toCol: TCol,
   ) => Promise<void> | void;
   /**
    * DX-264 — invoked when a card is released over a drop slot (the
@@ -49,28 +64,45 @@ export interface UseCardDragOptions {
    * `./cardPosition.ts` and PATCH the card. Either neighbor may be
    * `null` (top / bottom of column). Same-column drops on the column
    * background (NOT a slot) are inert (`onDrop` short-circuits on equal
-   * status); intra-column reordering goes exclusively through slots.
+   * column); intra-column reordering goes exclusively through slots.
    */
   onReorder?: (
     issue: IssueListItem,
     before: IssueListItem | null,
     after: IssueListItem | null,
   ) => Promise<void> | void;
+  /**
+   * Column identity key. The default `(col) => col` works for primitive
+   * column types (e.g. `IssueStatus` strings). Object-shaped columns
+   * (e.g. DX-586's `List`) MUST supply a key function so handler
+   * memoization + hover state survive re-renders that produce new
+   * column references but with the same logical identity.
+   */
+  keyOf?: (col: TCol) => string | number;
 }
 
-export interface UseCardDragReturn {
-  bindCard: (issue: IssueListItem) => CardDragHandlers;
-  bindColumn: (status: IssueStatus) => ColumnDragHandlers;
+export interface UseCardDragReturn<TCol = IssueStatus> {
+  /**
+   * Bind drag-source handlers to a card. `sourceCol` (optional) lets
+   * the caller pass the column the card currently belongs to so the
+   * onDrop same-column check works for object-shaped column types
+   * (e.g. DX-586's `List` — `issue.status` is not a `List` value, so
+   * defaulting `fromCol` to `issue.status` breaks the equality check
+   * `keyOf(fromCol) === keyOf(toCol)`). When omitted, falls back to
+   * `issue.status as TCol` for legacy `IssueStatus`-typed callers.
+   */
+  bindCard: (issue: IssueListItem, sourceCol?: TCol) => CardDragHandlers;
+  bindColumn: (col: TCol) => ColumnDragHandlers;
   bindSlot: (
     key: string,
     before: IssueListItem | null,
     after: IssueListItem | null,
   ) => SlotDragHandlers;
-  dragging: Ref<DragState | null>;
-  hoverColumn: Ref<IssueStatus | null>;
+  dragging: Ref<DragState<TCol> | null>;
+  hoverColumn: Ref<string | number | null>;
   hoverSlot: Ref<string | null>;
   isDragging: (issue: IssueListItem) => boolean;
-  isHoveringColumn: (status: IssueStatus) => boolean;
+  isHoveringColumn: (col: TCol) => boolean;
   isHoveringSlot: (key: string) => boolean;
 }
 
@@ -109,26 +141,36 @@ function buildDragImage(source: HTMLElement): HTMLElement {
  * `drop`, so the patch path (gated on `drop`) is never reached. We
  * still clear local state in `dragend` so the next drag starts clean.
  */
-export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
-  const dragging = ref<DragState | null>(null);
-  const hoverColumn = ref<IssueStatus | null>(null);
+export function useCardDrag<TCol = IssueStatus>(
+  opts: UseCardDragOptions<TCol>,
+): UseCardDragReturn<TCol> {
+  const dragging = ref<DragState<TCol> | null>(null) as Ref<DragState<TCol> | null>;
+  const hoverColumn = ref<string | number | null>(null);
   const hoverSlot = ref<string | null>(null);
+  const keyOf = opts.keyOf ?? ((c: TCol) => c as unknown as string | number);
   // `bindColumn` is invoked once per column per render. Memoize the
-  // handler trio per status so Vue's runtime can short-circuit the
-  // listener-patch on re-renders (object identity matches → no
+  // handler trio per column-key so Vue's runtime can short-circuit
+  // the listener-patch on re-renders (object identity matches → no
   // detach/reattach). The map is composable-scoped so per-board state
-  // does not leak across instances.
-  const columnHandlers = new Map<IssueStatus, ColumnDragHandlers>();
+  // does not leak across instances. Keyed by `keyOf(col)` (default
+  // identity) so object-shaped columns survive re-render churn.
+  const columnHandlers = new Map<string | number, ColumnDragHandlers>();
   // `bindSlot` returns handlers keyed by the slot's logical id. The
   // neighbors (`before` / `after`) MAY change identity across renders
   // (the board re-derives them from the post-mutation list each tick),
   // so we DON'T memoize — each render rebuilds slots from scratch with
   // the closure capturing the current neighbor refs.
 
-  function bindCard(issue: IssueListItem): CardDragHandlers {
+  function bindCard(issue: IssueListItem, sourceCol?: TCol): CardDragHandlers {
     return {
       onDragstart(e: DragEvent): void {
-        dragging.value = { issue, fromStatus: issue.status };
+        // `fromCol` snapshot: caller-supplied `sourceCol` wins (DX-586
+        // list-driven board passes the actual List object); legacy
+        // callers fall back to `issue.status` so the IssueStatus-typed
+        // same-col check `keyOf(fromCol) === keyOf(toCol)` continues
+        // to work.
+        const from = sourceCol ?? (issue.status as unknown as TCol);
+        dragging.value = { issue, fromCol: from };
         const dt = e.dataTransfer;
         if (dt) {
           dt.effectAllowed = "move";
@@ -150,8 +192,9 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
     };
   }
 
-  function bindColumn(status: IssueStatus): ColumnDragHandlers {
-    const cached = columnHandlers.get(status);
+  function bindColumn(col: TCol): ColumnDragHandlers {
+    const key = keyOf(col);
+    const cached = columnHandlers.get(key);
     if (cached) return cached;
     const handlers: ColumnDragHandlers = {
       onDragover(e: DragEvent): void {
@@ -159,10 +202,10 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
         e.preventDefault();
         const dt = e.dataTransfer;
         if (dt) dt.dropEffect = "move";
-        hoverColumn.value = status;
+        hoverColumn.value = key;
       },
       onDragleave(e: DragEvent): void {
-        if (hoverColumn.value !== status) return;
+        if (hoverColumn.value !== key) return;
         const root = e.currentTarget as Node | null;
         const next = e.relatedTarget as Node | null;
         // Crossing into a child of the column root fires dragleave on
@@ -175,26 +218,21 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
         const drag = dragging.value;
         hoverColumn.value = null;
         if (!drag) return;
-        const { issue, fromStatus } = drag;
+        const { issue, fromCol } = drag;
         dragging.value = null;
-        if (fromStatus === status) return;
-        const result = opts.onDrop(issue, fromStatus, status);
+        if (keyOf(fromCol) === key) return;
+        const result = opts.onDrop(issue, fromCol, col);
         if (result && typeof (result as Promise<void>).catch === "function") {
-          // Defensive: callers SHOULD catch their own rejections (the
-          // board emits `move` and `IssuesPage.onMove` owns the error
-          // surface). This catch only fires when a future caller forgets
-          // — failing loud beats `Unhandled promise rejection` in the
-          // console with no stack context.
           (result as Promise<void>).catch((err) => {
             console.error(
-              `[useCardDrag] onDrop rejected for ${issue.id} ${fromStatus}→${status}:`,
+              `[useCardDrag] onDrop rejected for ${issue.id} ${String(keyOf(fromCol))}→${String(key)}:`,
               err,
             );
           });
         }
       },
     };
-    columnHandlers.set(status, handlers);
+    columnHandlers.set(key, handlers);
     return handlers;
   }
 
@@ -256,8 +294,8 @@ export function useCardDrag(opts: UseCardDragOptions): UseCardDragReturn {
     return dragging.value?.issue.id === issue.id;
   }
 
-  function isHoveringColumn(status: IssueStatus): boolean {
-    return hoverColumn.value === status;
+  function isHoveringColumn(col: TCol): boolean {
+    return hoverColumn.value === keyOf(col);
   }
 
   function isHoveringSlot(key: string): boolean {

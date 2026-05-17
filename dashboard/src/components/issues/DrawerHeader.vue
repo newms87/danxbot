@@ -14,7 +14,7 @@
  * icon button in the meta row is a quick-edit affordance; the full
  * banner + clear/edit flow lives in the gates section.
  */
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   DanxButton,
   DanxDialog,
@@ -30,29 +30,23 @@ import type {
   Issue,
   IssueDetail,
   IssueListItem,
-  IssueStatus,
   IssueType,
+  List,
+  ListType,
 } from "../../types";
-import { ISSUE_TYPES } from "../../types";
+import { ISSUE_TYPES, LIST_TYPE_LADDER, LIST_TYPE_LABELS } from "../../types";
 import { deleteIssue, getIssueSubtree, patchIssue } from "../../api";
 import { ISSUE_TYPE_META, typeToId } from "./issuePalette";
+import { useListColors } from "../../composables/useListColors";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
 import PriorityIcon from "../PriorityIcon.vue";
+import BlockedReasonDialog from "./BlockedReasonDialog.vue";
+import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
 import {
   priorityTier,
   PRIORITY_TIERS,
   type PriorityTier,
 } from "../../lib/priorityTier";
-
-const ALL_STATUSES: readonly IssueStatus[] = [
-  "Review",
-  "ToDo",
-  "In Progress",
-  "Blocked",
-  "Backlog",
-  "Done",
-  "Cancelled",
-] as const;
 
 const props = withDefaults(
   defineProps<{
@@ -193,16 +187,86 @@ async function confirmDelete(): Promise<void> {
   }
 }
 
-// ── status / priority / type menus ─────────────────────────────────────
-const statusMenuOpen = ref(false);
+// ── list / priority / type menus ───────────────────────────────────────
+// DX-586 — status menu retired in favor of a List dropdown driven by
+// `lists.yaml`. The dropdown groups list options by `ListType` (ladder
+// order: archived → review → ready → blocked → in_progress →
+// completed → cancelled). Selecting a list PATCHes `list_name`; the
+// server applies the ladder semantics + auto-stamps timestamps/dispatch.
+// INTO-blocked and OUT-of-blocked moves route through the dedicated
+// dialogs (BlockedReasonDialog + UnblockConfirmDialog) so the reason
+// field gets captured / cleared explicitly.
+const listMenuOpen = ref(false);
 const priorityMenuOpen = ref(false);
 const typeMenuOpen = ref(false);
-const statusSaving = ref(false);
+const listSaving = ref(false);
 const prioritySaving = ref(false);
 const typeSaving = ref(false);
-const statusError = ref<string | null>(null);
+const listError = ref<string | null>(null);
 const priorityError = ref<string | null>(null);
 const typeError = ref<string | null>(null);
+
+// Per-drawer useListColors instance for the dropdown's option list.
+// init/destroy on mount / unmount; the SSE feed re-renders the menu
+// transparently when the operator updates lists.yaml from the
+// Settings page.
+const listsApi = useListColors(props.repo);
+onMounted(() => listsApi.init());
+onBeforeUnmount(() => listsApi.destroy());
+
+function ladderIdx(type: ListType): number {
+  const idx = LIST_TYPE_LADDER.indexOf(type);
+  return idx < 0 ? LIST_TYPE_LADDER.length : idx;
+}
+
+const sortedLists = computed<List[]>(() => {
+  const all = [...listsApi.lists.value];
+  all.sort((a, b) => {
+    const la = ladderIdx(a.type);
+    const lb = ladderIdx(b.type);
+    if (la !== lb) return la - lb;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.name.localeCompare(b.name);
+  });
+  return all;
+});
+
+const listsByType = computed<{ type: ListType; lists: List[] }[]>(() => {
+  const groups = new Map<ListType, List[]>();
+  for (const l of sortedLists.value) {
+    let bucket = groups.get(l.type);
+    if (!bucket) {
+      bucket = [];
+      groups.set(l.type, bucket);
+    }
+    bucket.push(l);
+  }
+  // Re-emit in ladder order.
+  const out: { type: ListType; lists: List[] }[] = [];
+  for (const t of LIST_TYPE_LADDER) {
+    const bucket = groups.get(t);
+    if (bucket && bucket.length > 0) out.push({ type: t, lists: bucket });
+  }
+  return out;
+});
+
+const currentListName = computed<string | null>(() => props.issue.list_name);
+const currentListColor = computed<string | null>(() =>
+  currentListName.value ? listsApi.colorFor(currentListName.value) : null,
+);
+function typeLabel(type: ListType): string {
+  return LIST_TYPE_LABELS[type];
+}
+
+// INTO-blocked / OUT-of-blocked dialog state. Same shape as
+// IssuesPage's board flow — the drawer is just a second entry point.
+const pendingDialog = ref<
+  | { kind: "into-blocked"; destList: List }
+  | { kind: "out-of-blocked"; destList: List }
+  | null
+>(null);
+const dialogBusy = ref(false);
+const dialogError = ref<string | null>(null);
 
 // Epic-with-children: status is parent-derived. Show inert pill +
 // tooltip explaining why; priority + type stay editable (knob is
@@ -223,39 +287,103 @@ watch(
     clearCopyResetTimer();
     copyState.value = "idle";
     copyMessage.value = null;
-    statusMenuOpen.value = false;
+    listMenuOpen.value = false;
     priorityMenuOpen.value = false;
     typeMenuOpen.value = false;
-    statusSaving.value = false;
+    listSaving.value = false;
     prioritySaving.value = false;
     typeSaving.value = false;
-    statusError.value = null;
+    listError.value = null;
     priorityError.value = null;
     typeError.value = null;
     titleSaving.value = false;
     titleError.value = null;
+    pendingDialog.value = null;
+    dialogBusy.value = false;
+    dialogError.value = null;
   },
 );
 
-async function selectStatus(s: IssueStatus): Promise<void> {
-  if (statusSaving.value) return;
-  if (s === props.issue.status) {
-    statusMenuOpen.value = false;
+async function patchListNameDirect(
+  list: List,
+  blockedPatch: { reason: string } | null | undefined,
+): Promise<void> {
+  listSaving.value = true;
+  listError.value = null;
+  try {
+    const patch: { list_name: string; blocked?: { reason: string } | null } = {
+      list_name: list.name,
+    };
+    if (blockedPatch !== undefined) patch.blocked = blockedPatch;
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, patch);
+    emit("update:issue", updated);
+  } finally {
+    listSaving.value = false;
+  }
+}
+
+async function selectList(list: List): Promise<void> {
+  if (listSaving.value) return;
+  if (list.name === currentListName.value) {
+    listMenuOpen.value = false;
     return;
   }
-  statusSaving.value = true;
-  statusError.value = null;
-  try {
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
-      status: s,
-    });
-    emit("update:issue", updated);
-    statusMenuOpen.value = false;
-  } catch (err) {
-    statusError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    statusSaving.value = false;
+  // Route INTO-blocked / OUT-of-blocked through dialogs; everything
+  // else is a direct PATCH.
+  if (list.type === "blocked") {
+    listMenuOpen.value = false;
+    dialogError.value = null;
+    pendingDialog.value = { kind: "into-blocked", destList: list };
+    return;
   }
+  if (props.issue.blocked !== null) {
+    listMenuOpen.value = false;
+    dialogError.value = null;
+    pendingDialog.value = { kind: "out-of-blocked", destList: list };
+    return;
+  }
+  try {
+    await patchListNameDirect(list, undefined);
+    listMenuOpen.value = false;
+  } catch (err) {
+    listError.value = err instanceof Error ? err.message : String(err);
+  }
+}
+
+async function onBlockedDialogSubmit(reason: string): Promise<void> {
+  const p = pendingDialog.value;
+  if (!p || p.kind !== "into-blocked") return;
+  dialogBusy.value = true;
+  dialogError.value = null;
+  try {
+    await patchListNameDirect(p.destList, { reason });
+    pendingDialog.value = null;
+  } catch (err) {
+    dialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    dialogBusy.value = false;
+  }
+}
+
+async function onUnblockDialogConfirm(): Promise<void> {
+  const p = pendingDialog.value;
+  if (!p || p.kind !== "out-of-blocked") return;
+  dialogBusy.value = true;
+  dialogError.value = null;
+  try {
+    await patchListNameDirect(p.destList, null);
+    pendingDialog.value = null;
+  } catch (err) {
+    dialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    dialogBusy.value = false;
+  }
+}
+
+function onDialogCancel(): void {
+  pendingDialog.value = null;
+  dialogBusy.value = false;
+  dialogError.value = null;
 }
 
 async function selectPriority(tier: PriorityTier): Promise<void> {
@@ -402,7 +530,8 @@ const rhVariant = computed(() =>
         </div>
       </DanxPopover>
 
-      <!-- Status -->
+      <!-- List (DX-586) — replaces the legacy status menu. Inert pill
+           for epic-with-children (status is parent-derived). -->
       <DanxTooltip
         v-if="statusInert"
         tooltip="Epic status is computed from phase statuses — edit a child phase to change this."
@@ -414,29 +543,39 @@ const rhVariant = computed(() =>
           >{{ issue.status }}</span>
         </template>
       </DanxTooltip>
-      <DanxPopover v-else v-model="statusMenuOpen" trigger="click" placement="bottom">
+      <DanxPopover v-else v-model="listMenuOpen" trigger="click" placement="bottom">
         <template #trigger>
           <DanxButton
             variant=""
             size="sm"
-            class="meta-btn status-btn"
-            :disabled="statusSaving"
-            :aria-label="`Status: ${issue.status} — click to change`"
-            data-test="drawer-status-pill"
-          >{{ issue.status }}</DanxButton>
+            class="meta-btn list-btn"
+            :disabled="listSaving"
+            :aria-label="`List: ${currentListName ?? issue.status} — click to change`"
+            data-test="drawer-list-pill"
+            :style="currentListColor ? { color: currentListColor, borderColor: currentListColor } : undefined"
+          >
+            <span v-if="currentListColor" class="list-dot" :style="{ background: currentListColor }" />
+            {{ currentListName ?? issue.status }}
+          </DanxButton>
         </template>
-        <div class="menu" data-test="drawer-status-menu">
-          <button
-            v-for="s in ALL_STATUSES"
-            :key="s"
-            type="button"
-            class="menu-item"
-            :class="{ active: s === issue.status }"
-            :disabled="statusSaving"
-            :data-test="`drawer-status-option-${s.toLowerCase().replace(/\s+/g, '-')}`"
-            @click="selectStatus(s)"
-          >{{ s }}</button>
-          <div v-if="statusError" class="menu-error" data-test="drawer-status-error">{{ statusError }}</div>
+        <div class="menu" data-test="drawer-list-menu">
+          <template v-for="group in listsByType" :key="group.type">
+            <div class="menu-group-label">{{ typeLabel(group.type) }}</div>
+            <button
+              v-for="l in group.lists"
+              :key="l.id"
+              type="button"
+              class="menu-item"
+              :class="{ active: l.name === currentListName }"
+              :disabled="listSaving"
+              :data-test="`drawer-list-option-${l.id}`"
+              @click="selectList(l)"
+            >
+              <span class="list-dot" :style="{ background: l.color }" />
+              <span class="menu-label">{{ l.name }}</span>
+            </button>
+          </template>
+          <div v-if="listError" class="menu-error" data-test="drawer-list-error">{{ listError }}</div>
         </div>
       </DanxPopover>
 
@@ -538,6 +677,28 @@ const rhVariant = computed(() =>
         >{{ deleteError }}</p>
       </div>
     </DanxDialog>
+
+    <BlockedReasonDialog
+      v-if="pendingDialog?.kind === 'into-blocked'"
+      :model-value="true"
+      :issue-id="issue.id"
+      :dest-list-name="pendingDialog.destList.name"
+      :busy="dialogBusy"
+      :error="dialogError"
+      @submit="onBlockedDialogSubmit"
+      @cancel="onDialogCancel"
+    />
+    <UnblockConfirmDialog
+      v-if="pendingDialog?.kind === 'out-of-blocked'"
+      :model-value="true"
+      :issue-id="issue.id"
+      :dest-list-name="pendingDialog.destList.name"
+      :current-reason="issue.blocked?.reason ?? null"
+      :busy="dialogBusy"
+      :error="dialogError"
+      @confirm="onUnblockDialogConfirm"
+      @cancel="onDialogCancel"
+    />
   </div>
 </template>
 
@@ -684,6 +845,33 @@ const rhVariant = computed(() =>
   color: #64748b;
   font-style: italic;
   border-top: 1px solid #1e293b;
+}
+/* DX-586 — section labels inside the drawer's List dropdown, one per
+   semantic ListType (Backlog / Review / Ready / etc.). Renders above
+   the lists of that type — pure visual grouping, not interactive. */
+.menu-group-label {
+  padding: 6px 10px 2px;
+  font-size: 9px;
+  font-weight: 700;
+  color: #475569;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.menu-group-label:not(:first-child) {
+  margin-top: 4px;
+  border-top: 1px solid #1e293b;
+  padding-top: 8px;
+}
+.list-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 9999px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.list-btn :deep(button) {
+  font-weight: 600;
 }
 .menu-error {
   margin-top: 4px;

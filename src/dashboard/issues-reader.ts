@@ -172,6 +172,17 @@ export interface IssueListItem {
    */
   blocked?: Blocked | null;
   /**
+   * DX-586 — the card's current per-repo list name from `lists.yaml`.
+   * `null` for cards that pre-date the auto-resolve write path
+   * (`src/issue/list-resolve.ts`) and haven't been touched since; the
+   * board treats those as "no list assigned yet" and groups them
+   * under the dest-of-derived-status list as a fallback. Workers NEVER
+   * read this field — the static guard at
+   * `src/__tests__/no-list-name-reads.test.ts` pins that contract.
+   * The dashboard board's grouping IS the only legitimate consumer.
+   */
+  list_name: string | null;
+  /**
    * Mutual-exclusion entries declared on THIS card (DX-309). Full passthrough
    * of `Issue.conflict_on[]`. Surfaced on the list item so the board's
    * CONFLICT pill renders without a detail fetch. Optional for test fixture

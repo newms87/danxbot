@@ -42,6 +42,7 @@ import {
 } from "../mcp/danxbot-server.js";
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { applyStrike } from "../dashboard/dispatch-tracker.js";
+import { recordSystemError } from "../dashboard/system-errors.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import {
   stampIssueCancelled,
@@ -1364,10 +1365,19 @@ function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
  * Called from both the in-memory `handleStop` and the DB-fallback
  * `handleStopFromDb` so the v10 timestamp fields land on the
  * candidate YAML before the auto-sync reconcile fires. Idempotent on
- * the YAML side; stamp errors log but never throw out (a YAML write
- * failure must not block the dispatch row finalization).
+ * the YAML side.
  *
- * Excluded statuses (handled by their own branches in the caller):
+ * **Fails LOUD** (DX-616): a `getDispatchById` failure OR a
+ * `stampIssueCompleted` / `stampIssueCancelled` throw propagates
+ * directly to the caller. The caller is responsible for catching,
+ * recording the system-error banner, downgrading the dispatch status
+ * to `failed` (so the strike accumulator fires), and continuing the
+ * teardown — see `handleStampThrow` below. Pre-DX-616 this function
+ * swallowed every error path silently, which produced the redispatch
+ * loop where a card stayed `status: In Progress` on disk forever
+ * because the stamp never landed AND no log surfaced the failure.
+ *
+ * Skipped statuses (handled by their own branches in the caller):
  *
  *   - `critical_failure` — the per-repo halt flag is the operator
  *     signal; the YAML stays In Progress so the next dispatch (after
@@ -1378,6 +1388,11 @@ function mapCompleteToDispatchStatus(status: CompleteStatus): DispatchStatus {
  *     `recovered` / `throttled` — non-card-terminal dispatch
  *     terminations (recover chain continues on a fresh dispatch row;
  *     the card itself stays in flight).
+ *
+ * Non-card dispatches (`dispatchRow.issueId === null`) are a
+ * legitimate no-op — Slack chats, ideator, board-chat, etc. have no
+ * candidate YAML to stamp. That branch returns silently without
+ * throwing.
  */
 async function maybeStampTerminalYaml(input: {
   jobId: string;
@@ -1386,40 +1401,74 @@ async function maybeStampTerminalYaml(input: {
 }): Promise<void> {
   const { jobId, status, repo } = input;
   if (status !== "completed" && status !== "failed") return;
-  let dispatchRow;
-  try {
-    dispatchRow = await getDispatchById(jobId);
-  } catch (err) {
-    log.error(
-      `[Dispatch ${jobId}] getDispatchById failed during terminal YAML stamp`,
-      err,
-    );
-    return;
-  }
+  const dispatchRow = await getDispatchById(jobId);
   if (!dispatchRow?.issueId) return;
   const at = new Date().toISOString();
-  try {
-    if (status === "completed") {
-      await stampIssueCompleted({
-        repoLocalPath: repo.localPath,
-        candidateId: dispatchRow.issueId,
-        expectedPrefix: repo.issuePrefix,
-        at,
-      });
-    } else {
-      await stampIssueCancelled({
-        repoLocalPath: repo.localPath,
-        candidateId: dispatchRow.issueId,
-        expectedPrefix: repo.issuePrefix,
-        at,
-      });
-    }
-  } catch (stampErr) {
-    log.error(
-      `[Dispatch ${jobId}] terminal YAML stamp failed for ${dispatchRow.issueId} (status=${status})`,
-      stampErr,
-    );
+  if (status === "completed") {
+    await stampIssueCompleted({
+      repoLocalPath: repo.localPath,
+      candidateId: dispatchRow.issueId,
+      expectedPrefix: repo.issuePrefix,
+      at,
+    });
+  } else {
+    await stampIssueCancelled({
+      repoLocalPath: repo.localPath,
+      candidateId: dispatchRow.issueId,
+      expectedPrefix: repo.issuePrefix,
+      at,
+    });
   }
+}
+
+/**
+ * DX-616 — fail-loud handler for `maybeStampTerminalYaml` throws.
+ *
+ * Called from `handleStop` and `handleStopFromDb` to convert a silent
+ * stamp failure into a visible one. Three side effects:
+ *
+ *   1. `log.error` with a `FAIL-LOUD` tag so operator grep finds the
+ *      class of failure instantly.
+ *   2. `recordSystemError({source: "stamp-terminal", severity: "error"})`
+ *      so the dashboard banner surfaces immediately.
+ *   3. Returns a downgrade `{status: "failed", summary}` the caller
+ *      uses to flip the dispatch row's terminal status. The strike
+ *      accumulator (`DispatchTracker.finalize` for in-memory path,
+ *      `applyStrike` for the DB-fallback path) fires automatically on
+ *      the mapped `failed` status — the agent gets a strike for
+ *      claiming success on a card whose YAML the worker could not
+ *      stamp.
+ *
+ * This is the SINGLE place that decides what a stamp failure means.
+ * Both callers route through here so the visibility + strike contract
+ * stays in one spot.
+ */
+function handleStampThrow(args: {
+  jobId: string;
+  status: CompleteStatus;
+  repo: RepoContext;
+  err: unknown;
+}): { status: "failed"; summary: string } {
+  const msg = args.err instanceof Error ? args.err.message : String(args.err);
+  log.error(
+    `[Dispatch ${args.jobId}] FAIL-LOUD: terminal YAML stamp threw for status=${args.status} — downgrading dispatch to failed + applying strike`,
+    args.err,
+  );
+  recordSystemError({
+    source: "stamp-terminal",
+    severity: "error",
+    repo: args.repo.name,
+    message: `Terminal YAML stamp failed for dispatch ${args.jobId} (agent claimed status=${args.status}): ${msg}`,
+    details: {
+      dispatchId: args.jobId,
+      claimedStatus: args.status,
+      error: msg,
+    },
+  });
+  return {
+    status: "failed",
+    summary: `Worker failed to stamp terminal YAML on agent-claimed status=${args.status}: ${msg}`,
+  };
 }
 
 /**
@@ -1516,8 +1565,11 @@ async function handleStopFromDb(
     status: parsedStatus,
     summary: parsedSummary,
   });
-  const status = gated.status;
-  const summary = gated.summary;
+  // DX-616 — `let` so the stamp-throw fail-loud branch below can
+  // downgrade to `failed` + replace `summary` with the failure
+  // reason before the dispatch row's terminal update lands.
+  let status = gated.status;
+  let summary = gated.summary;
 
   if (status === "critical_failure") {
     if (!summary) {
@@ -1639,7 +1691,22 @@ async function handleStopFromDb(
   // `dispatch` + auto-resolve `list_name` on the candidate YAML
   // BEFORE the reconcile pass. Same ordering / contract as the
   // in-memory `handleStop` path above.
-  await maybeStampTerminalYaml({ jobId, status, repo });
+  //
+  // DX-616 — stamp errors fail LOUD. `handleStampThrow` records a
+  // dashboard system-error AND downgrades `status` to `failed` so the
+  // `applyStrike` call below fires (strike for the agent's false
+  // success claim) and the dispatch row terminates as `failed`. Pre-
+  // DX-616 the stamp swallowed every error path silently and the
+  // dispatch row landed `completed` even when the YAML never received
+  // its `completed_at` timestamp — the card looked stuck and the
+  // poller looped.
+  try {
+    await maybeStampTerminalYaml({ jobId, status, repo });
+  } catch (stampErr) {
+    const downgrade = handleStampThrow({ jobId, status, repo, err: stampErr });
+    status = downgrade.status;
+    summary = downgrade.summary;
+  }
 
   // Non-critical terminal: sync the tracked YAML before marking the row
   // terminal, mirroring the in-memory path's ordering.
@@ -1721,8 +1788,11 @@ export async function handleStop(
       status: parsedStatus,
       summary: parsedSummary,
     });
-    const status = gated.status;
-    const summary = gated.summary;
+    // DX-616 — `let` so the stamp-throw fail-loud branch below can
+    // downgrade to `failed` + replace `summary` with the failure
+    // reason before `job.stop` records the terminal state.
+    let status = gated.status;
+    let summary = gated.summary;
 
     if (status === "critical_failure") {
       // The flag file is the operator's sole source of truth for what
@@ -1811,10 +1881,18 @@ export async function handleStop(
     // by the derived semantic state via `moveToClosedIfTerminal`) sees
     // the freshly-stamped fields. Idempotent on the YAML side —
     // re-running on a card already carrying the terminal timestamp
-    // preserves the original `*_at`. Stamp errors are logged but do
-    // not block the dispatch-row finalization; a YAML stuck without
-    // its terminal timestamp self-heals on the next reconcile / heal
-    // pass via derive-status fallthrough on raw `status`.
+    // preserves the original `*_at`.
+    //
+    // DX-616 — stamp errors FAIL LOUD. `handleStampThrow` records a
+    // dashboard system-error AND downgrades `status` to `failed` so
+    // the in-memory `DispatchTracker.finalize` (triggered inside
+    // `await job.stop`) records the dispatch row as `failed` and the
+    // strike accumulator fires (the agent claimed success on a card
+    // whose YAML the worker could not stamp — that's a strike-eligible
+    // failure mode). Pre-DX-616 the stamp silently swallowed every
+    // throw, and the dispatch row landed `completed` even when the
+    // YAML's `completed_at` never made it to disk — the card looked
+    // stuck and the poller redispatched the same card N times.
     //
     // `critical_failure` and `agent_blocked` are handled by their own
     // branches above — critical_failure intentionally does NOT stamp
@@ -1822,11 +1900,17 @@ export async function handleStop(
     // the per-repo halt flag and the next dispatch resumes work),
     // while agent_blocked routes through `stampIssueBlocked` which
     // handles its own list_name + dispatch-clear writes.
-    await maybeStampTerminalYaml({
-      jobId,
-      status,
-      repo,
-    });
+    try {
+      await maybeStampTerminalYaml({
+        jobId,
+        status,
+        repo,
+      });
+    } catch (stampErr) {
+      const downgrade = handleStampThrow({ jobId, status, repo, err: stampErr });
+      status = downgrade.status;
+      summary = downgrade.summary;
+    }
 
     // Post-dispatch reconcile. The agent edits the local YAML directly
     // with `Edit` / `Write` (DX-157 retired the legacy save MCP tool) and

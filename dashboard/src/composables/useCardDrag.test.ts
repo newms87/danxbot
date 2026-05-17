@@ -84,7 +84,7 @@ function makeDragEvent(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("useCardDrag — bindCard", () => {
-  it("dragstart populates `dragging` ref with issue + fromStatus", () => {
+  it("dragstart populates `dragging` ref with issue + fromCol (legacy IssueStatus default)", () => {
     const onDrop = vi.fn().mockResolvedValue(undefined);
     const drag = useCardDrag({ onDrop });
 
@@ -98,7 +98,7 @@ describe("useCardDrag — bindCard", () => {
 
     expect(drag.dragging.value).not.toBeNull();
     expect(drag.dragging.value!.issue.id).toBe("DX-1");
-    expect(drag.dragging.value!.fromStatus).toBe("ToDo");
+    expect(drag.dragging.value!.fromCol).toBe("ToDo");
     expect(dt.effectAllowed).toBe("move");
     // setData required for Firefox compatibility.
     expect(dt.setData).toHaveBeenCalledWith("text/plain", "DX-1");

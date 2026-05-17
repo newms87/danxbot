@@ -92,11 +92,11 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     conflict_on: overrides.conflict_on ?? [],
     effort_level: overrides.effort_level ?? null,
     db_updated_at: "",
-    archived_at: null,
-    ready_at: null,
-    completed_at: null,
-    cancelled_at: null,
-    list_name: null,
+    archived_at: overrides.archived_at ?? null,
+    ready_at: overrides.ready_at ?? null,
+    completed_at: overrides.completed_at ?? null,
+    cancelled_at: overrides.cancelled_at ?? null,
+    list_name: overrides.list_name ?? null,
   };
 
   if (merged.status === "Blocked" && merged.blocked === null) {
@@ -307,6 +307,9 @@ describe("listIssues", () => {
           action_item_ids: [],
           commits: [],
         },
+        // DX-586 projector positive case — list_name passthrough into
+        // the dashboard's IssueListItem projection (board grouping key).
+        list_name: "In Progress",
       }),
       1_700_000_000_000,
     );
@@ -358,6 +361,7 @@ describe("listIssues", () => {
       requires_human: null,
       requires_human_child_count: 0,
       blocked: null,
+      list_name: "In Progress",
       conflict_on: [],
       conflict_on_active_count: 0,
       triage: {

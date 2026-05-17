@@ -8,7 +8,28 @@ import {
   type StreamEvent,
   type UseStreamReturn,
 } from "./useStream";
-import type { IssueDetail, IssueListItem, IssueStatus } from "../types";
+import { LIST_TYPE_LABELS, type IssueDetail, type IssueListItem, type IssueStatus, type ListType } from "../types";
+
+/**
+ * Project the derived `IssueStatus` a card will land at after moving
+ * into a list of the given `ListType`. Used for the optimistic UI
+ * update — the server's `applyListMove` is the authoritative source,
+ * and the SSE `issue:updated` event re-affirms within ~50ms.
+ *
+ * `LIST_TYPE_LABELS` maps `archived → "Backlog"`, etc. The values are
+ * already `IssueStatus` literals; the cast is for the `Backlog` /
+ * `Review` / `ToDo` / `In Progress` / `Blocked` / `Done` / `Cancelled`
+ * surface (one IssueStatus value per ListType).
+ */
+function statusForListType(type: ListType): IssueStatus {
+  // LIST_TYPE_LABELS values: Backlog | Review | Ready | Blocked | In Progress | Completed | Cancelled
+  // IssueStatus values:      Backlog | Review | ToDo  | Blocked | In Progress | Done      | Cancelled
+  // Translate the two labels that differ.
+  const label = LIST_TYPE_LABELS[type];
+  if (label === "Ready") return "ToDo";
+  if (label === "Completed") return "Done";
+  return label as IssueStatus;
+}
 
 /**
  * Discriminated payload of the `issue:updated` SSE topic. Mirrored from
@@ -41,6 +62,21 @@ function parseIssueEvent(event: StreamEvent): IssueUpdatedData | null {
   return data;
 }
 
+export interface MoveIssueListOptions {
+  /**
+   * Pair with INTO-blocked or OUT-of-blocked moves.
+   *
+   *  - `{reason}` — INTO-blocked dialog submit; the server stamps
+   *    `blocked: {at: now, reason}` and skips the rest of the ladder
+   *    sweep (caller MUST pair this with a destination whose type is
+   *    `blocked`, else server returns 400).
+   *  - `null` — explicit unblock confirmation (OUT-of-blocked dialog).
+   *  - `undefined` — default ladder semantics; a leftward move out of
+   *    a Blocked card auto-clears `blocked`.
+   */
+  blocked?: { reason: string } | null;
+}
+
 export interface UseIssues {
   issues: Ref<IssueListItem[]>;
   loading: Ref<boolean>;
@@ -48,16 +84,24 @@ export interface UseIssues {
   refresh: () => Promise<void>;
   fetchDetail: (id: string) => Promise<IssueDetail>;
   /**
-   * Optimistically move a card between columns. Mutates `issues` immediately
-   * so the UI re-renders, then PATCHes `/api/issues/:id`. On failure the
-   * local state reverts to the prior status and the caller receives the
-   * server error (also surfaced via the `error` ref).
+   * DX-586 — optimistically move a card between list-driven columns.
+   * Mutates `issues[i].list_name` (which the board groups by) AND
+   * `issues[i].status` (projected from the dest list's type) immediately,
+   * then PATCHes `/api/issues/:id` with `{list_name, [blocked]}`. On
+   * failure the row reverts to its pre-move snapshot and the caller
+   * receives the server error (also surfaced via the `error` ref).
    *
    * The watcher-backed `issue:updated` SSE feed (DX-226) reconciles
    * server-side derived fields the optimistic update did not carry
-   * within ~50ms of the YAML write.
+   * within ~50ms of the YAML write — `blocked`, `dispatch`, the
+   * timestamp triggers are all overwritten by the server's
+   * authoritative `IssueListItem` projection.
    */
-  moveIssueStatus: (id: string, toStatus: IssueStatus) => Promise<void>;
+  moveIssueList: (
+    id: string,
+    destList: { name: string; type: ListType },
+    options?: MoveIssueListOptions,
+  ) => Promise<void>;
   /**
    * DX-264 — optimistically write a new `position` for a card (intra-
    * column reorder). The backend sort tier honors position ASC; the
@@ -138,12 +182,15 @@ export function useIssues(
   let cancelled = false;
   let currentReq = 0;
   const detailCache = new Map<string, IssueDetail>();
-  // Optimistic `moveIssueStatus` mutations awaiting their PATCH to
+  // Optimistic `moveIssueList` mutations awaiting their PATCH to
   // resolve. The SSE upsert (or a manual refresh) would otherwise
   // overwrite the optimistic state with the still-stale server
   // snapshot — replay these onto every fresh REST commit + every SSE
-  // event so the column doesn't snap back.
-  const pendingMoves = new Map<string, IssueStatus>();
+  // event so the column doesn't snap back. The pending value carries
+  // BOTH the dest list_name (the board's grouping key) AND the
+  // projected derived status so column membership + status-dependent
+  // chips both stay consistent during the in-flight window.
+  const pendingMoves = new Map<string, { list_name: string; status: IssueStatus }>();
 
   let stream: UseStreamReturn | null = null;
   let buffer: HydrationBuffer<IssueListItem[]> | null = null;
@@ -181,12 +228,16 @@ export function useIssues(
     // the reducer call so no-op events don't churn the cache.
     detailCache.delete(`${repo.value}:${data.id}`);
 
-    // Replay pendingMoves so an in-flight optimistic status doesn't
+    // Replay pendingMoves so an in-flight optimistic move doesn't
     // get clobbered by a SSE upsert that lands before the PATCH ack.
     if (pendingMoves.size === 0) return next;
     return next.map((i) => {
       const pending = pendingMoves.get(i.id);
-      return pending && pending !== i.status ? { ...i, status: pending } : i;
+      if (!pending) return i;
+      if (pending.list_name === i.list_name && pending.status === i.status) {
+        return i;
+      }
+      return { ...i, list_name: pending.list_name, status: pending.status };
     });
   }
 
@@ -221,9 +272,11 @@ export function useIssues(
           ? result
           : result.map((i) => {
               const pending = pendingMoves.get(i.id);
-              return pending && pending !== i.status
-                ? { ...i, status: pending }
-                : i;
+              if (!pending) return i;
+              if (pending.list_name === i.list_name && pending.status === i.status) {
+                return i;
+              }
+              return { ...i, list_name: pending.list_name, status: pending.status };
             });
       }, applyEvent);
       if (cancelled || reqId !== currentReq) return;
@@ -278,23 +331,34 @@ export function useIssues(
     stopStream();
   });
 
-  async function moveIssueStatus(
+  async function moveIssueList(
     id: string,
-    toStatus: IssueStatus,
+    destList: { name: string; type: ListType },
+    options: MoveIssueListOptions = {},
   ): Promise<void> {
     const requestRepo = repo.value;
     if (!requestRepo) throw new Error("No repo selected");
     const idx = issues.value.findIndex((i) => i.id === id);
     if (idx === -1) throw new Error(`Unknown issue ${id}`);
     const original = issues.value[idx];
-    if (original.status === toStatus) return;
+    const projectedStatus = statusForListType(destList.type);
+    const sameList =
+      original.list_name === destList.name &&
+      original.status === projectedStatus;
+    if (sameList && options.blocked === undefined) return;
     detailCache.delete(`${requestRepo}:${id}`);
-    pendingMoves.set(id, toStatus);
+    pendingMoves.set(id, { list_name: destList.name, status: projectedStatus });
     issues.value = issues.value.map((i, j) =>
-      j === idx ? { ...i, status: toStatus } : i,
+      j === idx
+        ? { ...i, list_name: destList.name, status: projectedStatus }
+        : i,
     );
     try {
-      await patchIssue(requestRepo, id, { status: toStatus });
+      const patch: { list_name: string; blocked?: { reason: string } | null } = {
+        list_name: destList.name,
+      };
+      if (options.blocked !== undefined) patch.blocked = options.blocked;
+      await patchIssue(requestRepo, id, patch);
     } catch (err) {
       issues.value = issues.value.map((i) => (i.id === id ? original : i));
       const message = err instanceof Error ? err.message : String(err);
@@ -345,7 +409,7 @@ export function useIssues(
     error,
     refresh: hydrate,
     fetchDetail,
-    moveIssueStatus,
+    moveIssueList,
     moveIssuePosition,
     applyIssueUpdate,
   };

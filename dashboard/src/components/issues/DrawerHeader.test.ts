@@ -38,6 +38,21 @@ vi.mock("../../api", () => ({
   patchIssue: vi.fn(),
   getIssueSubtree: vi.fn(),
   deleteIssue: vi.fn(),
+  // DX-586 — drawer's List dropdown consumes `useListColors`, which
+  // calls `fetchLists` on init. Return a deterministic 7-list seed so
+  // the dropdown surfaces the canonical options for click tests.
+  fetchLists: vi.fn(async () => ({
+    lists: [
+      { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
+      { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
+      { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
+      { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
+      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
+      { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
+      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+    ],
+    tombstone_ids: [],
+  })),
 }));
 
 import { getIssueSubtree, patchIssue } from "../../api";
@@ -143,12 +158,13 @@ describe("DrawerHeader — meta row layout", () => {
     patchMock.mockReset();
   });
 
-  it("renders id, priority, type, status, copy, delete, close, and rh-flag in the meta row", () => {
+  it("renders id, priority, type, list, copy, delete, close, and rh-flag in the meta row", () => {
     const w = mountHeader();
     expect(w.find('[data-test="drawer-id"]').text()).toBe("DX-1");
     expect(w.find('[data-test="drawer-priority-pill"]').exists()).toBe(true);
     expect(w.find('[data-test="drawer-type-pill"]').exists()).toBe(true);
-    expect(w.find('[data-test="drawer-status-pill"]').exists()).toBe(true);
+    // DX-586 — `drawer-status-pill` retired in favor of `drawer-list-pill`.
+    expect(w.find('[data-test="drawer-list-pill"]').exists()).toBe(true);
     expect(w.find('[data-test="drawer-copy"]').exists()).toBe(true);
     expect(w.find('[data-test="drawer-delete"]').exists()).toBe(true);
     expect(w.find('[data-test="drawer-close"]').exists()).toBe(true);
@@ -181,12 +197,12 @@ describe("DrawerHeader — meta row layout", () => {
     expect(w.emitted("jump-issue")?.[0]).toEqual(["DX-9"]);
   });
 
-  it("epic guard: epic-with-children renders inert status, NOT a clickable pill", () => {
+  it("epic guard: epic-with-children renders inert status, NOT a clickable list pill", () => {
     const w = mountHeader(
       makeDetail({ type: "Epic", children: ["DX-2"] }),
     );
     expect(w.find('[data-test="drawer-status-pill-inert"]').exists()).toBe(true);
-    expect(w.find('[data-test="drawer-status-pill"]').exists()).toBe(false);
+    expect(w.find('[data-test="drawer-list-pill"]').exists()).toBe(false);
   });
 });
 

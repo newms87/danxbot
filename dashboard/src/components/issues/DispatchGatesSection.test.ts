@@ -3,7 +3,24 @@ import { mount, flushPromises } from "@vue/test-utils";
 import DispatchGatesSection from "./DispatchGatesSection.vue";
 import type { IssueDetail } from "../../types";
 
-vi.mock("../../api", () => ({ patchIssue: vi.fn() }));
+vi.mock("../../api", () => ({
+  patchIssue: vi.fn(),
+  // DX-586 — DispatchGatesSection consumes `useListColors` to resolve
+  // the ready-default list name on Clear-Block. `useListColors` calls
+  // `fetchLists` from api on init.
+  fetchLists: vi.fn(async () => ({
+    lists: [
+      { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
+      { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
+      { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
+      { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
+      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
+      { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
+      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+    ],
+    tombstone_ids: [],
+  })),
+}));
 import { patchIssue } from "../../api";
 const patchMock = vi.mocked(patchIssue);
 
@@ -94,19 +111,22 @@ describe("DispatchGatesSection", () => {
     expect(w.find('[data-test="gate-blocked-body"]').exists()).toBe(true);
   });
 
-  it("blocked clear PATCHes blocked: null + status: ToDo", async () => {
+  it("blocked clear PATCHes blocked: null + list_name: <ready-default> (DX-586)", async () => {
     patchMock.mockResolvedValue(makeDetail() as never);
     const w = mountSection(
       makeDetail({
         blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
       }),
     );
+    // Wait for useListColors.init() → fetchLists() → reactive update so
+    // `readyDefaultListName` resolves to "To Do" before the click fires.
+    await flushPromises();
     await w.find('[data-test="gate-blocked-toggle"]').trigger("click");
     await w.find('[data-test="gate-blocked-clear"]').trigger("click");
     await flushPromises();
     expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
       blocked: null,
-      status: "ToDo",
+      list_name: "To Do",
     });
   });
 

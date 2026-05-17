@@ -1,21 +1,45 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { DanxScroll, DanxTooltip } from "@thehammer/danx-ui";
-import type { IssueListItem, IssueStatus } from "../../types";
+import type { IssueListItem, List, ListType } from "../../types";
+import { LIST_TYPE_LADDER } from "../../types";
 import IssueCard from "./IssueCard.vue";
-import { COLUMN_ACCENTS } from "./issuePalette";
 import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 import { useCardDrag } from "../../composables/useCardDrag";
+
+/**
+ * DX-586 (Phase 6 of DX-575) — list-driven board.
+ *
+ * Columns are now derived from the per-repo `lists.yaml` (parent
+ * provides via `lists` prop, sourced from `useListColors`). Each list
+ * is a column; columns are ordered left → right by `LIST_TYPE_LADDER`
+ * (archived → review → ready → blocked → in_progress → completed →
+ * cancelled), with multiple lists of the same type sorted by `order`.
+ *
+ * Cards are grouped by `IssueListItem.list_name`. Pre-DX-586 cards (no
+ * `list_name`) fall back to the type's default list so the operator
+ * never sees an orphaned card.
+ *
+ * The board emits `move` with the destination `List` (name + type) so
+ * the parent can route through the INTO-blocked / OUT-of-blocked
+ * dialogs before committing the optimistic mutation + PATCH. Pre-
+ * DX-586's `IssueStatus` emit shape is retired.
+ */
 
 const props = defineProps<{
   issues: IssueListItem[];
   /**
    * Active repo name. Threaded through to `<IssueCard>` so the agent
-   * badge (`<AgentBadge>`) can fetch the right per-repo avatar without
-   * a board-level singleton lookup. Required even when there is no
-   * `assigned_agent` on the cards — the prop shape stays stable.
+   * badge can fetch the right per-repo avatar.
    */
   repo: string;
+  /**
+   * Per-repo list taxonomy from `useListColors(repo)`. Empty array on
+   * first render before the initial fetch resolves — the board renders
+   * a single "Loading taxonomy…" placeholder column to avoid a flash
+   * of "no columns".
+   */
+  lists: List[];
   showClosed?: boolean;
   scopedEpicId: string | null;
   scopeMode: ScopeMode;
@@ -25,17 +49,15 @@ const emit = defineEmits<{
   select: [issue: IssueListItem];
   "parent-click": [parentId: string];
   /**
-   * Fired when the user releases a card over a column whose status
-   * differs from `issue.status`. Parent owns the optimistic state
-   * mutation + REST patch via `useIssues.moveIssueStatus`.
+   * DX-586 — destination list (name + semantic type). Parent resolves
+   * to the right dialog (INTO-blocked / OUT-of-blocked) and calls
+   * `useIssues.moveIssueList`.
    */
-  move: [issue: IssueListItem, toStatus: IssueStatus];
+  move: [issue: IssueListItem, toList: List];
   /**
-   * DX-264 — fired when a card is dropped into a drop slot (the gap
-   * between two cards in the same column, or the head/tail of an
-   * otherwise-empty column). Parent computes the new `position` via
-   * `nextPosition` from `cardPosition.ts` and PATCHes the card. Either
-   * neighbor is `null` at the column's head / tail.
+   * DX-264 carry-over — intra-column reorder via drop slot. Reorder
+   * only fires inside `position`-honoring columns; the position-tier
+   * sort filter still uses derived status (Review / ToDo / Blocked).
    */
   reorder: [
     issue: IssueListItem,
@@ -44,99 +66,169 @@ const emit = defineEmits<{
   ];
 }>();
 
-const cardDrag = useCardDrag({
+/**
+ * Ladder index for sort. Lower index = further left on the board.
+ * Unknown types fall to the end (defensive — `lists.yaml` validation
+ * already pins the enum, but a stale browser cache could see an
+ * unknown type briefly during a deploy).
+ */
+function ladderIdx(type: ListType): number {
+  const idx = LIST_TYPE_LADDER.indexOf(type);
+  return idx < 0 ? LIST_TYPE_LADDER.length : idx;
+}
+
+/**
+ * Columns ordered left → right by ladder position, then by `order`
+ * within a type, then by name as a stable tie-breaker. Re-computed
+ * whenever the parent's `lists` prop changes (SSE refresh on
+ * lists-routes mutation).
+ */
+const columns = computed<List[]>(() => {
+  const sorted = [...props.lists];
+  sorted.sort((a, b) => {
+    const la = ladderIdx(a.type);
+    const lb = ladderIdx(b.type);
+    if (la !== lb) return la - lb;
+    if (a.order !== b.order) return a.order - b.order;
+    return a.name.localeCompare(b.name);
+  });
+  // Show-closed gate: drop cancelled-type columns entirely when off
+  // (mirrors the pre-DX-586 board's behavior — cancelled cards stay
+  // hidden behind the toggle, not just dimmed). Completed-type
+  // columns stay visible but their per-card filter trims to the
+  // recent-24h slice — same UX as the legacy "Done (Recent)" synthetic.
+  if (!props.showClosed) {
+    return sorted.filter((l) => l.type !== "cancelled");
+  }
+  return sorted;
+});
+
+/** Map list_name → List for quick lookup (drop targets + card accent). */
+const listsByName = computed<Map<string, List>>(() => {
+  const m = new Map<string, List>();
+  for (const l of props.lists) m.set(l.name, l);
+  return m;
+});
+
+/** Default list per type — used as the fallback for cards with no `list_name`. */
+const defaultByType = computed<Map<ListType, List>>(() => {
+  const m = new Map<ListType, List>();
+  for (const l of props.lists) {
+    if (l.is_default_for_type) m.set(l.type, l);
+  }
+  return m;
+});
+
+/**
+ * Map issue status → ListType so a pre-DX-586 card with `list_name:
+ * null` can be bucketed into its derived type's default list.
+ * Mirrors `deriveListTypeFromSemanticStatus` server-side.
+ */
+function listTypeForStatus(status: IssueListItem["status"]): ListType {
+  switch (status) {
+    case "Backlog":
+      return "archived";
+    case "Review":
+      return "review";
+    case "ToDo":
+      return "ready";
+    case "In Progress":
+      return "in_progress";
+    case "Blocked":
+      return "blocked";
+    case "Done":
+      return "completed";
+    case "Cancelled":
+      return "cancelled";
+  }
+}
+
+/**
+ * Resolve a card to the list it belongs in for column grouping.
+ * Priority: explicit `list_name` (if it matches a current list) →
+ * default list for the card's derived type → null (uncategorized;
+ * dropped from the board, surfaces via the audit log).
+ */
+function listForIssue(issue: IssueListItem): List | null {
+  if (issue.list_name) {
+    const hit = listsByName.value.get(issue.list_name);
+    if (hit) return hit;
+  }
+  const fallbackType = listTypeForStatus(issue.status);
+  return defaultByType.value.get(fallbackType) ?? null;
+}
+
+const cardDrag = useCardDrag<List>({
   onDrop: (issue, _from, to) => {
     emit("move", issue, to);
   },
   onReorder: (issue, before, after) => {
     emit("reorder", issue, before, after);
   },
+  // List `id` is the stable identity. The columns[] array is re-derived
+  // every time the parent's `lists` prop updates (SSE on lists CRUD), so
+  // object identity churns; the `id` survives.
+  keyOf: (l) => l.id,
 });
 
-/** Stable key for a drop slot in the position-aware columns. */
+/** Stable key for a drop slot. */
 function slotKey(
-  colKey: string,
+  colName: string,
   before: IssueListItem | null,
   after: IssueListItem | null,
 ): string {
-  return `${colKey}:${before?.id ?? "head"}:${after?.id ?? "tail"}`;
+  return `${colName}:${before?.id ?? "head"}:${after?.id ?? "tail"}`;
 }
 
 /**
- * Drop slots only render inside priority-bucket columns (Review / ToDo
- * / Blocked) where the backend's `position` tier is honored. Recency
- * columns (In Progress / Done / Done Recent / Cancelled) sort by
- * `updated_at` and ignore position, so a drop there would be a silent
- * no-op visually — disable the affordance entirely to avoid a
- * "looked like a drop, did nothing" UX trap.
+ * Drop slots (intra-column reorder) only render in `position`-honoring
+ * types — same set as pre-DX-586 (review / ready / blocked). The
+ * dest-side `dispatch != null` columns (in_progress) and the terminal
+ * columns (completed / cancelled) sort by `updated_at` and ignore the
+ * position tier; drop slots there would look like targets but produce
+ * no visible movement.
  */
-const POSITIONABLE_STATUSES = new Set<IssueStatus>([
-  "Review",
-  "ToDo",
-  "Blocked",
+const POSITIONABLE_TYPES: ReadonlySet<ListType> = new Set<ListType>([
+  "review",
+  "ready",
+  "blocked",
 ]);
-function columnSupportsPosition(col: BoardColumn): boolean {
-  return col.status !== undefined && POSITIONABLE_STATUSES.has(col.status);
+function columnSupportsPosition(col: List): boolean {
+  return POSITIONABLE_TYPES.has(col.type);
 }
 
-interface BoardColumn {
-  key: string;
-  label: string;
-  accent: string;
-  testId: string;
-  collapsedByDefault: boolean;
-  match: (i: IssueListItem) => boolean;
-  /**
-   * Drop target status. `undefined` for synthetic columns (e.g.
-   * `done_recent`) that aggregate by predicate rather than a single
-   * status — drops on those columns are inert (no patch fires).
-   */
-  status?: IssueStatus;
-}
-
+/**
+ * Show-closed gate — when off, drop the `cancelled` columns entirely
+ * AND filter `completed`-type columns to the recent-24h slice. Same
+ * UX as pre-DX-586's "Done (Recent)" synthetic column, but lifted out
+ * to a per-card filter so the column structure stays purely list-driven.
+ */
 const RECENT_DONE_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-function statusColumn(status: IssueStatus): BoardColumn {
-  const meta = COLUMN_ACCENTS[status];
-  return {
-    key: meta.id,
-    label: meta.label,
-    accent: meta.accent,
-    testId: meta.id,
-    collapsedByDefault: meta.collapsedByDefault,
-    match: (i) => i.status === status,
-    status,
-  };
+function isCompletedRecent(issue: IssueListItem): boolean {
+  return issue.updated_at * 1000 >= Date.now() - RECENT_DONE_WINDOW_MS;
 }
 
-const columns = computed<BoardColumn[]>(() => {
-  const review = statusColumn("Review");
-  const todo = statusColumn("ToDo");
-  const blocked = statusColumn("Blocked");
-  const inProgress = statusColumn("In Progress");
-
-  // DX-231 retired the `Needs Approval` parking column. The orthogonal
-  // `requires_human` field replaces it; Phase 8 of the epic adds a
-  // dedicated indicator on every card. Until then no separate column
-  // exists for the field — flagged cards stay in their status column
-  // with the indicator surfacing the human-action handoff.
-
-  if (props.showClosed) {
-    const done = { ...statusColumn("Done"), collapsedByDefault: false };
-    const cancelled = { ...statusColumn("Cancelled"), collapsedByDefault: false };
-    return [review, todo, blocked, inProgress, done, cancelled];
+/**
+ * Grouped cards per column. Each card lands in exactly one column —
+ * the resolution priority is `list_name` → type-default → drop.
+ * Uncategorized cards (no list matches AND no default for type) are
+ * silently dropped; the lists-routes guarantees ≥1 list per type so
+ * this is unreachable in practice.
+ */
+const grouped = computed<Record<string, IssueListItem[]>>(() => {
+  const result: Record<string, IssueListItem[]> = {};
+  for (const col of columns.value) result[col.name] = [];
+  for (const issue of props.issues) {
+    const dest = listForIssue(issue);
+    if (!dest) continue;
+    if (!props.showClosed) {
+      if (dest.type === "cancelled") continue;
+      if (dest.type === "completed" && !isCompletedRecent(issue)) continue;
+    }
+    if (!result[dest.name]) result[dest.name] = [];
+    result[dest.name].push(issue);
   }
-
-  const cutoff = Date.now() - RECENT_DONE_WINDOW_MS;
-  const doneRecent: BoardColumn = {
-    key: "done_recent",
-    label: "Done (Recent)",
-    accent: COLUMN_ACCENTS["Done"].accent,
-    testId: "done_recent",
-    collapsedByDefault: false,
-    match: (i) => i.status === "Done" && i.updated_at * 1000 >= cutoff,
-  };
-  return [review, todo, blocked, inProgress, doneRecent];
+  return result;
 });
 
 const collapsed = ref<Record<string, boolean>>({});
@@ -146,32 +238,17 @@ watch(
   (next) => {
     const merged: Record<string, boolean> = {};
     for (const col of next) {
-      merged[col.key] = collapsed.value[col.key] ?? col.collapsedByDefault;
+      merged[col.name] = collapsed.value[col.name] ?? false;
     }
     collapsed.value = merged;
   },
   { immediate: true },
 );
 
-const grouped = computed<Record<string, IssueListItem[]>>(() => {
-  const result: Record<string, IssueListItem[]> = {};
-  const cols = columns.value;
-  for (const col of cols) result[col.key] = [];
-  for (const issue of props.issues) {
-    const col = cols.find((c) => c.match(issue));
-    if (!col) continue;
-    result[col.key].push(issue);
-  }
-  // No per-column re-sort. The backend's `sortIssuesForStatus` (in
-  // `src/issue-tracker/sort.ts`) emits the canonical order per status
-  // and the API list ships in that order; the SPA preserves it
-  // verbatim. ISS-210 retired the column-level updated_at re-sort.
-  return result;
-});
-
-// DX-239 — per-column `👤 N` subscript when any card in the column has
-// `requires_human != null`. Visual cue without filtering; clicking the
-// card surfaces the panel.
+/**
+ * Per-column `👤 N` subscript when any card in the column has
+ * `requires_human != null`. Carried over from pre-DX-586.
+ */
 const requiresHumanCounts = computed<Record<string, number>>(() => {
   const out: Record<string, number> = {};
   for (const [key, list] of Object.entries(grouped.value)) {
@@ -192,55 +269,68 @@ function scopedFor(i: IssueListItem): boolean {
   return !!props.scopedEpicId && isInScope(i, props.scopedEpicId);
 }
 
-function toggle(key: string): void {
-  collapsed.value = { ...collapsed.value, [key]: !collapsed.value[key] };
+function toggle(name: string): void {
+  collapsed.value = { ...collapsed.value, [name]: !collapsed.value[name] };
+}
+
+/** Lookup the column the card lives in (for the card accent prop). */
+function cardAccent(issue: IssueListItem): string {
+  const dest = listForIssue(issue);
+  return dest?.color ?? "#94a3b8";
+}
+
+/** Stable per-column test id (kebab-case, alphanumeric only). */
+function testIdFor(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 }
 </script>
 
 <template>
-  <div class="board">
+  <div v-if="columns.length === 0" class="board-loading" data-test="board-loading">
+    Loading list taxonomy…
+  </div>
+  <div v-else class="board">
     <div
       v-for="col in columns"
-      :key="col.key"
+      :key="col.id"
       class="column"
-      :class="{ collapsed: collapsed[col.key], 'drop-hover': col.status && cardDrag.isHoveringColumn(col.status) }"
-      :style="{ '--col-accent': col.accent }"
-      v-bind="col.status ? cardDrag.bindColumn(col.status) : {}"
-      :data-test="`column-${col.testId}`"
+      :class="{
+        collapsed: collapsed[col.name],
+        'drop-hover': cardDrag.isHoveringColumn(col),
+      }"
+      :style="{ '--col-accent': col.color }"
+      v-bind="cardDrag.bindColumn(col)"
+      :data-test="`column-${testIdFor(col.name)}`"
     >
       <button
         class="header"
         type="button"
-        :data-test="`column-header-${col.testId}`"
-        :style="{ borderBottomColor: col.accent }"
-        @click="toggle(col.key)"
+        :data-test="`column-header-${testIdFor(col.name)}`"
+        :style="{ borderBottomColor: col.color }"
+        @click="toggle(col.name)"
       >
-        <span class="dot" :style="{ background: col.accent }" />
-        <span class="label">{{ col.label }}</span>
-        <span class="count">{{ grouped[col.key]?.length ?? 0 }}</span>
+        <span class="dot" :style="{ background: col.color }" />
+        <span class="label">{{ col.name }}</span>
+        <span class="count">{{ grouped[col.name]?.length ?? 0 }}</span>
         <DanxTooltip
-          v-if="requiresHumanCounts[col.key] > 0"
-          :tooltip="`${requiresHumanCounts[col.key]} card(s) require human action`"
+          v-if="requiresHumanCounts[col.name] > 0"
+          :tooltip="`${requiresHumanCounts[col.name]} card(s) require human action`"
         >
           <template #trigger>
-            <span class="rh-count" :data-test="`column-rh-${col.testId}`">👤 {{ requiresHumanCounts[col.key] }}</span>
+            <span class="rh-count" :data-test="`column-rh-${testIdFor(col.name)}`">👤 {{ requiresHumanCounts[col.name] }}</span>
           </template>
         </DanxTooltip>
-        <span class="glyph">{{ collapsed[col.key] ? "▸" : "▾" }}</span>
+        <span class="glyph">{{ collapsed[col.name] ? "▸" : "▾" }}</span>
       </button>
 
-      <DanxScroll v-if="!collapsed[col.key]" class="cards-scroll">
+      <DanxScroll v-if="!collapsed[col.name]" class="cards-scroll">
         <div class="cards">
-          <div v-if="(grouped[col.key]?.length ?? 0) === 0" class="empty">
-            <!-- DX-264: empty column gets a single drop slot so the
-                 first reorder seeds a position value. Non-positionable
-                 columns skip the slot entirely (drag remains
-                 column-level only). -->
+          <div v-if="(grouped[col.name]?.length ?? 0) === 0" class="empty">
             <span v-if="columnSupportsPosition(col)"
               class="drop-slot drop-slot-empty"
-              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, null, null)) }"
-              v-bind="cardDrag.bindSlot(slotKey(col.key, null, null), null, null)"
-              :data-test="`drop-slot-${col.testId}-empty`"
+              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, null)) }"
+              v-bind="cardDrag.bindSlot(slotKey(col.name, null, null), null, null)"
+              :data-test="`drop-slot-${testIdFor(col.name)}-empty`"
             />
             No items
           </div>
@@ -248,38 +338,39 @@ function toggle(key: string): void {
             <span
               v-if="columnSupportsPosition(col)"
               class="drop-slot"
-              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, null, (grouped[col.key] ?? [])[0] ?? null)) }"
-              v-bind="cardDrag.bindSlot(slotKey(col.key, null, (grouped[col.key] ?? [])[0] ?? null), null, (grouped[col.key] ?? [])[0] ?? null)"
-              :data-test="`drop-slot-${col.testId}-head`"
+              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null)) }"
+              v-bind="cardDrag.bindSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null), null, (grouped[col.name] ?? [])[0] ?? null)"
+              :data-test="`drop-slot-${testIdFor(col.name)}-head`"
             />
             <template
-              v-for="(issue, idx) in grouped[col.key] ?? []"
+              v-for="(issue, idx) in grouped[col.name] ?? []"
               :key="issue.id"
             >
               <IssueCard
                 :issue="issue"
                 :repo="props.repo"
+                :accent="cardAccent(issue)"
                 :dimmed="dimmedFor(issue)"
                 :scoped="scopedFor(issue)"
                 :dragging="cardDrag.isDragging(issue)"
-                :drag-handlers="cardDrag.bindCard(issue)"
+                :drag-handlers="cardDrag.bindCard(issue, col)"
                 @select="(i) => emit('select', i)"
                 @parent-click="(pid) => emit('parent-click', pid)"
               />
               <span
                 v-if="columnSupportsPosition(col)"
                 class="drop-slot"
-                :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.key, issue, (grouped[col.key] ?? [])[idx + 1] ?? null)) }"
-                v-bind="cardDrag.bindSlot(slotKey(col.key, issue, (grouped[col.key] ?? [])[idx + 1] ?? null), issue, (grouped[col.key] ?? [])[idx + 1] ?? null)"
-                :data-test="`drop-slot-${col.testId}-${issue.id}`"
+                :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null)) }"
+                v-bind="cardDrag.bindSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null), issue, (grouped[col.name] ?? [])[idx + 1] ?? null)"
+                :data-test="`drop-slot-${testIdFor(col.name)}-${issue.id}`"
               />
             </template>
           </template>
         </div>
       </DanxScroll>
 
-      <div v-else-if="(grouped[col.key]?.length ?? 0) > 0" class="collapsed-summary">
-        {{ grouped[col.key]?.length ?? 0 }} hidden — click header to expand
+      <div v-else-if="(grouped[col.name]?.length ?? 0) > 0" class="collapsed-summary">
+        {{ grouped[col.name]?.length ?? 0 }} hidden — click header to expand
       </div>
     </div>
   </div>
@@ -296,6 +387,12 @@ function toggle(key: string): void {
   padding-bottom: 8px;
   height: 100%;
   min-height: 0;
+}
+.board-loading {
+  padding: 24px;
+  font-size: 12px;
+  color: #64748b;
+  text-align: center;
 }
 .column {
   display: flex;
@@ -391,9 +488,6 @@ function toggle(key: string): void {
   background: rgb(99 102 241 / 0.05);
   border-radius: 8px;
 }
-/* DX-264 — drop slots are 6px-tall transparent gaps between cards.
-   On dragover they swell to 14px with the column accent so the
-   operator gets a clear "drop here" target without coordinate math. */
 .drop-slot {
   display: block;
   height: 6px;

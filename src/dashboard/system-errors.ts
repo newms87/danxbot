@@ -32,7 +32,8 @@ export type SystemErrorSource =
   | "prep-verdict-replay"
   | "orphan-reaper"
   | "audit-drift"
-  | "trello-list-mapping";
+  | "trello-list-mapping"
+  | "stamp-terminal";
 
 /**
  * `"info"` is the audit-trail channel: routine, non-actionable events

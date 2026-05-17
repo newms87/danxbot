@@ -104,6 +104,73 @@ describe("applyIssuePatch — allowlist + body shape", () => {
     ).rejects.toMatchObject({ status: 400, body: { error: "Field not patchable: foo" } });
   });
 
+  it("rejects status (DX-586 — direct status writes no longer allowed)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { status: "In Progress" } as unknown as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "Field not patchable: status" },
+    });
+  });
+
+  it("rejects empty-string list_name with 400", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { list_name: "" },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "list_name must be a non-empty string" },
+    });
+  });
+
+  it("rejects non-string list_name with 400", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { list_name: 5 } as unknown as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 400,
+      body: { error: "list_name must be a non-empty string" },
+    });
+  });
+
+  it("returns 404 when list_name is unknown in lists.yaml", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { list_name: "Nonexistent List" },
+        "alice",
+      ),
+    ).rejects.toMatchObject({
+      status: 404,
+      body: {
+        error:
+          'list_name "Nonexistent List" not found in <repo>/.danxbot/lists.yaml',
+      },
+    });
+  });
+
   it("rejects an empty patch with 400", async () => {
     writeFixture(makeIssue(), "open");
     await expect(
@@ -677,36 +744,40 @@ describe("applyIssuePatch — round-trip mutation", () => {
     expect(issue.requires_human).toBeNull();
   });
 
-  it("status: Done moves the file open/ → closed/ and unlinks the source", async () => {
+  it("list_name: Done moves the file open/ → closed/ and unlinks the source", async () => {
     const openPath = writeFixture(makeIssue(), "open");
     const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { status: "Done" },
+      { list_name: "Done" },
       "alice",
     );
     expect(issue.status).toBe("Done");
+    expect(issue.list_name).toBe("Done");
+    expect(issue.completed_at).not.toBeNull();
     expect(existsSync(openPath)).toBe(false);
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "closed"))).toBe(true);
   });
 
-  it("status: Cancelled also closes the card", async () => {
+  it("list_name: Cancelled also closes the card", async () => {
     const openPath = writeFixture(makeIssue(), "open");
-    await applyIssuePatch(
+    const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { status: "Cancelled" },
+      { list_name: "Cancelled" },
       "alice",
     );
+    expect(issue.status).toBe("Cancelled");
+    expect(issue.cancelled_at).not.toBeNull();
     expect(existsSync(openPath)).toBe(false);
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "closed"))).toBe(true);
   });
 
-  it("reopen: true moves closed/ → open/ and defaults status to ToDo", async () => {
+  it("reopen: true defaults to the `ready`-type default list (To Do)", async () => {
     const closedPath = writeFixture(
-      makeIssue({ status: "Done" }),
+      makeIssue({ status: "Done", completed_at: "2026-04-01T00:00:00.000Z" }),
       "closed",
     );
     const { issue } = await applyIssuePatch(
@@ -717,20 +788,26 @@ describe("applyIssuePatch — round-trip mutation", () => {
       "alice",
     );
     expect(issue.status).toBe("ToDo");
+    expect(issue.list_name).toBe("To Do");
+    expect(issue.completed_at).toBeNull();
     expect(existsSync(closedPath)).toBe(false);
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(true);
   });
 
-  it("reopen: true with explicit status overrides the default", async () => {
-    writeFixture(makeIssue({ status: "Done" }), "closed");
+  it("reopen: true with explicit list_name picks a non-terminal target", async () => {
+    writeFixture(
+      makeIssue({ status: "Done", completed_at: "2026-04-01T00:00:00.000Z" }),
+      "closed",
+    );
     const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { reopen: true, status: "In Progress" },
+      { reopen: true, list_name: "In Progress" },
       "alice",
     );
     expect(issue.status).toBe("In Progress");
+    expect(issue.dispatch).not.toBeNull();
   });
 
   it("reopen against an open card returns 400", async () => {
@@ -740,14 +817,17 @@ describe("applyIssuePatch — round-trip mutation", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
-  it("reopen + status: Done is rejected as contradictory", async () => {
-    writeFixture(makeIssue({ status: "Done" }), "closed");
+  it("reopen + list_name resolving to completed type is rejected as contradictory", async () => {
+    writeFixture(
+      makeIssue({ status: "Done", completed_at: "2026-04-01T00:00:00.000Z" }),
+      "closed",
+    );
     await expect(
       applyIssuePatch(
         "danxbot",
         repoLocalPath,
         "DX-1",
-        { reopen: true, status: "Done" },
+        { reopen: true, list_name: "Done" },
         "alice",
       ),
     ).rejects.toMatchObject({ status: 400 });
@@ -759,15 +839,10 @@ describe("applyIssuePatch — round-trip mutation", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it("status: Blocked auto-stamps `blocked` so the YAML invariant survives a drag (DX-237)", async () => {
-    // The dashboard write API is the human-driven surface — a drag-to-Blocked
-    // operator gesture has no place to declare a reason, so the server stamps
-    // a generic record. The agent path still uses the full `blocked: {reason,
-    // timestamp}` shape via Edit/Write — this normalization only fires for
-    // the dashboard's status-only patches.
-    //
-    // Frozen clock — same flake class as the server-stamp tests above
-    // (DX-254). Exact-equality removes the WSL2 NTP-drift failure mode.
+  it("list_name: Blocked + blocked.reason stamps the blocked record (DX-586 INTO blocked)", async () => {
+    // DX-586 — the INTO blocked dialog provides the reason; the server
+    // never invents a placeholder reason. A list_name=Blocked without
+    // an accompanying blocked.reason is rejected (covered below).
     vi.useFakeTimers();
     const frozen = new Date("2026-05-11T12:00:00.000Z");
     vi.setSystemTime(frozen);
@@ -777,19 +852,32 @@ describe("applyIssuePatch — round-trip mutation", () => {
         "danxbot",
         repoLocalPath,
         "DX-1",
-        { status: "Blocked" },
+        { list_name: "Blocked", blocked: { reason: "Spec needs clarification" } },
         "alice",
       );
       expect(issue.status).toBe("Blocked");
       expect(issue.blocked).not.toBeNull();
-      expect(issue.blocked!.reason).toBe("Manually moved to Blocked via dashboard");
+      expect(issue.blocked!.reason).toBe("Spec needs clarification");
       expect(issue.blocked!.at).toBe(frozen.toISOString());
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("status away from Blocked auto-clears `blocked` (drag out of Blocked)", async () => {
+  it("list_name: Blocked without blocked.reason returns 400 (INTO-blocked dialog must supply reason)", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { list_name: "Blocked" },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("list_name move away from Blocked auto-clears `blocked` (drag out of Blocked)", async () => {
     writeFixture(
       makeIssue({
         status: "Blocked",
@@ -801,17 +889,18 @@ describe("applyIssuePatch — round-trip mutation", () => {
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { status: "In Progress" },
+      { list_name: "In Progress" },
       "alice",
     );
     expect(issue.status).toBe("In Progress");
     expect(issue.blocked).toBeNull();
   });
 
-  it("status away from ToDo preserves `waiting_on` (independent durable dep-chain record)", async () => {
+  it("list_name move preserves `waiting_on` (independent durable dep-chain record)", async () => {
     writeFixture(
       makeIssue({
         status: "ToDo",
+        ready_at: "2026-04-15T00:00:00Z",
         waiting_on: {
           reason: "queued behind DX-99",
           timestamp: "2026-04-20T00:00:00Z",
@@ -824,7 +913,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { status: "In Progress" },
+      { list_name: "In Progress" },
       "alice",
     );
     expect(issue.status).toBe("In Progress");
@@ -832,13 +921,16 @@ describe("applyIssuePatch — round-trip mutation", () => {
     expect(issue.waiting_on?.by).toEqual(["DX-99"]);
   });
 
-  it("status patch that does not touch Blocked leaves `blocked` alone", async () => {
-    writeFixture(makeIssue({ status: "ToDo", blocked: null }), "open");
+  it("list_name move that does not touch Blocked leaves `blocked` null", async () => {
+    writeFixture(
+      makeIssue({ status: "ToDo", ready_at: "2026-04-15T00:00:00Z", blocked: null }),
+      "open",
+    );
     const { issue } = await applyIssuePatch(
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { status: "In Progress" },
+      { list_name: "In Progress" },
       "alice",
     );
     expect(issue.blocked).toBeNull();
@@ -1287,7 +1379,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
     ).rejects.toMatchObject({ status: 400 });
   });
 
-  it("blocked: null + status: ToDo clears self-block (dashboard Clear button)", async () => {
+  it("blocked: null + list_name: To Do clears self-block (OUT-of-blocked dialog)", async () => {
     writeFixture(
       makeIssue({
         status: "Blocked",
@@ -1299,14 +1391,27 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { blocked: null, status: "ToDo" } as IssuePatch,
+      { blocked: null, list_name: "To Do" } as IssuePatch,
       "alice",
     );
     expect(issue.blocked).toBeNull();
     expect(issue.status).toBe("ToDo");
   });
 
-  it("rejects blocked patch with a non-null value (agent-only territory)", async () => {
+  it("standalone blocked: {reason} (no list_name) rejected — must accompany INTO-blocked move", async () => {
+    writeFixture(makeIssue(), "open");
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { blocked: { reason: "fake" } } as unknown as IssuePatch,
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("rejects blocked patch with extra agent-shape fields {reason, at} (only {reason} or null on the wire)", async () => {
     writeFixture(makeIssue(), "open");
     await expect(
       applyIssuePatch(
@@ -1317,6 +1422,54 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
         "alice",
       ),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("standalone blocked: null (no list_name) is REJECTED to keep the YAML invariant intact", async () => {
+    // Per DX-586 review: the server's `status === "Blocked" ⟺ blocked
+    // !== null` YAML invariant requires the move OFF the Blocked list
+    // be paired with a `list_name` of a non-blocked type. Standalone
+    // `blocked: null` would leave the YAML invalid (status: Blocked +
+    // blocked: null), which the round-trip validator catches with a
+    // confusing error. Reject at the wire instead.
+    writeFixture(
+      makeIssue({
+        status: "Blocked",
+        blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
+      }),
+      "open",
+    );
+    await expect(
+      applyIssuePatch(
+        "danxbot",
+        repoLocalPath,
+        "DX-1",
+        { blocked: null },
+        "alice",
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("INTO in_progress auto-stamps a v10-shaped dispatch on disk with the auth username", async () => {
+    // Pin the AC #7 contract end-to-end: the move-helper-level unit
+    // test covers the in-memory shape; this assertion forces a YAML
+    // round-trip through `serializeIssue → parseIssue` so a future
+    // schema validator regression (e.g. tightening `dispatch.host`
+    // shape) trips loudly instead of silently corrupting the card.
+    writeFixture(
+      makeIssue({ status: "ToDo", ready_at: "2026-05-15T00:00:00.000Z" }),
+      "open",
+    );
+    const { issue } = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { list_name: "In Progress" },
+      "alice",
+    );
+    expect(issue.status).toBe("In Progress");
+    expect(issue.dispatch).not.toBeNull();
+    expect(issue.dispatch?.host).toBe("dashboard:alice");
+    expect(issue.dispatch?.kind).toBe("work");
   });
 });
 
