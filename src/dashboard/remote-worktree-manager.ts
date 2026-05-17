@@ -26,7 +26,14 @@
 import { request } from "node:http";
 import { join } from "node:path";
 import { createLogger } from "../logger.js";
-import { agentWorktreePath, type WorktreeManager } from "../agent/worktree-manager.js";
+import {
+  agentWorktreePath,
+  type WorktreeManager,
+} from "../agent/worktree-manager.js";
+import {
+  HOST_DOCKER_INTERNAL,
+  resolveReachableHost,
+} from "./dispatch-proxy.js";
 
 const log = createLogger("remote-worktree-manager");
 
@@ -108,18 +115,25 @@ export function createRemoteWorktreeManager(
     path: string,
     body?: string,
   ): Promise<void> {
-    const host = deps.resolveHost(repoName);
+    const primary = deps.resolveHost(repoName);
     const port = deps.workerPort(repoName);
-    log.info(
-      `${method} http://${host}:${port}${path} (repo=${repoName})`,
-    );
+    // Mirror dispatch-proxy's probe-then-fallback. The worker may be a
+    // sibling container (`danxbot-worker-<repo>`) OR a host-mode process
+    // reachable only via `host.docker.internal`. Static resolution to the
+    // container DNS name fails the latter case with ENOTFOUND.
+    const host = await resolveReachableHost(repoName, primary, port);
+    if (!host) {
+      throw new Error(
+        `Worker for repo "${repoName}" is not reachable on any candidate host (tried "${primary}" and "${HOST_DOCKER_INTERNAL}")`,
+      );
+    }
+    log.info(`${method} http://${host}:${port}${path} (repo=${repoName})`);
     const result = await doRequest(host, port, method, path, deps.token, body);
     if (result.status === 204) return;
     let parsedError: string;
     try {
       const json = JSON.parse(result.body);
-      parsedError =
-        typeof json.error === "string" ? json.error : result.body;
+      parsedError = typeof json.error === "string" ? json.error : result.body;
     } catch {
       parsedError = result.body || `worker returned HTTP ${result.status}`;
     }

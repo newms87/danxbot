@@ -72,7 +72,7 @@ const PROBE_TIMEOUT_MS = 1_000;
 /** Docker's standard hostname for the host runtime, available in modern
  * Docker Desktop + dockerd configurations. Used as the fallback when the
  * configured per-repo container DNS doesn't resolve. */
-const HOST_DOCKER_INTERNAL = "host.docker.internal";
+export const HOST_DOCKER_INTERNAL = "host.docker.internal";
 
 interface CachedHostEntry {
   host: string;
@@ -199,7 +199,7 @@ export function _setProbeForTesting(
  *   - Real-request connect error in `proxyToWorkerWithFallback` (via
  *     the `onConnectError` hook in `proxyToWorker`)
  */
-async function resolveReachableHost(
+export async function resolveReachableHost(
   repoName: string,
   primary: string,
   port: number,
