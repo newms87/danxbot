@@ -17,6 +17,7 @@ Current canonical mappings (extend as the library grows):
 | Toggle / switch | `<DanxToggle>` | Native checkbox styled to look like a switch |
 | Code block | `<CodeViewer>` | Raw `<pre><code>` |
 | Markdown rendering / editing | `<MarkdownEditor>` | Hand-rolled markdown rendering |
+| Color picker | `<DanxColorPicker>` | Native `<input type="color">` on any branded surface |
 
 **Tooltip rule, hard.** Zero raw `title=` HTML attributes on any element in `dashboard/src/components/**/*.vue`. Component-prop `title=` on PascalCase tags (`<DanxDialog title="…">`, `<AgentConfirmModal title="…">`) is fine — that's a dialog header, not a hover tooltip. Browser-native `title=` ignores theme, ignores reduced-motion, has no focus path, and disagrees with the rest of the dashboard's hover-popover UX. Use:
 

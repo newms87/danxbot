@@ -25,6 +25,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   DanxButton,
+  DanxColorPicker,
   DanxDialog,
   DanxTooltip,
   useDialog,
@@ -315,13 +316,12 @@ async function onConfirmAdd(): Promise<void> {
                 @change="(e) => onRename(list, (e.target as HTMLInputElement).value)"
               />
 
-              <input
-                type="color"
-                class="h-8 w-10 cursor-pointer rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
-                :value="list.color"
+              <DanxColorPicker
+                :model-value="list.color"
                 :disabled="busyById.has(list.id)"
-                :data-test="`lists-color-${list.id}`"
-                @change="(e) => onRecolor(list, (e.target as HTMLInputElement).value)"
+                :test-id="`lists-color-${list.id}`"
+                storage-key="danxbot-lists-color-recents"
+                @update:model-value="(v: string) => onRecolor(list, v)"
               />
 
               <div class="flex items-center gap-1">
@@ -421,17 +421,12 @@ async function onConfirmAdd(): Promise<void> {
           />
         </label>
 
-        <label class="block">
-          <span class="text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">
-            Color
-          </span>
-          <input
-            v-model="addColor"
-            type="color"
-            class="mt-1 h-9 w-16 cursor-pointer rounded border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900"
-            data-test="lists-add-color"
-          />
-        </label>
+        <DanxColorPicker
+          v-model="addColor"
+          label="Color"
+          test-id="lists-add-color"
+          storage-key="danxbot-lists-color-recents"
+        />
 
         <p
           v-if="addError"
