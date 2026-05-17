@@ -1,11 +1,26 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { DanxScroll, DanxTooltip } from "@thehammer/danx-ui";
+import {
+  DanxButton,
+  DanxIcon,
+  DanxPopover,
+  DanxScroll,
+  DanxTooltip,
+} from "@thehammer/danx-ui";
+import sortIcon from "danx-icon/src/fontawesome/solid/sort.svg?raw";
+import arrowUp from "danx-icon/src/fontawesome/solid/arrow-up.svg?raw";
+import arrowDown from "danx-icon/src/fontawesome/solid/arrow-down.svg?raw";
 import type { IssueListItem, List, ListType } from "../../types";
 import { LIST_TYPE_LADDER } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 import { useCardDrag } from "../../composables/useCardDrag";
+import {
+  BOARD_SORT_OPTIONS,
+  useBoardSort,
+  type BoardSortDirection,
+  type BoardSortKey,
+} from "../../composables/useBoardSort";
 
 /**
  * DX-586 (Phase 6 of DX-575) — list-driven board.
@@ -228,6 +243,13 @@ const grouped = computed<Record<string, IssueListItem[]>>(() => {
     if (!result[dest.name]) result[dest.name] = [];
     result[dest.name].push(issue);
   }
+  // DX-625 — per-column client-side sort overlay on top of the backend
+  // canonical order. `dispatch` sort is a no-op (preserves backend
+  // order; ISS-210 / DX-522 invariant). Non-default sort applies a
+  // stable comparator scoped to that column only.
+  for (const col of columns.value) {
+    result[col.name] = boardSort.sortedIssues(col.name, result[col.name] ?? []);
+  }
   return result;
 });
 
@@ -244,6 +266,28 @@ watch(
   },
   { immediate: true },
 );
+
+const boardSort = useBoardSort();
+
+const sortMenuOpen = ref<Record<string, boolean>>({});
+
+function setSort(
+  colName: string,
+  key: BoardSortKey,
+  direction: BoardSortDirection,
+): void {
+  boardSort.setSort(colName, { key, direction });
+  sortMenuOpen.value = { ...sortMenuOpen.value, [colName]: false };
+}
+
+function isActive(
+  colName: string,
+  key: BoardSortKey,
+  direction: BoardSortDirection,
+): boolean {
+  const s = boardSort.getSort(colName);
+  return s.key === key && s.direction === direction;
+}
 
 /**
  * Per-column `👤 N` subscript when any card in the column has
@@ -302,31 +346,98 @@ function testIdFor(name: string): string {
       v-bind="cardDrag.bindColumn(col)"
       :data-test="`column-${testIdFor(col.name)}`"
     >
-      <button
+      <div
         class="header"
-        type="button"
         :data-test="`column-header-${testIdFor(col.name)}`"
         :style="{ borderBottomColor: col.color }"
-        @click="toggle(col.name)"
       >
-        <span class="dot" :style="{ background: col.color }" />
-        <span class="label">{{ col.name }}</span>
-        <span class="count">{{ grouped[col.name]?.length ?? 0 }}</span>
-        <DanxTooltip
-          v-if="requiresHumanCounts[col.name] > 0"
-          :tooltip="`${requiresHumanCounts[col.name]} card(s) require human action`"
+        <button
+          class="header-collapse"
+          type="button"
+          :data-test="`column-collapse-${testIdFor(col.name)}`"
+          @click="toggle(col.name)"
+        >
+          <span class="dot" :style="{ background: col.color }" />
+          <span class="label">{{ col.name }}</span>
+          <span class="count">{{ grouped[col.name]?.length ?? 0 }}</span>
+          <DanxTooltip
+            v-if="requiresHumanCounts[col.name] > 0"
+            :tooltip="`${requiresHumanCounts[col.name]} card(s) require human action`"
+          >
+            <template #trigger>
+              <span class="rh-count" :data-test="`column-rh-${testIdFor(col.name)}`">👤 {{ requiresHumanCounts[col.name] }}</span>
+            </template>
+          </DanxTooltip>
+        </button>
+        <DanxPopover
+          v-model="sortMenuOpen[col.name]"
+          trigger="click"
+          placement="bottom"
         >
           <template #trigger>
-            <span class="rh-count" :data-test="`column-rh-${testIdFor(col.name)}`">👤 {{ requiresHumanCounts[col.name] }}</span>
+            <DanxButton
+              variant=""
+              size="sm"
+              class="sort-btn"
+              :class="{ 'sort-btn-active': !boardSort.isDefault(col.name) }"
+              :tooltip="`Sort ${col.name}`"
+              :aria-label="`Sort ${col.name}`"
+              :data-test="`column-sort-${testIdFor(col.name)}`"
+            >
+              <template #icon>
+                <DanxIcon :icon="sortIcon" />
+              </template>
+            </DanxButton>
           </template>
-        </DanxTooltip>
-        <span class="glyph">{{ collapsed[col.name] ? "▸" : "▾" }}</span>
-      </button>
+          <div class="sort-menu" :data-test="`column-sort-menu-${testIdFor(col.name)}`">
+            <div
+              v-for="opt in BOARD_SORT_OPTIONS"
+              :key="opt.key"
+              class="sort-row"
+            >
+              <span class="sort-row-label">{{ opt.label }}</span>
+              <div class="sort-row-dirs">
+                <button
+                  type="button"
+                  class="sort-dir"
+                  :class="{ active: isActive(col.name, opt.key, 'asc') }"
+                  :data-test="`column-sort-${testIdFor(col.name)}-${opt.key}-asc`"
+                  :aria-label="`${opt.label} ascending`"
+                  @click="setSort(col.name, opt.key, 'asc')"
+                >
+                  <DanxIcon :icon="arrowUp" />
+                </button>
+                <button
+                  type="button"
+                  class="sort-dir"
+                  :class="{ active: isActive(col.name, opt.key, 'desc') }"
+                  :data-test="`column-sort-${testIdFor(col.name)}-${opt.key}-desc`"
+                  :aria-label="`${opt.label} descending`"
+                  @click="setSort(col.name, opt.key, 'desc')"
+                >
+                  <DanxIcon :icon="arrowDown" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </DanxPopover>
+        <button
+          class="header-glyph"
+          type="button"
+          :aria-label="collapsed[col.name] ? 'Expand column' : 'Collapse column'"
+          @click="toggle(col.name)"
+        >{{ collapsed[col.name] ? "▸" : "▾" }}</button>
+      </div>
 
       <DanxScroll v-if="!collapsed[col.name]" class="cards-scroll">
         <div class="cards">
           <div v-if="(grouped[col.name]?.length ?? 0) === 0" class="empty">
-            <span v-if="columnSupportsPosition(col)"
+            <!-- DX-264: empty column gets a single drop slot so the
+                 first reorder seeds a position value. DX-625: also
+                 hide drop slots when the column has a non-default
+                 sort so drag affordance never silently no-ops under
+                 a sort that ignores `position`. -->
+            <span v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
               class="drop-slot drop-slot-empty"
               :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, null)) }"
               v-bind="cardDrag.bindSlot(slotKey(col.name, null, null), null, null)"
@@ -336,7 +447,7 @@ function testIdFor(name: string): string {
           </div>
           <template v-else>
             <span
-              v-if="columnSupportsPosition(col)"
+              v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
               class="drop-slot"
               :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null)) }"
               v-bind="cardDrag.bindSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null), null, (grouped[col.name] ?? [])[0] ?? null)"
@@ -358,7 +469,7 @@ function testIdFor(name: string): string {
                 @parent-click="(pid) => emit('parent-click', pid)"
               />
               <span
-                v-if="columnSupportsPosition(col)"
+                v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
                 class="drop-slot"
                 :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null)) }"
                 v-bind="cardDrag.bindSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null), issue, (grouped[col.name] ?? [])[idx + 1] ?? null)"
@@ -411,13 +522,97 @@ function testIdFor(name: string): string {
   gap: 8px;
   padding: 10px 4px 10px 6px;
   width: 100%;
-  background: none;
-  border: 0;
   border-bottom: 1px solid #1e293b;
-  cursor: pointer;
-  font-family: inherit;
   color: #94a3b8;
   flex-shrink: 0;
+}
+.header-collapse {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+}
+.header-glyph {
+  background: none;
+  border: 0;
+  padding: 0 4px;
+  font-size: 10px;
+  color: #64748b;
+  cursor: pointer;
+}
+.sort-btn {
+  padding: 2px 6px !important;
+  opacity: 0.55;
+}
+.sort-btn:hover {
+  opacity: 1;
+}
+.sort-btn.sort-btn-active {
+  opacity: 1;
+  color: var(--col-accent, #a5b4fc);
+}
+.sort-btn :deep(.danx-icon) {
+  width: 12px;
+  height: 12px;
+}
+.sort-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  min-width: 200px;
+}
+.sort-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+.sort-row:hover {
+  background: rgb(51 65 85 / 0.4);
+}
+.sort-row-label {
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.sort-row-dirs {
+  display: flex;
+  gap: 4px;
+}
+.sort-dir {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: none;
+  border: 1px solid #334155;
+  border-radius: 4px;
+  cursor: pointer;
+  color: #94a3b8;
+}
+.sort-dir:hover {
+  border-color: #475569;
+  color: #e2e8f0;
+}
+.sort-dir.active {
+  border-color: var(--col-accent, #a5b4fc);
+  color: var(--col-accent, #a5b4fc);
+  background: rgb(99 102 241 / 0.15);
+}
+.sort-dir :deep(.danx-icon) {
+  width: 10px;
+  height: 10px;
 }
 .dot {
   width: 6px;
@@ -450,11 +645,6 @@ function testIdFor(name: string): string {
   border: 1px solid rgb(249 115 22 / 0.35);
   font-variant-numeric: tabular-nums;
   cursor: help;
-}
-.glyph {
-  margin-left: auto;
-  font-size: 10px;
-  color: #64748b;
 }
 .cards-scroll {
   flex: 1 1 auto;

@@ -1,8 +1,20 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import IssueBoard from "./IssueBoard.vue";
 import type { IssueListItem, IssueStatus, List } from "../../types";
+
+// DanxPopover renders into a portal — stub it so the panel content is
+// always inline in the wrapper's DOM tree for tests.
+const DanxPopoverStub = defineComponent({
+  name: "DanxPopover",
+  props: ["modelValue", "trigger", "placement"],
+  emits: ["update:modelValue"],
+  setup: (_p, { slots }) => () => [
+    h("div", { class: "stub-popover-trigger" }, slots.trigger?.()),
+    h("div", { class: "stub-popover-panel" }, slots.default?.()),
+  ],
+});
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -107,7 +119,10 @@ function mountBoard(
         });
     },
   });
-  const wrapper = mount(Host, { attachTo: document.body });
+  const wrapper = mount(Host, {
+    attachTo: document.body,
+    global: { stubs: { DanxPopover: DanxPopoverStub } },
+  });
   return { wrapper, issues, moveSpy };
 }
 
@@ -336,10 +351,134 @@ describe("IssueBoard — drag and drop", () => {
   });
 });
 
-// DX-522 — guard against the SPA accidentally re-sorting a column.
 // The backend's `sortIssuesForStatus` is the canonical order; the
 // API ships rows in that order; the board preserves it verbatim.
+
+// DX-625 — per-column client-side sort overlay with DanxPopover +
+// localStorage persistence. Default `dispatch` sort is a no-op so the
+// DX-522 invariant below still holds. Column key on disk is the
+// column's `name` (e.g. "To Do", "Review"), matching the post-DX-586
+// list-driven board.
+describe("IssueBoard — per-column sort (DX-625)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it("renders a sort button in every column header", () => {
+    const { wrapper } = mountBoard([]);
+    expect(wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).exists()).toBe(true);
+    expect(wrapper.find(`[data-test="column-sort-${tid("Review")}"]`).exists()).toBe(true);
+    expect(wrapper.find(`[data-test="column-sort-${tid("In Progress")}"]`).exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("selecting Card ID ASC reorders the column numerically", async () => {
+    const a = makeIssue("DX-10", "ToDo");
+    const b = makeIssue("DX-2", "ToDo");
+    const c = makeIssue("DX-100", "ToDo");
+    const { wrapper } = mountBoard([a, b, c]);
+
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-id-asc"]`).trigger("click");
+    await vi.waitFor(() => {
+      const ids = wrapper
+        .find(`[data-test="column-${tid("To Do")}"]`)
+        .findAll('[data-test="card-id"]')
+        .map((c) => c.text());
+      expect(ids).toEqual(["DX-2", "DX-10", "DX-100"]);
+    });
+    wrapper.unmount();
+  });
+
+  it("selecting Title DESC reorders the column by title", async () => {
+    const a = makeIssue("DX-1", "ToDo", { title: "alpha" });
+    const b = makeIssue("DX-2", "ToDo", { title: "zulu" });
+    const { wrapper } = mountBoard([a, b]);
+
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-title-desc"]`).trigger("click");
+    await vi.waitFor(() => {
+      const ids = wrapper
+        .find(`[data-test="column-${tid("To Do")}"]`)
+        .findAll('[data-test="card-id"]')
+        .map((c) => c.text());
+      expect(ids).toEqual(["DX-2", "DX-1"]);
+    });
+    wrapper.unmount();
+  });
+
+  it("setting sort on To Do does not affect Review", async () => {
+    const a = makeIssue("DX-10", "ToDo");
+    const b = makeIssue("DX-2", "ToDo");
+    const r1 = makeIssue("DX-50", "Review");
+    const r2 = makeIssue("DX-5", "Review");
+    const { wrapper } = mountBoard([a, b, r1, r2]);
+
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-id-asc"]`).trigger("click");
+    await vi.waitFor(() => {
+      const todoIds = wrapper
+        .find(`[data-test="column-${tid("To Do")}"]`)
+        .findAll('[data-test="card-id"]')
+        .map((c) => c.text());
+      expect(todoIds).toEqual(["DX-2", "DX-10"]);
+    });
+    const reviewIds = wrapper
+      .find(`[data-test="column-${tid("Review")}"]`)
+      .findAll('[data-test="card-id"]')
+      .map((c) => c.text());
+    expect(reviewIds).toEqual(["DX-50", "DX-5"]);
+    wrapper.unmount();
+  });
+
+  it("sort selection persists to localStorage keyed by column name", async () => {
+    const { wrapper } = mountBoard([makeIssue("DX-1", "ToDo")]);
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-created-desc"]`).trigger("click");
+    await vi.waitFor(() => {
+      const raw = localStorage.getItem("danxbot.issueBoard.sort.v1");
+      expect(raw).toBeTruthy();
+      expect(JSON.parse(raw!)["To Do"]).toEqual({ key: "created", direction: "desc" });
+    });
+    wrapper.unmount();
+  });
+
+  it("hydrates from localStorage on mount", () => {
+    localStorage.setItem(
+      "danxbot.issueBoard.sort.v1",
+      JSON.stringify({ "To Do": { key: "id", direction: "asc" } }),
+    );
+    const a = makeIssue("DX-10", "ToDo");
+    const b = makeIssue("DX-2", "ToDo");
+    const { wrapper } = mountBoard([a, b]);
+    const ids = wrapper
+      .find(`[data-test="column-${tid("To Do")}"]`)
+      .findAll('[data-test="card-id"]')
+      .map((c) => c.text());
+    expect(ids).toEqual(["DX-2", "DX-10"]);
+    wrapper.unmount();
+  });
+
+  it("drop slots hide on positionable columns when sort is non-default", async () => {
+    const a = makeIssue("DX-1", "ToDo");
+    const { wrapper } = mountBoard([a]);
+
+    expect(wrapper.find(`[data-test^="drop-slot-${tid("To Do")}-"]`).exists()).toBe(true);
+
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-title-asc"]`).trigger("click");
+    await vi.waitFor(() => {
+      expect(wrapper.find(`[data-test^="drop-slot-${tid("To Do")}-"]`).exists()).toBe(false);
+    });
+    wrapper.unmount();
+  });
+});
+
 describe("IssueBoard — backend sort preserved verbatim (DX-522)", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   it("renders priority-5 card before priority-2 card when backend ships them in that order", () => {
     const high = makeIssue("DX-HIGH", "ToDo", { priority: 5 });
     const low = makeIssue("DX-LOW", "ToDo", { priority: 2 });
