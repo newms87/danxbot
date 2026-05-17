@@ -109,8 +109,9 @@ const log = createLogger("worktree-manager");
  * writer races. `syncWorktree` uses ONLY non-destructive git ops:
  * `fetch`, `pull --ff-only`, and `rebase`. On rebase conflict the
  * rebase is aborted (returning the working tree to its pre-rebase
- * state at HEAD) and the kind=`abort` shape is returned for the
- * caller to route.
+ * state at HEAD) and the kind=`conflict` shape is returned so the
+ * dispatch wrapper can hand off to the agent's prep skill for
+ * semantic conflict resolution.
  *
  * - `noop` — already at `origin/main`. Nothing to do.
  * - `ff` — branch was behind-only; fast-forwarded via `git pull
@@ -118,19 +119,28 @@ const log = createLogger("worktree-manager");
  * - `rebased` — branch had local commits; rebased cleanly onto
  *   `origin/main`. `commits` is the count of agent-branch commits that
  *   were replayed.
- * - `abort` — sync could not complete (rebase conflict, ff-only pull
- *   rejected, or fetch network failure). `reason` is a short human
- *   label; `details` is the verbatim git stderr (or a code-only
- *   string when stderr was empty). The worktree is left at HEAD —
- *   no destructive cleanup. `dispatchWithRecovery` (DX-297 / DX-291
- *   P6) routes abort through the prep-verdict flow that flips
- *   `agents.<name>.broken` on settings.json + throws so the multi-
- *   agent caller's dispatch-cleanup bookkeeping fires.
+ * - `conflict` — rebase against `origin/main` hit a merge conflict.
+ *   The wrapper aborted the rebase to leave the worktree at clean
+ *   HEAD; `details` carries the verbatim git stderr from the failed
+ *   rebase. `dispatchWithRecovery` passes this through to
+ *   `deps.dispatch` — the agent's prep skill (Step 4 of
+ *   `danxbot:danx-prep`) re-runs the rebase and resolves conflicts
+ *   semantically. This is the steady-state branch-collision flow,
+ *   NOT an env failure.
+ * - `abort` — sync could not complete due to a true env failure
+ *   (fetch network failure, ff-only pull rejected, rev-list plumbing
+ *   error). `reason` is a short human label; `details` is the
+ *   verbatim git stderr (or a code-only string when stderr was
+ *   empty). The worktree is left at HEAD — no destructive cleanup.
+ *   `dispatchWithRecovery` routes abort through the prep-verdict
+ *   flow that flips `agents.<name>.broken` on settings.json + throws
+ *   so the multi-agent caller's dispatch-cleanup bookkeeping fires.
  */
 export type SyncResult =
   | { kind: "noop" }
   | { kind: "ff"; from: string; to: string }
   | { kind: "rebased"; commits: number }
+  | { kind: "conflict"; reason: string; details: string }
   | { kind: "abort"; reason: string; details: string };
 
 /**
@@ -756,13 +766,27 @@ async function rebaseOnto(
 ): Promise<SyncResult> {
   const rebase = await runner.run(path, ["rebase", "origin/main"]);
   if (rebase.code !== 0) {
-    const aborted = buildAbort(
-      "rebase conflict against origin/main",
-      "git rebase",
-      rebase,
-    );
+    // Rebase conflict is the EXPECTED branch-collision state when two
+    // agents (or a PR-merge + agent's local commits) touch the same
+    // files. It is NOT an env failure. The wrapper aborts the rebase
+    // to return the worktree to a clean HEAD (no mid-rebase residue)
+    // and returns kind "conflict" — distinct from kind "abort". The
+    // dispatch wrapper (`dispatchWithRecovery`) passes "conflict"
+    // through to the agent, whose prep skill (Step 4 of
+    // `danxbot:danx-prep`, file
+    // `.claude/skills/danx-prep/SKILL.md` line ~196) re-runs the
+    // rebase and resolves conflicts semantically. Stamping
+    // `agents.<name>.broken` on a conflict would lock the agent out
+    // of the rotation for what is supposed to be a self-healing
+    // in-session flow (regression DX-293 → fix in this commit).
+    const conflict: SyncResult = {
+      kind: "conflict",
+      reason: "rebase conflict against origin/main",
+      details:
+        rebase.stderr.trim() || `git rebase exited with code ${rebase.code}`,
+    };
     await runner.run(path, ["rebase", "--abort"]);
-    return aborted;
+    return conflict;
   }
   await provisionWorktreeArtifacts(ctx.hostPath, path);
   return { kind: "rebased", commits: ahead };

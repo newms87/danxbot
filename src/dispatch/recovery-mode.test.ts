@@ -279,6 +279,66 @@ describe("dispatchWithRecovery", () => {
     }
   });
 
+  describe("syncWorktree conflict → passes through to deps.dispatch (NO broken stamp)", () => {
+    // Rebase conflict against origin/main is the EXPECTED collision when
+    // two agents (or a human PR merge + an agent's local commits) touch
+    // the same files. The wrapper-level rebase backs out cleanly (kind
+    // "conflict" carries the captured stderr), but the dispatch then
+    // hands off to the agent — the prep skill's Step 4 re-runs the rebase
+    // and resolves conflicts in place semantically. Stamping
+    // agents.<name>.broken on a rebase conflict locks the agent out
+    // forever (operator must clear via dashboard) for what is supposed
+    // to be a self-healing in-session flow. Regression: DX-293 wired
+    // the conflict path to the broken-stamp branch by mistake; this
+    // test pins the correct behavior.
+    let seeded: { repoLocalPath: string; cleanup: () => void };
+
+    beforeEach(() => {
+      seeded = seedRepo("alice");
+    });
+
+    afterEach(() => {
+      seeded.cleanup();
+    });
+
+    it("rebase conflict → deps.dispatch invoked, agents.<name>.broken stays null", async () => {
+      const dispatchMock = vi.fn(
+        async (_input: DispatchInput): Promise<DispatchResult> => ({
+          dispatchId: "id-conflict-handoff",
+          job: fakeJob(),
+        }),
+      );
+      const manager = mkManager({
+        syncWorktree: async () => ({
+          kind: "conflict",
+          reason: "rebase conflict against origin/main",
+          details:
+            "CONFLICT (content): Merge conflict in src/foo.ts\nerror: could not apply ...",
+        }),
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      const result = await dispatchWithRecovery(
+        input,
+        { agentName: "alice", manager },
+        { dispatch: dispatchMock },
+      );
+
+      expect(dispatchMock).toHaveBeenCalledTimes(1);
+      expect(result.dispatchId).toBe("id-conflict-handoff");
+
+      const settings = JSON.parse(
+        readFileSync(
+          join(seeded.repoLocalPath, ".danxbot", "settings.json"),
+          "utf-8",
+        ),
+      );
+      expect(settings.agents.alice.broken).toBeNull();
+    });
+  });
+
   describe("syncWorktree abort → stamps agents.<name>.broken + throws", () => {
     let seeded: { repoLocalPath: string; cleanup: () => void };
 

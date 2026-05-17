@@ -16,11 +16,23 @@
  * `agents.<name>.broken` stamp. DX-333 retired the `validate()` method
  * itself.
  *
- * On `syncWorktree.kind === "abort"` (ff-only refused, fetch mid-failure)
- * this wrapper stamps `agents.<name>.broken` persistently so the picker
- * skips the agent until the operator clears the field, then throws a
- * plain `Error` so the multi-agent caller's existing try/catch fires its
- * dispatch-cleanup bookkeeping (clear YAML `dispatch{}`, release lock).
+ * On `syncWorktree.kind === "abort"` (env failure — ff-only refused,
+ * fetch network failure, rev-list plumbing) this wrapper stamps
+ * `agents.<name>.broken` persistently so the picker skips the agent
+ * until the operator clears the field, then throws a plain `Error` so
+ * the multi-agent caller's existing try/catch fires its dispatch-
+ * cleanup bookkeeping (clear YAML `dispatch{}`, release lock).
+ *
+ * On `syncWorktree.kind === "conflict"` (rebase against origin/main
+ * hit a merge conflict — the EXPECTED branch-collision state when two
+ * agents or a PR-merge + agent commits touch the same files) this
+ * wrapper logs + passes through to `deps.dispatch`. The agent's prep
+ * skill (Step 4 of `danxbot:danx-prep`) re-runs the rebase and
+ * resolves conflicts semantically in-session — that is the steady-
+ * state self-healing flow. Stamping `broken` on a conflict would lock
+ * the agent out for what is supposed to be in-session work
+ * (regression DX-293, fixed in the same commit that introduced the
+ * `conflict` kind).
  */
 
 import { createLogger } from "../logger.js";
@@ -88,6 +100,15 @@ export async function dispatchWithRecovery(
       agentName,
       `syncWorktree aborted: ${sync.reason}`,
       sync.details,
+    );
+  }
+  if (sync.kind === "conflict") {
+    // Pass-through. The agent's prep skill (Step 4 of
+    // `danxbot:danx-prep`) re-runs the rebase and resolves the
+    // conflict in place. Logged at warn so the conflict is visible
+    // in dispatch logs without alerting on the steady-state flow.
+    log.warn(
+      `dispatchWithRecovery(${input.repo.name}/${agentName}): ${sync.reason} — handing off to agent's prep skill for in-session resolution`,
     );
   }
   return deps.dispatch(input);

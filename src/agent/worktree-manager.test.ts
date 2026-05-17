@@ -367,7 +367,16 @@ describe("WorktreeManager", () => {
       ).toBe(false);
     });
 
-    it("abort path: rebase conflict → `git rebase --abort` is invoked AND worktree stays at HEAD (no destructive cleanup)", async () => {
+    it("conflict path: rebase conflict → {kind: 'conflict'}, `git rebase --abort` returns worktree to clean HEAD, dispatch hands off to agent's prep skill (Step 4 resolves in place)", async () => {
+      // Rebase conflict is the EXPECTED state during agent-on-agent
+      // contention, NOT an env failure. Wrapper aborts the rebase to
+      // leave a clean state, returns kind:"conflict", and
+      // dispatchWithRecovery passes through to deps.dispatch so the
+      // agent's prep skill (Step 4 of danx-prep) re-runs the rebase
+      // and resolves the conflict semantically. Stamping
+      // agents.<name>.broken on a rebase conflict is a regression
+      // (introduced w/ DX-293; the design always intended agent
+      // hand-off — see prep skill SKILL.md line 196-202).
       const runner = syncRunner("1\t2\n", [
         {
           match: "rebase origin/main",
@@ -383,15 +392,15 @@ describe("WorktreeManager", () => {
       const result = await wm.syncWorktree(ctx, "alice");
 
       expect(result).toMatchObject({
-        kind: "abort",
+        kind: "conflict",
         reason: "rebase conflict against origin/main",
       });
-      if (result.kind === "abort") {
+      if (result.kind === "conflict") {
         expect(result.details).toContain("CONFLICT");
       }
-      // Critical: `rebase --abort` ran AFTER the failed rebase to
-      // restore HEAD. No `git reset`, no `git checkout <ref>`, no
-      // `git restore`, no `git clean -f` — those would be destructive.
+      // `rebase --abort` ran AFTER the failed rebase to restore HEAD.
+      // No `git reset`, no `git checkout <ref>`, no `git restore`,
+      // no `git clean -f` — destructive ops banned.
       const argv0s = runner.calls.map((c) => c.args.join(" "));
       expect(argv0s.some((a) => a.startsWith("rebase --abort"))).toBe(true);
       expect(argv0s.some((a) => a.startsWith("reset"))).toBe(false);
@@ -399,8 +408,6 @@ describe("WorktreeManager", () => {
       expect(argv0s.some((a) => /^clean( |\b)/.test(a) && a.includes("-f"))).toBe(
         false,
       );
-      // No `checkout <ref>` either — the only checkout we'd allow is the
-      // retired `checkout <branch-name>`, which is also not in this flow.
       expect(argv0s.some((a) => a.startsWith("checkout"))).toBe(false);
     });
 

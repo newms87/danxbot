@@ -230,7 +230,7 @@ D("WorktreeManager (integration, real git)", () => {
     expect(existsSync(join(wtPath, "main-extra.txt"))).toBe(true);
   });
 
-  it("syncWorktree returns {kind: 'abort'} on rebase conflict AND leaves the working tree at HEAD (no destructive cleanup)", async () => {
+  it("syncWorktree returns {kind: 'conflict'} on rebase conflict AND leaves the working tree at HEAD (no destructive cleanup) — wrapper hands off to agent's prep skill for in-session resolution", async () => {
     const wm = createWorktreeManager(defaultGitRunner);
     await wm.bootstrap(ctx(), "alice");
     const wtPath = wm.worktreePath(ctx(), "alice");
@@ -268,8 +268,8 @@ D("WorktreeManager (integration, real git)", () => {
 
     const result = await wm.syncWorktree(ctx(), "alice");
 
-    expect(result.kind).toBe("abort");
-    if (result.kind === "abort") {
+    expect(result.kind).toBe("conflict");
+    if (result.kind === "conflict") {
       expect(result.reason).toBe("rebase conflict against origin/main");
     }
 
