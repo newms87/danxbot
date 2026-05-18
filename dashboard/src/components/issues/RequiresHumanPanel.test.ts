@@ -21,7 +21,7 @@ function wrap(
 
 function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
   const base: IssueDetail = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: "DX-1",
     external_id: "",

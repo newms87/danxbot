@@ -38,12 +38,50 @@ const GITHUB_PROBE_URL = "https://api.github.com/user";
 const PROBE_TIMEOUT_MS = 5_000;
 const PROBE_CACHE_TTL_MS = 5 * 60 * 1_000;
 const FORBIDDEN_VALUE_CHARS = /[\n\r\0]/;
+const TOKEN_PREFIX_LENGTH = 7;
+const TOKEN_SUFFIX_LENGTH = 4;
+const GITHUB_EXPIRY_HEADER = "github-authentication-token-expiration";
+// GitHub stamps the PAT expiry as `YYYY-MM-DD HH:MM:SS UTC` on every authed
+// response (always present for fine-grained PATs; classic PATs include it
+// only when the operator set one at creation). Strict regex up front so a
+// malformed header turns into `null` instead of an invalid Date that the
+// SPA renders as `NaN`.
+const GITHUB_EXPIRY_HEADER_RE =
+  /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}) UTC$/;
 
 export interface GithubCredentialsSnapshot {
   registered: boolean;
   token_shape_valid: boolean;
   last_validated_at: string | null;
   last_validation_error: string | null;
+  /**
+   * First `TOKEN_PREFIX_LENGTH` chars of the on-disk token (e.g. `ghp_abc`
+   * or `github_`). Empty string when unregistered. Seven chars matches the
+   * token-type discriminator length so the operator can tell classic vs
+   * fine-grained at a glance without losing entropy.
+   */
+  token_prefix: string;
+  /**
+   * Last `TOKEN_SUFFIX_LENGTH` chars of the on-disk token. Empty string
+   * when unregistered. Four trailing characters is below the brute-forceable
+   * threshold but enough to differentiate two rotations of the same type.
+   */
+  token_suffix: string;
+  /**
+   * ISO-8601 timestamp parsed from the probe response's
+   * `github-authentication-token-expiration` header (which GitHub ships as
+   * `YYYY-MM-DD HH:MM:SS UTC`). `null` when GitHub did not return the
+   * header (classic PATs without expiry) OR when the probe has not yet
+   * run for this snapshot (cold cache + `{probe: false}`).
+   */
+  token_expires_at: string | null;
+  /**
+   * GitHub login string parsed from the `/user` probe response body's
+   * `login` field. `null` when the probe failed before the body was
+   * read, when the body did not include a `login`, OR when the probe has
+   * not yet run for this snapshot.
+   */
+  token_user_login: string | null;
 }
 
 interface ProbeCacheEntry {
@@ -51,7 +89,24 @@ interface ProbeCacheEntry {
   error: string | null;
   /** Identifies which token produced this result so a rotation invalidates. */
   tokenFingerprint: string;
-  expiresAtMs: number;
+  cacheExpiresAtMs: number;
+  /** Captured from the probe response — see snapshot fields. */
+  tokenExpiresAt: string | null;
+  userLogin: string | null;
+}
+
+/**
+ * Metadata extracted from a successful `/user` probe response.
+ *
+ * Owned by `extractProbeMetadata` so the parsing rules (header regex,
+ * body shape, non-2xx fall-through) live in one place. `probeGithubToken`
+ * is the sole caller in production; tests can call directly with a
+ * fabricated `Response` to pin header-parse edge cases without standing
+ * up a fetch mock.
+ */
+export interface ProbeMetadata {
+  expiresAt: string | null;
+  userLogin: string | null;
 }
 
 const probeCache = new Map<string, ProbeCacheEntry>();
@@ -73,11 +128,101 @@ export function _resetForTesting(): void {
   fetchImpl = globalThis.fetch;
 }
 
+/**
+ * Canonical "no token registered" snapshot. Shared between
+ * `readGithubCredentialsSnapshot`'s unregistered branch and
+ * `agents-list.ts#buildSnapshot`'s reader-throws fallback so the empty
+ * shape lives in exactly one place — every future field add only
+ * touches the interface + this const.
+ */
+export const UNREGISTERED_GITHUB_SNAPSHOT: GithubCredentialsSnapshot = {
+  registered: false,
+  token_shape_valid: false,
+  last_validated_at: null,
+  last_validation_error: null,
+  token_prefix: "",
+  token_suffix: "",
+  token_expires_at: null,
+  token_user_login: null,
+};
+
 /** Stable fingerprint that changes when the token does but never echoes it. */
 function tokenFingerprint(token: string): string {
   // First 8 chars + length is enough to detect rotation without persisting
   // anything an attacker could correlate against a leaked log line.
   return `${token.slice(0, 8)}:${token.length}`;
+}
+
+/** Mask the on-disk token to `prefix…suffix` bytes for snapshot display. */
+function maskToken(token: string | null): {
+  prefix: string;
+  suffix: string;
+} {
+  if (token === null) return { prefix: "", suffix: "" };
+  return {
+    prefix: token.slice(0, TOKEN_PREFIX_LENGTH),
+    suffix:
+      token.length <= TOKEN_PREFIX_LENGTH
+        ? ""
+        : token.slice(-TOKEN_SUFFIX_LENGTH),
+  };
+}
+
+/**
+ * Parse the `github-authentication-token-expiration` header + JSON body
+ * `login` from a successful `/user` probe response. Returns `{null, null}`
+ * for non-2xx responses, header-absent responses, malformed headers, and
+ * any body-parse failure — so the snapshot's existing
+ * `last_validation_error` remains the single source of truth for "probe
+ * went wrong."
+ *
+ * Body read is fail-safe: if the response is opaque / not JSON / lacks a
+ * `login` field, `userLogin` falls through to `null` rather than throwing.
+ * Header parse is strict via `GITHUB_EXPIRY_HEADER_RE` so a garbled header
+ * never lands in the snapshot as an invalid Date the SPA renders `NaN` on.
+ */
+export async function extractProbeMetadata(
+  response: Response,
+): Promise<ProbeMetadata> {
+  if (!response.ok) return { expiresAt: null, userLogin: null };
+
+  const headerValue = response.headers.get(GITHUB_EXPIRY_HEADER);
+  const expiresAt = parseGithubExpiryHeader(headerValue);
+
+  let userLogin: string | null = null;
+  try {
+    const body = (await response.json()) as unknown;
+    if (
+      body !== null &&
+      typeof body === "object" &&
+      typeof (body as { login?: unknown }).login === "string" &&
+      (body as { login: string }).login.length > 0
+    ) {
+      userLogin = (body as { login: string }).login;
+    }
+  } catch {
+    // Body absent / not JSON / already consumed — leave userLogin null.
+  }
+
+  return { expiresAt, userLogin };
+}
+
+/**
+ * Convert GitHub's `YYYY-MM-DD HH:MM:SS UTC` PAT expiry header to ISO-8601.
+ * Exported only for the unit test to pin edge cases (UTC suffix, padding,
+ * malformed strings); production code calls `extractProbeMetadata`.
+ */
+export function parseGithubExpiryHeader(header: string | null): string | null {
+  if (!header) return null;
+  const m = GITHUB_EXPIRY_HEADER_RE.exec(header.trim());
+  if (!m) return null;
+  // `new Date("YYYY-MM-DDTHH:MM:SSZ")` is the canonical ISO-8601 path —
+  // parse via Date then re-serialize so the snapshot is deterministic
+  // regardless of host TZ.
+  const iso = `${m[1]}T${m[2]}Z`;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString();
 }
 
 function readTokenFromEnv(repoLocalPath: string): string | null {
@@ -104,10 +249,14 @@ function readTokenFromEnv(repoLocalPath: string): string | null {
   return raw && raw.length > 0 ? raw : null;
 }
 
-async function probeGithubToken(token: string): Promise<{
+interface ProbeResult {
   validatedAt: string;
   error: string | null;
-}> {
+  expiresAt: string | null;
+  userLogin: string | null;
+}
+
+async function probeGithubToken(token: string): Promise<ProbeResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   const validatedAt = new Date().toISOString();
@@ -125,26 +274,40 @@ async function probeGithubToken(token: string): Promise<{
       return {
         validatedAt,
         error: "GitHub rejected the token (401) — token may be revoked or invalid.",
+        expiresAt: null,
+        userLogin: null,
       };
     }
     if (response.status === 403) {
       return {
         validatedAt,
         error: "GitHub returned 403 Forbidden — token lacks required scope or is rate-limited.",
+        expiresAt: null,
+        userLogin: null,
       };
     }
     if (!response.ok) {
       return {
         validatedAt,
         error: `GitHub probe returned status ${response.status}.`,
+        expiresAt: null,
+        userLogin: null,
       };
     }
-    return { validatedAt, error: null };
+    const meta = await extractProbeMetadata(response);
+    return {
+      validatedAt,
+      error: null,
+      expiresAt: meta.expiresAt,
+      userLogin: meta.userLogin,
+    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
       validatedAt,
       error: `GitHub probe network error: ${msg}`,
+      expiresAt: null,
+      userLogin: null,
     };
   } finally {
     clearTimeout(timer);
@@ -179,13 +342,13 @@ export async function readGithubCredentialsSnapshot(
   const probe = options.probe ?? true;
   const token = readTokenFromEnv(repoLocalPath);
   if (token === null) {
-    return {
-      registered: false,
-      token_shape_valid: false,
-      last_validated_at: null,
-      last_validation_error: null,
-    };
+    return { ...UNREGISTERED_GITHUB_SNAPSHOT };
   }
+  // Mask the on-disk token once — prefix/suffix are deterministic per
+  // token value, so we surface them on every snapshot regardless of
+  // shape validity or cache freshness. The full token never leaves
+  // this function except via these masked slices.
+  const { prefix, suffix } = maskToken(token);
   const shapeOk = TOKEN_PATTERN.test(token);
   if (!shapeOk) {
     return {
@@ -194,6 +357,10 @@ export async function readGithubCredentialsSnapshot(
       last_validated_at: null,
       last_validation_error:
         "Token does not match expected GitHub PAT shape (ghp_/ghs_/github_pat_).",
+      token_prefix: prefix,
+      token_suffix: suffix,
+      token_expires_at: null,
+      token_user_login: null,
     };
   }
   const fp = tokenFingerprint(token);
@@ -201,24 +368,33 @@ export async function readGithubCredentialsSnapshot(
   if (
     cached &&
     cached.tokenFingerprint === fp &&
-    cached.expiresAtMs > Date.now()
+    cached.cacheExpiresAtMs > Date.now()
   ) {
     return {
       registered: true,
       token_shape_valid: true,
       last_validated_at: cached.validatedAt,
       last_validation_error: cached.error,
+      token_prefix: prefix,
+      token_suffix: suffix,
+      token_expires_at: cached.tokenExpiresAt,
+      token_user_login: cached.userLogin,
     };
   }
   if (!probe) {
     // Snapshot-aggregation path: never hit the network. SPA renders
     // "not yet validated" until a GET / PATCH against this repo
-    // populates the cache.
+    // populates the cache. Prefix/suffix are still surfaced — they
+    // come from the on-disk token, not the network.
     return {
       registered: true,
       token_shape_valid: true,
       last_validated_at: null,
       last_validation_error: null,
+      token_prefix: prefix,
+      token_suffix: suffix,
+      token_expires_at: null,
+      token_user_login: null,
     };
   }
   const result = await probeGithubToken(token);
@@ -226,13 +402,19 @@ export async function readGithubCredentialsSnapshot(
     validatedAt: result.validatedAt,
     error: result.error,
     tokenFingerprint: fp,
-    expiresAtMs: Date.now() + PROBE_CACHE_TTL_MS,
+    cacheExpiresAtMs: Date.now() + PROBE_CACHE_TTL_MS,
+    tokenExpiresAt: result.expiresAt,
+    userLogin: result.userLogin,
   });
   return {
     registered: true,
     token_shape_valid: true,
     last_validated_at: result.validatedAt,
     last_validation_error: result.error,
+    token_prefix: prefix,
+    token_suffix: suffix,
+    token_expires_at: result.expiresAt,
+    token_user_login: result.userLogin,
   };
 }
 
@@ -360,14 +542,21 @@ export async function handlePatchGithubCredentials(
     validatedAt: probe.validatedAt,
     error: null,
     tokenFingerprint: tokenFingerprint(raw),
-    expiresAtMs: Date.now() + PROBE_CACHE_TTL_MS,
+    cacheExpiresAtMs: Date.now() + PROBE_CACHE_TTL_MS,
+    tokenExpiresAt: probe.expiresAt,
+    userLogin: probe.userLogin,
   });
 
+  const { prefix, suffix } = maskToken(raw);
   const snapshot: GithubCredentialsSnapshot = {
     registered: true,
     token_shape_valid: true,
     last_validated_at: probe.validatedAt,
     last_validation_error: null,
+    token_prefix: prefix,
+    token_suffix: suffix,
+    token_expires_at: probe.expiresAt,
+    token_user_login: probe.userLogin,
   };
   json(res, 200, snapshot);
 }

@@ -55,6 +55,19 @@ const mockReadGithubCredentialsSnapshot = vi.fn();
 vi.mock("./agents-github.js", () => ({
   readGithubCredentialsSnapshot: (...args: unknown[]) =>
     mockReadGithubCredentialsSnapshot(...args),
+  // Inline fixture so vi.mock's hoisting (factory must not close over
+  // top-level non-hoisted symbols) stays valid. Mirrors the canonical
+  // const exported from agents-github.ts.
+  UNREGISTERED_GITHUB_SNAPSHOT: {
+    registered: false,
+    token_shape_valid: false,
+    last_validated_at: null,
+    last_validation_error: null,
+    token_prefix: "",
+    token_suffix: "",
+    token_expires_at: null,
+    token_user_login: null,
+  },
 }));
 
 import {
@@ -70,6 +83,10 @@ const GITHUB_UNREGISTERED = {
   token_shape_valid: false,
   last_validated_at: null,
   last_validation_error: null,
+  token_prefix: "",
+  token_suffix: "",
+  token_expires_at: null,
+  token_user_login: null,
 };
 
 beforeEach(() => {
@@ -357,6 +374,10 @@ describe("handleGetAgent", () => {
       token_shape_valid: false,
       last_validated_at: null,
       last_validation_error: null,
+      token_prefix: "",
+      token_suffix: "",
+      token_expires_at: null,
+      token_user_login: null,
     });
   });
 });

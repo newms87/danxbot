@@ -906,6 +906,21 @@ export interface GithubCredentialsSnapshot {
   token_shape_valid: boolean;
   last_validated_at: string | null;
   last_validation_error: string | null;
+  /**
+   * Masked-token display fields — DX-661. Derived server-side from the
+   * on-disk token bytes; the full token never reaches the SPA.
+   */
+  token_prefix: string;
+  token_suffix: string;
+  /**
+   * ISO-8601 timestamp parsed from the GitHub probe response header
+   * `github-authentication-token-expiration` (which GitHub ships as
+   * `YYYY-MM-DD HH:MM:SS UTC`). `null` for classic PATs without expiry
+   * AND when the probe has not run yet for this snapshot.
+   */
+  token_expires_at: string | null;
+  /** GitHub `/user` login from the probe response body; `null` when absent. */
+  token_user_login: string | null;
 }
 
 /**

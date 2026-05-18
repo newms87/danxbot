@@ -20,7 +20,7 @@ vi.mock("../../api", () => ({
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: "DX-1",
     external_id: "",

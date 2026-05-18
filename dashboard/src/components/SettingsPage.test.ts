@@ -200,6 +200,10 @@ describe("SettingsPage", () => {
           token_shape_valid: false,
           last_validated_at: null,
           last_validation_error: null,
+          token_prefix: "",
+          token_suffix: "",
+          token_expires_at: null,
+          token_user_login: null,
         },
       };
     }

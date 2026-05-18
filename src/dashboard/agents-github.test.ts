@@ -50,6 +50,8 @@ import {
   _resetForTesting,
   _setFetchImplForTesting,
   readGithubCredentialsSnapshot,
+  extractProbeMetadata,
+  parseGithubExpiryHeader,
 } from "./agents-github.js";
 import { deps } from "./agents-test-fixtures.js";
 
@@ -114,6 +116,10 @@ describe("handleGetGithubCredentials", () => {
       token_shape_valid: false,
       last_validated_at: null,
       last_validation_error: null,
+      token_prefix: "",
+      token_suffix: "",
+      token_expires_at: null,
+      token_user_login: null,
     });
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -436,6 +442,10 @@ describe("readGithubCredentialsSnapshot", () => {
       token_shape_valid: true,
       last_validated_at: expect.any(String),
       last_validation_error: null,
+      token_prefix: VALID_TOKEN.slice(0, 7),
+      token_suffix: VALID_TOKEN.slice(-4),
+      token_expires_at: null,
+      token_user_login: null,
     });
   });
 
@@ -449,6 +459,10 @@ describe("readGithubCredentialsSnapshot", () => {
       token_shape_valid: false,
       last_validated_at: null,
       last_validation_error: null,
+      token_prefix: "",
+      token_suffix: "",
+      token_expires_at: null,
+      token_user_login: null,
     });
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -470,6 +484,10 @@ describe("readGithubCredentialsSnapshot", () => {
       token_shape_valid: true,
       last_validated_at: null,
       last_validation_error: null,
+      token_prefix: VALID_TOKEN.slice(0, 7),
+      token_suffix: VALID_TOKEN.slice(-4),
+      token_expires_at: null,
+      token_user_login: null,
     });
     expect(mockFetch).not.toHaveBeenCalled();
   });
@@ -487,5 +505,243 @@ describe("readGithubCredentialsSnapshot", () => {
     expect(snap.last_validated_at).not.toBeNull();
     expect(snap.last_validation_error).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces token_expires_at + token_user_login on a successful probe", async () => {
+    mockParseEnvFile.mockReturnValue({ DANX_GITHUB_TOKEN: VALID_TOKEN });
+    mockFetch.mockResolvedValue(
+      new Response(JSON.stringify({ login: "alice" }), {
+        status: 200,
+        headers: {
+          "github-authentication-token-expiration":
+            "2026-06-04 12:00:00 UTC",
+        },
+      }),
+    );
+    const snap = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(snap.token_expires_at).toBe("2026-06-04T12:00:00.000Z");
+    expect(snap.token_user_login).toBe("alice");
+    expect(snap.token_prefix).toBe(VALID_TOKEN.slice(0, 7));
+    expect(snap.token_suffix).toBe(VALID_TOKEN.slice(-4));
+  });
+
+  it("cache hit round-trips token_expires_at + token_user_login without re-probing", async () => {
+    mockParseEnvFile.mockReturnValue({ DANX_GITHUB_TOKEN: VALID_TOKEN });
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ login: "bob" }), {
+        status: 200,
+        headers: {
+          "github-authentication-token-expiration":
+            "2026-12-01 08:30:45 UTC",
+        },
+      }),
+    );
+    const first = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(first.token_user_login).toBe("bob");
+
+    const second = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(second.token_expires_at).toBe("2026-12-01T08:30:45.000Z");
+    expect(second.token_user_login).toBe("bob");
+  });
+
+  it("returns prefix/suffix for a shape-invalid token (registered but malformed)", async () => {
+    mockParseEnvFile.mockReturnValue({
+      DANX_GITHUB_TOKEN: "not-a-pat-but-long-enough-to-slice",
+    });
+    const snap = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(snap.registered).toBe(true);
+    expect(snap.token_shape_valid).toBe(false);
+    expect(snap.token_prefix).toBe("not-a-p");
+    expect(snap.token_suffix).toBe("lice");
+    expect(snap.token_expires_at).toBeNull();
+    expect(snap.token_user_login).toBeNull();
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("returns empty suffix when the token is shorter than the prefix length", async () => {
+    // Should never happen for a real PAT, but defends the slice math.
+    mockParseEnvFile.mockReturnValue({ DANX_GITHUB_TOKEN: "ghp_a" });
+    const snap = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(snap.token_prefix).toBe("ghp_a");
+    expect(snap.token_suffix).toBe("");
+  });
+
+  it("PATCH stamps token_expires_at + token_user_login into the probe cache — follow-up snapshot serves them without re-probing", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_GITHUB_TOKEN"]);
+    mockFetch.mockResolvedValueOnce(
+      new Response(JSON.stringify({ login: "dani" }), {
+        status: 200,
+        headers: {
+          "github-authentication-token-expiration":
+            "2026-09-09 09:09:09 UTC",
+        },
+      }),
+    );
+    const patchReq = createMockReqWithBody("PATCH", { token: VALID_TOKEN });
+    (patchReq.headers as Record<string, string>)["authorization"] =
+      "Bearer user-newms87";
+    await handlePatchGithubCredentials(
+      patchReq,
+      createMockRes(),
+      "danxbot",
+      deps(),
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Subsequent snapshot read MUST hit cache — same fingerprint, no
+    // second fetch — AND surface the metadata PATCH just stamped.
+    mockParseEnvFile.mockReturnValue({ DANX_GITHUB_TOKEN: VALID_TOKEN });
+    const snap = await readGithubCredentialsSnapshot("/repos/danxbot");
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(snap.token_expires_at).toBe("2026-09-09T09:09:09.000Z");
+    expect(snap.token_user_login).toBe("dani");
+    expect(snap.last_validation_error).toBeNull();
+  });
+
+  it("PATCH 200 echoes the masked token + new metadata on the response", async () => {
+    mockWriteRepoEnvVars.mockResolvedValue(["DANX_GITHUB_TOKEN"]);
+    mockFetch.mockResolvedValue(
+      new Response(JSON.stringify({ login: "carol" }), {
+        status: 200,
+        headers: {
+          "github-authentication-token-expiration":
+            "2026-07-15 23:59:00 UTC",
+        },
+      }),
+    );
+    const req = createMockReqWithBody("PATCH", { token: VALID_TOKEN });
+    (req.headers as Record<string, string>)["authorization"] =
+      "Bearer user-newms87";
+    const res = createMockRes();
+    await handlePatchGithubCredentials(req, res, "danxbot", deps());
+    const body = JSON.parse(res._getBody());
+    expect(body.token_prefix).toBe(VALID_TOKEN.slice(0, 7));
+    expect(body.token_suffix).toBe(VALID_TOKEN.slice(-4));
+    expect(body.token_expires_at).toBe("2026-07-15T23:59:00.000Z");
+    expect(body.token_user_login).toBe("carol");
+  });
+});
+
+// ============================================================
+// parseGithubExpiryHeader — header parse edge cases
+// ============================================================
+
+describe("parseGithubExpiryHeader", () => {
+  it("converts the canonical `YYYY-MM-DD HH:MM:SS UTC` to ISO-8601", () => {
+    expect(parseGithubExpiryHeader("2026-06-04 12:00:00 UTC")).toBe(
+      "2026-06-04T12:00:00.000Z",
+    );
+  });
+
+  it("returns null for a null / empty header", () => {
+    expect(parseGithubExpiryHeader(null)).toBeNull();
+    expect(parseGithubExpiryHeader("")).toBeNull();
+  });
+
+  it("returns null when the UTC suffix is missing", () => {
+    expect(parseGithubExpiryHeader("2026-06-04 12:00:00")).toBeNull();
+  });
+
+  it("returns null for a non-UTC suffix (defensive — GitHub always sends UTC)", () => {
+    expect(parseGithubExpiryHeader("2026-06-04 12:00:00 PST")).toBeNull();
+  });
+
+  it("returns null for malformed dates", () => {
+    expect(parseGithubExpiryHeader("not a date UTC")).toBeNull();
+    expect(parseGithubExpiryHeader("2026-13-40 99:99:99 UTC")).toBeNull();
+  });
+
+  it("strips surrounding whitespace before matching", () => {
+    expect(parseGithubExpiryHeader("  2026-01-01 00:00:00 UTC  ")).toBe(
+      "2026-01-01T00:00:00.000Z",
+    );
+  });
+
+  it("preserves two-digit padding in hour/minute/second", () => {
+    expect(parseGithubExpiryHeader("2026-06-04 01:02:03 UTC")).toBe(
+      "2026-06-04T01:02:03.000Z",
+    );
+  });
+});
+
+// ============================================================
+// extractProbeMetadata — header + body parse from a full Response
+// ============================================================
+
+describe("extractProbeMetadata", () => {
+  it("parses expiresAt + userLogin from a 200 with both", async () => {
+    const res = new Response(JSON.stringify({ login: "alice" }), {
+      status: 200,
+      headers: {
+        "github-authentication-token-expiration":
+          "2026-08-01 06:30:00 UTC",
+      },
+    });
+    expect(await extractProbeMetadata(res)).toEqual({
+      expiresAt: "2026-08-01T06:30:00.000Z",
+      userLogin: "alice",
+    });
+  });
+
+  it("returns expiresAt=null when the header is absent (classic PAT without expiry)", async () => {
+    const res = new Response(JSON.stringify({ login: "alice" }), {
+      status: 200,
+    });
+    const meta = await extractProbeMetadata(res);
+    expect(meta.expiresAt).toBeNull();
+    expect(meta.userLogin).toBe("alice");
+  });
+
+  it("returns userLogin=null when the body lacks a login field", async () => {
+    const res = new Response(JSON.stringify({}), {
+      status: 200,
+      headers: {
+        "github-authentication-token-expiration":
+          "2026-08-01 06:30:00 UTC",
+      },
+    });
+    const meta = await extractProbeMetadata(res);
+    expect(meta.expiresAt).toBe("2026-08-01T06:30:00.000Z");
+    expect(meta.userLogin).toBeNull();
+  });
+
+  it("returns userLogin=null when the body is not JSON", async () => {
+    const res = new Response("plain text response", { status: 200 });
+    const meta = await extractProbeMetadata(res);
+    expect(meta.userLogin).toBeNull();
+  });
+
+  it("returns userLogin=null when the body's login is not a non-empty string", async () => {
+    const res = new Response(JSON.stringify({ login: "" }), { status: 200 });
+    expect((await extractProbeMetadata(res)).userLogin).toBeNull();
+
+    const res2 = new Response(JSON.stringify({ login: 42 }), { status: 200 });
+    expect((await extractProbeMetadata(res2)).userLogin).toBeNull();
+  });
+
+  it("returns {null, null} for a non-2xx response (probe rejection)", async () => {
+    const res = new Response("Bad credentials", {
+      status: 401,
+      headers: {
+        "github-authentication-token-expiration":
+          "2026-08-01 06:30:00 UTC",
+      },
+    });
+    expect(await extractProbeMetadata(res)).toEqual({
+      expiresAt: null,
+      userLogin: null,
+    });
+  });
+
+  it("returns expiresAt=null when the header is malformed (defense-in-depth)", async () => {
+    const res = new Response(JSON.stringify({ login: "alice" }), {
+      status: 200,
+      headers: {
+        "github-authentication-token-expiration": "garbage",
+      },
+    });
+    expect((await extractProbeMetadata(res)).expiresAt).toBeNull();
   });
 });

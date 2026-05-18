@@ -112,6 +112,59 @@ const lastValidatedRelative = computed<string | null>(() => {
   return at === null ? null : formatRelative(at);
 });
 
+// DX-661 — masked token + expiry + authenticated-as lines.
+//
+// `maskedToken` only renders when the operator has actually registered
+// SOMETHING (prefix is non-empty); the modal's empty-input state stays
+// quiet rather than rendering a stray ellipsis.
+const maskedToken = computed<string | null>(() => {
+  const s = snapshot.value;
+  if (s.token_prefix.length === 0) return null;
+  return s.token_suffix.length > 0
+    ? `${s.token_prefix}…${s.token_suffix}`
+    : s.token_prefix;
+});
+
+const EXPIRY_WARN_DAYS = 14;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+interface ExpiryLine {
+  text: string;
+  warn: boolean;
+}
+
+function formatYmd(date: Date): string {
+  // UTC slicing keeps the displayed date deterministic regardless of
+  // the operator's host TZ — the snapshot ships an ISO string and the
+  // expiry concept is calendar-day-level, not minute-level.
+  return date.toISOString().slice(0, 10);
+}
+
+const expiryLine = computed<ExpiryLine | null>(() => {
+  const iso = snapshot.value.token_expires_at;
+  if (iso === null) return null;
+  const expiresAt = new Date(iso);
+  if (Number.isNaN(expiresAt.getTime())) return null;
+  const ymd = formatYmd(expiresAt);
+  // Day-level diff so an expiry at 23:59:00 UTC reads as "in Nd" not
+  // "in N-1d" on the same-day-but-earlier render.
+  const diffDays = Math.round(
+    (expiresAt.getTime() - Date.now()) / MS_PER_DAY,
+  );
+  if (diffDays < 0) {
+    const ago = Math.abs(diffDays);
+    return { text: `Expired ${ago}d ago (${ymd})`, warn: true };
+  }
+  return {
+    text: `Expires in ${diffDays}d (${ymd})`,
+    warn: diffDays <= EXPIRY_WARN_DAYS,
+  };
+});
+
+const userLogin = computed<string | null>(
+  () => snapshot.value.token_user_login,
+);
+
 function openModal(): void {
   modalOpen.value = true;
 }
@@ -155,6 +208,39 @@ function onSaved(_next: GithubCredentialsSnapshot): void {
         data-test="github-credentials-reason"
       >
         {{ badge.reason }}
+      </p>
+
+      <p
+        v-if="maskedToken"
+        class="text-xs text-gray-700 dark:text-gray-200 font-mono"
+        data-test="github-credentials-masked-token"
+      >
+        {{ maskedToken }}
+      </p>
+
+      <p
+        v-if="userLogin"
+        class="text-xs italic text-gray-500 dark:text-gray-400"
+        data-test="github-credentials-user-login"
+      >
+        Authenticated as @{{ userLogin }}
+      </p>
+
+      <p
+        v-if="expiryLine"
+        :class="[
+          'text-xs',
+          expiryLine.warn
+            ? 'text-amber-700 dark:text-amber-300 font-medium'
+            : 'text-gray-500 dark:text-gray-400',
+        ]"
+        :data-test="
+          expiryLine.warn
+            ? 'github-credentials-expiry-warn'
+            : 'github-credentials-expiry'
+        "
+      >
+        {{ expiryLine.text }}
       </p>
 
       <p

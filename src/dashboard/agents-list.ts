@@ -34,6 +34,7 @@ import { eventBus } from "./event-bus.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import {
   readGithubCredentialsSnapshot,
+  UNREGISTERED_GITHUB_SNAPSHOT,
   type GithubCredentialsSnapshot,
 } from "./agents-github.js";
 
@@ -210,12 +211,7 @@ export async function buildSnapshot(
       `readGithubCredentialsSnapshot(${repo.name}) failed; rendering snapshot with registered=false`,
       err,
     );
-    githubCredentials = {
-      registered: false,
-      token_shape_valid: false,
-      last_validated_at: null,
-      last_validation_error: null,
-    };
+    githubCredentials = { ...UNREGISTERED_GITHUB_SNAPSHOT };
   }
 
   return {
