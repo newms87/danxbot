@@ -48,6 +48,14 @@ import {
   loadPlaywrightUrl,
   type PlaywrightProxyDeps,
 } from "./playwright-proxy.js";
+import {
+  handlePreviewProxy,
+  makePreviewProxyDeps,
+  parsePreviewPath,
+  type PreviewProxyDeps,
+} from "./preview-proxy.js";
+import { resolveReachableHost, workerHost } from "./dispatch-proxy.js";
+import { getDispatchById } from "./dispatches-db.js";
 import { handleGetAgent, handleListAgents } from "./agents-list.js";
 import {
   handleGetGithubCredentials,
@@ -166,6 +174,7 @@ async function route(
   dispatchDeps: DispatchProxyDeps,
   playwrightDeps: PlaywrightProxyDeps,
   syncRootDeps: SyncRootRouteDeps,
+  previewDeps: PreviewProxyDeps,
 ): Promise<boolean> {
   const method = req.method?.toUpperCase() ?? "GET";
 
@@ -265,6 +274,21 @@ async function route(
         },
         dispatchDeps,
       );
+      return true;
+    }
+  }
+
+  // ── DX-670 Preview proxy — `GET /preview/:dispatchId/:templateId/<tail>`.
+  // Dispatch-scoped iframe URL that 3rd parties embed directly. Auth is
+  // dual-band (bearer / user session / signed query); the handler owns
+  // the gate. Restricted to GET — Vite serves the preview entirely
+  // via GET (HTML + assets). HMR live-reload over WS is NOT proxied;
+  // the iframe loads + reloads on file change but doesn't hot-swap.
+  // See `preview-proxy.ts` for the full contract.
+  if (method === "GET" && url.pathname.startsWith("/preview/")) {
+    const parsed = parsePreviewPath(url.pathname);
+    if (parsed) {
+      await handlePreviewProxy(req, res, parsed, previewDeps);
       return true;
     }
   }
@@ -1030,6 +1054,20 @@ export async function startDashboard(): Promise<void> {
     upstreamUrl: loadPlaywrightUrl(),
   };
 
+  // DX-670 — preview proxy wiring. Shares the dispatch token with the
+  // launch + playwright proxies (single secret per dashboard). Worker
+  // routing reuses `resolveReachableHost` + the per-repo `workerPort`
+  // map so the proxy benefits from the same probe/cache machinery the
+  // dispatch proxy uses.
+  const repoByName = new Map(repos.map((r) => [r.name, r]));
+  const previewDeps: PreviewProxyDeps = makePreviewProxyDeps({
+    token,
+    getDispatchById,
+    resolveReachableHost,
+    workerPortFor: (name) => repoByName.get(name)?.workerPort ?? null,
+    primaryHostFor: (name) => repoByName.get(name)?.workerHost ?? workerHost(name),
+  });
+
   await checkWorkerHostResolution(repos, resolveHost);
 
   // Start the DB change detector that publishes dispatch:created and
@@ -1087,6 +1125,7 @@ export async function startDashboard(): Promise<void> {
         dispatchDeps,
         playwrightDeps,
         syncRootDeps,
+        previewDeps,
       );
       if (!handled) {
         json(res, 404, { error: "Not found" });
