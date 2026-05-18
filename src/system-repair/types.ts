@@ -31,6 +31,18 @@ export type SystemErrorStatus = "open" | "repairing" | "fixed" | "unfixable";
  */
 export const REPAIR_CAP = 3;
 
+/**
+ * Minimum `system_errors.count` before the Self-Repair dispatcher
+ * (DX-651 — Phase 2 of DX-580) considers an open row a candidate for
+ * an autonomous fix attempt. A signature that fired once is noise; the
+ * threshold forces a row to recur before the worker burns tokens on a
+ * repair dispatch. Same magnitude as `REPAIR_CAP` so the dispatcher
+ * gives every cap-bounded chain a fair shot before the cap kicks in.
+ *
+ * Dashboard SPA mirrors via the SSE feed — no in-process import.
+ */
+export const REPAIR_THRESHOLD = 3;
+
 export interface SystemErrorRow {
   id: number;
   signature_hash: string;
