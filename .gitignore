@@ -86,3 +86,5 @@ deploy/targets/.cache/
 # DX-558 — repo-root sync error state. Worker rewrites on every transition;
 # never committed.
 .danxbot/sync-root-state.json
+# DX-667 — agent-local scratch (vitest logs, ad-hoc captures). Never committed.
+.danxbot/tmp/
