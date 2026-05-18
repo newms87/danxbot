@@ -1,25 +1,46 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import { MarkdownEditor } from "@thehammer/danx-ui";
+import { computed, ref, watch } from "vue";
+import {
+  DanxButton,
+  DanxIcon,
+  MarkdownEditor,
+  chevronDownIcon,
+  chevronRightIcon,
+} from "@thehammer/danx-ui";
 import { useBrokenAgents } from "../composables/useBrokenAgents";
 import { useNowTick } from "../composables/useNowTick";
 
 defineEmits<{
-  /** Operator clicked "View agent" — emit so the parent route can switch tabs. */
   "open-agent": [repo: string, agent: string];
 }>();
 
 const { entries, error, unblock, reRunEvaluator } = useBrokenAgents();
 
-/**
- * Drives the "Nm ago" relative-time labels via the shared 60s cosmetic
- * ticker (`useNowTick`). Sharing the tick keeps the banner consistent
- * with `AgentCard`'s busy badge — no second clock skew.
- */
 const now = useNowTick();
 
-/** Track which row currently has its confirm modal open. */
 const pendingUnblock = ref<{ repo: string; agent: string } | null>(null);
+
+const expanded = ref<Record<string, boolean>>({});
+
+watch(entries, (list) => {
+  const keys = new Set(list.map((e) => `${e.repoName}/${e.agentName}`));
+  for (const k of Object.keys(expanded.value)) {
+    if (!keys.has(k)) delete expanded.value[k];
+  }
+});
+
+function rowKey(repo: string, agent: string): string {
+  return `${repo}/${agent}`;
+}
+
+function toggle(repo: string, agent: string): void {
+  const k = rowKey(repo, agent);
+  expanded.value = { ...expanded.value, [k]: !expanded.value[k] };
+}
+
+function isExpanded(repo: string, agent: string): boolean {
+  return !!expanded.value[rowKey(repo, agent)];
+}
 
 function relativeTime(iso: string): string {
   if (!iso) return "—";
@@ -42,7 +63,11 @@ function truncate(s: string, max = 100): string {
   return s.slice(0, max - 1).trimEnd() + "…";
 }
 
-/** Banner visibility — silent green state when zero rows. */
+function summarize(reason: string): string {
+  const oneLine = reason.replace(/\s+/g, " ").trim();
+  return truncate(oneLine, 140);
+}
+
 const visible = computed(() => entries.value.length > 0);
 
 function openUnblockConfirm(repo: string, agent: string): void {
@@ -62,16 +87,16 @@ async function confirmUnblock(): Promise<void> {
 </script>
 
 <template>
-  <div
+  <section
     v-if="visible"
     role="alert"
     aria-live="assertive"
     data-test="broken-agents-banner"
-    class="broken-banner"
+    class="broken-section"
   >
-    <div class="headline">
-      <span aria-hidden="true" class="icon">🔴</span>
-      <span>AGENTS BROKEN — IMMEDIATE ACTION REQUIRED</span>
+    <div class="section-title">
+      <span aria-hidden="true">🔴</span>
+      <span>Agents Broken — Action Required</span>
       <span class="count">{{ entries.length }}</span>
     </div>
 
@@ -81,24 +106,40 @@ async function confirmUnblock(): Promise<void> {
       data-test="broken-agents-banner-error"
     >{{ error }}</div>
 
-    <ul class="rows">
-      <li
-        v-for="entry in entries"
-        :key="`${entry.repoName}/${entry.agentName}`"
-        class="row"
-        :data-test="`broken-row-${entry.repoName}-${entry.agentName}`"
+    <div
+      v-for="entry in entries"
+      :key="`${entry.repoName}/${entry.agentName}`"
+      class="gate gate-broken"
+      :class="{ expanded: isExpanded(entry.repoName, entry.agentName) }"
+      :data-test="`broken-row-${entry.repoName}-${entry.agentName}`"
+    >
+      <button
+        type="button"
+        class="gate-bar"
+        :aria-expanded="isExpanded(entry.repoName, entry.agentName)"
+        :data-test="`broken-toggle-${entry.repoName}-${entry.agentName}`"
+        @click="toggle(entry.repoName, entry.agentName)"
       >
-        <div class="row-head">
-          <span class="agent-name">{{ entry.agentName }}</span>
-          <span class="repo-chip">{{ entry.repoName }}</span>
-          <span class="when">broken {{ relativeTime(entry.broken.set_at) }}</span>
-          <span
-            v-if="entry.broken.evaluator_status !== 'completed'"
-            class="evaluator-status"
-            :data-evaluator-status="entry.broken.evaluator_status"
-          >evaluator: {{ entry.broken.evaluator_status }}</span>
-        </div>
+        <DanxIcon
+          :icon="isExpanded(entry.repoName, entry.agentName) ? chevronDownIcon : chevronRightIcon"
+          class="chev"
+        />
+        <span class="gate-glyph" aria-hidden="true">🔴</span>
+        <span class="gate-label">{{ entry.agentName }}</span>
+        <span class="repo-chip">{{ entry.repoName }}</span>
+        <span class="gate-summary">{{ summarize(entry.broken.reason) }}</span>
+        <span
+          v-if="entry.broken.evaluator_status !== 'completed'"
+          class="evaluator-pill"
+          :data-evaluator-status="entry.broken.evaluator_status"
+        >eval: {{ entry.broken.evaluator_status }}</span>
+        <span class="gate-meta">{{ relativeTime(entry.broken.set_at) }}</span>
+      </button>
 
+      <div
+        v-if="isExpanded(entry.repoName, entry.agentName)"
+        class="gate-body"
+      >
         <div class="reason">
           <MarkdownEditor
             :model-value="entry.broken.reason"
@@ -122,17 +163,18 @@ async function confirmUnblock(): Promise<void> {
           </ul>
         </div>
 
-        <div class="row-actions">
-          <button
-            type="button"
-            class="btn btn-unblock"
+        <div class="gate-actions">
+          <DanxButton
+            size="sm"
+            variant="warning"
             :disabled="entry.unblocking"
+            :loading="entry.unblocking"
             :data-test="`broken-unblock-${entry.repoName}-${entry.agentName}`"
             @click="openUnblockConfirm(entry.repoName, entry.agentName)"
-          >{{ entry.unblocking ? "Unblocking…" : "Unblock + reset strikes" }}</button>
-          <button
-            type="button"
-            class="btn btn-reevaluate"
+          >Unblock + reset strikes</DanxButton>
+          <DanxButton
+            size="sm"
+            variant="muted"
             :disabled="entry.reRunning || entry.broken.evaluator_status === 'running'"
             :data-test="`broken-reeval-${entry.repoName}-${entry.agentName}`"
             @click="reRunEvaluator(entry.repoName, entry.agentName)"
@@ -140,23 +182,17 @@ async function confirmUnblock(): Promise<void> {
             <span v-if="entry.broken.evaluator_status === 'running'">Evaluator running…</span>
             <span v-else-if="entry.reRunning">Queuing…</span>
             <span v-else>Re-run evaluator</span>
-          </button>
-          <button
-            type="button"
-            class="btn btn-view"
+          </DanxButton>
+          <DanxButton
+            size="sm"
+            variant="muted"
             :data-test="`broken-view-${entry.repoName}-${entry.agentName}`"
             @click="$emit('open-agent', entry.repoName, entry.agentName)"
-          >View agent</button>
+          >View agent</DanxButton>
         </div>
-      </li>
-    </ul>
+      </div>
+    </div>
 
-    <!--
-      Confirmation modal — Unblock destroys the strike-broken state.
-      Accessibility: Escape + click-outside cancel; the overlay receives
-      keyboard focus so the Escape handler fires without depending on
-      browser focus heuristics.
-    -->
     <div
       v-if="pendingUnblock"
       class="modal-overlay"
@@ -179,145 +215,170 @@ async function confirmUnblock(): Promise<void> {
           this banner may recur on the next dispatch.
         </p>
         <div class="modal-actions">
-          <button
-            type="button"
-            class="btn btn-cancel"
+          <DanxButton
+            size="sm"
+            variant="muted"
             data-test="broken-unblock-cancel"
             @click="closeUnblockConfirm"
-          >Cancel</button>
-          <button
-            type="button"
-            class="btn btn-confirm"
+          >Cancel</DanxButton>
+          <DanxButton
+            size="sm"
+            variant="warning"
             data-test="broken-unblock-confirm"
             @click="confirmUnblock"
-          >Unblock + reset strikes</button>
+          >Unblock + reset strikes</DanxButton>
         </div>
       </div>
     </div>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.broken-banner {
-  background: #b91c1c; /* tailwind red-700 — sufficient contrast w/ white */
-  color: #ffffff;
-  border-radius: 8px;
-  padding: 12px 16px;
+.broken-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 12px;
   margin-bottom: 12px;
-  max-height: 40vh;
-  overflow-y: auto;
-  box-shadow: 0 4px 12px rgba(127, 29, 29, 0.4);
+  border-radius: 8px;
+  border: 1px solid rgb(239 68 68 / 0.35);
+  background: rgb(239 68 68 / 0.08);
 }
-.headline {
+.section-title {
   display: flex;
   align-items: center;
   gap: 8px;
+  font-size: 10px;
   font-weight: 700;
-  font-size: 14px;
-  letter-spacing: 0.03em;
-  margin-bottom: 8px;
-}
-.icon {
-  font-size: 16px;
-  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #fca5a5;
+  margin-bottom: 2px;
 }
 .count {
-  margin-left: 4px;
-  background: rgba(0, 0, 0, 0.25);
+  margin-left: 2px;
+  background: rgb(0 0 0 / 0.3);
   border-radius: 999px;
   padding: 1px 8px;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fee2e2;
 }
 .row-error {
-  background: rgba(0, 0, 0, 0.25);
+  background: rgb(0 0 0 / 0.3);
   color: #fee2e2;
   font-size: 12px;
   padding: 6px 8px;
   border-radius: 6px;
-  margin-bottom: 8px;
 }
-.rows {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+.gate {
+  border-radius: 6px;
+  border: 1px solid rgb(239 68 68 / 0.30);
+  background: rgb(239 68 68 / 0.10);
+  overflow: hidden;
+}
+.gate-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gate-bar:hover {
+  background: rgb(255 255 255 / 0.03);
+}
+.chev {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: #94a3b8;
+}
+.gate-glyph {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.gate-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #fca5a5;
+  flex-shrink: 0;
+}
+.repo-chip {
+  background: rgb(0 0 0 / 0.3);
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #e2e8f0;
+  flex-shrink: 0;
+}
+.gate-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #cbd5e1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.evaluator-pill {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.15);
+  color: #fde68a;
+  flex-shrink: 0;
+}
+.evaluator-pill[data-evaluator-status="failed"] {
+  background: rgb(0 0 0 / 0.4);
+  color: #fca5a5;
+}
+.gate-meta {
+  font-size: 10px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.gate-body {
+  padding: 4px 12px 12px 32px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-}
-.row {
-  background: rgba(0, 0, 0, 0.18);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  padding: 10px 12px;
-}
-.row-head {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
   font-size: 13px;
-}
-.agent-name {
-  font-weight: 700;
-}
-.repo-chip {
-  background: rgba(0, 0, 0, 0.3);
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-.when {
-  color: #fecaca;
-  font-size: 12px;
-}
-.evaluator-status {
-  background: rgba(255, 255, 255, 0.15);
-  border-radius: 999px;
-  padding: 1px 8px;
-  font-size: 11px;
-  font-weight: 600;
-}
-[data-evaluator-status="failed"] {
-  background: rgba(0, 0, 0, 0.4);
+  color: #cbd5e1;
 }
 .reason {
-  margin-top: 8px;
   background: #0f172a;
   color: #f1f5f9;
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  border: 1px solid rgb(255 255 255 / 0.12);
   border-radius: 6px;
   padding: 4px 12px;
   font-size: 13px;
 }
-.reason :deep(*) {
-  color: #f1f5f9;
-}
-.reason :deep(p) {
-  margin: 6px 0;
-}
-.reason :deep(a) {
-  color: #93c5fd;
-}
+.reason :deep(*) { color: #f1f5f9; }
+.reason :deep(p) { margin: 6px 0; }
+.reason :deep(a) { color: #93c5fd; }
 .reason :deep(code) {
-  background: rgba(255, 255, 255, 0.1);
+  background: rgb(255 255 255 / 0.1);
   color: #fde68a;
   padding: 1px 5px;
   border-radius: 3px;
 }
 .reason :deep(pre) {
-  background: rgba(0, 0, 0, 0.5);
+  background: rgb(0 0 0 / 0.5);
   color: #f1f5f9;
   padding: 8px 10px;
   border-radius: 4px;
   overflow-x: auto;
 }
-.reason :deep(pre code) {
-  background: transparent;
-  color: inherit;
-  padding: 0;
-}
+.reason :deep(pre code) { background: transparent; color: inherit; padding: 0; }
 .reason :deep(blockquote) {
   border-left: 3px solid #475569;
   margin: 6px 0;
@@ -325,7 +386,6 @@ async function confirmUnblock(): Promise<void> {
   color: #cbd5e1;
 }
 .strikes {
-  margin-top: 8px;
   font-size: 12px;
   color: #fee2e2;
 }
@@ -340,64 +400,21 @@ async function confirmUnblock(): Promise<void> {
 }
 .strikes code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(0, 0, 0, 0.3);
+  background: rgb(0 0 0 / 0.3);
   border-radius: 3px;
   padding: 0 4px;
 }
-.strike-status {
-  font-style: italic;
-  color: #fed7aa;
-}
-.strike-err {
-  color: #fca5a5;
-}
-.row-actions {
-  margin-top: 10px;
+.strike-status { font-style: italic; color: #fed7aa; }
+.strike-err { color: #fca5a5; }
+.gate-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
 }
-.btn {
-  font-family: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  background: rgba(0, 0, 0, 0.25);
-  color: #ffffff;
-  cursor: pointer;
-}
-.btn:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.4);
-}
-.btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.btn-unblock {
-  background: #f59e0b;
-  border-color: #f59e0b;
-  color: #1a1207;
-}
-.btn-unblock:hover:not(:disabled) {
-  background: #fbbf24;
-}
-.btn-reevaluate {
-  background: rgba(255, 255, 255, 0.92);
-  border-color: rgba(255, 255, 255, 0.92);
-  color: #7f1d1d;
-}
-.btn-reevaluate:hover:not(:disabled) {
-  background: #ffffff;
-}
-.btn-view {
-  background: transparent;
-}
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.65);
+  background: rgb(0 0 0 / 0.65);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -414,20 +431,11 @@ async function confirmUnblock(): Promise<void> {
   flex-direction: column;
   gap: 14px;
 }
-.modal-title {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 700;
-}
-.modal-body {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.55;
-  color: #cbd5e1;
-}
+.modal-title { margin: 0; font-size: 16px; font-weight: 700; }
+.modal-body { margin: 0; font-size: 13px; line-height: 1.55; color: #cbd5e1; }
 .modal-body code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgb(255 255 255 / 0.08);
   padding: 1px 5px;
   border-radius: 3px;
 }
@@ -435,21 +443,5 @@ async function confirmUnblock(): Promise<void> {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-}
-.btn-cancel {
-  background: transparent;
-  border-color: #475569;
-  color: #94a3b8;
-}
-.btn-cancel:hover {
-  background: #1e293b;
-}
-.btn-confirm {
-  background: #f59e0b;
-  border-color: #f59e0b;
-  color: #1a1207;
-}
-.btn-confirm:hover {
-  background: #fbbf24;
 }
 </style>
