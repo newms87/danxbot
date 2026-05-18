@@ -10,6 +10,12 @@ worktrees/
 .trello-retry/
 issues/
 trash/
+prep-verdicts/
+dispatch-stops/
+cron-state.json
+sync-root-state.json
+logs/
+CRITICAL_FAILURE
 workspaces/*/.claude/rules/danx-*.md
 workspaces/*/.claude/hooks/worktree-guard.mjs
 workspaces/*/.claude/scheduled_tasks.lock
@@ -68,3 +74,9 @@ workspaces/worktree-repair/workspace-shape.test.ts
 workspaces/worktree-repair/.mcp.json
 workspaces/worktree-repair/.claude/settings.json
 workspaces/worktree-repair/.claude/skills/danx-prep/
+workspaces/worker-repair/CLAUDE.md
+workspaces/worker-repair/workspace.yml
+workspaces/worker-repair/workspace-shape.test.ts
+workspaces/worker-repair/.mcp.json
+workspaces/worker-repair/.claude/settings.json
+workspaces/worker-repair/.claude/skills/danx-prep/
