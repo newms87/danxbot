@@ -67,6 +67,7 @@ import { ensureWorktreesProvisioned } from "./agent/ensure-worktrees-provisioned
 import { replayStopQueue } from "./worker/replay-stop-queue.js";
 import { replayPrepVerdictQueue } from "./worker/replay-prep-verdict-queue.js";
 import { startEvaluatorDispatcher } from "./agent/evaluator-dispatcher.js";
+import { startSyncRepairDispatcher } from "./agent/sync-repair-dispatcher.js";
 import {
   preflightSystemdRun,
   SystemdPreflightError,
@@ -742,6 +743,16 @@ async function startWorkerMode(): Promise<void> {
   // SIGTERM (process exit takes the listener down); kept for the
   // shutdown contract symmetry with the other boot subscriptions.
   startEvaluatorDispatcher({ repo });
+
+  // DX-645 (Phase 3 of DX-576) — subscribe to sync-repair-needed events
+  // so the worktree-repair dispatch fires when `dispatchWithRecovery`
+  // observes `syncWorktree.kind === "abort"`. Same per-worker filter
+  // + same fire-and-forget unsubscribe contract as the evaluator
+  // dispatcher above. The repair agent rebases + resolves + pushes
+  // and the dispatcher's onComplete clears `agent.broken` on
+  // terminal `completed` so the original agent is dispatchable
+  // again on the next tick without operator action.
+  startSyncRepairDispatcher({ repo });
 
   // Start Slack listener for this repo (if configured)
   if (repo.slack.enabled) {

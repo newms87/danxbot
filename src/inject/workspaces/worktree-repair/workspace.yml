@@ -1,0 +1,9 @@
+name: worktree-repair
+description: Worktree-repair dispatch — auto-heal `syncWorktree` abort by rebasing the broken agent's branch in place + clearing `agent.broken` on success (DX-645 — Phase 3 of DX-576)
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []
+staging-paths: []

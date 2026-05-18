@@ -19,9 +19,29 @@
  * On `syncWorktree.kind === "abort"` (env failure — ff-only refused,
  * fetch network failure, rev-list plumbing) this wrapper stamps
  * `agents.<name>.broken` persistently so the picker skips the agent
- * until the operator clears the field, then throws a plain `Error` so
- * the multi-agent caller's existing try/catch fires its dispatch-
- * cleanup bookkeeping (clear YAML `dispatch{}`, release lock).
+ * for THIS tick, emits a `sync-repair-needed` event so the
+ * sync-repair-dispatcher (DX-645 / Phase 3 of DX-576) dispatches the
+ * `worktree-repair` workspace asynchronously, then throws a plain
+ * `Error` so the multi-agent caller's existing try/catch fires its
+ * dispatch-cleanup bookkeeping (clear YAML `dispatch{}`, release
+ * lock). The repair agent rebases + resolves + pushes + clears
+ * `agent.broken` (on terminal `completed`) so the original agent is
+ * dispatchable again on the next tick — no operator action required
+ * for the steady-state autosave-rebase-conflict class. The broken
+ * stamp persists when the repair dispatch itself fails (terminal
+ * `failed`), preserving the prior operator-gate behavior as the
+ * fallback for unresolvable conflicts.
+ *
+ * The order — stamp BEFORE emit BEFORE throw — is load-bearing:
+ *   - Stamping first guarantees the picker-gate is in place even if
+ *     the event subscriber is missing or throws.
+ *   - Emitting before the throw means the event lands in the
+ *     dispatch-events bus's microtask queue while the caller's
+ *     try/catch unwinds; the repair dispatcher fires its dispatch
+ *     after the unwind completes, on a fresh tick.
+ *   - Throwing last gives the multi-agent caller the rejection it
+ *     needs to release its lock; the repair runs concurrently with
+ *     the next poller tick.
  *
  * On `syncWorktree.kind === "conflict"` (rebase against origin/main
  * hit a merge conflict — the EXPECTED branch-collision state when two
@@ -39,6 +59,7 @@ import { createLogger } from "../logger.js";
 import { defaultBrokenEvaluator, setAgentBroken } from "../settings-file.js";
 import type { DispatchInput, DispatchResult } from "./core.js";
 import type { WorktreeManager } from "../agent/worktree-manager.js";
+import { dispatchEvents } from "./events.js";
 
 const log = createLogger("recovery-mode");
 
@@ -95,11 +116,19 @@ export async function dispatchWithRecovery(
   // until the operator clears the field via the dashboard.
   const sync = await manager.syncWorktree(input.repo, agentName);
   if (sync.kind === "abort") {
+    // DX-645 — emit the sync-repair-needed event AFTER the broken
+    // stamp so the picker-gate is in place before the repair
+    // dispatcher fires (subscriber-vs-stamp race-safe). The repair
+    // agent's terminal `completed` clears `agent.broken`
+    // programmatically (mirrors the `clear-broken` route's
+    // mutation); terminal `failed` leaves the stamp in place as the
+    // operator-gate fallback.
     await stampBrokenAndThrow(
       input,
       agentName,
       `syncWorktree aborted: ${sync.reason}`,
       sync.details,
+      { emitSyncRepairNeeded: true },
     );
   }
   if (sync.kind === "conflict") {
@@ -114,11 +143,27 @@ export async function dispatchWithRecovery(
   return deps.dispatch(input);
 }
 
+interface StampBrokenOpts {
+  /**
+   * DX-645 — when true, emits a `sync-repair-needed` event AFTER the
+   * broken stamp settles but BEFORE the throw unwinds the caller.
+   * The sync-repair-dispatcher (`src/agent/sync-repair-dispatcher.ts`)
+   * subscribes and dispatches the `worktree-repair` workspace
+   * asynchronously. ONLY the `syncWorktree` abort path sets this —
+   * `snapshotIfDirty` abort (HEAD not on agent branch, commit
+   * failure) is a corrupt-worktree condition the repair agent
+   * cannot heal via the rebase contract, so that path retains the
+   * operator-gate behavior.
+   */
+  emitSyncRepairNeeded?: boolean;
+}
+
 async function stampBrokenAndThrow(
   input: DispatchInput,
   agentName: string,
   reason: string,
   details: string,
+  opts: StampBrokenOpts = {},
 ): Promise<never> {
   log.warn(
     `dispatchWithRecovery(${input.repo.name}/${agentName}): ${reason} — ${details}`,
@@ -135,6 +180,18 @@ async function stampBrokenAndThrow(
     },
     "worker",
   );
+  if (opts.emitSyncRepairNeeded) {
+    // Strip the `syncWorktree aborted: ` prefix so the event carries
+    // the raw SyncResult.abort.reason — the dispatcher composes its
+    // own prefix when surfacing the reason in the repair prompt.
+    const abortReason = reason.replace(/^syncWorktree aborted:\s*/, "");
+    dispatchEvents.emit("sync-repair-needed", {
+      repoName: input.repo.name,
+      agentName,
+      abortReason,
+      abortDetails: details,
+    });
+  }
   throw new Error(
     `dispatchWithRecovery(${input.repo.name}/${agentName}): ${reason} — ${details}`,
   );

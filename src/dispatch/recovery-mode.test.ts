@@ -21,6 +21,8 @@ import type {
 import { makeRepoContext } from "../__tests__/helpers/fixtures.js";
 import type { DispatchInput, DispatchResult } from "./core.js";
 import type { AgentJob } from "../agent/launcher.js";
+import { dispatchEvents } from "./events.js";
+import type { SyncRepairNeededEvent } from "./events.js";
 
 vi.mock("../logger.js", () => ({
   createLogger: () => ({
@@ -339,14 +341,23 @@ describe("dispatchWithRecovery", () => {
     });
   });
 
-  describe("syncWorktree abort → stamps agents.<name>.broken + throws", () => {
+  describe("syncWorktree abort → stamps agents.<name>.broken + emits sync-repair-needed + throws (DX-645)", () => {
     let seeded: { repoLocalPath: string; cleanup: () => void };
+    let repairEvents: SyncRepairNeededEvent[];
+    let repairListener: (event: SyncRepairNeededEvent) => void;
 
     beforeEach(() => {
       seeded = seedRepo("alice");
+      repairEvents = [];
+      repairListener = (event) => {
+        repairEvents.push(event);
+      };
+      dispatchEvents.on("sync-repair-needed", repairListener);
     });
 
     afterEach(() => {
+      dispatchEvents.off("sync-repair-needed", repairListener);
+      dispatchEvents.removeAllListeners();
       seeded.cleanup();
     });
 
@@ -385,6 +396,19 @@ describe("dispatchWithRecovery", () => {
       expect(settings.agents.alice.broken.set_at).toMatch(
         /^\d{4}-\d{2}-\d{2}T/,
       );
+
+      // DX-645 — the recovery wrapper emits sync-repair-needed AFTER
+      // the broken stamp lands and BEFORE the throw unwinds. The
+      // event carries the raw SyncResult.abort.reason (no `syncWorktree
+      // aborted: ` prefix) so the dispatcher composes its own prompt
+      // string.
+      expect(repairEvents).toHaveLength(1);
+      expect(repairEvents[0]).toEqual({
+        repoName: "test-repo",
+        agentName: "alice",
+        abortReason: "ff-only pull rejected",
+        abortDetails: "fatal: Not possible to fast-forward",
+      });
     });
 
     it("empty sync.details → suggested_steps stays empty (not stamped with empty string)", async () => {
@@ -415,6 +439,40 @@ describe("dispatchWithRecovery", () => {
         ),
       );
       expect(settings.agents.alice.broken.suggested_steps).toEqual([]);
+
+      // Event still fires even with empty details — the dispatcher's
+      // prompt builder handles `abortDetails === ""` gracefully (omits
+      // the verbatim-stderr block).
+      expect(repairEvents).toHaveLength(1);
+      expect(repairEvents[0].abortReason).toBe("fetch failed");
+      expect(repairEvents[0].abortDetails).toBe("");
+    });
+
+    it("snapshotIfDirty abort does NOT emit sync-repair-needed (repair contract only covers syncWorktree)", async () => {
+      const dispatchMock = vi.fn();
+      const manager = mkManager({
+        snapshotIfDirty: async () => ({
+          kind: "abort",
+          reason: "worktree HEAD not on agent branch",
+          details: "expected branch alice, got bob",
+        }),
+      });
+      const input = mkInput({
+        repo: makeRepoContext({ localPath: seeded.repoLocalPath }),
+      });
+
+      await expect(
+        dispatchWithRecovery(
+          input,
+          { agentName: "alice", manager },
+          { dispatch: dispatchMock },
+        ),
+      ).rejects.toThrow(/snapshotIfDirty aborted/);
+
+      // snapshotIfDirty failure is corruption-class — repair agent
+      // cannot heal a worktree whose HEAD is on the wrong branch.
+      // Operator-gate behavior preserved.
+      expect(repairEvents).toHaveLength(0);
     });
   });
 

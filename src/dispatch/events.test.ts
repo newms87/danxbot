@@ -118,6 +118,49 @@ describe("dispatchEvents", () => {
     expect(dispatchEvents.listenerCount("broken-transition")).toBe(1);
   });
 
+  // DX-645 — sync-repair-needed topic. The recovery-mode wrapper emits
+  // this on `syncWorktree.kind === "abort"`; the sync-repair-dispatcher
+  // subscribes + dispatches the worktree-repair workspace. Pin the
+  // topic shape + payload routing so a regression that loses the
+  // payload mid-emit (or drops the type binding) lands here, not
+  // silently in production.
+  it("delivers sync-repair-needed events with the full payload", () => {
+    const listener = vi.fn();
+    dispatchEvents.on("sync-repair-needed", listener);
+    dispatchEvents.emit("sync-repair-needed", {
+      repoName: "danxbot",
+      agentName: "alice",
+      abortReason: "ff-only pull rejected",
+      abortDetails: "fatal: Not possible to fast-forward",
+    });
+    expect(listener).toHaveBeenCalledWith({
+      repoName: "danxbot",
+      agentName: "alice",
+      abortReason: "ff-only pull rejected",
+      abortDetails: "fatal: Not possible to fast-forward",
+    });
+  });
+
+  it("sync-repair-needed and broken-transition are independent topics", () => {
+    const repair = vi.fn();
+    const broken = vi.fn();
+    dispatchEvents.on("sync-repair-needed", repair);
+    dispatchEvents.on("broken-transition", broken);
+    dispatchEvents.emit("sync-repair-needed", {
+      repoName: "r",
+      agentName: "a",
+      abortReason: "x",
+      abortDetails: "y",
+    });
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(broken).not.toHaveBeenCalled();
+    dispatchEvents.emit("broken-transition", { repoName: "r", agentName: "a" });
+    expect(broken).toHaveBeenCalledTimes(1);
+    // repair still only fired once — the broken emit did not cross
+    // topic boundaries.
+    expect(repair).toHaveBeenCalledTimes(1);
+  });
+
   it("on() N times + off() N times drains a duplicate registration cleanly", () => {
     // EventEmitter semantics: same function registered N times needs
     // N off() calls. The wrappers Map stores a stack of wrappers per

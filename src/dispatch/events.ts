@@ -1,14 +1,24 @@
 /**
  * DX-365 (Phase 2 of DX-363) — in-process event bus for dispatch
  * lifecycle transitions that consumers OUTSIDE the dispatch finalize
- * path care about. Currently a single topic:
+ * path care about. Topics:
  *
  *   - `broken-transition` — the strike accumulator (`src/agent/strikes.ts`)
  *     emits this when an agent's strike count crosses the
  *     `STRIKES_MAX = 3` threshold AND the agent's `broken` field flipped
- *     from `null` to populated in the same write. Phase 4 (DX-367) will
- *     subscribe to dispatch the system-evaluator agent that fills in the
+ *     from `null` to populated in the same write. Phase 4 (DX-367)
+ *     subscribes to dispatch the system-evaluator agent that fills in the
  *     real `broken.reason` summary.
+ *   - `sync-repair-needed` — `dispatchWithRecovery` emits this when
+ *     `syncWorktree` returns `kind: "abort"` (DX-645 — Phase 3 of
+ *     DX-576). The sync-repair-dispatcher subscribes and dispatches
+ *     the `worktree-repair` workspace into the broken worktree; the
+ *     repair agent rebases + resolves + pushes + clears
+ *     `agent.broken` so the original agent is dispatchable again on
+ *     the next tick. The picker-gate stamp on `agents.<name>.broken`
+ *     still lands inline inside `dispatchWithRecovery` (no event-
+ *     only path) so a missed subscriber cannot silently let a
+ *     broken worktree retry the next tick.
  *
  * Singleton EventEmitter so subscribers in any module reach the same
  * source — mirrors `src/dashboard/event-bus.ts`'s shape but lives under
@@ -28,10 +38,47 @@ export interface BrokenTransitionEvent {
   agentName: string;
 }
 
-export type DispatchEventTopic = "broken-transition";
+/**
+ * Emitted by `dispatchWithRecovery` on `syncWorktree.kind === "abort"`
+ * (DX-645). The sync-repair-dispatcher subscribes and dispatches the
+ * `worktree-repair` workspace into the broken worktree.
+ *
+ * The picker-gate stamp on `agents.<name>.broken` still happens
+ * inline inside `dispatchWithRecovery` — the event is the
+ * fan-out signal that triggers the repair dispatch, NOT the gate
+ * itself. A missed subscriber therefore leaves the agent gated
+ * (preserving the prior operator-gate behavior) but blocks the
+ * auto-repair; reviewer agents flag any change that moves the
+ * gate-stamp into the event subscriber.
+ */
+export interface SyncRepairNeededEvent {
+  repoName: string;
+  agentName: string;
+  /**
+   * The short human label from `SyncResult.abort.reason`
+   * (e.g. "ff-only pull rejected"). Carried verbatim so the
+   * dispatched repair agent can name the env failure in its
+   * comments / commit messages.
+   */
+  abortReason: string;
+  /**
+   * The verbatim git stderr from the failed sync (or empty string
+   * when stderr was empty). Carried for downstream diagnostics —
+   * the dispatcher does NOT include this in the prompt by default
+   * (kept off the wire so a 50KB conflict dump doesn't blow up
+   * the prompt budget); the repair agent reads it from the YAML
+   * via `agent.broken.suggested_steps` instead.
+   */
+  abortDetails: string;
+}
+
+export type DispatchEventTopic =
+  | "broken-transition"
+  | "sync-repair-needed";
 
 export interface DispatchEventMap {
   "broken-transition": BrokenTransitionEvent;
+  "sync-repair-needed": SyncRepairNeededEvent;
 }
 
 class DispatchEventBus {
