@@ -34,6 +34,7 @@ export type SystemErrorSource =
   | "audit-drift"
   | "trello-list-mapping"
   | "stamp-terminal"
+  | "stamp-terminal-epic-refused"
   | "event-loop-stall";
 
 /**

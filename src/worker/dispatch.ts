@@ -1412,6 +1412,7 @@ async function maybeStampTerminalYaml(input: {
       candidateId: dispatchRow.issueId,
       expectedPrefix: repo.issuePrefix,
       at,
+      dispatchId: jobId,
     });
   } else {
     await stampIssueCancelled({
@@ -1419,6 +1420,7 @@ async function maybeStampTerminalYaml(input: {
       candidateId: dispatchRow.issueId,
       expectedPrefix: repo.issuePrefix,
       at,
+      dispatchId: jobId,
     });
   }
 }

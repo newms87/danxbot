@@ -33,6 +33,8 @@ import {
   deriveListTypeFromSemanticStatus,
   resolveListNameForType,
 } from "./list-resolve.js";
+import { recordSystemError } from "../dashboard/system-errors.js";
+import { repoNameFromPath } from "../poller/repo-name.js";
 import type { Issue, IssueStatus } from "../issue-tracker/interface.js";
 
 export interface StampTerminalInput {
@@ -47,6 +49,12 @@ export interface StampTerminalInput {
    * preserved across duplicate signals.
    */
   at: string;
+  /**
+   * DX-654: dispatch row uuid surfaced in the system-error banner when
+   * the epic guard refuses a stamp. Required so operators can correlate
+   * the refusal to the offending dispatch in the dashboard.
+   */
+  dispatchId: string;
 }
 
 export async function stampIssueCompleted(
@@ -111,6 +119,27 @@ async function stampTerminal(
   const issue = parseIssue(readFileSync(filePath, "utf-8"), {
     expectedPrefix: input.expectedPrefix,
   });
+  // DX-654 — write-side guard. Epic terminal stamps are NEVER a direct
+  // agent write; they roll up from child terminal states (DX-641 sub-step
+  // 3g handles the reactive heal). An agent that promoted its candidate
+  // to `type: Epic` mid-dispatch then signalled `danxbot_complete` would
+  // otherwise stamp `completed_at` / `cancelled_at` on the epic and force
+  // the file to closed/, fighting the reconcile body downstream. Suppress
+  // the YAML mutate + surface the refusal so the operator can investigate.
+  if (issue.type === "Epic") {
+    recordSystemError({
+      source: "stamp-terminal-epic-refused",
+      severity: "warn",
+      repo: repoNameFromPath(input.repoLocalPath),
+      message: `Refused ${semanticStatus === "Done" ? "completed" : "cancelled"} stamp on Epic ${issue.id} (dispatch ${input.dispatchId}) — epic terminal state is derived from children, never written directly.`,
+      details: {
+        candidateId: issue.id,
+        dispatchId: input.dispatchId,
+        attemptedTerminalKind: semanticStatus,
+      },
+    });
+    return;
+  }
   const listType = deriveListTypeFromSemanticStatus(semanticStatus);
   const listName = resolveListNameForType(input.repoLocalPath, listType);
   const next = mutate(issue, input.at, listName);
@@ -129,7 +158,6 @@ async function stampTerminal(
   const { upsertIssueRowNow } = await import("../db/issues-mirror.js");
   const { canonicalize, sha256 } = await import("../db/canonicalize.js");
   const { parse: parseYamlText } = await import("yaml");
-  const { repoNameFromPath } = await import("../poller/repo-name.js");
   const { writeFileSync } = await import("node:fs");
   const stamped: Issue = { ...next, db_updated_at: new Date().toISOString() };
   const serialized = serializeIssue(stamped);

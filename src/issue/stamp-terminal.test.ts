@@ -79,6 +79,7 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
       candidateId: "DX-1",
       expectedPrefix: "DX",
       at: "2026-05-14T12:00:00.000Z",
+      dispatchId: "dispatch-1",
     });
 
     const raw = readRaw("DX-1");
@@ -107,6 +108,7 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
       candidateId: "DX-2",
       expectedPrefix: "DX",
       at: "2026-05-14T13:00:00.000Z",
+      dispatchId: "dispatch-2",
     });
 
     const raw = readRaw("DX-2");
@@ -125,6 +127,7 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
       candidateId: "DX-3",
       expectedPrefix: "DX",
       at: "2026-05-14T11:00:00.000Z", // later signal
+      dispatchId: "dispatch-3",
     });
 
     const raw = readRaw("DX-3");
@@ -139,6 +142,7 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
         candidateId: "DX-99",
         expectedPrefix: "DX",
         at: "2026-05-14T12:00:00.000Z",
+        dispatchId: "dispatch-99",
       }),
     ).resolves.toBeUndefined();
     expect(
@@ -180,6 +184,7 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
       candidateId: "DX-4",
       expectedPrefix: "DX",
       at: "2026-05-14T13:00:00.000Z",
+      dispatchId: "dispatch-4",
     });
 
     // No open/ copy resurrected — the file move is not reverted.
