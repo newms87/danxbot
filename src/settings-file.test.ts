@@ -33,6 +33,7 @@ import {
   readAgents,
   readSettings,
   resolveEffortToFlags,
+  runtimeSettingsFilePath,
   setAgentBroken,
   settingsFilePath,
   settingsLockPath,
@@ -53,23 +54,56 @@ import {
  * acts as the "repo localPath". The `.danxbot/` subdir is created so
  * writeSettings can land the file without a prior `syncSettingsFileOnBoot`
  * call.
+ *
+ * DX-683 — also creates an isolated runtime-volume root and points
+ * `DANX_RUNTIME_ROOT` at it, so the drift settings file
+ * (`<runtime-volume>/<basename(localPath)>/settings-runtime.json`)
+ * lands in test tmp space instead of polluting the host's
+ * `~/.local/share/danxbot/`. Cleanup tears both down.
  */
-function setupRepoDir(): string {
-  const dir = mkdtempSync(resolve(tmpdir(), "danxbot-settings-test-"));
-  mkdirSync(resolve(dir, ".danxbot"), { recursive: true });
-  return dir;
+function setupRepoDir(): { localPath: string; runtimeRoot: string } {
+  const localPath = mkdtempSync(resolve(tmpdir(), "danxbot-settings-test-"));
+  mkdirSync(resolve(localPath, ".danxbot"), { recursive: true });
+  const runtimeRoot = mkdtempSync(
+    resolve(tmpdir(), "danxbot-settings-runtime-"),
+  );
+  return { localPath, runtimeRoot };
+}
+
+/**
+ * DX-683 — write a fixture pre-split single-file `settings.json` (the
+ * shape that existed before the contract/drift partition). Used by
+ * tests that intentionally exercise the pre-migration on-disk shape
+ * (legacy-format tolerance + migration path tests). For post-split
+ * fixtures, write to `settingsFilePath` (contract) AND
+ * `runtimeSettingsFilePath` (drift) directly.
+ */
+function writeLegacySingleFileFixture(
+  localPath: string,
+  body: unknown,
+): void {
+  writeFileSync(settingsFilePath(localPath), JSON.stringify(body));
 }
 
 describe("settings-file", () => {
   let localPath: string;
+  let runtimeRoot: string;
+  let prevRuntimeRoot: string | undefined;
 
   beforeEach(() => {
     _resetForTesting();
-    localPath = setupRepoDir();
+    const dirs = setupRepoDir();
+    localPath = dirs.localPath;
+    runtimeRoot = dirs.runtimeRoot;
+    prevRuntimeRoot = process.env.DANX_RUNTIME_ROOT;
+    process.env.DANX_RUNTIME_ROOT = runtimeRoot;
   });
 
   afterEach(() => {
     rmSync(localPath, { recursive: true, force: true });
+    rmSync(runtimeRoot, { recursive: true, force: true });
+    if (prevRuntimeRoot === undefined) delete process.env.DANX_RUNTIME_ROOT;
+    else process.env.DANX_RUNTIME_ROOT = prevRuntimeRoot;
   });
 
   // ============================================================
@@ -114,8 +148,11 @@ describe("settings-file", () => {
       expect(s.overrides.dispatchApi.enabled).toBeNull();
     });
 
-    it("parses a well-formed file", () => {
-      const body: Settings = {
+    it("parses a well-formed split (contract + drift) on-disk shape", () => {
+      // DX-683 — post-split fixture: contract fields land in the
+      // in-repo settings.json; drift (display) lands in the runtime-
+      // volume settings-runtime.json. The merged read surfaces both.
+      const contractBody = {
         overrides: {
           slack: { enabled: false },
           issuePoller: { enabled: true },
@@ -124,17 +161,124 @@ describe("settings-file", () => {
           autoTriage: { enabled: null },
           trelloSync: { enabled: null },
         },
-        display: { worker: { port: 1234, runtime: "host" } },
         meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" },
       };
-      writeFileSync(settingsFilePath(localPath), JSON.stringify(body));
+      writeFileSync(settingsFilePath(localPath), JSON.stringify(contractBody));
+
+      const driftPath = runtimeSettingsFilePath(localPath);
+      mkdirSync(resolve(driftPath, ".."), { recursive: true });
+      const driftBody = {
+        display: { worker: { port: 1234, runtime: "host" as const } },
+        meta: { updatedAt: "2026-04-20T00:00:01Z", updatedBy: "worker" as const },
+      };
+      writeFileSync(driftPath, JSON.stringify(driftBody));
 
       const s = readSettings(localPath);
       expect(s.overrides.slack.enabled).toBe(false);
       expect(s.overrides.issuePoller.enabled).toBe(true);
       expect(s.overrides.dispatchApi.enabled).toBeNull();
       expect(s.display.worker).toEqual({ port: 1234, runtime: "host" });
-      expect(s.meta.updatedBy).toBe("dashboard:alice");
+      // Merged meta picks the more-recent updatedAt — drift here.
+      expect(s.meta.updatedBy).toBe("worker");
+    });
+
+    it("ignores a `display` field stranded in the contract file (pre-migration residue)", () => {
+      // DX-683 — read path is canonical-only: a `display` field in the
+      // contract file is residue from before the migration partitioned
+      // the file; the read path ignores it. The drift file owns
+      // `display`, even if empty.
+      const legacyBody = {
+        overrides: {
+          slack: { enabled: false },
+          issuePoller: { enabled: null },
+          dispatchApi: { enabled: null },
+          ideator: { enabled: null },
+          autoTriage: { enabled: null },
+          trelloSync: { enabled: null },
+        },
+        display: { worker: { port: 9999, runtime: "host" as const } },
+        meta: { updatedAt: "2026-04-20T00:00:00Z", updatedBy: "dashboard:alice" as const },
+      };
+      writeLegacySingleFileFixture(localPath, legacyBody);
+
+      const s = readSettings(localPath);
+      // Overrides come through (contract category).
+      expect(s.overrides.slack.enabled).toBe(false);
+      // Display is empty — the in-repo `display` is ignored at read.
+      expect(s.display).toEqual({});
+    });
+
+    // DX-683 — `meta` precedence is per-file: each side carries its
+    // own `{updatedAt, updatedBy}` block. The merged read surfaces
+    // the MORE RECENT one. Pin every branch of the comparison so a
+    // future refactor doesn't silently flip the winner.
+    describe("meta merge precedence (DX-683)", () => {
+      function writeBoth(opts: {
+        contractMeta?: { updatedAt: string; updatedBy: string };
+        driftMeta?: { updatedAt: string; updatedBy: string };
+      }): void {
+        const contractBody: Record<string, unknown> = {
+          overrides: { slack: { enabled: false } },
+        };
+        if (opts.contractMeta) contractBody.meta = opts.contractMeta;
+        writeFileSync(settingsFilePath(localPath), JSON.stringify(contractBody));
+
+        const driftBody: Record<string, unknown> = {
+          display: { worker: { port: 1, runtime: "host" } },
+        };
+        if (opts.driftMeta) driftBody.meta = opts.driftMeta;
+        const driftPath = runtimeSettingsFilePath(localPath);
+        mkdirSync(resolve(driftPath, ".."), { recursive: true });
+        writeFileSync(driftPath, JSON.stringify(driftBody));
+      }
+
+      it("drift newer than contract → drift wins", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "2026-05-18T00:00:00Z", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "2026-05-18T01:00:00Z", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("worker");
+      });
+
+      it("contract newer than drift → contract wins (inverse case)", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "2026-05-18T05:00:00Z", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "2026-05-18T00:00:00Z", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:op");
+      });
+
+      it("equal timestamps → contract wins (strict >, no flicker)", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "2026-05-18T00:00:00Z", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "2026-05-18T00:00:00Z", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:op");
+      });
+
+      it("drift updatedAt unparseable → contract wins (NaN fallback)", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "2026-05-18T00:00:00Z", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "tomorrow-ish", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:op");
+      });
+
+      it("contract updatedAt unparseable, drift valid → drift wins (`NaN > -Infinity` is false)", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "garbage", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "2026-05-18T01:00:00Z", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("worker");
+      });
+
+      it("both NaN → contract wins (defensive default)", () => {
+        writeBoth({
+          contractMeta: { updatedAt: "garbage", updatedBy: "dashboard:op" },
+          driftMeta: { updatedAt: "also-garbage", updatedBy: "worker" },
+        });
+        expect(readSettings(localPath).meta.updatedBy).toBe("dashboard:op");
+      });
     });
 
     it("returns defaults on corrupt JSON without throwing", () => {
@@ -760,14 +904,22 @@ describe("settings-file", () => {
   });
 
   describe("syncSettingsFileOnBoot", () => {
-    it("creates the file with display populated when missing", async () => {
+    it("creates the drift file with display populated when missing", async () => {
       const ctx = makeRepoContext({ localPath });
       await syncSettingsFileOnBoot(ctx, "docker");
 
-      expect(existsSync(settingsFilePath(localPath))).toBe(true);
+      // DX-683 — display lives in the drift file; the contract file is
+      // NOT created by a display-only write. The boot path's own
+      // `migrateSettingsSplit` + lists-file seeding produce the
+      // in-repo contract file via other channels; the display-only
+      // `syncSettingsFileOnBoot` writes solely to the drift file.
+      expect(existsSync(runtimeSettingsFilePath(localPath))).toBe(true);
+      expect(existsSync(settingsFilePath(localPath))).toBe(false);
+
       const s = readSettings(localPath);
       expect(s.display.worker?.runtime).toBe("docker");
       expect(s.display.worker?.port).toBe(5562);
+      // Defaults flow through for unset overrides.
       expect(s.overrides.slack.enabled).toBeNull();
     });
 
@@ -810,6 +962,193 @@ describe("settings-file", () => {
   describe("settingsLockPath", () => {
     it("resolves to .danxbot/.settings.lock under the repo path", () => {
       expect(settingsLockPath("/repo")).toBe("/repo/.danxbot/.settings.lock");
+    });
+  });
+
+  // DX-683 — path helpers for the runtime-volume drift file. Pin the
+  // contract so callers (dashboard, migrations) can construct paths
+  // without round-tripping through `readSettings`.
+  describe("runtimeSettingsFilePath / runtimeSettingsLockPath", () => {
+    it("settings-runtime.json + .settings-runtime.lock land under DANX_RUNTIME_ROOT/<repo>", () => {
+      const repoBase = "danxbot-settings-test-foo";
+      const fakeLocal = resolve(tmpdir(), repoBase);
+      // setRepoName not called → falls back to basename(localPath).
+      expect(runtimeSettingsFilePath(fakeLocal)).toBe(
+        resolve(runtimeRoot, repoBase, "settings-runtime.json"),
+      );
+    });
+  });
+
+  // DX-683 — when a `writeSettings` patch carries BOTH contract +
+  // drift fields, the writer must:
+  //   - touch both files in this dispatch
+  //   - stamp BOTH meta blocks fresh
+  //   - return a merged Settings reflecting both writes
+  // High-priority gap surfaced in test-reviewer's audit.
+  describe("writeSettings — combined contract + drift patch (DX-683)", () => {
+    it("a patch carrying overrides + display updates both files and stamps both meta blocks", async () => {
+      const beforeMs = Date.now();
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false } },
+        display: { worker: { port: 4242, runtime: "host" } },
+        writtenBy: "dashboard:dual",
+      });
+
+      // Both files exist after the dual write.
+      expect(existsSync(settingsFilePath(localPath))).toBe(true);
+      expect(existsSync(runtimeSettingsFilePath(localPath))).toBe(true);
+
+      // Contract file carries overrides + a fresh meta with the writer.
+      const contractRaw = JSON.parse(
+        readFileSync(settingsFilePath(localPath), "utf-8"),
+      );
+      expect(contractRaw.overrides.slack.enabled).toBe(false);
+      expect(contractRaw.meta.updatedBy).toBe("dashboard:dual");
+      expect(Date.parse(contractRaw.meta.updatedAt)).toBeGreaterThanOrEqual(
+        beforeMs,
+      );
+      // Contract file does NOT carry the drift fields.
+      expect(contractRaw.display).toBeUndefined();
+
+      // Drift file carries display + its own fresh meta.
+      const driftRaw = JSON.parse(
+        readFileSync(runtimeSettingsFilePath(localPath), "utf-8"),
+      );
+      expect(driftRaw.display).toEqual({ worker: { port: 4242, runtime: "host" } });
+      expect(driftRaw.meta.updatedBy).toBe("dashboard:dual");
+      expect(Date.parse(driftRaw.meta.updatedAt)).toBeGreaterThanOrEqual(
+        beforeMs,
+      );
+      // Drift file does NOT carry contract fields.
+      expect(driftRaw.overrides).toBeUndefined();
+      expect(driftRaw.agents).toBeUndefined();
+
+      // Merged readSettings sees both.
+      const merged = readSettings(localPath);
+      expect(merged.overrides.slack.enabled).toBe(false);
+      expect(merged.display.worker?.port).toBe(4242);
+      expect(merged.meta.updatedBy).toBe("dashboard:dual");
+    });
+
+    it("drift-only patch does NOT create or touch the contract file", async () => {
+      // Sanity: no files exist yet.
+      expect(existsSync(settingsFilePath(localPath))).toBe(false);
+
+      await writeSettings(localPath, {
+        display: { worker: { port: 1234, runtime: "docker" } },
+        writtenBy: "deploy",
+      });
+
+      expect(existsSync(runtimeSettingsFilePath(localPath))).toBe(true);
+      // Contract file never materialized for a drift-only write.
+      expect(existsSync(settingsFilePath(localPath))).toBe(false);
+    });
+
+    it("drift-only patch preserves an existing contract file byte-stable", async () => {
+      // Seed the contract file with operator overrides.
+      await writeSettings(localPath, {
+        overrides: { slack: { enabled: false }, dispatchApi: { enabled: true } },
+        writtenBy: "dashboard:op",
+      });
+      const contractBefore = readFileSync(settingsFilePath(localPath));
+
+      // Now write a drift-only patch (display refresh).
+      await writeSettings(localPath, {
+        display: { worker: { port: 9999, runtime: "host" } },
+        writtenBy: "worker",
+      });
+
+      // Contract file is byte-stable — no spurious re-write.
+      const contractAfter = readFileSync(settingsFilePath(localPath));
+      expect(contractAfter.equals(contractBefore)).toBe(true);
+    });
+  });
+
+  // DX-683 — `mutateAgents` is categorized contract-only. The drift
+  // file must NEVER be touched by this writer. Regression guard:
+  // pre-DX-683, agents lived in the same file as display; a careless
+  // refactor could re-introduce a drift write here and silently wipe
+  // operator-stamped display state on every CRUD.
+  describe("mutateAgents — drift isolation (DX-683)", () => {
+    it("does not create the drift file when none exists", async () => {
+      await mutateAgents(
+        localPath,
+        (current) => {
+          current.alice = ({
+            type: "agent",
+            bio: "A",
+            capabilities: ["issue-worker"],
+            schedule: {
+              tz: "UTC",
+              always_on: true,
+              mon: [],
+              tue: [],
+              wed: [],
+              thu: [],
+              fri: [],
+              sat: [],
+              sun: [],
+            },
+            enabled: true,
+            broken: null,
+            strikes: { count: 0, history: [] },
+            created_at: "2026-05-18T00:00:00Z",
+            updated_at: "2026-05-18T00:00:00Z",
+          } as AgentRecord);
+          return current;
+        },
+        "dashboard:tester",
+      );
+
+      expect(existsSync(settingsFilePath(localPath))).toBe(true);
+      expect(existsSync(runtimeSettingsFilePath(localPath))).toBe(false);
+    });
+
+    it("leaves an existing drift file byte-stable across an agents mutation", async () => {
+      // Seed display via syncSettingsFileOnBoot → drift file lands.
+      await writeSettings(localPath, {
+        display: { worker: { port: 7777, runtime: "host" } },
+        writtenBy: "worker",
+      });
+      const driftBefore = readFileSync(runtimeSettingsFilePath(localPath));
+
+      await mutateAgents(
+        localPath,
+        (current) => {
+          current.alice = ({
+            type: "agent",
+            bio: "A",
+            capabilities: ["issue-worker"],
+            schedule: {
+              tz: "UTC",
+              always_on: true,
+              mon: [],
+              tue: [],
+              wed: [],
+              thu: [],
+              fri: [],
+              sat: [],
+              sun: [],
+            },
+            enabled: true,
+            broken: null,
+            strikes: { count: 0, history: [] },
+            created_at: "2026-05-18T00:00:00Z",
+            updated_at: "2026-05-18T00:00:00Z",
+          } as AgentRecord);
+          return current;
+        },
+        "dashboard:tester",
+      );
+
+      // Drift file byte-stable — operator display state survives.
+      const driftAfter = readFileSync(runtimeSettingsFilePath(localPath));
+      expect(driftAfter.equals(driftBefore)).toBe(true);
+
+      // Sanity: the mutation actually landed in the contract file.
+      const merged = readSettings(localPath);
+      expect(merged.agents?.alice).toBeDefined();
+      expect(merged.display.worker?.port).toBe(7777);
     });
   });
 

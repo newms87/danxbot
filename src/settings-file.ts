@@ -1,29 +1,79 @@
 /**
- * Per-repo settings file at `<repo>/.danxbot/settings.json`.
+ * Per-repo settings — split across two files since DX-683 (Phase 3b of the
+ * Worker Cleanup epic, DX-668):
  *
- * Source of truth for runtime feature toggles (Slack / issue poller /
- * dispatch API) and masked-config mirrors the dashboard displays. Full
- * design in `docs/superpowers/specs/2026-04-20-agents-tab-design.md` and
- * `.claude/rules/settings-file.md`.
+ *   - **Contract** at `<repo>/.danxbot/settings.json`: operator-tunable
+ *     fields the dashboard / deploy / setup edit. Lives in the consumed
+ *     repo so `git status` stays clean for the operator's source of truth.
+ *
+ *   - **Drift** at `<runtime-volume>/<repo>/settings-runtime.json`:
+ *     worker-stamped fields the worker auto-updates per boot (display
+ *     masks today; future runtime-only mirrors). Lives in the worker-owned
+ *     volume — never leaks into the consumed repo.
+ *
+ * Per-field categorization (writer-routes-by-field, DX-683):
+ *
+ *   | Field                    | Contract | Drift |
+ *   |--------------------------|:--------:|:-----:|
+ *   | overrides.*              |    X     |       |
+ *   | agents{}                 |    X     |       |
+ *   | agentDefaults            |    X     |       |
+ *   | effortLevels             |    X     |       |
+ *   | effortAssignmentPrompt   |    X     |       |
+ *   | selfRepair               |    X     |       |
+ *   | display                  |          |   X   |
+ *   | meta                     |  X (own) |  X (own)  |  <- each file persists its own
+ *
+ * `agents{}` is CONTRACT even though the worker writes broken stamps +
+ * strikes — those land via `setAgentBroken` / `mutateAgents` which know
+ * to route to the contract file. The DX-281 per-key merge invariant
+ * is preserved across the split.
+ *
+ * `meta` is per-file: each file persists its OWN `{updatedAt, updatedBy}`.
+ * `readSettings` returns the MORE RECENT of the two so consumers see the
+ * "latest write" semantic they had pre-split. Tie-break + parse-failure
+ * rules (`Date.parse` returns `NaN` for un-parseable strings):
+ *   - both timestamps parse → strictly more-recent wins; equal-tie → contract.
+ *   - drift parses, contract NaN → drift wins (`-Infinity` fallback).
+ *   - contract parses, drift NaN → contract wins (`NaN > -Infinity` is `false`).
+ *   - both NaN → contract wins (defensive default).
  *
  * Ownership:
- * - Workers READ on every event via `isFeatureEnabled(ctx, feature)`.
- * - Dashboard, deploy, and setup WRITE via `writeSettings`. Dashboard only
- *   ever writes `overrides`; deploy and setup only ever write `display`.
- * - Worker self-seeds `display` via `syncSettingsFileOnBoot` on every boot
- *   (creates the file when missing; refreshes `display` while preserving
- *   `overrides`).
+ * - Workers READ both files on every event via `isFeatureEnabled(ctx, feature)`.
+ * - Dashboard, deploy, and setup WRITE via `writeSettings`. The writer
+ *   partitions the patch by field and writes the appropriate file(s).
+ * - Worker self-seeds the drift file's `display` via
+ *   `syncSettingsFileOnBoot` on every boot.
  *
  * Contracts:
  * - `overrides.<feature>.enabled` is three-valued: `true`/`false` is an
  *   explicit override, `null` defers to the env default carried on
- *   `RepoContext`. No secrets land in this file — only masked mirrors.
- * - `readSettings` never throws: missing file or corrupt JSON fall back to
- *   defaults, with one log per minute per path on parse errors.
- * - `writeSettings` is atomic (tmp + rename) and serialized by a per-file
- *   lock at `<repo>/.danxbot/.settings.lock`, plus an in-process promise
- *   chain keyed by path so multiple concurrent writes from the same
- *   process don't race each other on the filesystem.
+ *   `RepoContext`. No secrets land in either file — only masked mirrors.
+ * - `readSettings` never throws: missing file(s) or corrupt JSON fall back
+ *   to defaults, with one log per minute per path on parse errors.
+ * - `writeSettings` is atomic per-file (tmp + rename), serialized by a
+ *   per-file lock (`<repo>/.danxbot/.settings.lock` + the sibling
+ *   `.settings-runtime.lock` next to the drift file), plus an in-process
+ *   promise chain keyed by the contract file path so multiple concurrent
+ *   writes from the same process don't race each other on the filesystem.
+ *   The in-process queue key intentionally covers BOTH files — a future
+ *   drift-only helper still serializes against contract writers.
+ * - Cross-file atomicity (DX-683): a patch carrying BOTH contract +
+ *   drift fields writes the two files SEQUENTIALLY under the in-process
+ *   queue. External readers MAY observe the half-written state (new
+ *   contract + old drift, briefly) between the two writes; consumers
+ *   are already idempotent against partial mirror state via the
+ *   `readSettings` merge + `isFeatureEnabled` env-default fallback. No
+ *   two-phase commit — the cost (atomic rename across two filesystems
+ *   that may not share an inode lock) outweighs the benefit at this
+ *   read-mostly hot path.
+ * - No-touch write (`{writtenBy: x}` patch with no field updates):
+ *   stamps the CONTRACT file's meta only, leaving the drift file
+ *   untouched. The contract file is the operator-facing surface; a
+ *   no-touch write's "I observed state" semantic is operator-side.
+ * - Boot-time migration in `src/migrations/runtime-volume-migrate.ts`
+ *   partitions a pre-split single-file `settings.json` once per repo;
+ *   the read path is canonical-only and ignores unknown fields per file.
  */
 
 import {
@@ -42,6 +92,7 @@ import { createLogger } from "./logger.js";
 import type { RepoContext } from "./types.js";
 import { bumpEnvGen } from "./issue/env-generation.js";
 import { repoNameFromPath } from "./poller/repo-name.js";
+import { runtimeVolumePath } from "./runtime-volume.js";
 
 const log = createLogger("settings-file");
 
@@ -640,6 +691,30 @@ export function settingsLockPath(localPath: string): string {
   return resolve(localPath, ".danxbot/.settings.lock");
 }
 
+/**
+ * DX-683 — runtime-drift settings file. Sibling to `settings.json` on the
+ * worker-owned runtime volume (`<runtime-volume>/<repo>/settings-runtime.json`).
+ * Holds fields the worker stamps per boot (`display`) so the consumed
+ * repo's `.danxbot/` stays contract-only.
+ *
+ * Repo name is resolved from `localPath` via `repoNameFromPath` —
+ * production registers every repo at boot, tests fall through to the
+ * basename of `localPath`. The runtime-volume root is itself overridable
+ * by `DANX_RUNTIME_ROOT`, so tests writing to `tmpDir` can isolate via
+ * `process.env.DANX_RUNTIME_ROOT = tmpDir`.
+ */
+export function runtimeSettingsFilePath(localPath: string): string {
+  return runtimeVolumePath(repoNameFromPath(localPath), "settings-runtime.json");
+}
+
+/** Sibling lock file for the drift file. Same atomic-write contract as `.settings.lock`. */
+export function runtimeSettingsLockPath(localPath: string): string {
+  return runtimeVolumePath(
+    repoNameFromPath(localPath),
+    ".settings-runtime.lock",
+  );
+}
+
 /** One log entry per file per PARSE_ERROR_LOG_INTERVAL_MS. */
 const lastParseErrorLogTs = new Map<string, number>();
 
@@ -1121,15 +1196,71 @@ function normalizeSelfRepair(value: unknown): SelfRepairSettings {
 }
 
 /**
- * Read settings from disk. Never throws — missing file returns defaults,
- * corrupt JSON logs once per minute and returns defaults.
+ * Read settings from disk. Never throws — missing file(s) return defaults,
+ * corrupt JSON logs once per minute and returns defaults for that file.
+ *
+ * Reads BOTH the contract file (`<repo>/.danxbot/settings.json`) and the
+ * drift file (`<runtime-volume>/<repo>/settings-runtime.json`) and merges
+ * them by FIELD CATEGORY (DX-683): contract fields come from the contract
+ * file, drift fields (`display`) come from the drift file. `meta` is
+ * per-file; the merged shape returns the MORE RECENT meta block so
+ * consumers see the "latest write" semantic they had pre-split.
+ *
+ * Per-file canonical schema (the read path is canonical-only — unknown
+ * fields on either file are ignored, never silently merged back):
+ *   - contract: `{overrides, agents, agentDefaults, effortLevels,
+ *     effortAssignmentPrompt, selfRepair, meta}`
+ *   - drift:    `{display, meta}`
+ *
+ * A `display` field encountered in the contract file means the boot
+ * migration has not yet partitioned this repo (or the test is hand-
+ * crafting a pre-split fixture). The read path IGNORES it — readers
+ * see the drift file's `display` (empty `{}` when the migration hasn't
+ * run) until the boot migration partitions the file. Same direction
+ * inversely for any contract field that lands in the drift file.
  */
 export function readSettings(localPath: string): Settings {
+  const contract = readContractFile(localPath);
+  const drift = readDriftFile(localPath);
+
+  // Pick the more recent `meta` block as the consumer-facing one. This
+  // matches pre-split semantics where the most recent write surfaced
+  // `meta.updatedBy` regardless of which field changed.
+  const contractMetaAt = Date.parse(contract.meta.updatedAt);
+  const driftMetaAt = Date.parse(drift.meta.updatedAt);
+  const meta =
+    Number.isFinite(driftMetaAt) && driftMetaAt > (Number.isFinite(contractMetaAt) ? contractMetaAt : -Infinity)
+      ? drift.meta
+      : contract.meta;
+
+  return {
+    overrides: contract.overrides,
+    display: drift.display,
+    agents: contract.agents,
+    agentDefaults: contract.agentDefaults,
+    effortLevels: contract.effortLevels,
+    effortAssignmentPrompt: contract.effortAssignmentPrompt,
+    selfRepair: contract.selfRepair,
+    meta,
+  };
+}
+
+/**
+ * Contract-shape read. Returns a `Settings` with every contract field
+ * normalized AND `display: {}` (drift placeholder — caller overlays the
+ * real drift). `meta` is the contract file's own meta block. Missing
+ * file → defaults.
+ */
+function readContractFile(localPath: string): Settings {
   const path = settingsFilePath(localPath);
   if (!existsSync(path)) return defaultSettings();
   try {
     const raw = readFileSync(path, "utf-8");
-    return normalize(JSON.parse(raw) as Partial<Settings>);
+    const partial = JSON.parse(raw) as Partial<Settings>;
+    const normalized = normalize(partial);
+    // Read path is canonical-only: even if a pre-migration file has
+    // `display` baked in, ignore it here and let the drift file own it.
+    return { ...normalized, display: {} };
   } catch (err) {
     logParseErrorOnce(path, err);
     return defaultSettings();
@@ -1137,20 +1268,64 @@ export function readSettings(localPath: string): Settings {
 }
 
 /**
- * Write settings to disk. Merges `patch` on top of the current on-disk
- * state, stamps meta, writes atomically via tmp+rename, and serializes
- * concurrent writes via a per-file lock.
+ * Drift-shape read. Returns the narrow drift shape (`{display, meta}`).
+ * Missing file → defaults (`display: {}`, default meta).
+ */
+function readDriftFile(localPath: string): DriftShape {
+  const path = runtimeSettingsFilePath(localPath);
+  if (!existsSync(path)) {
+    const d = defaultSettings();
+    return { display: d.display, meta: d.meta };
+  }
+  return safeParseDrift(path);
+}
+
+/**
+ * Write settings to disk. Partitions `patch` by field category (DX-683)
+ * and writes to the appropriate file(s): contract fields go to
+ * `<repo>/.danxbot/settings.json`, drift fields (`display`) go to
+ * `<runtime-volume>/<repo>/settings-runtime.json`. Each file write is
+ * atomic (tmp+rename) under its own per-file lock; both writes go
+ * through one in-process queue keyed on `localPath` so multiple
+ * concurrent writes from the same process serialize cleanly.
  *
  * `overrides` is shallowly merged per-feature (absent features keep their
  * current value). `display` is shallowly merged at the section level so
  * deploy's "refresh masks" pass and setup's initial seed both leave
  * unrelated sections alone.
+ *
+ * Per-file `meta`: each file receiving a patch gets a fresh meta block.
+ * A patch that touches contract fields only stamps the contract file's
+ * meta; a patch that touches drift fields only stamps the drift file's
+ * meta. A patch carrying BOTH stamps both files' meta. The merged
+ * `Settings` returned reflects the latest write across both files (see
+ * `readSettings`).
  */
 export async function writeSettings(
   localPath: string,
   patch: WriteSettingsPatch,
 ): Promise<Settings> {
   return enqueueWrite(localPath, () => runWrite(localPath, patch));
+}
+
+/**
+ * DX-683 — categorize a `WriteSettingsPatch` into contract / drift parts.
+ * Centralized so a future field addition has ONE place to update.
+ */
+function categorizePatch(patch: WriteSettingsPatch): {
+  contract: boolean;
+  drift: boolean;
+} {
+  return {
+    contract:
+      patch.overrides !== undefined ||
+      patch.agents !== undefined ||
+      patch.agentDefaults !== undefined ||
+      patch.effortLevels !== undefined ||
+      patch.effortAssignmentPrompt !== undefined ||
+      patch.selfRepair !== undefined,
+    drift: patch.display !== undefined,
+  };
 }
 
 /**
@@ -1189,6 +1364,36 @@ async function runWrite(
   localPath: string,
   patch: WriteSettingsPatch,
 ): Promise<Settings> {
+  const cat = categorizePatch(patch);
+
+  // No-touch patch (only `writtenBy`, no field updates) — stamps the
+  // contract file's meta to preserve the pre-split "every write bumps
+  // meta" semantic on the operator-facing surface. Drift file is left
+  // alone (see file docstring "No-touch write" contract).
+  const writeContract = cat.contract || !cat.drift;
+  const writeDrift = cat.drift;
+
+  if (writeContract) {
+    await writeContractFile(localPath, patch);
+  }
+  if (writeDrift) {
+    await writeDriftFile(localPath, patch);
+  }
+
+  // Re-merge from canonical reads — `readSettings` is the source of
+  // truth for the merged shape; no need to construct it twice.
+  return readSettings(localPath);
+}
+
+/**
+ * Write the contract-side patch fields to `<repo>/.danxbot/settings.json`.
+ * Atomic per-file lock + tmp+rename. Caller re-reads via `readSettings`
+ * for the canonical merged result.
+ */
+async function writeContractFile(
+  localPath: string,
+  patch: WriteSettingsPatch,
+): Promise<void> {
   const path = settingsFilePath(localPath);
   const lockFile = settingsLockPath(localPath);
   const dir = dirname(path);
@@ -1197,10 +1402,15 @@ async function runWrite(
   const release = await acquireFileLock(lockFile);
   try {
     const existing = existsSync(path)
-      ? safeParse(path)
+      ? safeParseContract(path)
       : defaultSettings();
 
-    const merged: Settings = {
+    const mergedAgents =
+      patch.agents !== undefined
+        ? normalizeAgents({ ...(existing.agents ?? {}), ...patch.agents })
+        : (existing.agents ?? {});
+
+    const contractShape = {
       overrides: {
         slack: patch.overrides?.slack ?? existing.overrides.slack,
         issuePoller:
@@ -1213,38 +1423,16 @@ async function runWrite(
         trelloSync:
           patch.overrides?.trelloSync ?? existing.overrides.trelloSync,
       },
-      display: patch.display
-        ? { ...existing.display, ...patch.display }
-        : existing.display,
-      // DX-281 — merge `patch.agents` per-key into the locked on-disk
-      // read instead of wholesale-replacing. Pre-DX-281 the writer
-      // replaced the whole map, so a caller passing {alice} silently
-      // wiped operator-added entries on disk (phil disappeared mid-
-      // test-system runs). Post-DX-281 patch wins per-key but on-disk-
-      // only keys (operator additions) ALWAYS survive. The empty-patch
-      // ({agents: {}}) case becomes a no-op for agents; intentional
-      // clear goes through `mutateAgents(p, () => ({}), w)` — the only
-      // API that can drop on-disk entries, and only by explicitly
-      // returning an empty map from inside the lock. See
-      // `.claude/rules/settings-file.md` writer-merge invariant.
-      agents:
-        patch.agents !== undefined
-          ? normalizeAgents({ ...(existing.agents ?? {}), ...patch.agents })
-          : (existing.agents ?? {}),
+      // DX-281 — merge `patch.agents` per-key (see file docstring).
+      agents: mergedAgents,
       agentDefaults: patch.agentDefaults
         ? {
             ...(existing.agentDefaults ?? defaultAgentDefaults()),
             ...patch.agentDefaults,
           }
         : (existing.agentDefaults ?? defaultAgentDefaults()),
-      // DX-509 — whole-array atomic replace. Dashboard PATCH always
-      // re-sends the full 7-entry array, so partial-row updates land
-      // through this single field. `undefined` (or omitted) preserves
-      // the existing on-disk array. `normalize` re-runs on read so a
-      // partially-malformed write self-heals per-row on next read.
-      // `existing` flows through `safeParse → normalize`, so
-      // `existing.effortLevels` is always materialized (length 7) —
-      // no `?? DEFAULT_*` fallback required.
+      // DX-509 — whole-array atomic replace; `existing` is always
+      // materialized to length 7 via the normalize() pass.
       effortLevels:
         patch.effortLevels !== undefined
           ? normalizeEffortLevels(patch.effortLevels)
@@ -1253,9 +1441,7 @@ async function runWrite(
         patch.effortAssignmentPrompt !== undefined
           ? normalizeEffortAssignmentPrompt(patch.effortAssignmentPrompt)
           : existing.effortAssignmentPrompt!,
-      // DX-563 — atomic replace via normalize. `undefined` preserves the
-      // on-disk block; passing `{}` (the empty SelfRepairSettings)
-      // explicitly clears any prior threshold override.
+      // DX-563 — atomic replace via normalize.
       selfRepair:
         patch.selfRepair !== undefined
           ? normalizeSelfRepair(patch.selfRepair)
@@ -1266,20 +1452,103 @@ async function runWrite(
       },
     };
 
-    const body = JSON.stringify(merged, null, 2) + "\n";
+    const body = JSON.stringify(contractShape, null, 2) + "\n";
     const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, body, "utf-8");
     renameSync(tmp, path);
+
     // DX-640 — agent-roster change is environment input for the picker
     // and for conflict_on / waiting_on partner resolution. Bump envGen
     // so the next reconcile re-derives per card. Gated on actual agents
-    // mutation so unrelated patches (overrides, display) don't churn.
-    if (agentsMapMutated(existing.agents ?? {}, merged.agents ?? {})) {
+    // mutation so unrelated patches (overrides) don't churn.
+    if (agentsMapMutated(existing.agents ?? {}, mergedAgents)) {
       bumpEnvGen(repoNameFromPath(localPath), "settings.json agents{} mutated");
     }
-    return merged;
   } finally {
     await release();
+  }
+}
+
+/**
+ * Write the drift-side patch fields to the runtime-volume drift file.
+ * Atomic per-file lock + tmp+rename. `display` is shallow-merged
+ * section-wise so deploy's "refresh masks" pass leaves unrelated
+ * sections alone. Caller re-reads via `readSettings` for the canonical
+ * merged result.
+ */
+async function writeDriftFile(
+  localPath: string,
+  patch: WriteSettingsPatch,
+): Promise<void> {
+  const path = runtimeSettingsFilePath(localPath);
+  const lockFile = runtimeSettingsLockPath(localPath);
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+
+  const release = await acquireFileLock(lockFile);
+  try {
+    const existing = existsSync(path)
+      ? safeParseDrift(path)
+      : defaultSettings();
+
+    const display = patch.display
+      ? { ...existing.display, ...patch.display }
+      : existing.display;
+
+    const driftShape = {
+      display,
+      meta: {
+        updatedAt: new Date().toISOString(),
+        updatedBy: patch.writtenBy,
+      },
+    };
+
+    const body = JSON.stringify(driftShape, null, 2) + "\n";
+    const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
+    writeFileSync(tmp, body, "utf-8");
+    renameSync(tmp, path);
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * Contract-side `safeParse`. Mirrors `safeParse` but discards any
+ * `display` field (drift file's territory).
+ */
+function safeParseContract(path: string): Settings {
+  try {
+    const normalized = normalize(
+      JSON.parse(readFileSync(path, "utf-8")) as Partial<Settings>,
+    );
+    return { ...normalized, display: {} };
+  } catch (err) {
+    logParseErrorOnce(path, err);
+    return defaultSettings();
+  }
+}
+
+/**
+ * Drift-side `safeParse`. Returns ONLY the drift fields — narrow shape
+ * so a future drift-field addition can't silently leak contract
+ * defaults through `writeDriftFile`'s pass-through (type system catches
+ * the missed field).
+ */
+interface DriftShape {
+  display: SettingsDisplay;
+  meta: SettingsMeta;
+}
+
+function safeParseDrift(path: string): DriftShape {
+  try {
+    const normalized = normalize(
+      JSON.parse(readFileSync(path, "utf-8")) as Partial<Settings>,
+    );
+    return { display: normalized.display, meta: normalized.meta };
+  } catch (err) {
+    logParseErrorOnce(path, err);
+    const d = defaultSettings();
+    return { display: d.display, meta: d.meta };
   }
 }
 
@@ -1307,15 +1576,6 @@ function agentsMapMutated(
     if (JSON.stringify(prev[k]) !== JSON.stringify(next[k])) return true;
   }
   return false;
-}
-
-function safeParse(path: string): Settings {
-  try {
-    return normalize(JSON.parse(readFileSync(path, "utf-8")) as Partial<Settings>);
-  } catch (err) {
-    logParseErrorOnce(path, err);
-    return defaultSettings();
-  }
 }
 
 /**
@@ -1495,6 +1755,9 @@ export async function mutateAgents(
   writtenBy: SettingsWriter,
 ): Promise<Settings> {
   return enqueueWrite(localPath, async () => {
+    // DX-683 — `agents{}` is contract-categorized. `mutateAgents`
+    // touches the agents map only; the contract file is the sole
+    // write target. The drift file is untouched.
     const path = settingsFilePath(localPath);
     const lockFile = settingsLockPath(localPath);
     const dir = dirname(path);
@@ -1502,42 +1765,45 @@ export async function mutateAgents(
 
     const release = await acquireFileLock(lockFile);
     try {
-      const existing = existsSync(path) ? safeParse(path) : defaultSettings();
+      const existing = existsSync(path) ? safeParseContract(path) : defaultSettings();
       // Pass a shallow copy so callers can mutate freely without
       // worrying about whether a defensive `{...x}` was applied.
       const next = mutator({ ...(existing.agents ?? {}) });
 
-      const merged: Settings = {
+      const mergedAgents = normalizeAgents(next);
+
+      const contractShape = {
         overrides: existing.overrides,
-        display: existing.display,
-        agents: normalizeAgents(next),
+        agents: mergedAgents,
         agentDefaults: existing.agentDefaults ?? defaultAgentDefaults(),
         // DX-509 — `mutateAgents` only touches the agents map; the
         // ladder + prompt come through from disk unchanged. `existing`
-        // is `safeParse → normalize` output (or `defaultSettings()`),
-        // so both fields are always materialized — no fallback needed.
+        // is `safeParseContract → normalize` output (or
+        // `defaultSettings()`), so both fields are always materialized.
         effortLevels: existing.effortLevels!,
         effortAssignmentPrompt: existing.effortAssignmentPrompt!,
         selfRepair: existing.selfRepair ?? {},
         meta: { updatedAt: new Date().toISOString(), updatedBy: writtenBy },
       };
-      const body = JSON.stringify(merged, null, 2) + "\n";
+      const body = JSON.stringify(contractShape, null, 2) + "\n";
       const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
       writeFileSync(tmp, body, "utf-8");
       renameSync(tmp, path);
       // DX-640 — agents-map mutated → bump envGen. `mutateAgents` is the
       // only API that can DROP on-disk entries, so the key-set comparison
       // is the load-bearing detector here.
-      if (agentsMapMutated(existing.agents ?? {}, merged.agents ?? {})) {
+      if (agentsMapMutated(existing.agents ?? {}, mergedAgents)) {
         bumpEnvGen(
           repoNameFromPath(localPath),
           "settings.json agents{} mutated (mutateAgents)",
         );
       }
-      return merged;
     } finally {
       await release();
     }
+    // Return the canonical merged Settings (contract + drift) so callers
+    // observe the post-mutation shape across both files in one read.
+    return readSettings(localPath);
   });
 }
 
