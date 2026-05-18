@@ -17,6 +17,7 @@ import {
   setReconcileSchedulerHookForRepo,
   setReconcileSystemErrorHookForRepo,
   setReconcileTrackerForRepo,
+  setWriteIssueReconcileHook,
 } from "./issue/reconcile.js";
 import { bootRescheduleRetryQueue } from "./issue-tracker/retry-queue.js";
 import { setCircuitLogger } from "./issue-tracker/circuit-breaker.js";
@@ -622,6 +623,18 @@ async function startWorkerMode(): Promise<void> {
     reconcile: reconcileIssue,
   });
   setReconcileSchedulerHookForRepo(repo.name, onReconcileResult);
+
+  // DX-664: wire the writeIssue → reconcile hook so same-process
+  // callers that pass `{ reconcileAfter: true }` see reconcile-processed
+  // state on the next read without waiting ~5s for chokidar's
+  // `awaitWriteFinish` debounce. Off by default — callers opt in
+  // explicitly. Workers are single-repo (`startWorkerMode` exits with
+  // a single `repo` binding), so the closure captures the only repo
+  // context this process is responsible for.
+  setWriteIssueReconcileHook(async (repoLocalPath, id, trigger) => {
+    if (repoLocalPath !== repo.localPath) return;
+    await reconcileIssue(repo, id, trigger);
+  });
 
   // Phase 5 (DX-220) — consolidated boot rehydrate. Clears dead-PID /
   // cross-host / dead-TTL dispatch records from open YAMLs (replaces

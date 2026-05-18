@@ -73,7 +73,16 @@ import { issuePath } from "../issue-tracker/paths.js";
 import {
   writeIssue,
   moveToClosedIfTerminal,
+  setWriteIssueReconcileHook,
 } from "../poller/yaml-lifecycle.js";
+
+// DX-664: re-export the writeIssue → reconcile hook setter for caller
+// ergonomics. The registry itself lives in yaml-lifecycle.ts to keep
+// the writer from importing reconcile.ts (cycle), but the public
+// surface a worker boot file binds against is exposed here next to
+// `setReconcileSchedulerHookForRepo` so the two extension points sit
+// side by side.
+export { setWriteIssueReconcileHook };
 import {
   dbListChildrenByParent,
   dbListDependentsByWaitingOnId,

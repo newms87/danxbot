@@ -100,6 +100,36 @@ export async function findByExternalId(
 }
 
 /**
+ * Optional post-write reconcile hook (DX-664). The worker registers a
+ * function at boot (`setWriteIssueReconcileHook`) that calls
+ * `reconcileIssue(repo, id, "lifecycle")`. Same-process callers that
+ * write a YAML and immediately need to read post-reconcile state opt
+ * in via `writeIssue(..., { reconcileAfter: true })` and the hook
+ * fires inline after the file write completes, bypassing the ~5s
+ * chokidar `awaitWriteFinish` debounce.
+ *
+ * Registry lives here (NOT reconcile.ts) so `writeIssue` can read it
+ * without importing reconcile.ts — reconcile.ts already imports from
+ * yaml-lifecycle.ts, so the reverse import would create a cycle.
+ * reconcile.ts re-exports the setter for caller ergonomics.
+ *
+ * `null` clears the registration (used by tests).
+ */
+export type WriteIssueReconcileHook = (
+  repoLocalPath: string,
+  id: string,
+  trigger: "lifecycle",
+) => Promise<unknown>;
+
+let writeIssueReconcileHook: WriteIssueReconcileHook | null = null;
+
+export function setWriteIssueReconcileHook(
+  hook: WriteIssueReconcileHook | null,
+): void {
+  writeIssueReconcileHook = hook;
+}
+
+/**
  * Write the issue to `<repo>/.danxbot/issues/open/<id>.yml`. Always writes
  * to `open/` — the move to `closed/` happens via `moveToClosedIfTerminal`
  * (called by `persistAfterSync` in the worker's auto-sync path) when the
@@ -145,6 +175,7 @@ export async function findByExternalId(
 export async function writeIssue(
   repoLocalPath: string,
   issue: Issue,
+  options?: { reconcileAfter?: boolean },
 ): Promise<Issue> {
   ensureIssuesDirs(repoLocalPath);
   const stamped: Issue = {
@@ -173,6 +204,9 @@ export async function writeIssue(
   });
   const path = issuePath(repoLocalPath, stamped.id, "open");
   writeFileSync(path, serialized);
+  if (options?.reconcileAfter && writeIssueReconcileHook) {
+    await writeIssueReconcileHook(repoLocalPath, stamped.id, "lifecycle");
+  }
   return stamped;
 }
 

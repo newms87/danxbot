@@ -18,6 +18,7 @@ import {
   hydrateFromRemote,
   issuePath,
   moveToClosedIfTerminal,
+  setWriteIssueReconcileHook,
   stampAssignedAgentAndWrite,
   stampDispatchAndWrite,
   writeIssue,
@@ -492,6 +493,82 @@ describe("yaml-lifecycle", () => {
       // `new Date().toISOString()` call.
       expect(stampedMs).toBeGreaterThanOrEqual(before - 1000);
       expect(stampedMs).toBeLessThanOrEqual(after + 1000);
+    });
+
+    it("DX-664: { reconcileAfter: true } invokes the registered hook with (repoLocalPath, id, 'lifecycle') AFTER the file is on disk", async () => {
+      const issue = buildIssueLite("ISS-664", "ToDo");
+      const calls: Array<{ repoLocalPath: string; id: string; trigger: string; fileExisted: boolean }> = [];
+      setWriteIssueReconcileHook(async (repoLocalPath, id, trigger) => {
+        calls.push({
+          repoLocalPath,
+          id,
+          trigger,
+          fileExisted: existsSync(issuePath(repoLocalPath, id, "open")),
+        });
+      });
+      try {
+        await writeIssue(repoRoot, issue, { reconcileAfter: true });
+      } finally {
+        setWriteIssueReconcileHook(null);
+      }
+      expect(calls).toEqual([
+        {
+          repoLocalPath: repoRoot,
+          id: "ISS-664",
+          trigger: "lifecycle",
+          fileExisted: true,
+        },
+      ]);
+    });
+
+    it("DX-664: omitting reconcileAfter does NOT invoke the hook (default-false preserves behavior)", async () => {
+      const issue = buildIssueLite("ISS-665", "ToDo");
+      let called = 0;
+      setWriteIssueReconcileHook(async () => {
+        called += 1;
+      });
+      try {
+        await writeIssue(repoRoot, issue);
+      } finally {
+        setWriteIssueReconcileHook(null);
+      }
+      expect(called).toBe(0);
+    });
+
+    it("DX-664: reconcileAfter is a no-op when no hook is registered (writer is fail-safe)", async () => {
+      setWriteIssueReconcileHook(null);
+      const issue = buildIssueLite("ISS-666", "ToDo");
+      // Must not throw, must still write the file.
+      await writeIssue(repoRoot, issue, { reconcileAfter: true });
+      expect(existsSync(issuePath(repoRoot, "ISS-666", "open"))).toBe(true);
+    });
+
+    it("DX-664: writeIssue awaits the hook before resolving (caller observes post-reconcile state)", async () => {
+      const issue = buildIssueLite("ISS-667", "ToDo");
+      const order: string[] = [];
+      let releaseHook: (() => void) | null = null;
+      const hookPromise = new Promise<void>((resolve) => {
+        releaseHook = resolve;
+      });
+      setWriteIssueReconcileHook(async () => {
+        order.push("hook-start");
+        await hookPromise;
+        order.push("hook-end");
+      });
+      try {
+        const writePromise = writeIssue(repoRoot, issue, { reconcileAfter: true }).then(() => {
+          order.push("write-resolved");
+        });
+        // Give the hook a tick to enter its await; nothing else should
+        // resolve before we release the hook.
+        await new Promise((r) => setTimeout(r, 10));
+        expect(order).toEqual(["hook-start"]);
+        releaseHook!();
+        await writePromise;
+        expect(order).toEqual(["hook-start", "hook-end", "write-resolved"]);
+      } finally {
+        setWriteIssueReconcileHook(null);
+      }
     });
   });
 
