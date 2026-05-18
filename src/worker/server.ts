@@ -59,6 +59,7 @@ import {
 } from "../template-build/handler.js";
 import { handleTemplateHmrActive } from "./template-hmr-route.js";
 import { shutdownAllHmr } from "../template-hmr/index.js";
+import { startIdleSweeper } from "../template-hmr/server.js";
 import { seedCooldownFromDb } from "./restart.js";
 import type { RepoContext } from "../types.js";
 
@@ -167,12 +168,7 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       /^\/api\/evaluator-summary\/(.+)$/,
     );
     if (method === "POST" && evaluatorSummaryMatch) {
-      await handleEvaluatorSummary(
-        req,
-        res,
-        evaluatorSummaryMatch[1],
-        repo,
-      );
+      await handleEvaluatorSummary(req, res, evaluatorSummaryMatch[1], repo);
       return;
     }
 
@@ -254,6 +250,13 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       resolve();
     });
   });
+
+  // SG-189 follow-on (operator design, 2026-05-17): HMR entries survive
+  // their starting dispatch's terminal so the operator can hold a preview
+  // tab open between dispatches. A periodic sweeper reaps entries with no
+  // live refs whose `lastActiveAt` is older than the TTL. Defaults: 1h
+  // idle TTL, 1min sweep cadence. Stopped by `shutdownAllHmr`.
+  startIdleSweeper();
 
   // Seed the restart-cooldown map from the worker_restarts table so a
   // fast restart-then-restart-again across a worker boundary still

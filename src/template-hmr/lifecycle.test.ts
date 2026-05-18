@@ -39,7 +39,14 @@ describe("template-hmr lifecycle", () => {
   });
 
   async function makeSource(sid: number, tid: number): Promise<string> {
-    const dir = join(workDir, "schemas", String(sid), "templates", String(tid), "source");
+    const dir = join(
+      workDir,
+      "schemas",
+      String(sid),
+      "templates",
+      String(tid),
+      "source",
+    );
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, "main.ts"), "// SG-189 lifecycle test\n");
     return dir;
@@ -76,7 +83,7 @@ describe("template-hmr lifecycle", () => {
     expect(listActiveHmr()).toHaveLength(2);
   });
 
-  it("stopTemplateHmrForDispatch releases every entry the dispatch held", async () => {
+  it("stopTemplateHmrForDispatch drops the dispatch's refs from every entry; entries STAY ALIVE for idle-TTL reuse", async () => {
     const srcA = await makeSource(9, 11);
     const srcB = await makeSource(9, 22);
     await startTemplateHmrForDispatch({
@@ -87,7 +94,9 @@ describe("template-hmr lifecycle", () => {
     expect(listActiveHmr()).toHaveLength(2);
 
     await stopTemplateHmrForDispatch("d-1");
-    expect(listActiveHmr()).toHaveLength(0);
+    const after = listActiveHmr();
+    expect(after).toHaveLength(2);
+    expect(after.every((e) => e.refDispatchIds.length === 0)).toBe(true);
   });
 
   it("stop is idempotent — double-call on the same dispatchId does not throw", async () => {
@@ -99,7 +108,9 @@ describe("template-hmr lifecycle", () => {
     });
     await stopTemplateHmrForDispatch("d-1");
     await stopTemplateHmrForDispatch("d-1");
-    expect(listActiveHmr()).toHaveLength(0);
+    // Entry still alive (refs empty); idempotent stop is safe.
+    expect(listActiveHmr()).toHaveLength(1);
+    expect(listActiveHmr()[0].refDispatchIds).toEqual([]);
   });
 
   it("a per-template acquire failure does NOT block siblings (warn + continue)", async () => {
@@ -119,7 +130,11 @@ describe("template-hmr lifecycle", () => {
     // `acquire` finds a node_modules but vite isn't reachable.
     await writeFile(join(srcB, "main.ts"), "// genuine fail target\n");
     const { symlink: nodeSymlink } = await import("fs/promises");
-    await nodeSymlink("/nonexistent-deps-path", join(srcB, "node_modules"), "dir");
+    await nodeSymlink(
+      "/nonexistent-deps-path",
+      join(srcB, "node_modules"),
+      "dir",
+    );
 
     const started = await startTemplateHmrForDispatch({
       dispatchId: "d-1",

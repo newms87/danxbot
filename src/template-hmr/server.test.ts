@@ -11,6 +11,9 @@ import {
   shutdownAllHmr,
   clearHmrStateForTesting,
   pickFreePort,
+  sweepIdleHmrServers,
+  startIdleSweeper,
+  stopIdleSweeper,
 } from "./server.js";
 
 /**
@@ -55,7 +58,14 @@ async function makeFixture(): Promise<Fixture> {
     depsBase,
     shellVersion,
     async sourceDirFor(sid: number, tid: number) {
-      const dir = join(workDir, "schemas", String(sid), "templates", String(tid), "source");
+      const dir = join(
+        workDir,
+        "schemas",
+        String(sid),
+        "templates",
+        String(tid),
+        "source",
+      );
       await mkdir(dir, { recursive: true });
       // Seed a minimal main.ts so the index.html shim can target it (kept
       // empty body — the fake-vite doesn't actually parse the source).
@@ -117,9 +127,13 @@ describe("template-hmr server", () => {
       expect(info.refDispatchIds).toEqual(["d-1"]);
 
       // Shim files dropped into the source dir.
-      const indexBody = (await readFile(join(sourceDir, "index.html"))).toString();
+      const indexBody = (
+        await readFile(join(sourceDir, "index.html"))
+      ).toString();
       expect(indexBody).toContain("danxbot HMR shim");
-      const configBody = (await readFile(join(sourceDir, "vite.config.ts"))).toString();
+      const configBody = (
+        await readFile(join(sourceDir, "vite.config.ts"))
+      ).toString();
       expect(configBody).toContain("defineConfig");
 
       // node_modules symlink dropped into the source dir.
@@ -196,12 +210,16 @@ describe("template-hmr server", () => {
         }),
       ]);
       expect(a.port).not.toBe(b.port);
-      expect(listActiveHmr().map((e) => e.templateId).sort()).toEqual(["11", "22"]);
+      expect(
+        listActiveHmr()
+          .map((e) => e.templateId)
+          .sort(),
+      ).toEqual(["11", "22"]);
     });
   });
 
   describe("releaseHmrServer", () => {
-    it("decRefs on release; kills the child + removes shims when ref hits zero", async () => {
+    it("decRefs on release; entry STAYS ALIVE when ref hits zero (idle-TTL sweep owns kill)", async () => {
       const sourceDir = await fx.sourceDirFor(1, 11);
       await acquireHmrServer({
         templateId: "11",
@@ -223,12 +241,15 @@ describe("template-hmr server", () => {
       expect(getActiveHmr("11")?.refDispatchIds).toEqual(["d-2"]);
       await access(join(sourceDir, "index.html")); // shim still there
 
-      // Last release kills the child + removes shims.
+      // Last release drops d-2 → refs empty BUT entry stays alive; vite
+      // child still running, URL still serving. Sweep owns kill.
       await releaseHmrServer("11", "d-2");
-      expect(getActiveHmr("11")).toBeNull();
-      await expect(access(join(sourceDir, "index.html"))).rejects.toThrow();
-      await expect(access(join(sourceDir, "vite.config.ts"))).rejects.toThrow();
-      await expect(access(join(sourceDir, "node_modules"))).rejects.toThrow();
+      const stillAlive = getActiveHmr("11");
+      expect(stillAlive).not.toBeNull();
+      expect(stillAlive?.refDispatchIds).toEqual([]);
+      await access(join(sourceDir, "index.html"));
+      await access(join(sourceDir, "vite.config.ts"));
+      await access(join(sourceDir, "node_modules"));
     });
 
     it("double-release with the same dispatchId is an idempotent no-op", async () => {
@@ -241,19 +262,136 @@ describe("template-hmr server", () => {
         shellVersion: fx.shellVersion,
       });
       await releaseHmrServer("11", "d-1");
-      // Second release must NOT throw.
+      // Second release must NOT throw + must not alter ref state.
       await releaseHmrServer("11", "d-1");
-      expect(getActiveHmr("11")).toBeNull();
+      expect(getActiveHmr("11")?.refDispatchIds).toEqual([]);
     });
 
     it("releasing a never-acquired template is a silent no-op", async () => {
       await releaseHmrServer("999", "d-x");
       expect(getActiveHmr("999")).toBeNull();
     });
+
+    it("a follow-up acquire on the same templateId after release-to-zero re-uses the SAME entry (same port, lastActiveAt bumped)", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      const first = await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      const firstActiveAt = first.lastActiveAt.getTime();
+      await releaseHmrServer("11", "d-1");
+      await new Promise((r) => setTimeout(r, 20));
+
+      const second = await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-2",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      expect(second.port).toBe(first.port);
+      expect(second.url).toBe(first.url);
+      expect(second.startedAt.getTime()).toBe(first.startedAt.getTime());
+      expect(second.lastActiveAt.getTime()).toBeGreaterThan(firstActiveAt);
+      expect(second.refDispatchIds).toEqual(["d-2"]);
+    });
+  });
+
+  describe("idle-TTL sweep", () => {
+    it("kills entries with zero refs whose lastActiveAt is older than the threshold", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      await releaseHmrServer("11", "d-1");
+      await new Promise((r) => setTimeout(r, 80));
+      const reaped = await sweepIdleHmrServers(50);
+      expect(reaped).toEqual(["11"]);
+      expect(getActiveHmr("11")).toBeNull();
+      await expect(access(join(sourceDir, "index.html"))).rejects.toThrow();
+      await expect(access(join(sourceDir, "vite.config.ts"))).rejects.toThrow();
+      await expect(access(join(sourceDir, "node_modules"))).rejects.toThrow();
+    });
+
+    it("leaves entries with live refs alone, however idle", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      await new Promise((r) => setTimeout(r, 80));
+      const reaped = await sweepIdleHmrServers(50);
+      expect(reaped).toEqual([]);
+      expect(getActiveHmr("11")?.refDispatchIds).toEqual(["d-1"]);
+    });
+
+    it("leaves zero-ref entries alone when lastActiveAt is within the threshold", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      await releaseHmrServer("11", "d-1");
+      const reaped = await sweepIdleHmrServers(60_000);
+      expect(reaped).toEqual([]);
+      expect(getActiveHmr("11")?.refDispatchIds).toEqual([]);
+    });
+
+    it("a new dispatch on an idle zero-ref entry bumps lastActiveAt past the sweep horizon", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      await releaseHmrServer("11", "d-1");
+      await new Promise((r) => setTimeout(r, 80));
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-2",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      const reaped = await sweepIdleHmrServers(50);
+      expect(reaped).toEqual([]);
+      expect(getActiveHmr("11")?.refDispatchIds).toEqual(["d-2"]);
+    });
+
+    it("startIdleSweeper drives periodic sweeps; stopIdleSweeper halts them", async () => {
+      const sourceDir = await fx.sourceDirFor(1, 11);
+      await acquireHmrServer({
+        templateId: "11",
+        sourceDir,
+        dispatchId: "d-1",
+        depsBaseDir: fx.depsBase,
+        shellVersion: fx.shellVersion,
+      });
+      await releaseHmrServer("11", "d-1");
+      startIdleSweeper({ intervalMs: 20, maxIdleMs: 30 });
+      await new Promise((r) => setTimeout(r, 200));
+      stopIdleSweeper();
+      expect(getActiveHmr("11")).toBeNull();
+    });
   });
 
   describe("releaseAllForDispatch", () => {
-    it("drops every entry referencing the dispatchId", async () => {
+    it("drops the dispatchId from every entry but leaves entries alive (sweep owns kill)", async () => {
       const srcA = await fx.sourceDirFor(1, 11);
       const srcB = await fx.sourceDirFor(1, 22);
       await acquireHmrServer({
@@ -273,7 +411,11 @@ describe("template-hmr server", () => {
       expect(listActiveHmr()).toHaveLength(2);
 
       await releaseAllForDispatch("d-1");
-      expect(listActiveHmr()).toHaveLength(0);
+      // Entries still listed; their refs are empty now. Sweep would reap
+      // them later when lastActiveAt crosses the idle threshold.
+      const after = listActiveHmr();
+      expect(after).toHaveLength(2);
+      expect(after.every((e) => e.refDispatchIds.length === 0)).toBe(true);
     });
 
     it("leaves entries alone when a sibling dispatch still references them", async () => {

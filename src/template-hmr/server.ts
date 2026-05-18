@@ -9,8 +9,15 @@
  * port keyed by templateId. Two concurrent dispatches that share a
  * templateId share the same Vite server (HMR re-emits to every connected
  * iframe regardless of which dispatch wrote the source file) — the
- * `refDispatchIds` set just keeps the process alive until the last
- * referring dispatch terminates.
+ * `refDispatchIds` set tracks which dispatches currently hold the entry.
+ *
+ * Lifetime: the entry survives ref-count → 0 (the operator can hold a
+ * preview tab open between dispatches; a follow-up acquire on the same
+ * templateId reuses the same port + child). Killing is deferred to
+ * `sweepIdleHmrServers`, run on an interval via `startIdleSweeper` —
+ * entries with no live refs whose `lastActiveAt` is older than the TTL
+ * (default 1h) get reaped. `acquireHmrServer` + `releaseHmrServer` both
+ * bump `lastActiveAt`, so a dispatch every <TTL keeps the entry warm.
  *
  * Why spawn (not import Vite programmatically): danxbot has no `vite`
  * dependency; pulling it in would also pull `@vitejs/plugin-vue` + `vue`
@@ -25,10 +32,10 @@
  * dropped into the source dir alongside the agent's SFC files. Each shim
  * carries a `danxbot HMR shim — do not edit` header so an agent reading
  * the dir knows the file is infrastructure, not card-scope work. Cleanup
- * on dispatch terminal removes only the shims this module wrote (tracked
- * per-entry); files the SFC source shipped natively (App.vue, main.ts,
- * etc.) are left alone — those are the dispatch's `stagedFilePaths` and
- * are owned by `agent-cleanup.ts`.
+ * happens on idle-TTL sweep / worker shutdown — NOT on dispatch terminal
+ * (entries survive the dispatch that started them). Removes only the
+ * shims this module wrote (tracked per-entry); files the SFC source
+ * shipped natively (App.vue, main.ts, etc.) are left alone.
  */
 
 import {
@@ -66,6 +73,12 @@ export interface HmrServerInfo {
   /** Snapshot of the dispatch ids currently holding the entry open. */
   refDispatchIds: string[];
   startedAt: Date;
+  /**
+   * Wall-clock time of the last acquire or release call against this
+   * template. Drives the idle-TTL sweep: an entry with no live refs whose
+   * `lastActiveAt` is older than the sweeper's threshold gets killed.
+   */
+  lastActiveAt: Date;
 }
 
 export interface AcquireHmrOptions extends AcquireOverrides {
@@ -86,6 +99,8 @@ interface InternalEntry {
   symlinks: string[];
   refDispatchIds: Set<string>;
   startedAt: Date;
+  /** Updated on every acquire + release; sweep input for idle-TTL reaping. */
+  lastActiveAt: Date;
   /** Set when shutdown begins so concurrent release calls don't re-kill. */
   closing: boolean;
 }
@@ -247,15 +262,13 @@ interface SpawnedViteHandle {
  * resolves on first "ready in N ms" line. The child stays alive after
  * the promise resolves — caller owns the process from that point.
  */
-function spawnViteChild(
-  opts: {
-    sourceDir: string;
-    port: number;
-    spawnImpl: typeof SpawnFn;
-    readyTimeoutMs: number;
-    templateId: string;
-  },
-): SpawnedViteHandle {
+function spawnViteChild(opts: {
+  sourceDir: string;
+  port: number;
+  spawnImpl: typeof SpawnFn;
+  readyTimeoutMs: number;
+  templateId: string;
+}): SpawnedViteHandle {
   const viteBin = join(opts.sourceDir, "node_modules", ".bin", "vite");
   const child = opts.spawnImpl(
     viteBin,
@@ -334,7 +347,12 @@ function snapshot(entry: InternalEntry): HmrServerInfo {
     url: entry.url,
     refDispatchIds: [...entry.refDispatchIds],
     startedAt: entry.startedAt,
+    lastActiveAt: entry.lastActiveAt,
   };
+}
+
+function bumpActive(entry: InternalEntry): void {
+  entry.lastActiveAt = new Date();
 }
 
 /**
@@ -349,6 +367,7 @@ export async function acquireHmrServer(
   const existing = entries.get(opts.templateId);
   if (existing && !existing.closing) {
     existing.refDispatchIds.add(opts.dispatchId);
+    bumpActive(existing);
     return snapshot(existing);
   }
 
@@ -356,6 +375,7 @@ export async function acquireHmrServer(
   if (pending) {
     const entry = await pending;
     entry.refDispatchIds.add(opts.dispatchId);
+    bumpActive(entry);
     return snapshot(entry);
   }
 
@@ -439,6 +459,7 @@ async function startEntry(opts: AcquireHmrOptions): Promise<InternalEntry> {
     // releaseAllForDispatch).
     refDispatchIds: new Set([opts.dispatchId]),
     startedAt: new Date(),
+    lastActiveAt: new Date(),
     closing: false,
   };
   entries.set(opts.templateId, entry);
@@ -491,11 +512,20 @@ async function unwindShims(
 }
 
 /**
- * Release — drop one dispatchId's claim on the template. When the ref
- * set hits zero, SIGTERM the vite child, await its exit, and unwind
- * the shim files this entry wrote. Idempotent: double-release with the
- * same dispatchId is a no-op (the Set.delete on a missing key); releasing
- * a never-acquired template is also a no-op.
+ * Release — drop one dispatchId's claim on the template. The vite child
+ * is NOT killed on zero refs; the entry stays alive (URL keeps serving)
+ * so the operator can hold a preview tab open between dispatches and a
+ * follow-up acquire on the same templateId reuses the same port + child.
+ * Killing happens later in `sweepIdleHmrServers` — entries with zero refs
+ * whose `lastActiveAt` is older than the sweep threshold get reaped.
+ *
+ * `lastActiveAt` is bumped here too so the idle clock starts at the
+ * release moment, not at the last acquire (otherwise a short-lived
+ * dispatch with a long warm-up would expire faster than intended).
+ *
+ * Idempotent: double-release with the same dispatchId is a no-op (the
+ * `Set.delete` on a missing key is a no-op); releasing a never-acquired
+ * template is also a no-op.
  */
 export async function releaseHmrServer(
   templateId: string,
@@ -503,15 +533,10 @@ export async function releaseHmrServer(
 ): Promise<void> {
   const entry = entries.get(templateId);
   if (!entry) return;
+  if (entry.closing) return;
 
   entry.refDispatchIds.delete(dispatchId);
-  if (entry.refDispatchIds.size > 0) return;
-  if (entry.closing) return;
-  entry.closing = true;
-  entries.delete(templateId);
-
-  await stopChild(entry.child);
-  await unwindShims(entry.shimFiles, entry.symlinks);
+  bumpActive(entry);
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -555,9 +580,7 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 /** Release every entry currently referencing `dispatchId`. */
-export async function releaseAllForDispatch(
-  dispatchId: string,
-): Promise<void> {
+export async function releaseAllForDispatch(dispatchId: string): Promise<void> {
   const owned = [...entries.values()].filter((e) =>
     e.refDispatchIds.has(dispatchId),
   );
@@ -603,6 +626,7 @@ export function listActiveHmr(): HmrServerInfo[] {
  * children, and by the test suite to drain state between cases.
  */
 export async function shutdownAllHmr(): Promise<void> {
+  stopIdleSweeper();
   const ids = [...entries.keys()];
   await Promise.all(
     ids.map(async (templateId) => {
@@ -618,8 +642,104 @@ export async function shutdownAllHmr(): Promise<void> {
   );
 }
 
+/**
+ * Idle TTL — entries with no live refs whose `lastActiveAt` is older than
+ * this get killed by the sweeper. Operator design (2026-05-17): "torn down
+ * by the cron within an hour of inactivity." 1 hour default; tests pass a
+ * tiny threshold via `sweepIdleHmrServers(thresholdMs)`.
+ */
+export const DEFAULT_IDLE_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Sweep cadence — how often `startIdleSweeper` walks the entries map. 1
+ * minute is fine for a 1-hour TTL: drift between idle-onset and reap is
+ * at most one cadence, so worst case a server lives 61 minutes idle.
+ */
+export const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * Walk every entry; kill the ones that have no live refs AND whose
+ * `lastActiveAt` is older than `maxIdleMs`. Returns the list of templateIds
+ * that were reaped — useful for the sweeper's debug log + tests asserting
+ * what got reaped without re-reading internal state.
+ */
+export async function sweepIdleHmrServers(
+  maxIdleMs: number = DEFAULT_IDLE_TTL_MS,
+): Promise<string[]> {
+  const now = Date.now();
+  const reaped: string[] = [];
+  // Collect first; mutating `entries` mid-iteration would skip neighbors.
+  const candidates = [...entries.values()].filter(
+    (e) =>
+      !e.closing &&
+      e.refDispatchIds.size === 0 &&
+      now - e.lastActiveAt.getTime() > maxIdleMs,
+  );
+
+  await Promise.all(
+    candidates.map(async (entry) => {
+      // Re-check inside the async closure — another release/acquire could
+      // have bumped lastActiveAt or added a ref between the filter snapshot
+      // and this tick.
+      if (entry.closing) return;
+      if (entry.refDispatchIds.size > 0) return;
+      if (now - entry.lastActiveAt.getTime() <= maxIdleMs) return;
+
+      entry.closing = true;
+      entries.delete(entry.templateId);
+      await stopChild(entry.child);
+      await unwindShims(entry.shimFiles, entry.symlinks);
+      reaped.push(entry.templateId);
+    }),
+  );
+
+  return reaped;
+}
+
+let sweeperHandle: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Start the periodic idle sweep. Idempotent — calling twice is a no-op
+ * (the second call returns the same handle). Stops on `stopIdleSweeper`
+ * or on worker shutdown via `shutdownAllHmr`.
+ */
+export function startIdleSweeper(
+  opts: { intervalMs?: number; maxIdleMs?: number } = {},
+): void {
+  if (sweeperHandle !== null) return;
+  const intervalMs = opts.intervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
+  const maxIdleMs = opts.maxIdleMs ?? DEFAULT_IDLE_TTL_MS;
+  sweeperHandle = setInterval(() => {
+    sweepIdleHmrServers(maxIdleMs).then(
+      (reaped) => {
+        if (reaped.length > 0) {
+          log.info(`[template-hmr] swept idle entries: ${reaped.join(", ")}`);
+        }
+      },
+      (err) => {
+        log.warn(
+          `[template-hmr] sweep failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      },
+    );
+  }, intervalMs);
+  // Don't keep the event loop alive just for the sweeper — worker exits
+  // cleanly on its own signals.
+  sweeperHandle.unref?.();
+}
+
+/** Stop the periodic idle sweep. Idempotent. */
+export function stopIdleSweeper(): void {
+  if (sweeperHandle === null) return;
+  clearInterval(sweeperHandle);
+  sweeperHandle = null;
+}
+
 /** Test hook — clear in-memory state without trying to kill anything. */
 export function clearHmrStateForTesting(): void {
   entries.clear();
   startLocks.clear();
+  stopIdleSweeper();
 }
