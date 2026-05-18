@@ -506,3 +506,37 @@ describe("IssueCard — child_assignments avatar stack (DX-524)", () => {
     expect(stack.props("assignments")).toEqual(assignments);
   });
 });
+
+describe("IssueCard — root element drag-compatibility", () => {
+  it("root is not <button> (Chrome aborts native drag on <button draggable>)", () => {
+    const w = mountCard(makeListItem());
+    expect(w.element.tagName).not.toBe("BUTTON");
+  });
+
+  it("root carries role=button + tabindex=0 for keyboard a11y", () => {
+    const w = mountCard(makeListItem());
+    expect(w.element.getAttribute("role")).toBe("button");
+    expect(w.element.getAttribute("tabindex")).toBe("0");
+  });
+
+  it("root is draggable when dragHandlers prop is passed", () => {
+    const handlers = { onDragstart: () => {}, onDragend: () => {} };
+    const w = mount(IssueCard, {
+      props: { issue: makeListItem(), repo: "danxbot", dragHandlers: handlers },
+      global: { stubs },
+    });
+    expect(w.element.getAttribute("draggable")).toBe("true");
+  });
+
+  it("Enter key on root emits select", async () => {
+    const w = mountCard(makeListItem({ id: "DX-1" }));
+    await w.trigger("keydown", { key: "Enter" });
+    expect(w.emitted("select")).toBeTruthy();
+  });
+
+  it("Space key on root emits select", async () => {
+    const w = mountCard(makeListItem({ id: "DX-1" }));
+    await w.trigger("keydown", { key: " " });
+    expect(w.emitted("select")).toBeTruthy();
+  });
+});

@@ -157,12 +157,15 @@ function onParentClick(e: MouseEvent): void {
 </script>
 
 <template>
-  <button
+  <div
     class="issue-card"
     :class="{ epic: isEpic, 'self-blocked': selfBlocked, 'waiting-on': waitingOn && !selfBlocked, conflict: conflictActiveCount > 0 && !selfBlocked && !waitingOn, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
-    type="button"
+    role="button"
+    tabindex="0"
     :draggable="props.dragHandlers ? true : undefined"
     @click="emit('select', issue)"
+    @keydown.enter.prevent="emit('select', issue)"
+    @keydown.space.prevent="emit('select', issue)"
     @dragstart="props.dragHandlers?.onDragstart($event)"
     @dragend="props.dragHandlers?.onDragend($event)"
   >
@@ -298,7 +301,7 @@ function onParentClick(e: MouseEvent): void {
         />
       </span>
     </div>
-  </button>
+  </div>
 </template>
 
 <style scoped>
@@ -377,7 +380,6 @@ function onParentClick(e: MouseEvent): void {
 }
 .issue-card.is-dragging {
   opacity: 0.4;
-  pointer-events: none;
 }
 .issue-card.is-dragging:hover {
   transform: none;
