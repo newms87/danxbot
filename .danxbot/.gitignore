@@ -62,3 +62,9 @@ workspaces/self-repair/workspace-shape.test.ts
 workspaces/self-repair/.mcp.json
 workspaces/self-repair/.claude/settings.json
 workspaces/self-repair/.claude/skills/danx-prep/
+workspaces/worktree-repair/CLAUDE.md
+workspaces/worktree-repair/workspace.yml
+workspaces/worktree-repair/workspace-shape.test.ts
+workspaces/worktree-repair/.mcp.json
+workspaces/worktree-repair/.claude/settings.json
+workspaces/worktree-repair/.claude/skills/danx-prep/
