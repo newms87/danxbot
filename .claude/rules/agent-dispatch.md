@@ -179,6 +179,7 @@ Mechanical pre-edit check for `src/terminal.ts` / any WT-launching bash:
 
 | Forbidden | Why |
 |---|---|
+| Wrapping a NEW DB caller in `retryTransient` / `tier4Retry` AS A PRIMARY FIX for a loop-starvation symptom | Tier 4 retry wraps (`src/db/tier4-retry.ts`, DX-637) are defense-in-depth INSURANCE under DX-634's event-loop hardening. If a new caller flakes under load, fix the loop-starvation root cause first (load DX-633 + DX-634). Adding more retry envelopes around the symptom hides the bug and burns the retry budget on what the loop should have handled. Retries are Tier 4 only. |
 | Schema legacy-tolerance patterns — `back-compat` reader branches, `forward-compat` silent acceptance of unknown fields on round-trip, `auto-migrate` on read, version-conditional reader logic, `schema_version` literals other than `KNOWN_SCHEMA_MAX` in write paths, "auto-migrate-on-read" defaults at parse time | Migration is the registry under `src/issue-tracker/migrations/` running once at worker boot, not a scatter of read-time conditionals. The validator rejects fail-loud anything `< KNOWN_SCHEMA_MIN`. See CLAUDE.md "Core Principle: Single Canonical Schema — Fail Loud, No Legacy". |
 | `claude -p` in host mode | See "Host mode MUST be interactive". |
 | `--output-format stream-json` anywhere | Vestigial. Replaced by SessionLogWatcher. |

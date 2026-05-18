@@ -648,6 +648,55 @@ describe("startDispatchTracking", () => {
       }),
     ).rejects.toThrow("db down");
   });
+
+  describe("Tier 4 retry envelope (DX-637)", () => {
+    it("retries a transient pg error and proceeds without CRITICAL_FAILURE", async () => {
+      // First call throws transient connection-terminated; second call
+      // succeeds. The retry wrapper keeps the blip from reaching the
+      // handler's CRITICAL_FAILURE branch.
+      mockInsertDispatch
+        .mockRejectedValueOnce(
+          new Error("Connection terminated due to connection timeout"),
+        )
+        .mockResolvedValueOnce(undefined);
+
+      const watcher = makeMockWatcher();
+      await startDispatchTracking({
+        jobId: "job-tier4",
+        repoName: "danxbot",
+        trigger: slackTrigger,
+        runtimeMode: "docker",
+        danxbotCommit: "abc",
+        agentName: null,
+        watcher: watcher as never,
+      });
+
+      expect(mockInsertDispatch).toHaveBeenCalledTimes(2);
+      expect(mockPublish).toHaveBeenCalledWith(
+        expect.objectContaining({ topic: "dispatch:created" }),
+      );
+    });
+
+    it("does not retry a non-transient insert error — fails fast as before", async () => {
+      mockInsertDispatch.mockRejectedValueOnce(
+        Object.assign(new Error("unique_violation"), { code: "23505" }),
+      );
+      const watcher = makeMockWatcher();
+      await expect(
+        startDispatchTracking({
+          jobId: "job-fatal",
+          repoName: "r",
+          trigger: slackTrigger,
+          runtimeMode: "docker",
+          danxbotCommit: null,
+          agentName: null,
+          watcher: watcher as never,
+        }),
+      ).rejects.toThrow("unique_violation");
+
+      expect(mockInsertDispatch).toHaveBeenCalledOnce();
+    });
+  });
 });
 
 // ─── EventBus publishing ──────────────────────────────────────────────────────

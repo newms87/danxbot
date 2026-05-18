@@ -144,6 +144,34 @@ describe("triage-timer", () => {
       expect(boom).toHaveBeenCalledTimes(1);
       expect(_isTriageTimerArmed("danxbot", "DX-3")).toBe(false);
     });
+
+    it("Tier 4 retry (DX-637) — transient pg error during audit reconcile retries via tier4Retry", async () => {
+      // Use real timers so the tier4Retry sleep (setTimeout 100ms) can
+      // resolve naturally — under fake timers the retry's pending
+      // sleep would block the microtask drain.
+      vi.useRealTimers();
+      const flaky = vi
+        .fn<ReconcileFn>()
+        .mockRejectedValueOnce(
+          new Error("Connection terminated due to connection timeout"),
+        )
+        .mockResolvedValueOnce(emptyResult());
+
+      armTriageTimer({
+        repo,
+        cardId: "DX-tier4",
+        expiresAtMs: 0,
+        reconcile: flaky,
+      });
+
+      // Wait long enough for the timer to fire + tier4Retry's first
+      // sleep (initial 100ms ± 20% jitter) to elapse + the retry to
+      // resolve. 500ms is comfortably above the worst-case envelope.
+      await new Promise<void>((r) => setTimeout(r, 500));
+
+      expect(flaky).toHaveBeenCalledTimes(2);
+      expect(_isTriageTimerArmed("danxbot", "DX-tier4")).toBe(false);
+    });
   });
 
   describe("clearTriageTimer", () => {

@@ -38,6 +38,7 @@ import { reportSystemError } from "../system-repair/report.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
 import { runWithYields } from "../util/yield-loop.js";
+import { tier4Retry } from "../db/tier4-retry.js";
 
 const log = createLogger("triage-timer");
 
@@ -92,7 +93,15 @@ export function armTriageTimer(args: {
     // Fire reconcile in audit mode. The promise is intentionally
     // unawaited — the timer fires from the event loop, not a caller
     // we can return errors to. A rejection lands here and is logged.
-    reconcile(repo, cardId, "audit").catch((err) => {
+    //
+    // Tier 4 safety net (DX-637 / DX-633). Reconcile's pg steps
+    // (mirror via content-hash dedup, dispatch-row UPDATE-where-changed)
+    // are idempotent on re-run; the Trello push step (step 7) hash-
+    // gates against the prior pushed state so a retry sees the same
+    // hash and no-ops the diff. Root-cause fix is DX-634 event-loop
+    // hardening; this wrap stops a TCP hiccup from silently dropping
+    // the audit reconcile.
+    tier4Retry("triage-timer-audit", () => reconcile(repo, cardId, "audit")).catch((err) => {
       log.warn(
         `[${repo.name}] ${cardId} triage-timer reconcile rejected: ${
           err instanceof Error ? err.message : String(err)

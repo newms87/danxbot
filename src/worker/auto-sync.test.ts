@@ -349,4 +349,51 @@ describe("autoSyncTrackedIssue — post-dispatch reconcile", () => {
       expect(syncRoot).toHaveBeenCalledOnce();
     });
   });
+
+  describe("Tier 4 retry envelope (DX-637)", () => {
+    it("retries reconcile on a transient pg error and proceeds without surfacing the blip", async () => {
+      const repo = makeRepoContext({ localPath: setupRepo() });
+      const getDispatch = vi
+        .fn()
+        .mockResolvedValue(fakeDispatchRow({ issueId: "TEST-1" }));
+      const reconcile = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error("Connection terminated due to connection timeout"),
+        )
+        .mockResolvedValueOnce(undefined);
+      const syncRoot = vi.fn().mockResolvedValue(undefined);
+
+      await autoSyncTrackedIssue("dispatch-123", repo, {
+        getDispatch,
+        reconcile,
+        syncRoot,
+      });
+
+      // First call threw transient → second call succeeded inside tier4Retry.
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(syncRoot).toHaveBeenCalledOnce();
+    });
+
+    it("does not retry a non-transient reconcile failure — swallows it like before", async () => {
+      const repo = makeRepoContext({ localPath: setupRepo() });
+      const getDispatch = vi
+        .fn()
+        .mockResolvedValue(fakeDispatchRow({ issueId: "TEST-1" }));
+      const reconcile = vi
+        .fn()
+        .mockRejectedValue(new Error("schema validation failed"));
+      const syncRoot = vi.fn().mockResolvedValue(undefined);
+
+      await autoSyncTrackedIssue("dispatch-123", repo, {
+        getDispatch,
+        reconcile,
+        syncRoot,
+      });
+
+      // Non-transient → exactly one attempt, error swallowed, syncRoot still fires.
+      expect(reconcile).toHaveBeenCalledOnce();
+      expect(syncRoot).toHaveBeenCalledOnce();
+    });
+  });
 });

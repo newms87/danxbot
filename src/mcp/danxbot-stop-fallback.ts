@@ -25,6 +25,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Pool } from "pg";
 import { TERMINAL_STATUSES } from "../dashboard/dispatches.js";
+import { tier4Retry } from "../db/tier4-retry.js";
 
 /**
  * `dispatches` table fields the fallback writes. Mirrors the worker
@@ -81,8 +82,14 @@ export async function tryDirectDbWrite(
       ...(db.database ? { database: db.database } : {}),
       max: 1,
       idleTimeoutMillis: 1_000,
-      connectionTimeoutMillis: 3_000,
+      // 1500ms cap so the 2000ms tier4 retry budget can fit at least one
+      // retry attempt after the first connect-timeout fire. The previous
+      // 3000ms exceeded the tier4 envelope, making the wrap dead code on
+      // its most-likely failure mode (connection_timeout on a stale
+      // pool client).
+      connectionTimeoutMillis: 1_500,
     });
+    const livePool = pool;
 
     const completedAt = Date.now();
     // Idempotent: skip already-terminal rows. Mirrors the worker-side
@@ -95,21 +102,31 @@ export async function tryDirectDbWrite(
     const placeholders = TERMINAL_STATUSES.map(
       (_, i) => `$${i + 5}`,
     ).join(", ");
-    const result = await pool.query(
-      `UPDATE dispatches
-       SET "status" = $1,
-           summary = $2,
-           completed_at = $3,
-           pid_terminated_at = $3
-       WHERE id = $4
-         AND "status" NOT IN (${placeholders})`,
-      [
-        shape.dbStatus,
-        shape.summary,
-        completedAt,
-        shape.dispatchId,
-        ...TERMINAL_STATUSES,
-      ],
+    // Tier 4 safety net (DX-637 / DX-633). The MCP fallback only fires
+    // when the worker's HTTP stop endpoint is unreachable — a single
+    // transient pg blip on this branch would waste the retry budget by
+    // falling through to the filesystem queue. Wrap the leaf query so
+    // a hiccup retries cheaply before degrading. Root-cause fix is
+    // DX-634 event-loop hardening; this is the residual-blip insurance.
+    // `livePool` aliases `pool` so the closure captures the narrowed
+    // (non-undefined) ref without leaning on `!` or `as`.
+    const result = await tier4Retry("mcp-stop-fallback-db", () =>
+      livePool.query(
+        `UPDATE dispatches
+         SET "status" = $1,
+             summary = $2,
+             completed_at = $3,
+             pid_terminated_at = $3
+         WHERE id = $4
+           AND "status" NOT IN (${placeholders})`,
+        [
+          shape.dbStatus,
+          shape.summary,
+          completedAt,
+          shape.dispatchId,
+          ...TERMINAL_STATUSES,
+        ],
+      ),
     );
     return (result.rowCount ?? 0) > 0;
   } catch {

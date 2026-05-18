@@ -45,6 +45,7 @@
 import { reconcileIssue } from "../issue/reconcile.js";
 import { createLogger } from "../logger.js";
 import { syncRepoRoot } from "./sync-root.js";
+import { tier4Retry } from "../db/tier4-retry.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 import type { ReconcileTrigger } from "../issue/reconcile-types.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
@@ -97,14 +98,25 @@ export async function autoSyncTrackedIssue(
     // every terminal dispatch (issue-bound or not) can have advanced
     // `origin/main`, so the root clone may still drift.
     if (row && row.issueId !== null) {
-      await deps.reconcile(
-        {
-          name: repo.name,
-          localPath: repo.localPath,
-          issuePrefix: repo.issuePrefix,
-        },
-        row.issueId,
-        "lifecycle",
+      const issueId = row.issueId;
+      // Tier 4 safety net (DX-637 / DX-633). Reconcile's pg-touching
+      // steps (YAML→DB mirror via content-hash dedup, dispatch-row
+      // updates via UPDATE-where-changed) are idempotent on re-run.
+      // The Trello push step (step 7) is gated by hash-equality on
+      // the prior pushed state — a second run after a transient blip
+      // sees the same content_hash and no-ops the diff. Retry is safe.
+      // Root-cause fix is DX-634 event-loop hardening; this wrap stops
+      // a hiccup from silently dropping the post-completion reconcile.
+      await tier4Retry("auto-sync-reconcile", () =>
+        deps.reconcile(
+          {
+            name: repo.name,
+            localPath: repo.localPath,
+            issuePrefix: repo.issuePrefix,
+          },
+          issueId,
+          "lifecycle",
+        ),
       );
     }
   } catch (err) {

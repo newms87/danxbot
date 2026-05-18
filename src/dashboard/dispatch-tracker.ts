@@ -9,6 +9,7 @@ import {
   insertDispatch,
   updateDispatch,
 } from "./dispatches-db.js";
+import { tier4Retry } from "../db/tier4-retry.js";
 import {
   type Dispatch,
   type DispatchStatus,
@@ -291,7 +292,11 @@ export async function startDispatchTracking(
   };
 
   try {
-    await insertDispatch(row);
+    // Tier 4 safety net (DX-637 / DX-633). Root-cause fix for transient
+    // pg errors on this path is DX-634's event-loop hardening; the
+    // retry envelope catches the residual blip class so a single TCP
+    // hiccup never produces a CRITICAL_FAILURE on dispatch INSERT.
+    await tier4Retry("dispatch-insert", () => insertDispatch(row));
     // Notify SSE clients immediately so they see the new dispatch without
     // waiting for the next DB change-detector poll cycle.
     eventBus.publish({ topic: "dispatch:created", data: row });
