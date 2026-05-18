@@ -19,7 +19,6 @@ const FIXTURE: List[] = [
   { id: "u-arch", name: "Backlog", type: "archived", order: 0, is_default_for_type: true, color: "#64748b" },
   { id: "u-review", name: "Review", type: "review", order: 0, is_default_for_type: true, color: "#3b82f6" },
   { id: "u-ready", name: "To Do", type: "ready", order: 0, is_default_for_type: true, color: "#22d3ee" },
-  { id: "u-blocked", name: "Blocked", type: "blocked", order: 0, is_default_for_type: true, color: "#ef4444" },
   { id: "u-ip", name: "In Progress", type: "in_progress", order: 0, is_default_for_type: true, color: "#f59e0b" },
   { id: "u-done", name: "Done", type: "completed", order: 0, is_default_for_type: true, color: "#22c55e" },
   { id: "u-cancel", name: "Cancelled", type: "cancelled", order: 0, is_default_for_type: true, color: "#71717a" },
@@ -61,13 +60,12 @@ beforeEach(() => {
 });
 
 describe("ListsManager", () => {
-  it("renders all 7 semantic-type sections with the seeded lists grouped", () => {
+  it("renders all 6 semantic-type sections with the seeded lists grouped", () => {
     const w = mountManager();
     for (const t of [
       "archived",
       "review",
       "ready",
-      "blocked",
       "in_progress",
       "completed",
       "cancelled",

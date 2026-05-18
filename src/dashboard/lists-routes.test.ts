@@ -160,13 +160,13 @@ describe("repo resolution", () => {
 });
 
 describe("GET /api/lists", () => {
-  it("returns the seeded 7-list file", async () => {
+  it("returns the seeded 6-list file", async () => {
     const res = createMockRes();
     await handleListLists(authedReq("GET"), res, "danxbot", deps);
     expect(res._getStatusCode()).toBe(200);
     const body = bodyOf(res);
     const file = body.file as { lists: unknown[] };
-    expect(file.lists).toHaveLength(7);
+    expect(file.lists).toHaveLength(6);
   });
 });
 

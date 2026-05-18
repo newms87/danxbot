@@ -78,12 +78,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     list_name: null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -98,10 +92,15 @@ describe("isDispatchSessionTerminal", () => {
     );
   });
 
-  it("returns true for Blocked", () => {
-    expect(isDispatchSessionTerminal(makeIssue({ status: "Blocked" }))).toBe(
-      true,
-    );
+  it("returns true when blocked field is populated", () => {
+    expect(
+      isDispatchSessionTerminal(
+        makeIssue({
+          status: "ToDo",
+          blocked: { reason: "x", at: "2026-01-01T00:00:00.000Z" },
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("returns true when requires_human is non-null on a non-terminal status (DX-231)", () => {
@@ -606,13 +605,14 @@ describe("persistAfterSync — preserves dispatch + assigned_agent forever", () 
   // Blocked is a session-terminal status that STAYS in open/. The
   // dispatch slot and assigned_agent are preserved — durable audit
   // even when the session ended without reaching Done.
-  it("Blocked save (stays in open/) preserves BOTH dispatch and assigned_agent", async () => {
+  it("blocked-gated save (stays in open/) preserves BOTH dispatch and assigned_agent", async () => {
     vi.mocked(syncIssue).mockRejectedValue(new Error("tracker 502"));
     const recordError = vi.fn().mockResolvedValue(undefined);
     const issue = makeIssue({
       id: "ISS-202",
       external_id: "ext-202",
-      status: "Blocked",
+      status: "In Progress",
+      blocked: { reason: "stuck", at: "2026-01-01T00:00:00.000Z" },
       assigned_agent: "dani",
       dispatch: {
         id: "did-202",
@@ -631,7 +631,7 @@ describe("persistAfterSync — preserves dispatch + assigned_agent forever", () 
     const persisted = parseIssue(readFileSync(openPath, "utf-8"), {
       expectedPrefix: "ISS",
     });
-    expect(persisted.status).toBe("Blocked");
+    expect(persisted.blocked).not.toBeNull();
     expect(persisted.dispatch!.id).toBe("did-202");
     expect(persisted.assigned_agent).toBe("dani");
   });

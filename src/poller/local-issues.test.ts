@@ -127,12 +127,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
   // without an explicit `blocked` override. Keeps the v4 invariant
   // `status === "Blocked" ⟺ blocked !== null` without forcing every
   // call site to repeat the {reason, timestamp} shape.
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -176,7 +170,7 @@ describe("local-issues — DB-backed", () => {
         1000,
       );
       await seed(
-        makeIssue({ id: "ISS-2", external_id: "b", status: "Blocked" }),
+        makeIssue({ id: "ISS-2", external_id: "b", status: "ToDo", blocked: { reason: "x", at: "2026-01-01T00:00:00.000Z" } }),
         1000,
       );
       await seed(
@@ -186,6 +180,27 @@ describe("local-issues — DB-backed", () => {
       const result = await listDispatchableYamls(REPO_PATH, "ISS");
       expect(result.map((i) => i.id)).toEqual(["ISS-3"]);
     });
+
+    it.skipIf(!handle)(
+      "DX-658: excludes ToDo cards with blocked.at populated (pure dispatch gate)",
+      async () => {
+        // Card looks ToDo to deriveStatus (ready_at populated, no
+        // dispatch, no terminal timestamps) but the self-block gate is
+        // armed. Post-DX-658 the picker MUST skip dispatch while
+        // `blocked.at != null` regardless of derived semantic column.
+        await seed(
+          {
+            ...makeIssue({ id: "ISS-1", external_id: "a", status: "ToDo" }),
+            blocked: { reason: "needs human", at: "2026-05-18T00:00:00.000Z" },
+            ready_at: "2026-05-17T00:00:00.000Z",
+          },
+          1000,
+        );
+        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 1000);
+        const result = await listDispatchableYamls(REPO_PATH, "ISS");
+        expect(result.map((i) => i.id)).toEqual(["ISS-2"]);
+      },
+    );
 
     it.skipIf(!handle)(
       "DX-584: excludes Backlog cards (archived_at != null AND ready_at == null) — explicit gate",
@@ -645,7 +660,8 @@ describe("local-issues — DB-backed", () => {
             id: "ISS-1",
             external_id: "a",
             type: "Epic",
-            status: "Blocked",
+            status: "In Progress",
+            blocked: { reason: "epic stuck", at: "2026-01-01T00:00:00.000Z" },
           }),
           1000,
         );
@@ -917,7 +933,7 @@ describe("local-issues — DB-backed", () => {
 
     it.skipIf(!handle)("returns Blocked cards whose triage is due", async () => {
       await seed(
-        withTriage({ id: "ISS-1", external_id: "a", status: "Blocked" }, ""),
+        withTriage({ id: "ISS-1", external_id: "a", status: "ToDo", blocked: { reason: "x", at: "2026-01-01T00:00:00.000Z" } }, ""),
         1000,
       );
       const result = await listTriageDueYamls(REPO_PATH, NOW, "ISS");

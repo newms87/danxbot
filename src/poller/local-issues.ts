@@ -158,7 +158,13 @@ export async function listDispatchableYamls(
     // rewrite without silently re-opening Backlog cards to dispatch.
     if (i.archived_at !== null && i.ready_at === null) return false;
     if (isEffectivelyWaitingOn(i, byId)) return false;
-    if (i.blocked != null) return false;
+    // DX-658 (Phase 2) — `blocked: {at, reason}` is now a pure
+    // dispatch gate independent of `status`. The picker skips any
+    // card with the gate populated regardless of which derived
+    // semantic column it lives in. `blocked?.at != null` matches the
+    // validator invariant (`blocked` non-null ⇒ `at` non-empty); the
+    // explicit at-check survives any future widening of the shape.
+    if (i.blocked?.at != null && i.blocked.at !== "") return false;
     if (isEffectivelyConflicted(i, allOpen)) return false;
     // DX-231 (Phase 2 — DX-233): the orthogonal "needs human action"
     // field is a dispatch gate parallel to `blocked` and `waiting_on`.
@@ -308,7 +314,10 @@ export async function listTriageDueYamls(
 function inTriageScope(issue: Issue): boolean {
   if (issue.waiting_on !== null) return true;
   if (issue.status === "Review") return true;
-  if (issue.status === "Blocked") return true;
+  // DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`. The
+  // self-block gate (`Issue.blocked != null`) signals a card that
+  // still needs human triage of the block reason; keep it in scope.
+  if (issue.blocked !== null) return true;
   return false;
 }
 

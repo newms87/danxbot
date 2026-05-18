@@ -255,8 +255,6 @@ export type CascadeAction =
 export interface CascadeIssueListBody {
   epic_id: string;
   dest_list_name: string;
-  unblock_confirmed: boolean;
-  blocked_reason?: string;
   overrides?: Record<string, CascadeAction>;
 }
 

@@ -379,10 +379,8 @@ async function doSyncIssue(
   // itself is derived from labels. So the remote-side diff MUST come from
   // the actual label state.
   //
-  // `blocked` mirrors `status === "Blocked"`. The `Issue.blocked` FIELD
-  // carries the reason, but the label is keyed off status alone — status
-  // is the index lookup, the field is the reason cache, and the worker
-  // enforces the field/status invariant.
+  // `blocked` mirrors `Issue.blocked != null`. DX-658 / Phase 2 retired
+  // `"Blocked"` from `IssueStatus`; the gate field is the sole signal.
   //
   // `requires_human` mirrors `Issue.requires_human != null`. DX-231
   // replaced the legacy `needsApproval` derive (driven by the retired
@@ -399,7 +397,7 @@ async function doSyncIssue(
   }
   const localLabels = {
     type: local.type,
-    blocked: local.status === "Blocked",
+    blocked: local.blocked !== null,
     // DX-231 Phase 3 (DX-234) reinstates `requires_human` in the diff
     // predicate. Phase 1 (DX-232) intentionally omitted it because the
     // Trello label id was not yet provisioned — every flagged card

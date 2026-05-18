@@ -1,6 +1,15 @@
 /**
- * Stamp `status: "Blocked"` + `blocked: {reason, at}` on a
- * candidate YAML at `<repo>/.danxbot/issues/open/<id>.yml`.
+ * Stamp `blocked: {at, reason}` on a candidate YAML at
+ * `<repo>/.danxbot/issues/open/<id>.yml`.
+ *
+ * DX-658 (Phase 2 of "Blocked becomes a dispatch gate, not a status",
+ * parent epic DX-656) — this stamp is now a pure gate write. `status`,
+ * `dispatch`, and `list_name` on the saved YAML are byte-identical to
+ * their pre-stamp values. The picker's `blocked?.at != null` filter
+ * skips the card while the gate is populated; the card keeps its
+ * derived semantic column (Review / In Progress / ToDo / …) and the
+ * worker's normal dispatch lifecycle still clears `dispatch` on the
+ * terminal save that follows the self-block signal.
  *
  * Single source for the self-block YAML mutation. Two callers:
  *
@@ -9,10 +18,10 @@
  *   - `src/worker/dispatch.ts` (`agent_blocked` status from
  *     `danxbot_complete`).
  *
- * The function is idempotent: re-stamps overwrite the timestamp but
- * leave status + reason at the new values. Any pre-existing
- * `waiting_on` record is preserved (independent durable dep-chain
- * note; not coupled to status).
+ * Idempotent: re-stamps overwrite the timestamp + reason but never
+ * touch any other field. Any pre-existing `waiting_on` /
+ * `requires_human` / `conflict_on[]` record is preserved (independent
+ * durable gates; not coupled).
  *
  * Throws when the YAML does not exist or fails schema validation —
  * the caller path is responsible for surfacing the error as the right
@@ -21,7 +30,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { issuePath, writeIssue } from "../poller/yaml-lifecycle.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
-import { resolveListNameForType } from "./list-resolve.js";
 import type { Issue } from "../issue-tracker/interface.js";
 
 export interface StampIssueBlockedInput {
@@ -43,12 +51,6 @@ export interface StampIssueBlockedInput {
 // the DB row stale; the picker's onComplete → loadLocal →
 // clearDispatchAndWrite chain in `multi-agent-pick.ts` then reads the
 // stale row and writes it back, clobbering this stamp.
-//
-// DX-584 (Phase 4) — auto-resolves `list_name` to the default blocked
-// list AND clears the live `dispatch` block on the same write. The
-// agent_blocked signal is terminal-for-session — leaving stale dispatch
-// data on disk falsely re-claims the card on the next poller startup's
-// reattach pass.
 export async function stampIssueBlocked({
   repoLocalPath,
   candidateId,
@@ -67,10 +69,7 @@ export async function stampIssueBlocked({
   });
   const next: Issue = {
     ...issue,
-    status: "Blocked",
     blocked: { reason, at },
-    list_name: resolveListNameForType(repoLocalPath, "blocked"),
-    dispatch: null,
   };
   await writeIssue(repoLocalPath, next);
 }

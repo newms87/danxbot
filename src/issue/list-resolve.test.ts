@@ -22,7 +22,6 @@ describe("deriveListTypeFromSemanticStatus", () => {
     ["Review", "review"],
     ["ToDo", "ready"],
     ["In Progress", "in_progress"],
-    ["Blocked", "blocked"],
     ["Done", "completed"],
     ["Cancelled", "cancelled"],
   ] as const)("maps semantic %s → list type %s", (status, type) => {
@@ -47,7 +46,6 @@ describe("resolveListNameForType (seeded lists.yaml)", () => {
     ["archived", "Backlog"],
     ["review", "Review"],
     ["ready", "To Do"],
-    ["blocked", "Blocked"],
     ["in_progress", "In Progress"],
     ["completed", "Done"],
     ["cancelled", "Cancelled"],

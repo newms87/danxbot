@@ -59,12 +59,6 @@ function buildIssue(
     list_name: null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -157,10 +151,10 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     expect(reloaded.title).toBe("Fresh open copy");
   });
 
-  it("does not touch non-terminal YAMLs (ToDo / In Progress / Blocked / waiting_on / requires_human)", () => {
+  it("does not touch non-terminal YAMLs (ToDo / In Progress / waiting_on / requires_human)", () => {
     const todo = buildIssue({ id: "ISS-1", status: "ToDo" });
     const inProgress = buildIssue({ id: "ISS-2", status: "In Progress" });
-    const needsHelp = buildIssue({ id: "ISS-3", status: "Blocked" });
+    const needsHelp = buildIssue({ id: "ISS-3", status: "ToDo", blocked: { reason: "stuck", at: "2026-05-08T00:00:00.000Z" } });
     const blocked = buildIssue({
       id: "ISS-5",
       status: "ToDo",
@@ -362,14 +356,14 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     // filename-location heuristic falls back to "Done".
     const drifted = buildIssue({
       id: "ISS-60",
-      status: "Blocked",
+      status: "ToDo",
       history: [],
     });
     writeFileSync(resolve(closedDir, "ISS-60.yml"), serializeIssue(drifted));
 
     const result = healLocalYamls(repoRoot, "ISS");
     expect(result.healed).toEqual([
-      { id: "ISS-60", status: "Blocked", direction: "closed-to-open" },
+      { id: "ISS-60", status: "ToDo", direction: "closed-to-open" },
     ]);
 
     const reloaded = parseIssue(
@@ -378,7 +372,7 @@ describe("healLocalYamls (ISS-133, Phase 3 — per-tick self-heal pass)", () => 
     );
     expect(reloaded.history).toHaveLength(1);
     expect(reloaded.history[0].from).toBe("Done");
-    expect(reloaded.history[0].to).toBe("Blocked");
+    expect(reloaded.history[0].to).toBe("ToDo");
   });
 
   it("DX-147: closed YAML whose status is still terminal is a no-op (idempotency on the inverse pass)", () => {
@@ -665,42 +659,9 @@ describe("healOrphanInvariantViolations — orphan dispatch scan (co-ownership r
     expect(reloaded.assigned_agent).toBe("phil");
   });
 
-  // Co-ownership retired: a card with `assigned_agent: phil` and
-  // blocked-with-assignment — agent set status:Blocked but did not null
-  // assigned_agent. Operator rule: Blocked = agent declared "done from my
-  // side"; staying assigned is invalid (picker's resume-owned-card path
-  // would re-dispatch the same Blocked card every tick).
-  it("clears assigned_agent when status is Blocked but agent stamp remains", async () => {
-    const stuck = buildIssue({
-      id: "ISS-901",
-      status: "Blocked",
-      assigned_agent: "dani",
-      dispatch: null,
-    });
-    writeFileSync(resolve(openDir, "ISS-901.yml"), serializeIssue(stuck));
-
-    const result = await healOrphanInvariantViolations(repoRoot, "ISS", deps);
-
-    expect(result.scanned).toBe(1);
-    expect(result.healed).toEqual([
-      {
-        id: "ISS-901",
-        kind: "blocked-with-assignment",
-        staleAgent: "dani",
-        staleDispatchId: null,
-        verdict: null,
-      },
-    ]);
-    expect(result.errors).toEqual([]);
-
-    const reloaded = parseIssue(
-      readFileSync(resolve(openDir, "ISS-901.yml"), "utf-8"),
-      { expectedPrefix: "ISS" },
-    );
-    expect(reloaded.assigned_agent).toBeNull();
-    expect(reloaded.status).toBe("Blocked");
-    expect(reloaded.blocked).not.toBeNull();
-  });
+  // DX-658 retired the `blocked-with-assignment` heal kind — `Blocked`
+  // is no longer a status. The reconcile sub-step 3e invariant
+  // covers the equivalent self-block + stale-agent case.
 
   // `dispatch: null` is the steady state after a dispatch ends. No
   // heal action.

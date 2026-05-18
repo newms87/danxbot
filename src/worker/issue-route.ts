@@ -582,13 +582,16 @@ export async function runSync(
  */
 export function isDispatchSessionTerminal(issue: Issue): boolean {
   // DX-584 (Phase 4) — read derived semantic state, not raw `status`.
-  // A card with terminal timestamps (completed_at / cancelled_at /
-  // blocked.at) derives to its terminal state regardless of any stale
-  // raw `status` value still on disk.
+  // A card with terminal timestamps (completed_at / cancelled_at)
+  // derives to its terminal state regardless of any stale raw
+  // `status` value still on disk.
+  //
+  // DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`. The
+  // self-block gate (`blocked != null`) is checked directly as a
+  // dispatch-terminal signal alongside the terminal-status branch.
   const derived = deriveStatus(issue);
-  if (derived === "Done" || derived === "Cancelled" || derived === "Blocked") {
-    return true;
-  }
+  if (derived === "Done" || derived === "Cancelled") return true;
+  if (issue.blocked !== null) return true;
   if (issue.waiting_on !== null) return true;
   if (issue.requires_human !== null) return true;
   return false;

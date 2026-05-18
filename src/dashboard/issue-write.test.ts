@@ -778,10 +778,9 @@ describe("applyIssuePatch — round-trip mutation", () => {
     ).rejects.toMatchObject({ status: 404 });
   });
 
-  it("list_name: Blocked + blocked.reason stamps the blocked record (DX-586 INTO blocked)", async () => {
-    // DX-586 — the INTO blocked dialog provides the reason; the server
-    // never invents a placeholder reason. A list_name=Blocked without
-    // an accompanying blocked.reason is rejected (covered below).
+  it("DX-658: standalone blocked: {reason} patch stamps the blocked gate (no list_name pairing)", async () => {
+    // DX-658 retired list_name=Blocked. The blocked field is a
+    // standalone dispatch gate written via {reason} on the PATCH.
     vi.useFakeTimers();
     const frozen = new Date("2026-05-11T12:00:00.000Z");
     vi.setSystemTime(frozen);
@@ -791,10 +790,9 @@ describe("applyIssuePatch — round-trip mutation", () => {
         "danxbot",
         repoLocalPath,
         "DX-1",
-        { list_name: "Blocked", blocked: { reason: "Spec needs clarification" } },
+        { blocked: { reason: "Spec needs clarification" } },
         "alice",
       );
-      expect(issue.status).toBe("Blocked");
       expect(issue.blocked).not.toBeNull();
       expect(issue.blocked!.reason).toBe("Spec needs clarification");
       expect(issue.blocked!.at).toBe(frozen.toISOString());
@@ -803,23 +801,10 @@ describe("applyIssuePatch — round-trip mutation", () => {
     }
   });
 
-  it("list_name: Blocked without blocked.reason returns 400 (INTO-blocked dialog must supply reason)", async () => {
-    writeFixture(makeIssue(), "open");
-    await expect(
-      applyIssuePatch(
-        "danxbot",
-        repoLocalPath,
-        "DX-1",
-        { list_name: "Blocked" },
-        "alice",
-      ),
-    ).rejects.toMatchObject({ status: 400 });
-  });
-
-  it("list_name move away from Blocked auto-clears `blocked` (drag out of Blocked)", async () => {
+  it("DX-658: standalone blocked: null clears the blocked gate (no list_name pairing)", async () => {
     writeFixture(
       makeIssue({
-        status: "Blocked",
+        status: "In Progress",
         blocked: { reason: "old reason", at: "2026-04-20T00:00:00Z" },
       }),
       "open",
@@ -828,7 +813,7 @@ describe("applyIssuePatch — round-trip mutation", () => {
       "danxbot",
       repoLocalPath,
       "DX-1",
-      { list_name: "In Progress" },
+      { blocked: null },
       "alice",
     );
     expect(issue.status).toBe("In Progress");
@@ -1321,7 +1306,7 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
   it("blocked: null + list_name: To Do clears self-block (OUT-of-blocked dialog)", async () => {
     writeFixture(
       makeIssue({
-        status: "Blocked",
+        status: "In Progress",
         blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
       }),
       "open",
@@ -1337,55 +1322,34 @@ describe("applyIssuePatch — conflict_on + blocked (DX-309)", () => {
     expect(issue.status).toBe("ToDo");
   });
 
-  it("standalone blocked: {reason} (no list_name) rejected — must accompany INTO-blocked move", async () => {
+  it("DX-658: standalone blocked: {reason} (no list_name) is ACCEPTED — gate is independent of list move", async () => {
     writeFixture(makeIssue(), "open");
-    await expect(
-      applyIssuePatch(
-        "danxbot",
-        repoLocalPath,
-        "DX-1",
-        { blocked: { reason: "fake" } } as unknown as IssuePatch,
-        "alice",
-      ),
-    ).rejects.toMatchObject({ status: 400 });
+    const { issue } = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { blocked: { reason: "fake" } } as unknown as IssuePatch,
+      "alice",
+    );
+    expect(issue.blocked?.reason).toBe("fake");
   });
 
-  it("rejects blocked patch with extra agent-shape fields {reason, at} (only {reason} or null on the wire)", async () => {
-    writeFixture(makeIssue(), "open");
-    await expect(
-      applyIssuePatch(
-        "danxbot",
-        repoLocalPath,
-        "DX-1",
-        { blocked: { reason: "fake", at: "2026-05-12T00:00:00Z" } } as unknown as IssuePatch,
-        "alice",
-      ),
-    ).rejects.toMatchObject({ status: 400 });
-  });
-
-  it("standalone blocked: null (no list_name) is REJECTED to keep the YAML invariant intact", async () => {
-    // Per DX-586 review: the server's `status === "Blocked" ⟺ blocked
-    // !== null` YAML invariant requires the move OFF the Blocked list
-    // be paired with a `list_name` of a non-blocked type. Standalone
-    // `blocked: null` would leave the YAML invalid (status: Blocked +
-    // blocked: null), which the round-trip validator catches with a
-    // confusing error. Reject at the wire instead.
+  it("DX-658: standalone blocked: null (no list_name) is ACCEPTED — clears the gate independently", async () => {
     writeFixture(
       makeIssue({
-        status: "Blocked",
+        status: "In Progress",
         blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
       }),
       "open",
     );
-    await expect(
-      applyIssuePatch(
-        "danxbot",
-        repoLocalPath,
-        "DX-1",
-        { blocked: null },
-        "alice",
-      ),
-    ).rejects.toMatchObject({ status: 400 });
+    const { issue } = await applyIssuePatch(
+      "danxbot",
+      repoLocalPath,
+      "DX-1",
+      { blocked: null },
+      "alice",
+    );
+    expect(issue.blocked).toBeNull();
   });
 
   it("INTO in_progress auto-stamps a v10-shaped dispatch on disk with the auth username", async () => {
@@ -1568,10 +1532,9 @@ describe("createIssue — happy path", () => {
     expect(issue.id).toBe("DX-1");
     expect(issue.title).toBe("First card");
     expect(issue.description).toBe("Body");
-    // DX-544 — every new card lands in the flesh-out sentinel-block state;
-    // the operator's chosen starting status (Review) is encoded into the
-    // sentinel `blocked.reason` so the flesh-out agent can restore it.
-    expect(issue.status).toBe("Blocked");
+    // DX-658 — Phase 2 retired `status: "Blocked"`. createIssue stamps
+    // the `blocked` gate alone; status is the operator's choice (Review).
+    expect(issue.status).toBe("Review");
     expect(issue.blocked).toEqual({
       reason: "Awaiting flesh-out — start as Review",
       at: expect.any(String),
@@ -1620,28 +1583,27 @@ describe("createIssue — happy path", () => {
     expect(existsSync(issuePath(repoLocalPath, "DX-1", "open"))).toBe(true);
   });
 
-  it("starts cards in Blocked + sentinel encoding Review when Review was requested", async () => {
+  it("DX-658: stamps blocked gate + preserves operator's requested status (Review)", async () => {
     const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Triage me",
       description: "Body",
       status: "Review",
       type: "Feature",
     });
-    // DX-544 — sentinel-block ride-along: status is Blocked, reason encodes
-    // the operator's chosen start (Review). The flesh-out agent parses the
-    // reason back out and restores `status: "Review"` on completion.
-    expect(issue.status).toBe("Blocked");
+    // DX-658 retired the paired status: Blocked write. Status is now
+    // the operator's choice; the gate is independent.
+    expect(issue.status).toBe("Review");
     expect(issue.blocked?.reason).toBe("Awaiting flesh-out — start as Review");
   });
 
-  it("starts cards in Blocked + sentinel encoding ToDo when ToDo was requested", async () => {
+  it("DX-658: stamps blocked gate + preserves operator's requested status (ToDo)", async () => {
     const { issue } = await createIssue("danxbot", repoLocalPath, {
       title: "Ready",
       description: "Body",
       status: "ToDo",
       type: "Feature",
     });
-    expect(issue.status).toBe("Blocked");
+    expect(issue.status).toBe("ToDo");
     expect(issue.blocked?.reason).toBe("Awaiting flesh-out — start as ToDo");
   });
 
@@ -1882,9 +1844,9 @@ describe("handlePostIssue — HTTP route", () => {
     const body = JSON.parse(res._getBody());
     expect(body.issue.id).toBe("DX-1");
     expect(body.issue.title).toBe("Test card");
-    // DX-544 — sentinel-block ride-along: the HTTP echo reflects the
-    // Blocked status with the encoded starting status in `blocked.reason`.
-    expect(body.issue.status).toBe("Blocked");
+    // DX-658 retired the paired `status: Blocked` write. Status is the
+    // operator's requested value; the gate is independent.
+    expect(body.issue.status).toBe("Review");
     expect(body.issue.blocked.reason).toBe("Awaiting flesh-out — start as Review");
     expect(body.issue.type).toBe("Feature");
   });

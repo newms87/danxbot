@@ -14,11 +14,19 @@
  * working.
  */
 
+/**
+ * Semantic enum every list belongs to. DX-658 / Phase 2 of "Blocked
+ * becomes a dispatch gate, not a status" retired the `"blocked"`
+ * member — Blocked is no longer a column the workers map cards onto;
+ * the `Issue.blocked` field is a pure dispatch gate read by the
+ * picker. The boot migration at `src/lists-file-migrate-blocked.ts`
+ * strips any legacy `type: "blocked"` entry from existing repos'
+ * `lists.yaml` files.
+ */
 export type ListType =
   | "archived"
   | "review"
   | "ready"
-  | "blocked"
   | "in_progress"
   | "completed"
   | "cancelled";
@@ -27,7 +35,6 @@ export const LIST_TYPES: readonly ListType[] = [
   "archived",
   "review",
   "ready",
-  "blocked",
   "in_progress",
   "completed",
   "cancelled",

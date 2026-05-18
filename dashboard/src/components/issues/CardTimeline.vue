@@ -25,10 +25,18 @@ const props = defineProps<{
   repo: string;
 }>();
 
+/**
+ * Timeline node "type" is the visual / color key — a superset of
+ * `ListType` plus the special `"blocked"` self-block gate node
+ * (DX-658 / Phase 2 retired `"blocked"` as a `ListType`, but the
+ * timeline still renders the gate event when populated).
+ */
+type TimelineNodeType = ListType | "blocked";
+
 interface TimelineNode {
   key: string;
   label: string;
-  type: ListType;
+  type: TimelineNodeType;
   /** True iff the card reached this lifecycle state. Decoupled from `timestamp`
    *  so a node can be "reached but timestamp unknown" — e.g. a completed card
    *  with no recorded In Progress transition. */
@@ -54,8 +62,15 @@ const colorByType = computed<Record<ListType, string>>(() => {
 });
 
 const NEUTRAL_NODE_COLOR = "#475569" as const;
+/** Self-block gate accent — kept inline because the post-DX-658
+ *  `"blocked"` ListType no longer exists in the taxonomy, but the
+ *  timeline still renders the gate node when populated. Matches the
+ *  pre-DX-658 default-blocked-list red so historical screenshots
+ *  remain visually consistent. */
+const BLOCKED_GATE_COLOR = "#ef4444" as const;
 
-function colorFor(type: ListType): string {
+function colorFor(type: TimelineNodeType): string {
+  if (type === "blocked") return BLOCKED_GATE_COLOR;
   return colorByType.value[type] ?? NEUTRAL_NODE_COLOR;
 }
 

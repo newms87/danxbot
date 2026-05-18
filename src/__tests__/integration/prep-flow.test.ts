@@ -601,7 +601,9 @@ describe("prep flow integration — picker → route → onComplete", () => {
 
     expect(result.dispatched).toBe(1);
     const stamped = readIssue("DX-1");
-    expect(stamped.status).toBe("Blocked");
+    // DX-658: stamp is a pure gate write — status stays at the
+    // pre-stamp value; only `blocked` changes.
+    expect(stamped.status).toBe("ToDo");
     expect(stamped.blocked?.reason).toBe("spec ambiguous");
     expect(runPostDispatchProgressCheck).not.toHaveBeenCalled();
   });

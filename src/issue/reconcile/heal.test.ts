@@ -30,10 +30,7 @@ function makeIssue(
     ac: [],
     comments: [],
     retro: { good: "", bad: "", action_item_ids: [], commits: [] },
-    blocked:
-      status === "Blocked"
-        ? { reason: "self-block", at: "2026-01-01T00:00:00.000Z" }
-        : null,
+    blocked: null,
     assigned_agent: null,
     waiting_on: null,
     requires_human: null,
@@ -73,9 +70,6 @@ describe("decideFileMove — pure helper (DX-217)", () => {
       expect(decideFileMove(makeIssue("Review"), "open")).toBeNull();
     });
 
-    it("Blocked in open/ → null (Blocked is non-terminal)", () => {
-      expect(decideFileMove(makeIssue("Blocked"), "open")).toBeNull();
-    });
     // DX-231 retired the `Needs Approval` parking status — the
     // corresponding heal-direction case went away with it.
   });

@@ -58,9 +58,9 @@ function makeDir(): string {
 }
 
 describe("defaultLists", () => {
-  it("seeds 7 lists, one per type, all default", () => {
+  it("seeds 6 lists, one per type, all default", () => {
     const file = defaultLists({ uuid: deterministicUuid("s") });
-    expect(file.lists).toHaveLength(7);
+    expect(file.lists).toHaveLength(6);
     const types = file.lists.map((l) => l.type).sort();
     expect(types).toEqual([...LIST_TYPES].sort());
     expect(file.lists.every((l) => l.is_default_for_type)).toBe(true);
@@ -79,7 +79,6 @@ describe("defaultLists", () => {
     expect(byType.archived).toEqual({ name: "Backlog", color: "#64748b" });
     expect(byType.review).toEqual({ name: "Review", color: "#3b82f6" });
     expect(byType.ready).toEqual({ name: "To Do", color: "#22d3ee" });
-    expect(byType.blocked).toEqual({ name: "Blocked", color: "#ef4444" });
     expect(byType.in_progress).toEqual({ name: "In Progress", color: "#f59e0b" });
     expect(byType.completed).toEqual({ name: "Done", color: "#22c55e" });
     expect(byType.cancelled).toEqual({ name: "Cancelled", color: "#71717a" });
@@ -185,7 +184,7 @@ describe("file round-trip", () => {
   it("readLists returns seed when file missing", () => {
     const dir = makeDir();
     const file = readLists(dir);
-    expect(file.lists).toHaveLength(7);
+    expect(file.lists).toHaveLength(6);
   });
 
   it("writeLists then readLists yields identical content", async () => {
@@ -199,7 +198,7 @@ describe("file round-trip", () => {
   it("writeLists rejects an invalid file under the lock", async () => {
     const dir = makeDir();
     const bad = defaultLists();
-    bad.lists = bad.lists.filter((l) => l.type !== "blocked");
+    bad.lists = bad.lists.filter((l) => l.type !== "review");
     await expect(writeLists(dir, bad)).rejects.toBeInstanceOf(ListsValidationError);
     // File on disk must NOT have been touched.
     expect(existsSync(listsFilePath(dir))).toBe(false);
@@ -221,7 +220,7 @@ describe("file round-trip", () => {
     const dir = makeDir();
     writeFileSync(listsFilePath(dir), "{not valid yaml: [: : :", "utf-8");
     const file = readLists(dir);
-    expect(file.lists).toHaveLength(7);
+    expect(file.lists).toHaveLength(6);
   });
 
   it("readLists backfills missing color from the type's seed color (DX-601 migration)", () => {
@@ -256,7 +255,7 @@ describe("ensureListsFile", () => {
     await ensureListsFile(dir, { uuid: deterministicUuid("e") });
     expect(existsSync(listsFilePath(dir))).toBe(true);
     const parsed = parseYaml(readFileSync(listsFilePath(dir), "utf-8")) as ListsFile;
-    expect(parsed.lists).toHaveLength(7);
+    expect(parsed.lists).toHaveLength(6);
   });
 
   it("does NOT overwrite existing file", async () => {

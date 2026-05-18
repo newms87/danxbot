@@ -98,12 +98,6 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     list_name: overrides.list_name ?? null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -793,26 +787,6 @@ describe("listIssues", () => {
     expect(epic.children_detail[0].waiting_on).toBe(true);
   });
 
-  it("children_detail carries Blocked raw + blocked=false", async () => {
-    const repo = setupRepo();
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
-      2_000,
-    );
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({ id: "ISS-2", title: "help me", status: "Blocked" }),
-      1_000,
-    );
-    const items = await listIssues(repo);
-    const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("Blocked");
-    expect(epic.children_detail[0].waiting_on).toBe(false);
-  });
-
   it("epic with no own waiting_on is NOT waiting regardless of child state (literal)", async () => {
     const repo = setupRepo();
     writeIssue(
@@ -890,31 +864,6 @@ describe("listIssues", () => {
     expect(epic.children_detail[0].waiting_on).toBe(true);
   });
 
-  it("epic status untouched by child status === Blocked (literal)", async () => {
-    const repo = setupRepo();
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({
-        id: "ISS-1",
-        type: "Epic",
-        status: "In Progress",
-        children: ["ISS-2"],
-      }),
-      2_000,
-    );
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({ id: "ISS-2", status: "Blocked" }),
-      1_000,
-    );
-    const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
-    expect(epic.status).toBe("In Progress");
-    expect(epic.waiting_on).toBe(false);
-    expect(epic.children_detail[0].status).toBe("Blocked");
-  });
-
   it("epic with non-null waiting_on surfaces literally on the wire", async () => {
     const repo = setupRepo();
     writeIssue(
@@ -957,33 +906,6 @@ describe("listIssues", () => {
     const epic = (await listIssues(repo)).find((i) => i.id === "ISS-1")!;
     expect(epic.waiting_on).toBe(false);
     expect(epic.status).toBe("In Progress");
-  });
-
-  it("children_detail carries Blocked raw + waiting_on=false (Blocked is the canonical non-dispatchable status)", async () => {
-    // DX-231 retired the `Needs Approval` parking status; Blocked is
-    // now the only non-dispatchable open-status code path. The
-    // children_detail projection still surfaces the raw status.
-    const repo = setupRepo();
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({ id: "ISS-1", type: "Epic", children: ["ISS-2"] }),
-      2_000,
-    );
-    writeIssue(
-      repo,
-      "open",
-      emptyIssue({
-        id: "ISS-2",
-        title: "stuck child",
-        status: "Blocked",
-      }),
-      1_000,
-    );
-    const items = await listIssues(repo);
-    const epic = items.find((i) => i.id === "ISS-1")!;
-    expect(epic.children_detail[0].status).toBe("Blocked");
-    expect(epic.children_detail[0].waiting_on).toBe(false);
   });
 
   it("children_detail carries the child's raw type (Bug/Feature/Epic flows through)", async () => {
@@ -2036,7 +1958,6 @@ describe("listIssues — status grouping smoke", () => {
     "Review",
     "ToDo",
     "In Progress",
-    "Blocked",
     "Done",
     "Cancelled",
   ])("retains rows in status %s", async (status) => {
@@ -2188,7 +2109,7 @@ describe("child_assignments rollup (DX-524)", () => {
       }),
       1_700_000_000_000,
     );
-    // Blocked + assigned → INCLUDED (Blocked is non-terminal)
+    // Self-blocked + assigned → INCLUDED (blocked gate is non-terminal)
     writeIssue(
       repo,
       "open",
@@ -2196,7 +2117,7 @@ describe("child_assignments rollup (DX-524)", () => {
         id: "ISS-23",
         parent_id: "ISS-20",
         title: "Phase 3",
-        status: "Blocked",
+        status: "ToDo",
         assigned_agent: "phil",
         blocked: { reason: "needs key", at: "2026-01-01T00:00:00Z" },
       }),

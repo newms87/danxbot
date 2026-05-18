@@ -169,7 +169,6 @@ function writeIssue(
   id: string,
   statusOrMutator:
     | "ToDo"
-    | "Blocked"
     | ((issue: ReturnType<typeof createEmptyIssue>) => void) = "ToDo",
 ) {
   mkdirSync(join(root, ".danxbot", "issues", "open"), { recursive: true });
@@ -740,7 +739,7 @@ describe("handlePrepVerdict — blocked verdict", () => {
     expect(res._getStatusCode()).toBe(200);
     expect(JSON.parse(res._getBody()).candidateBlocked).toBe(true);
     const yaml = readIssue(root, "DX-100");
-    expect(yaml.status).toBe("Blocked");
+    // status unchanged post-DX-658 — blocked field is the gate
     expect(yaml.blocked).toEqual({
       reason: "spec ambiguous",
       at: new Date(fixedNow).toISOString(),
@@ -781,7 +780,7 @@ describe("handlePrepVerdict — blocked verdict", () => {
     });
     expect(res._getStatusCode()).toBe(200);
     const yaml = readIssue(root, "DX-100");
-    expect(yaml.status).toBe("Blocked");
+    // status unchanged post-DX-658 — blocked field is the gate
     expect(yaml.waiting_on).not.toBeNull();
     expect(yaml.waiting_on?.by).toEqual(["DX-99"]);
   });
@@ -1069,7 +1068,7 @@ describe("handlePrepVerdict — DB writer consistency (DX-552 regression)", () =
       );
       expect(upserts.length).toBeGreaterThan(0);
       const last = upserts[upserts.length - 1]!;
-      expect(last.data.status).toBe("Blocked");
+      // status unchanged post-DX-658 — blocked field is the gate
       expect(last.data.blocked).toEqual({
         reason: "spec ambiguous",
         at: "2026-05-15T07:00:00.000Z",

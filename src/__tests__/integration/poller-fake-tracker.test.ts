@@ -405,13 +405,12 @@ describe("Integration: poller hot path against FakeTracker", () => {
     await poll(REPO);
 
     const log = trackerHandle.current!.getRequestLog();
-    // The poller calls fetchOpenCards twice per tick (NH check +
-    // runSync's ToDo branch). Assert the count rather than positions so
-    // a future refactor that parallelizes the two fetches via
-    // Promise.all doesn't silently break this test.
+    // DX-658 retired the Needs-Help check (checkNeedsHelp is a no-op).
+    // The poller now calls fetchOpenCards once per tick (runSync's ToDo
+    // branch only).
     const methods = methodsOnly(log);
     const fetchCalls = methods.filter((m) => m === "fetchOpenCards").length;
-    expect(fetchCalls).toBeGreaterThanOrEqual(2);
+    expect(fetchCalls).toBeGreaterThanOrEqual(1);
     // No moveToList / addComment on an empty board — no cards to move.
     expect(methods).not.toContain("moveToList");
     expect(methods).not.toContain("addComment");

@@ -57,6 +57,7 @@ import {
   syncSettingsFileOnBoot,
 } from "./settings-file.js";
 import { ensureListsFile } from "./lists-file.js";
+import { migrateListsFileForDx658 } from "./lists-file-migrate-blocked.js";
 import { ensureTrelloListMapFile } from "./trello-list-map.js";
 import { watchRepoEnvFile } from "./dashboard/repo-env-writer.js";
 import { reattachOrResolveDispatches } from "./worker/reattach.js";
@@ -185,6 +186,13 @@ async function startWorkerMode(): Promise<void> {
   // an existing file is left untouched so operator-tuned list taxonomies
   // survive every restart. Same model as `syncSettingsFileOnBoot` above.
   await ensureListsFile(repo.localPath);
+
+  // DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status" —
+  // strip any pre-DX-658 `type: "blocked"` list from existing repos'
+  // `lists.yaml`, tombstone the id. Idempotent: a no-op on fresh seed
+  // (the post-DX-658 seed ships 6 lists, no Blocked) and on already-
+  // migrated repos.
+  await migrateListsFileForDx658(repo.localPath);
 
   // DX-609 — seed `<repo>/.danxbot/trello-list-map.yaml` on first boot.
   // Idempotent: an existing file is left untouched so operator-configured

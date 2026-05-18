@@ -527,9 +527,12 @@ async function handleMessage(
           routerResult.error,
           errorContext,
           {
-            // DX-621 / Phase 9d — resolve via trello-list-map.yaml; operational
-            // router errors land on the Blocked list for the operator to see.
-            listId: resolveTrelloListIdByType(ls.repo.localPath, "blocked"),
+            // DX-658 / Phase 2 — the `"blocked"` ListType was retired;
+            // operational router errors now land on the review list so
+            // the operator triages the error card before any agent
+            // picks it up. The needs-help label is still applied so
+            // the dashboard surfaces the error with the right styling.
+            listId: resolveTrelloListIdByType(ls.repo.localPath, "review"),
             labelId: ls.repo.trello.needsHelpLabelId,
           },
         ).catch(() => {});

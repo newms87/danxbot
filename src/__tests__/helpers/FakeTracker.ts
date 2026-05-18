@@ -217,7 +217,7 @@ export class FakeTracker implements IssueTracker {
       effort_level: null,
       labels: {
         type: input.type,
-        blocked: input.status === "Blocked",
+        blocked: false,
         // `createCard` always stamps `requires_human: null` on a fresh
         // card per the schema contract (the field is added via subsequent
         // saves), so the matching label boolean is `false` at create
@@ -503,7 +503,7 @@ export class FakeTracker implements IssueTracker {
       effort_level: issue.effort_level,
       labels: {
         type: issue.type,
-        blocked: issue.status === "Blocked",
+        blocked: issue.blocked !== null,
         // Mirrors `createCard`: a stored seed reflects whether the seed
         // YAML carries a non-null `requires_human` record.
         requires_human: issue.requires_human !== null,

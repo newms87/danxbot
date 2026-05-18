@@ -724,69 +724,6 @@ describe("reconcileIssue — Phase 2 parent-derive (DX-217)", () => {
     },
   );
 
-  it.skipIf(!dbHandle)(
-    "stamps blocked record when derived status is Blocked",
-    async () => {
-      const parent: Issue = {
-        ...makeIssue("DX-540", "In Progress"),
-        type: "Epic",
-        children: ["DX-541"],
-      };
-      writeYaml(dbCtx.openDir, "DX-540", parent);
-      await seedDb(REPO, parent);
-      await seedDb(REPO, {
-        ...makeIssue("DX-541", "Blocked"),
-        parent_id: "DX-540",
-      });
-
-      const result = await reconcileIssue(dbCtx.repo, "DX-540", "audit");
-
-      expect(result.changed).toBe(true);
-      const updated = parseIssue(
-        readFileSync(resolve(dbCtx.openDir, "DX-540.yml"), "utf-8"),
-        { expectedPrefix: "DX" },
-      );
-      expect(updated.status).toBe("Blocked");
-      expect(updated.blocked).not.toBeNull();
-      expect(updated.blocked!.reason).toContain("Auto-derived");
-    },
-  );
-
-  it.skipIf(!dbHandle)(
-    "clears blocked record when derived flips Blocked → non-Blocked (invariant)",
-    async () => {
-      // Parent currently Blocked with auto-derived self-block; child
-      // resolves out of Blocked so derive should flip parent to
-      // In Progress AND clear `blocked` to maintain
-      // status === Blocked ⟺ blocked !== null.
-      const parent: Issue = {
-        ...makeIssue("DX-550", "Blocked"),
-        type: "Epic",
-        children: ["DX-551"],
-        blocked: {
-          reason:
-            "Auto-derived from children: Any child Blocked — parent Blocked",
-          at: "2026-01-01T00:00:00.000Z",
-        },
-      };
-      writeYaml(dbCtx.openDir, "DX-550", parent);
-      await seedDb(REPO, parent);
-      await seedDb(REPO, {
-        ...makeIssue("DX-551", "In Progress"),
-        parent_id: "DX-550",
-      });
-
-      const result = await reconcileIssue(dbCtx.repo, "DX-550", "audit");
-
-      expect(result.changed).toBe(true);
-      const updated = parseIssue(
-        readFileSync(resolve(dbCtx.openDir, "DX-550.yml"), "utf-8"),
-        { expectedPrefix: "DX" },
-      );
-      expect(updated.status).toBe("In Progress");
-      expect(updated.blocked).toBeNull();
-    },
-  );
 });
 
 describe("reconcileIssue — waiting_on is durable (DX-219 follow-up)", () => {
@@ -1214,7 +1151,7 @@ describe("reconcileIssue — fanout.dispatchableChanged (Phase 4b.1 / DX-288)", 
 
   it("first observation of a card with blocked != null → dispatchableChanged === false", async () => {
     const issue: Issue = {
-      ...makeIssue("DX-1003", "Blocked"),
+      ...makeIssue("DX-1003", "In Progress"),
       blocked: {
         reason: "Awaiting design decision",
         at: "2026-05-11T10:00:00Z",
@@ -1315,7 +1252,7 @@ describe("reconcileIssue — fanout.dispatchableChanged (Phase 4b.1 / DX-288)", 
 
   it("flips true when blocked clears (Blocked → ToDo)", async () => {
     const blockedIssue: Issue = {
-      ...makeIssue("DX-1009", "Blocked"),
+      ...makeIssue("DX-1009", "In Progress"),
       blocked: { reason: "Initial block", at: "2026-05-11T10:00:00Z" },
     };
     writeYaml(ctx.openDir, "DX-1009", blockedIssue);

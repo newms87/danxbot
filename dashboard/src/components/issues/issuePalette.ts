@@ -19,28 +19,27 @@ export type ChildStatusId =
   | "waiting";
 
 /**
- * Project a child issue's raw `(status, waiting_on)` into the
+ * Project a child issue's raw `(status, waiting_on, blocked)` into the
  * `done | todo | in_progress | blocked | waiting` palette key.
  *
  *  - Done / Cancelled                                     → "done"
- *  - status === "Blocked"                                 → "blocked"
- *  - waiting_on === true                                  → "waiting"
+ *  - blocked gate populated                               → "blocked"
+ *  - waiting_on populated                                 → "waiting"
  *  - status === "In Progress"                             → "in_progress"
- *  - Anything else (Review, ToDo)                         → "todo"
+ *  - Anything else (Review, ToDo, Backlog)                → "todo"
  *
- * Done / Cancelled win over a self-block because both are terminal — a
- * card cannot be "blocked" once shipped or dropped. Self-block beats
- * waiting-on because a card stuck on its own work is a stronger signal
- * than queued-behind-deps. Waiting beats In Progress so a child queued
- * behind a dep doesn't masquerade as actively running.
+ * DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`; the
+ * self-block gate (`Issue.blocked != null`) is the projection input.
+ * Done / Cancelled still win over the gate because both are terminal.
  */
 export function projectChildStatus(
   status: IssueStatus,
   waitingOn: boolean,
   waitingOnByCard: boolean = false,
+  blocked: boolean = false,
 ): ChildStatusId {
   if (status === "Done" || status === "Cancelled") return "done";
-  if (status === "Blocked") return "blocked";
+  if (blocked) return "blocked";
   if (waitingOnByCard || waitingOn) return "waiting";
   if (status === "In Progress") return "in_progress";
   return "todo";
@@ -51,7 +50,6 @@ export type ColumnId =
   | "review"
   | "todo"
   | "in_progress"
-  | "blocked"
   | "backlog"
   | "done"
   | "cancelled";
@@ -104,7 +102,6 @@ export const COLUMN_ACCENTS: Record<IssueStatus, ColumnAccent> = {
   "Review":      { id: "review",      label: "Review",      accent: "#a78bfa", collapsedByDefault: false },
   "ToDo":        { id: "todo",        label: "To Do",       accent: "#64748b", collapsedByDefault: false },
   "In Progress": { id: "in_progress", label: "In Progress", accent: "#fcd34d", collapsedByDefault: false },
-  "Blocked":     { id: "blocked",     label: "Blocked",     accent: "#ef4444", collapsedByDefault: false },
   "Backlog":     { id: "backlog",     label: "Backlog",     accent: "#7dd3fc", collapsedByDefault: true  },
   "Done":        { id: "done",        label: "Done",        accent: "#10b981", collapsedByDefault: true  },
   "Cancelled":   { id: "cancelled",   label: "Cancelled",   accent: "#475569", collapsedByDefault: true  },

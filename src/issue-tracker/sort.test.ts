@@ -33,7 +33,6 @@ function mkIssue(k: Knobs): Issue {
     };
   }
   if (k.blockedReason) {
-    i.status = "Blocked";
     i.blocked = {
       reason: k.blockedReason,
       at: "2030-01-01T00:00:00.000Z",
@@ -156,25 +155,6 @@ describe("sortIssuesForStatus — priority bucket (DX-627 canon)", () => {
     // The tier check runs before priority: low-priority OK still beats
     // high-priority waiting/blocked entries.
     expect(ids(out)[0]).toBe("ISS-1");
-  });
-
-  it("Blocked status uses the priority bucket (same chain as Review/ToDo)", () => {
-    const lowP = mkIssue({ id: "ISS-1", status: "Blocked", priority: 1.0, blockedReason: "x" });
-    const highP = mkIssue({ id: "ISS-2", status: "Blocked", priority: 4.0, blockedReason: "y" });
-    const byId = new Map<string, Issue>([
-      [lowP.id, lowP],
-      [highP.id, highP],
-    ]);
-    // Both are blocked → same tier. Priority DESC decides.
-    const out = sortInputsForStatus(
-      asInputs([
-        { issue: lowP, mtime: 200 },
-        { issue: highP, mtime: 100 },
-      ]),
-      "Blocked",
-      byId,
-    );
-    expect(ids(out)).toEqual(["ISS-2", "ISS-1"]);
   });
 
   it("malformed ids fall back to localeCompare at the FIFO tier", () => {

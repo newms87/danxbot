@@ -271,39 +271,28 @@ export interface HealOrphanAssignedAgentsResult {
 }
 
 /**
- * One outcome row from `healOrphanInvariantViolations`. Two kinds:
+ * One outcome row from `healOrphanInvariantViolations`.
  *
  *  - `dispatch-without-agent` — orphan pre-stamp where the dispatch
  *    slot was filled but the PID is not alive. Co-ownership invariant
  *    retired; this is the legacy-pre-stamp shape the scan still touches.
- *  - `blocked-with-assignment` — a card at `status: "Blocked"` carries a
- *    non-null `assigned_agent`. Blocked = agent declared "done from my
- *    side, operator action needed"; staying assigned after that is an
- *    invalid state — the picker's resume-owned-card path would
- *    re-dispatch the same Blocked card every tick. The scan clears
- *    `assigned_agent` so the next picker tick offers the agent a fresh
- *    ToDo card.
+ *
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * retired the `blocked-with-assignment` branch — `"Blocked"` is no
+ * longer an `IssueStatus`. The gate-vs-assignment invariant
+ * (`blocked != null` ⇒ `assigned_agent: null`) is enforced by
+ * reconcile's sub-step 3e instead, which keys on the field directly.
  */
-export type InvariantHeal =
-  | {
-      id: string;
-      kind: "dispatch-without-agent";
-      /** Always null with the retired direction-1 branch. Field kept for API stability. */
-      staleAgent: null;
-      /** Stale dispatch.id. */
-      staleDispatchId: string;
-      /** Verdict from `checkYamlDispatchLiveness`. */
-      verdict: "dead-pid" | "dead-ttl" | "cross-host";
-    }
-  | {
-      id: string;
-      kind: "blocked-with-assignment";
-      /** Name cleared from `assigned_agent`. */
-      staleAgent: string;
-      /** No dispatch involved — Blocked cards have dispatch:null by design. */
-      staleDispatchId: null;
-      verdict: null;
-    };
+export interface InvariantHeal {
+  id: string;
+  kind: "dispatch-without-agent";
+  /** Always null with the retired direction-1 branch. Field kept for API stability. */
+  staleAgent: null;
+  /** Stale dispatch.id. */
+  staleDispatchId: string;
+  /** Verdict from `checkYamlDispatchLiveness`. */
+  verdict: "dead-pid" | "dead-ttl" | "cross-host";
+}
 
 export interface HealOrphanInvariantResult {
   /** Open YAMLs the scan looked at (parse-rejected files count too). */
@@ -370,28 +359,12 @@ export async function healOrphanInvariantViolations(
       continue;
     }
 
-    // blocked-with-assignment — agent set the card to Blocked but
-    // forgot to null `assigned_agent` on the way out. Picker's
-    // resume-owned-card path would otherwise pin the agent on a card
-    // that is, by the agent's own declaration, done from their side.
-    if (issue.status === "Blocked" && issue.assigned_agent !== null) {
-      const staleAgent = issue.assigned_agent;
-      try {
-        const cleared: Issue = { ...issue, assigned_agent: null };
-        await writeIssue(repoLocalPath, cleared);
-        result.healed.push({
-          id: issue.id,
-          kind: "blocked-with-assignment",
-          staleAgent,
-          staleDispatchId: null,
-          verdict: null,
-        });
-      } catch (err) {
-        result.errors.push({ path, message: parseErrorMessage(err) });
-      }
-      continue;
-    }
-
+    // DX-658 / Phase 2 — the `blocked-with-assignment` branch
+    // (`status === "Blocked" + assigned_agent != null`) is retired.
+    // Reconcile sub-step 3e enforces the field-keyed invariant
+    // (`blocked != null` ⇒ `assigned_agent: null`) on every audit-pass
+    // reconcile, so this per-tick scan only needs to cover the
+    // dead-dispatch orphan case below.
     if (issue.dispatch === null) continue;
 
     const verdict = checkYamlDispatchLiveness(issue.dispatch, livenessDeps);

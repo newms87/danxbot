@@ -1494,8 +1494,12 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
         // `stampDispatchAndWrite` lands the dispatch sidecar.
         if (candidate) {
           const derived = deriveStatus(candidate);
+          // DX-658 / Phase 2 — `"Blocked"` is no longer an
+          // `IssueStatus`. The self-block gate (`blocked != null`)
+          // also indicates a terminal-for-this-tick state where the
+          // auto-flip MUST NOT be reverted.
           if (
-            derived !== "Blocked" &&
+            candidate.blocked === null &&
             derived !== "Done" &&
             derived !== "Cancelled"
           ) {

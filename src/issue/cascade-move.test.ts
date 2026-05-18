@@ -16,7 +16,6 @@ interface MakeOpts {
   // deriveListTypeFromSemanticStatus. The helper sets the appropriate
   // lifecycle trigger / gate field so the derivation lands on `type`.
   type: ListType;
-  blockedReason?: string;
   children?: string[];
 }
 
@@ -72,13 +71,6 @@ function makeIssue(opts: MakeOpts): Issue {
       base.status = "ToDo";
       base.ready_at = "2026-05-01T00:00:00.000Z";
       return base;
-    case "blocked":
-      base.status = "Blocked";
-      base.blocked = {
-        at: "2026-05-01T00:00:00.000Z",
-        reason: opts.blockedReason ?? "stuck",
-      };
-      return base;
     case "in_progress":
       base.status = "In Progress";
       base.dispatch = {
@@ -106,7 +98,6 @@ function input(partial: Partial<CascadeMoveInput> & { destListType: ListType }):
     parent: makeIssue({ id: "DX-100", type: "review", listName: "Review" }),
     descendants: [],
     destListName: partial.destListName ?? defaultListNameFor(partial.destListType),
-    unblockConfirmed: false,
     now: NOW,
     ...partial,
   };
@@ -117,15 +108,13 @@ function defaultListNameFor(type: ListType): string {
     case "archived": return "Backlog";
     case "review": return "Review";
     case "ready": return "To Do";
-    case "blocked": return "Blocked";
     case "in_progress": return "In Progress";
     case "completed": return "Done";
     case "cancelled": return "Cancelled";
   }
 }
 
-describe("cascadeEpicMove — spec 5×5 matrix", () => {
-  // ── FROM review/ready/archived (passive types, "review" representative) ──
+describe("cascadeEpicMove — spec matrix", () => {
   describe("from review-type child", () => {
     it("→ review (same passive type): same-type lateral if child in parent.list_name", () => {
       const parent = makeIssue({ id: "DX-100", type: "review", listName: "Review" });
@@ -172,17 +161,6 @@ describe("cascadeEpicMove — spec 5×5 matrix", () => {
       ]);
     });
 
-    it("→ blocked: no child moves (epic-only block)", () => {
-      const child = makeIssue({ id: "DX-1", type: "review", listName: "Review" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "blocked",
-        destListName: "Blocked",
-        blockedReason: "parent stuck",
-      }));
-      expect(out.childWrites).toEqual([]);
-    });
-
     it("→ in_progress: only the first dispatchable child moves", () => {
       const a = makeIssue({ id: "DX-1", type: "review", listName: "Review" });
       const b = makeIssue({ id: "DX-2", type: "review", listName: "Review" });
@@ -223,7 +201,6 @@ describe("cascadeEpicMove — spec 5×5 matrix", () => {
     });
   });
 
-  // ── FROM in_progress ──
   describe("from in_progress child", () => {
     it.each<ListType>(["review", "ready", "archived"])(
       "→ %s: stays",
@@ -236,16 +213,6 @@ describe("cascadeEpicMove — spec 5×5 matrix", () => {
         expect(out.childWrites).toEqual([]);
       },
     );
-
-    it("→ blocked: stays (no child moves on epic-block)", () => {
-      const child = makeIssue({ id: "DX-1", type: "in_progress" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "blocked",
-        blockedReason: "x",
-      }));
-      expect(out.childWrites).toEqual([]);
-    });
 
     it("→ in_progress: stays", () => {
       const child = makeIssue({ id: "DX-1", type: "in_progress" });
@@ -281,97 +248,26 @@ describe("cascadeEpicMove — spec 5×5 matrix", () => {
     });
   });
 
-  // ── FROM blocked (confirm-clear semantics) ──
-  describe("from blocked child", () => {
-    it.each<ListType>(["review", "ready", "archived"])(
-      "→ %s: stays (no auto-unblock on passive dest)",
-      (destType) => {
-        const child = makeIssue({ id: "DX-1", type: "blocked" });
-        const out = cascadeEpicMove(input({
-          descendants: [child],
-          destListType: destType,
-          unblockConfirmed: true,
-        }));
-        expect(out.childWrites).toEqual([]);
-      },
-    );
-
-    it("→ blocked: stays", () => {
-      const child = makeIssue({ id: "DX-1", type: "blocked" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "blocked",
-        blockedReason: "x",
-      }));
-      expect(out.childWrites).toEqual([]);
-    });
-
-    it("→ in_progress with unblockConfirmed: clears block + moves", () => {
-      const child = makeIssue({ id: "DX-1", type: "blocked" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "in_progress",
-        destListName: "In Progress",
-        unblockConfirmed: true,
-      }));
-      expect(out.childWrites).toEqual([
-        { id: "DX-1", write: { ready_at: NOW, list_name: "In Progress", blocked: null } },
-      ]);
-      expect(out.requiresUnblockConfirm).toBe(false);
-    });
-
-    it("→ completed with unblockConfirmed: clears block + completes", () => {
-      const child = makeIssue({ id: "DX-1", type: "blocked" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "completed",
-        destListName: "Done",
-        unblockConfirmed: true,
-      }));
-      expect(out.childWrites).toEqual([
-        { id: "DX-1", write: { completed_at: NOW, cancelled_at: null, list_name: "Done", blocked: null } },
-      ]);
-    });
-
-    it("→ cancelled with unblockConfirmed: clears block + cancels", () => {
-      const child = makeIssue({ id: "DX-1", type: "blocked" });
-      const out = cascadeEpicMove(input({
-        descendants: [child],
-        destListType: "cancelled",
-        destListName: "Cancelled",
-        unblockConfirmed: true,
-      }));
-      expect(out.childWrites).toEqual([
-        { id: "DX-1", write: { cancelled_at: NOW, list_name: "Cancelled", blocked: null } },
-      ]);
-    });
-  });
-
-  // ── FROM completed/cancelled (terminal sources never auto-move) ──
   describe("from terminal sources", () => {
-    it.each<ListType>(["review", "ready", "archived", "blocked", "in_progress", "completed", "cancelled"])(
+    it.each<ListType>(["review", "ready", "archived", "in_progress", "completed", "cancelled"])(
       "completed child → %s: stays",
       (destType) => {
         const child = makeIssue({ id: "DX-1", type: "completed" });
         const out = cascadeEpicMove(input({
           descendants: [child],
           destListType: destType,
-          blockedReason: "x",
-          unblockConfirmed: true,
         }));
         expect(out.childWrites).toEqual([]);
       },
     );
 
-    it.each<ListType>(["review", "ready", "archived", "blocked", "in_progress", "completed", "cancelled"])(
+    it.each<ListType>(["review", "ready", "archived", "in_progress", "completed", "cancelled"])(
       "cancelled child → %s: stays",
       (destType) => {
         const child = makeIssue({ id: "DX-1", type: "cancelled" });
         const out = cascadeEpicMove(input({
           descendants: [child],
           destListType: destType,
-          blockedReason: "x",
-          unblockConfirmed: true,
         }));
         expect(out.childWrites).toEqual([]);
       },
@@ -379,10 +275,7 @@ describe("cascadeEpicMove — spec 5×5 matrix", () => {
   });
 });
 
-describe("cascadeEpicMove — 5×5 matrix: archived + ready source cells", () => {
-  // Passive sources collapse to one row in code, but the AC says "one
-  // passing test per cell" — pin archived-source and ready-source so a
-  // future refactor that diverges the rows fails loud.
+describe("cascadeEpicMove — passive sources", () => {
   it.each<ListType>(["completed", "cancelled"])(
     "archived child → %s: moves",
     (destType) => {
@@ -413,74 +306,6 @@ describe("cascadeEpicMove — 5×5 matrix: archived + ready source cells", () =>
   );
 });
 
-describe("cascadeEpicMove — confirmation gates", () => {
-  it("requiresUnblockConfirm: true when any descendant blocked + non-blocked dest + !unblockConfirmed", () => {
-    const blocked = makeIssue({ id: "DX-1", type: "blocked" });
-    const out = cascadeEpicMove(input({
-      descendants: [blocked],
-      destListType: "completed",
-      unblockConfirmed: false,
-    }));
-    expect(out.requiresUnblockConfirm).toBe(true);
-  });
-
-  it("requiresUnblockConfirm: false when dest is blocked itself", () => {
-    const blocked = makeIssue({ id: "DX-1", type: "blocked" });
-    const out = cascadeEpicMove(input({
-      descendants: [blocked],
-      destListType: "blocked",
-      blockedReason: "x",
-      unblockConfirmed: false,
-    }));
-    expect(out.requiresUnblockConfirm).toBe(false);
-  });
-
-  it("skips blocked-source childWrites when !unblockConfirmed (non-blocked dest)", () => {
-    const blocked = makeIssue({ id: "DX-1", type: "blocked" });
-    const normal = makeIssue({ id: "DX-2", type: "in_progress" });
-    const out = cascadeEpicMove(input({
-      descendants: [blocked, normal],
-      destListType: "completed",
-      destListName: "Done",
-      unblockConfirmed: false,
-    }));
-    expect(out.childWrites.map((w) => w.id)).toEqual(["DX-2"]);
-    expect(out.requiresUnblockConfirm).toBe(true);
-  });
-
-  it("blockedReasonRequired: true when destType=blocked AND blockedReason empty", () => {
-    const out = cascadeEpicMove(input({
-      destListType: "blocked",
-      destListName: "Blocked",
-      blockedReason: "",
-    }));
-    expect(out.blockedReasonRequired).toBe(true);
-    expect(out.parentWrite).toEqual({});
-    expect(out.childWrites).toEqual([]);
-  });
-
-  it("blockedReasonRequired: true when blockedReason missing entirely", () => {
-    const out = cascadeEpicMove(input({
-      destListType: "blocked",
-      destListName: "Blocked",
-    }));
-    expect(out.blockedReasonRequired).toBe(true);
-  });
-
-  it("blockedReasonRequired: false when destType=blocked AND blockedReason populated", () => {
-    const out = cascadeEpicMove(input({
-      destListType: "blocked",
-      destListName: "Blocked",
-      blockedReason: "stuck waiting on review",
-    }));
-    expect(out.blockedReasonRequired).toBe(false);
-    expect(out.parentWrite).toEqual({
-      blocked: { at: NOW, reason: "stuck waiting on review" },
-      list_name: "Blocked",
-    });
-  });
-});
-
 describe("cascadeEpicMove — parent writes", () => {
   it("parent → completed: stamps completed_at and clears cancelled_at", () => {
     const out = cascadeEpicMove(input({
@@ -506,21 +331,6 @@ describe("cascadeEpicMove — parent writes", () => {
       cancelled_at: null,
       list_name: "To Do",
     });
-  });
-
-  it("parent → blocked: stamps blocked record only, no descendant writes", () => {
-    const child = makeIssue({ id: "DX-1", type: "in_progress" });
-    const out = cascadeEpicMove(input({
-      descendants: [child],
-      destListType: "blocked",
-      destListName: "Blocked",
-      blockedReason: "epic stuck",
-    }));
-    expect(out.parentWrite).toEqual({
-      blocked: { at: NOW, reason: "epic stuck" },
-      list_name: "Blocked",
-    });
-    expect(out.childWrites).toEqual([]);
   });
 });
 
@@ -569,29 +379,6 @@ describe("cascadeEpicMove — overrides", () => {
     }));
     expect(out.childWrites).toEqual([
       { id: "DX-1", write: { cancelled_at: NOW, list_name: "Cancelled" } },
-    ]);
-  });
-});
-
-describe("cascadeEpicMove — override interactions", () => {
-  it("override beats the !unblockConfirmed skip on a blocked-source descendant", () => {
-    // Caller-supplied override is the operator's per-row decision —
-    // it bypasses the default-path skip that protects blocked
-    // descendants from auto-clear without confirmation. The dialog
-    // surfaces the per-row dropdown for exactly this case.
-    const blocked = makeIssue({ id: "DX-1", type: "blocked" });
-    const overrides: Record<string, CascadeAction> = {
-      "DX-1": { kind: "move_same_type" },
-    };
-    const out = cascadeEpicMove(input({
-      descendants: [blocked],
-      destListType: "completed",
-      destListName: "Done",
-      unblockConfirmed: false,
-      overrides,
-    }));
-    expect(out.childWrites).toEqual([
-      { id: "DX-1", write: { completed_at: NOW, cancelled_at: null, list_name: "Done", blocked: null } },
     ]);
   });
 });

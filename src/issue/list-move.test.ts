@@ -3,7 +3,6 @@ import {
   applyListMove,
   currentLadderIndex,
   ladderIndexForType,
-  ListMoveError,
   LADDER_ORDER,
 } from "./list-move.js";
 import { createEmptyIssue } from "../issue-tracker/yaml.js";
@@ -26,7 +25,6 @@ describe("LADDER_ORDER", () => {
       "archived",
       "review",
       "ready",
-      "blocked",
       "in_progress",
       "completed",
       "cancelled",
@@ -34,7 +32,7 @@ describe("LADDER_ORDER", () => {
   });
   it("ladderIndexForType is the array index", () => {
     expect(ladderIndexForType("archived")).toBe(0);
-    expect(ladderIndexForType("cancelled")).toBe(6);
+    expect(ladderIndexForType("cancelled")).toBe(5);
   });
 });
 
@@ -60,13 +58,6 @@ describe("currentLadderIndex — anchors on derived status, not list_name", () =
         ttl_seconds: 0,
       },
     });
-    expect(currentLadderIndex(issue)).toBe(4);
-  });
-  it("returns blocked when blocked.at is set (beats dispatch)", () => {
-    const issue = fresh({
-      ready_at: "2026-05-17T09:00:00.000Z",
-      blocked: { at: "2026-05-17T09:30:00.000Z", reason: "r" },
-    });
     expect(currentLadderIndex(issue)).toBe(3);
   });
   it("returns cancelled when cancelled_at is set (beats everything)", () => {
@@ -75,7 +66,71 @@ describe("currentLadderIndex — anchors on derived status, not list_name", () =
       completed_at: "y",
       cancelled_at: "z",
     });
-    expect(currentLadderIndex(issue)).toBe(6);
+    expect(currentLadderIndex(issue)).toBe(5);
+  });
+});
+
+describe("applyListMove — DX-658 blocked gate is orthogonal to list_name (AC #7)", () => {
+  it("preserves blocked: {at, reason} byte-identically across a lateral move", () => {
+    const blockedRecord = { at: "2026-05-10T00:00:00.000Z", reason: "needs human" };
+    const current = fresh({
+      status: "Review",
+      list_name: "Review",
+      blocked: { ...blockedRecord },
+    });
+    const { next } = applyListMove({
+      ...CTX,
+      current,
+      destListType: "review",
+      destListName: "Inbox",
+    });
+    expect(next.blocked).toEqual(blockedRecord);
+  });
+
+  it("preserves blocked: {at, reason} across a rightward move (review → ready)", () => {
+    const blockedRecord = { at: "2026-05-10T00:00:00.000Z", reason: "needs human" };
+    const current = fresh({
+      status: "Review",
+      list_name: "Review",
+      blocked: { ...blockedRecord },
+    });
+    const { next } = applyListMove({
+      ...CTX,
+      current,
+      destListType: "ready",
+      destListName: "To Do",
+    });
+    expect(next.ready_at).toBe(CTX.nowIso);
+    expect(next.blocked).toEqual(blockedRecord);
+  });
+
+  it("preserves blocked: {at, reason} across a leftward move (ready → review)", () => {
+    const blockedRecord = { at: "2026-05-10T00:00:00.000Z", reason: "needs human" };
+    const current = fresh({
+      status: "ToDo",
+      ready_at: "2026-05-09T00:00:00.000Z",
+      list_name: "To Do",
+      blocked: { ...blockedRecord },
+    });
+    const { next } = applyListMove({
+      ...CTX,
+      current,
+      destListType: "review",
+      destListName: "Review",
+    });
+    expect(next.ready_at).toBeNull();
+    expect(next.blocked).toEqual(blockedRecord);
+  });
+
+  it("does NOT clear blocked: null cards' gate field (steady-state no-op)", () => {
+    const current = fresh({ status: "Review", blocked: null });
+    const { next } = applyListMove({
+      ...CTX,
+      current,
+      destListType: "ready",
+      destListName: "To Do",
+    });
+    expect(next.blocked).toBeNull();
   });
 });
 
@@ -87,7 +142,6 @@ describe("applyListMove — lateral", () => {
       current,
       destListType: "review",
       destListName: "Inbox", // operator-renamed review list
-      blockedPatch: undefined,
     });
     expect(next.list_name).toBe("Inbox");
     expect(next.ready_at).toBeNull();
@@ -104,7 +158,6 @@ describe("applyListMove — rightward", () => {
       current,
       destListType: "ready",
       destListName: "To Do",
-      blockedPatch: undefined,
     });
     expect(next.ready_at).toBe(CTX.nowIso);
     expect(next.completed_at).toBeNull();
@@ -112,32 +165,27 @@ describe("applyListMove — rightward", () => {
     expect(deriveStatus(next)).toBe("ToDo");
   });
 
-  it("review → completed: stamps ready_at AND completed_at, skips blocked + in_progress gates", () => {
+  it("review → completed: stamps ready_at AND completed_at", () => {
     const current = fresh({ status: "Review" });
     const { next } = applyListMove({
       ...CTX,
       current,
       destListType: "completed",
       destListName: "Done",
-      blockedPatch: undefined,
     });
     expect(next.ready_at).toBe(CTX.nowIso);
     expect(next.completed_at).toBe(CTX.nowIso);
-    expect(next.blocked).toBeNull();
     expect(next.dispatch).toBeNull();
     expect(deriveStatus(next)).toBe("Done");
   });
 
-  it("review → cancelled: stamps ready_at AND cancelled_at; completed_at NOT stamped (>T excluded)", () => {
-    // Wait — cancelled idx is 6 which is highest, so [2..6] includes completed (5).
-    // Rightward stamps all lifecycle timestamps in the range including completed_at.
+  it("review → cancelled: stamps ready_at AND cancelled_at; completed_at also stamped (full sweep)", () => {
     const current = fresh({ status: "Review" });
     const { next } = applyListMove({
       ...CTX,
       current,
       destListType: "cancelled",
       destListName: "Cancelled",
-      blockedPatch: undefined,
     });
     expect(next.ready_at).toBe(CTX.nowIso);
     expect(next.completed_at).toBe(CTX.nowIso);
@@ -152,7 +200,6 @@ describe("applyListMove — rightward", () => {
       current,
       destListType: "in_progress",
       destListName: "In Progress",
-      blockedPatch: undefined,
     });
     expect(next.dispatch).not.toBeNull();
     expect(next.dispatch?.host).toBe("dashboard:monitor");
@@ -169,119 +216,10 @@ describe("applyListMove — rightward", () => {
       current,
       destListType: "in_progress",
       destListName: "In Progress",
-      blockedPatch: undefined,
     });
     expect(next.ready_at).toBe(CTX.nowIso);
     expect(next.dispatch).not.toBeNull();
     expect(deriveStatus(next)).toBe("In Progress");
-  });
-});
-
-describe("applyListMove — INTO blocked", () => {
-  it("rejects when blocked patch is missing", () => {
-    const current = fresh({ status: "ToDo", ready_at: "2026-05-17T09:00:00.000Z" });
-    expect(() =>
-      applyListMove({
-        ...CTX,
-        current,
-        destListType: "blocked",
-        destListName: "Blocked",
-        blockedPatch: undefined,
-      }),
-    ).toThrow(ListMoveError);
-  });
-
-  it("rejects when blocked.reason is empty", () => {
-    const current = fresh({ status: "ToDo", ready_at: "2026-05-17T09:00:00.000Z" });
-    expect(() =>
-      applyListMove({
-        ...CTX,
-        current,
-        destListType: "blocked",
-        destListName: "Blocked",
-        blockedPatch: { reason: "" },
-      }),
-    ).toThrow(ListMoveError);
-  });
-
-  it("stamps blocked.at + reason when blocked.reason provided; clears any dispatch", () => {
-    const current = fresh({
-      status: "In Progress",
-      ready_at: "2026-05-17T09:00:00.000Z",
-      dispatch: {
-        id: "d1",
-        pid: 1,
-        host: "h",
-        kind: "work",
-        started_at: "2026-05-17T09:30:00.000Z",
-        ttl_seconds: 0,
-      },
-    });
-    const { next } = applyListMove({
-      ...CTX,
-      current,
-      destListType: "blocked",
-      destListName: "Blocked",
-      blockedPatch: { reason: "Waiting on design" },
-    });
-    expect(next.blocked).toEqual({ at: CTX.nowIso, reason: "Waiting on design" });
-    expect(next.dispatch).toBeNull();
-    expect(next.ready_at).toBe("2026-05-17T09:00:00.000Z"); // preserved
-    expect(deriveStatus(next)).toBe("Blocked");
-  });
-
-  it("does NOT stamp ready_at / completed_at on the INTO-blocked rightward sweep (gate semantics)", () => {
-    const current = fresh({ status: "Review" });
-    const { next } = applyListMove({
-      ...CTX,
-      current,
-      destListType: "blocked",
-      destListName: "Blocked",
-      blockedPatch: { reason: "Spec ambiguous" },
-    });
-    expect(next.ready_at).toBeNull();
-    expect(next.blocked).toEqual({ at: CTX.nowIso, reason: "Spec ambiguous" });
-    expect(deriveStatus(next)).toBe("Blocked");
-  });
-});
-
-describe("applyListMove — OUT of blocked", () => {
-  it("explicit blocked: null clears the block and applies ladder semantics for the dest", () => {
-    const current = fresh({
-      status: "Blocked",
-      ready_at: "2026-05-17T09:00:00.000Z",
-      blocked: { at: "2026-05-17T09:30:00.000Z", reason: "r" },
-    });
-    const { next } = applyListMove({
-      ...CTX,
-      current,
-      destListType: "ready",
-      destListName: "To Do",
-      blockedPatch: null,
-    });
-    expect(next.blocked).toBeNull();
-    expect(next.ready_at).toBe("2026-05-17T09:00:00.000Z"); // preserved
-    expect(deriveStatus(next)).toBe("ToDo");
-  });
-
-  it("missing blocked patch still auto-clears when dest is non-blocked", () => {
-    // Hardening: a board drag-out of blocked without the dialog still routes
-    // through here and the move should auto-clear (operator dragged away from
-    // Blocked, the block must lift even without the explicit confirm).
-    const current = fresh({
-      status: "Blocked",
-      ready_at: "2026-05-17T09:00:00.000Z",
-      blocked: { at: "2026-05-17T09:30:00.000Z", reason: "r" },
-    });
-    const { next } = applyListMove({
-      ...CTX,
-      current,
-      destListType: "ready",
-      destListName: "To Do",
-      blockedPatch: undefined,
-    });
-    expect(next.blocked).toBeNull();
-    expect(deriveStatus(next)).toBe("ToDo");
   });
 });
 
@@ -304,7 +242,6 @@ describe("applyListMove — leftward", () => {
       current,
       destListType: "ready",
       destListName: "To Do",
-      blockedPatch: undefined,
     });
     expect(next.dispatch).toBeNull();
     expect(next.ready_at).toBe("2026-05-17T09:00:00.000Z");
@@ -322,7 +259,6 @@ describe("applyListMove — leftward", () => {
       current,
       destListType: "ready",
       destListName: "To Do",
-      blockedPatch: undefined,
     });
     expect(next.completed_at).toBeNull();
     expect(next.ready_at).toBe("2026-05-17T09:00:00.000Z");
@@ -347,7 +283,6 @@ describe("applyListMove — leftward", () => {
       current,
       destListType: "archived",
       destListName: "Backlog",
-      blockedPatch: undefined,
     });
     expect(next.dispatch).toBeNull();
     expect(next.ready_at).toBeNull();
@@ -366,7 +301,6 @@ describe("applyListMove — leftward", () => {
       current,
       destListType: "in_progress",
       destListName: "In Progress",
-      blockedPatch: undefined,
     });
     expect(next.completed_at).toBeNull();
     expect(next.dispatch).not.toBeNull();
@@ -376,10 +310,9 @@ describe("applyListMove — leftward", () => {
 
 describe("applyListMove — list_name always set", () => {
   it("sets list_name on every dest (rightward / leftward / lateral)", () => {
-    const cases: { from: Partial<Issue>; destType: import("../lists-types.js").ListType; destName: string; blocked?: { reason: string } }[] = [
+    const cases: { from: Partial<Issue>; destType: import("../lists-types.js").ListType; destName: string }[] = [
       { from: { status: "Review" }, destType: "ready", destName: "ToDoCustom" },
       { from: { status: "Review" }, destType: "archived", destName: "BacklogCustom" },
-      { from: { status: "Review" }, destType: "blocked", destName: "Stuck", blocked: { reason: "r" } },
       { from: { status: "ToDo", ready_at: "x" }, destType: "in_progress", destName: "WIP" },
     ];
     for (const c of cases) {
@@ -389,56 +322,14 @@ describe("applyListMove — list_name always set", () => {
         current,
         destListType: c.destType,
         destListName: c.destName,
-        blockedPatch: c.blocked,
       });
       expect(next.list_name).toBe(c.destName);
     }
   });
 });
 
-describe("applyListMove — invalid combinations", () => {
-  it("rejects blocked.reason paired with non-blocked dest", () => {
-    const current = fresh({ status: "ToDo", ready_at: "2026-05-17T09:00:00.000Z" });
-    expect(() =>
-      applyListMove({
-        ...CTX,
-        current,
-        destListType: "ready",
-        destListName: "To Do",
-        blockedPatch: { reason: "r" },
-      }),
-    ).toThrow(ListMoveError);
-  });
-});
-
-// Critical-path regression tests added per DX-586 review findings.
-describe("applyListMove — lateral within blocked (review finding)", () => {
-  it("blocked → blocked-renamed (lateral): preserves blocked record, does NOT 400 on missing reason", () => {
-    // Two blocked-type lists ("Blocked" → "Stuck"). The operator drags
-    // between them; the existing block stays, no reason prompt fires.
-    const current = fresh({
-      status: "Blocked",
-      ready_at: "2026-05-17T09:00:00.000Z",
-      blocked: { at: "2026-05-17T09:30:00.000Z", reason: "Original reason" },
-    });
-    const { next } = applyListMove({
-      ...CTX,
-      current,
-      destListType: "blocked",
-      destListName: "Stuck",
-      blockedPatch: undefined,
-    });
-    expect(next.list_name).toBe("Stuck");
-    expect(next.blocked).toEqual({
-      at: "2026-05-17T09:30:00.000Z",
-      reason: "Original reason",
-    });
-    expect(deriveStatus(next)).toBe("Blocked");
-  });
-});
-
 describe("applyListMove — multi-pass-through (review finding)", () => {
-  it("archived → cancelled: skips blocked + in_progress gates, stamps ready_at + completed_at + cancelled_at", () => {
+  it("archived → cancelled: skips in_progress gate, stamps ready_at + completed_at + cancelled_at", () => {
     const current = fresh({
       status: "Backlog",
       archived_at: "2026-05-17T08:00:00.000Z",
@@ -448,11 +339,9 @@ describe("applyListMove — multi-pass-through (review finding)", () => {
       current,
       destListType: "cancelled",
       destListName: "Cancelled",
-      blockedPatch: undefined,
     });
     expect(next.archived_at).toBe("2026-05-17T08:00:00.000Z"); // preserved
     expect(next.ready_at).toBe(CTX.nowIso);
-    expect(next.blocked).toBeNull(); // gate skipped
     expect(next.dispatch).toBeNull(); // gate skipped
     expect(next.completed_at).toBe(CTX.nowIso);
     expect(next.cancelled_at).toBe(CTX.nowIso);
@@ -472,7 +361,6 @@ describe("applyListMove — terminal ↔ terminal (review finding)", () => {
       current,
       destListType: "cancelled",
       destListName: "Cancelled",
-      blockedPatch: undefined,
     });
     expect(next.completed_at).toBe("2026-05-17T09:30:00.000Z");
     expect(next.cancelled_at).toBe(CTX.nowIso);
@@ -491,7 +379,6 @@ describe("applyListMove — terminal ↔ terminal (review finding)", () => {
       current,
       destListType: "completed",
       destListName: "Done",
-      blockedPatch: undefined,
     });
     expect(next.cancelled_at).toBeNull();
     expect(next.completed_at).toBe("2026-05-17T09:30:00.000Z");
@@ -511,7 +398,6 @@ describe("applyListMove — source mutation guard (review finding)", () => {
       current,
       destListType: "in_progress",
       destListName: "In Progress",
-      blockedPatch: undefined,
     });
     expect(JSON.parse(JSON.stringify(current))).toEqual(snapshot);
   });

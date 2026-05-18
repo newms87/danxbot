@@ -68,12 +68,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     list_name: null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -91,23 +85,10 @@ describe("deriveStatus", () => {
     expect(deriveStatus([])).toBeNull();
   });
 
-  describe("priority rule 1 — any Blocked lifts to parent", () => {
-    it("Blocked wins over In Progress / ToDo / Review / Done / Cancelled", () => {
-      const result = deriveStatus([
-        child("ISS-1", "In Progress"),
-        child("ISS-2", "ToDo"),
-        child("ISS-3", "Blocked"),
-        child("ISS-4", "Done"),
-      ]);
-      expect(result?.status).toBe("Blocked");
-      expect(result?.rule).toMatch(/Blocked/);
-    });
-
-    // DX-231 retired the `Needs Approval` parking status. The
-    // orthogonal `requires_human` field replaces it but is NOT
-    // propagated to parents — only status-based rules drive epic
-    // rollup. Tests asserting Needs-Approval propagation were removed.
-  });
+  // DX-658 retired the `any child Blocked → parent Blocked` rule
+  // (Blocked is no longer a status; blocked is a pure dispatch gate
+  // not propagated to parents). DX-231 retired the Needs Approval
+  // parking status. Tests for those rules were removed.
 
   describe("priority rule 2 — any In Progress (without Blocked)", () => {
     it("In Progress wins over ToDo / Review / Done / Cancelled", () => {
@@ -423,26 +404,6 @@ describe("recomputeParentStatuses (integration)", () => {
     },
   );
 
-  it.skipIf(!handle)(
-    "propagates Blocked up an Epic chain on the same call",
-    async () => {
-      await seed(
-        makeIssue({
-          id: "ISS-1",
-          type: "Epic",
-          status: "ToDo",
-          children: ["ISS-2", "ISS-3"],
-        }),
-      );
-      await seed(child("ISS-2", "Done"));
-      await seed(child("ISS-3", "Blocked"));
-
-      const changes = await recomputeParentStatuses(repoRoot, "ISS");
-      expect(changes).toHaveLength(1);
-      expect(loadStatus("ISS-1")).toBe("Blocked");
-    },
-  );
-
   // ----- DX-147 — history-append on auto-derive -----
 
   it.skipIf(!handle)(
@@ -538,25 +499,6 @@ describe("recomputeParentStatuses (integration)", () => {
   );
 
   // Per-rule note accuracy.
-  it.skipIf(!handle)(
-    "DX-147: rule 1 — Blocked flip note describes the Blocked rule",
-    async () => {
-      await seed(
-        makeIssue({
-          id: "ISS-1",
-          type: "Epic",
-          status: "In Progress",
-          children: ["ISS-2"],
-        }),
-      );
-      await seed(child("ISS-2", "Blocked"));
-
-      await recomputeParentStatuses(repoRoot, "ISS");
-      const note = loadIssue("ISS-1").history[0].note ?? "";
-      expect(note).toMatch(/Blocked/);
-    },
-  );
-
   it.skipIf(!handle)(
     "DX-147: rule 2 — In Progress flip note describes the In Progress rule",
     async () => {

@@ -177,61 +177,18 @@ async function checkNeedsHelp(
   tracker: IssueTracker,
   trelloMap: TrelloListMap,
 ): Promise<number> {
-  // DX-621 / Phase 9d — resolve the operator-mapped Trello list ids for
-  // "Blocked" (source) + "ToDo" (destination). When either is unmapped,
-  // skip the whole pass — the operator has not configured the boundary
-  // this loop needs to act on.
-  const blockedTrelloListId = resolveTrelloListIdByTypeLocal(
-    repo.localPath,
-    "blocked",
-  );
-  const readyTrelloListId = resolveTrelloListIdByTypeLocal(
-    repo.localPath,
-    "ready",
-  );
-  if (!blockedTrelloListId || !readyTrelloListId) {
-    log.debug(
-      `[${repo.name}] checkNeedsHelp skipped — blocked=${blockedTrelloListId || "(unmapped)"}, ready=${readyTrelloListId || "(unmapped)"}`,
-    );
-    return 0;
-  }
-
-  let refs: IssueRef[];
-  try {
-    refs = await tracker.fetchOpenCards([blockedTrelloListId]);
-  } catch (error) {
-    log.error(`[${repo.name}] Error fetching Needs Help cards`, error);
-    return 0;
-  }
-
-  if (refs.length === 0) return 0;
-
-  let movedCount = 0;
-  for (const ref of refs) {
-    try {
-      const comments = await tracker.getComments(ref.external_id);
-      const latest = comments.length > 0 ? comments[comments.length - 1] : null;
-      if (latest && !latest.text.includes(DANXBOT_COMMENT_MARKER)) {
-        log.info(
-          `[${repo.name}] User responded on "${ref.title}" — moving to ToDo`,
-        );
-        await tracker.moveToList(ref.external_id, readyTrelloListId);
-        movedCount++;
-      }
-    } catch (error) {
-      log.error(
-        `[${repo.name}] Error checking comments for card "${ref.title}"`,
-        error,
-      );
-    }
-  }
-
-  // Silence unused-import warning in environments where the helper goes
-  // ungrabbed: `trelloMap` is supplied by the caller as a snapshot — it
-  // currently feeds only the openCards filter upstream, but checkNeedsHelp
-  // accepts it so a future caller can reuse the same read.
+  // DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+  // retired the `"blocked"` ListType, so this helper no longer has a
+  // Trello source list to poll. The pre-DX-658 Needs-Help flow watched
+  // Trello's Blocked column for user replies; today the self-block
+  // gate (`Issue.blocked != null`) is the canonical signal, cleared
+  // via the dashboard's Clear-Block button. Kept as a no-op so the
+  // caller's per-tick sweep wiring stays intact while the future
+  // gate-cleared inbound shape is decided.
+  void repo;
+  void tracker;
   void trelloMap;
-  return movedCount;
+  return 0;
 }
 
 /**

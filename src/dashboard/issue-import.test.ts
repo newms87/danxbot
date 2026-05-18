@@ -239,7 +239,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
       repoLocalPath,
       makeIssue({
         id: "DX-1",
-        status: "Blocked",
+        status: "In Progress",
         blocked: {
           reason: "Need a credential rotation",
           at: "2026-05-14T01:00:00Z",
@@ -262,7 +262,9 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
     );
     const payload = buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
     const issue = payload.issues[0];
-    expect(issue.status).toBe("Blocked");
+    // DX-658: blocked is independent of status; the fixture's
+    // `status: "In Progress"` round-trips verbatim.
+    expect(issue.status).toBe("In Progress");
     expect(issue.blocked).toEqual({
       reason: "Need a credential rotation",
       at: "2026-05-14T01:00:00Z",
@@ -501,10 +503,10 @@ describe("applyIssueImport — happy paths", () => {
     );
   });
 
-  it("preserves status === Blocked AND blocked record (invariant holds across paste)", async () => {
+  it("preserves blocked record (invariant holds across paste)", async () => {
     const src = makeIssue({
       id: "DX-100",
-      status: "Blocked",
+      status: "In Progress",
       blocked: {
         reason: "Original blocker text",
         at: "2026-05-14T00:00:00Z",
@@ -515,7 +517,9 @@ describe("applyIssueImport — happy paths", () => {
       repoLocalPath,
       payloadOf([src]),
     );
-    expect(result.issues[0].status).toBe("Blocked");
+    // DX-658: blocked is independent of status — the source's
+    // `In Progress` status round-trips verbatim.
+    expect(result.issues[0].status).toBe("In Progress");
     expect(result.issues[0].blocked).toEqual({
       reason: "Original blocker text",
       at: "2026-05-14T00:00:00Z",

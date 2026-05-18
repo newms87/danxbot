@@ -101,10 +101,13 @@ export function isWaitingOrBlocked(
   return ancestorWaitingOrBlocked(issue, byId);
 }
 
+// DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`. The
+// self-block gate (`Issue.blocked != null`) is now independent of the
+// derived column; cards retain their semantic status while gated, so
+// the priority bucket no longer carries a Blocked entry.
 const PRIORITY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([
   "Review",
   "ToDo",
-  "Blocked",
 ]);
 
 const RECENCY_BUCKET: ReadonlySet<IssueStatus> = new Set<IssueStatus>([

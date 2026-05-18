@@ -233,9 +233,10 @@ async function applyQueuedVerdict(
     const issue = parseIssue(readFileSync(filePath, "utf-8"), {
       expectedPrefix: repo.issuePrefix,
     });
+    // DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`;
+    // the self-block gate field alone signals the dispatch terminal.
     const next: Issue = {
       ...issue,
-      status: "Blocked",
       blocked: {
         reason: payload.reason,
         at: new Date().toISOString(),

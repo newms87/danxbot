@@ -28,7 +28,6 @@ describe("deriveStatus — single-rule precedence", () => {
   }> = [
     { name: "rule 1: cancelled_at → Cancelled", overrides: { cancelled_at: TS, status: "ToDo" }, expected: "Cancelled" },
     { name: "rule 2: completed_at → Done", overrides: { completed_at: TS, status: "ToDo" }, expected: "Done" },
-    { name: "rule 3: blocked.at → Blocked", overrides: { blocked: { at: TS }, status: "ToDo" }, expected: "Blocked" },
     // Phase 4 (DX-584): rule 4 is live — dispatch != null derives In
     // Progress when raw status is not terminal.
     { name: "rule 4: dispatch live derives In Progress (raw ToDo)", overrides: { dispatch: { id: "d" }, status: "ToDo" }, expected: "In Progress" },
@@ -38,7 +37,6 @@ describe("deriveStatus — single-rule precedence", () => {
     { name: "rule 7: fallthrough → raw status (Review)", overrides: { status: "Review" }, expected: "Review" },
     { name: "rule 7: fallthrough → raw status (ToDo)", overrides: { status: "ToDo" }, expected: "ToDo" },
     { name: "rule 7: fallthrough → raw status (In Progress)", overrides: { status: "In Progress" }, expected: "In Progress" },
-    { name: "rule 7: fallthrough → raw status (Blocked)", overrides: { status: "Blocked" }, expected: "Blocked" },
     { name: "rule 7: fallthrough → raw status (Done)", overrides: { status: "Done" }, expected: "Done" },
     { name: "rule 7: fallthrough → raw status (Cancelled)", overrides: { status: "Cancelled" }, expected: "Cancelled" },
     { name: "rule 7: fallthrough → raw status (Backlog)", overrides: { status: "Backlog" }, expected: "Backlog" },
@@ -49,6 +47,45 @@ describe("deriveStatus — single-rule precedence", () => {
       expect(deriveStatus(input(r.overrides))).toBe(r.expected);
     });
   }
+});
+
+describe("deriveStatus — DX-658 blocked gate is orthogonal to derived status (AC #2)", () => {
+  it("returns the same derived status whether blocked is null or populated (ready_at path)", () => {
+    const base = input({
+      ready_at: TS,
+      status: "ToDo",
+    });
+    const withGate = { ...base, blocked: { at: TS } };
+    expect(deriveStatus(base)).toBe(deriveStatus(withGate));
+    expect(deriveStatus(base)).toBe("ToDo");
+  });
+
+  it("returns the same derived status whether blocked is null or populated (review fallthrough)", () => {
+    const base = input({ status: "Review" });
+    const withGate = { ...base, blocked: { at: TS } };
+    expect(deriveStatus(base)).toBe(deriveStatus(withGate));
+    expect(deriveStatus(base)).toBe("Review");
+  });
+
+  it("returns the same derived status whether blocked is null or populated (dispatch path)", () => {
+    const base = input({
+      dispatch: { id: "d" },
+      status: "ToDo",
+    });
+    const withGate = { ...base, blocked: { at: TS } };
+    expect(deriveStatus(base)).toBe(deriveStatus(withGate));
+    expect(deriveStatus(base)).toBe("In Progress");
+  });
+
+  it("returns the same derived status whether blocked is null or populated (archived path)", () => {
+    const base = input({
+      archived_at: TS,
+      status: "Review",
+    });
+    const withGate = { ...base, blocked: { at: TS } };
+    expect(deriveStatus(base)).toBe(deriveStatus(withGate));
+    expect(deriveStatus(base)).toBe("Backlog");
+  });
 });
 
 describe("deriveStatus — precedence combinations", () => {
@@ -92,19 +129,6 @@ describe("deriveStatus — precedence combinations", () => {
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Done" }))).toBe("Done");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Cancelled" }))).toBe("Cancelled");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "In Progress" }))).toBe("In Progress");
-  });
-
-  it("blocked.at without dispatch → Blocked", () => {
-    expect(
-      deriveStatus(
-        input({
-          blocked: { at: TS },
-          ready_at: TS,
-          archived_at: TS,
-          status: "Review",
-        }),
-      ),
-    ).toBe("Blocked");
   });
 
   it("ready_at + archived_at → ToDo (rule 5 beats rule 6)", () => {

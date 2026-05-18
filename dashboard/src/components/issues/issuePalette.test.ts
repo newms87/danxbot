@@ -23,8 +23,8 @@ describe("projectChildStatus", () => {
     expect(projectChildStatus("Cancelled", true)).toBe("done");
   });
 
-  it("Blocked → 'blocked'", () => {
-    expect(projectChildStatus("Blocked", false)).toBe("blocked");
+  it("blocked gate populated → 'blocked'", () => {
+    expect(projectChildStatus("ToDo", false, false, true)).toBe("blocked");
   });
   // DX-231 retired the legacy `Needs Approval` status mapping; the
   // orthogonal `requires_human` field gets its own indicator (Phase 8

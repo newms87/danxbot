@@ -23,7 +23,7 @@
  * `<label>` (structural / semantic HTML, not branded primitives).
  */
 import { computed, ref, watch } from "vue";
-import { DanxDialog, DanxSelect, DanxTextarea, DanxToggle, DanxTooltip } from "@thehammer/danx-ui";
+import { DanxDialog, DanxSelect, DanxTooltip } from "@thehammer/danx-ui";
 import type { CascadeAction } from "../../api";
 import type { IssueListItem, List } from "../../types";
 import { deriveListTypeFromStatus } from "../../composables/derive-status";
@@ -64,8 +64,6 @@ const emit = defineEmits<{
   confirm: [
     payload: {
       overrides: Record<string, CascadeAction>;
-      unblockConfirmed: boolean;
-      blockedReason?: string;
     },
   ];
   /** Operator cancelled — parent reverts any optimistic UI + closes. */
@@ -97,15 +95,11 @@ watch(
   },
 );
 
-/** Reset banner state on every reopen. */
-const unblockConfirmed = ref(false);
-const blockedReason = ref("");
+/** Reset state on every reopen. */
 watch(
   () => props.modelValue,
   (next) => {
     if (next) {
-      unblockConfirmed.value = false;
-      blockedReason.value = "";
       selections.value = Object.fromEntries(
         props.descendants.map((d) => [d.id, ACTION_DEFAULT]),
       );
@@ -113,20 +107,8 @@ watch(
   },
 );
 
-const destIsBlocked = computed<boolean>(() => props.destList.type === "blocked");
-
-const blockedDescendantIds = computed<string[]>(() =>
-  props.descendants.filter((d) => d.blocked !== null && d.blocked !== undefined).map((d) => d.id),
-);
-
-const showUnblockBanner = computed<boolean>(
-  () => !destIsBlocked.value && blockedDescendantIds.value.length > 0,
-);
-
 const canSubmit = computed<boolean>(() => {
   if (props.busy) return false;
-  if (destIsBlocked.value && blockedReason.value.trim().length === 0) return false;
-  if (showUnblockBanner.value && !unblockConfirmed.value) return false;
   return true;
 });
 
@@ -245,16 +227,7 @@ function onSubmit(): void {
     if (sel === ACTION_DEFAULT) continue;
     overrides[d.id] = resolveAction(d.id);
   }
-  const payload: {
-    overrides: Record<string, CascadeAction>;
-    unblockConfirmed: boolean;
-    blockedReason?: string;
-  } = {
-    overrides,
-    unblockConfirmed: unblockConfirmed.value,
-  };
-  if (destIsBlocked.value) payload.blockedReason = blockedReason.value.trim();
-  emit("confirm", payload);
+  emit("confirm", { overrides });
 }
 
 function onCancel(): void {
@@ -283,45 +256,6 @@ function onCancel(): void {
         to <strong>{{ props.destList.name }}</strong>. Review per-descendant
         actions below, then confirm.
       </p>
-
-      <div
-        v-if="showUnblockBanner"
-        class="banner banner-unblock"
-        data-test="cascade-unblock-banner"
-      >
-        <p class="banner-text">
-          The following descendants are currently Blocked:
-          <strong>{{ blockedDescendantIds.join(", ") }}</strong>.
-        </p>
-        <label class="toggle-row">
-          <DanxToggle
-            v-model="unblockConfirmed"
-            data-test="cascade-unblock-toggle"
-            aria-label="Confirm clearing block on descendants"
-          />
-          <span>
-            I confirm clearing the block on these
-            {{ blockedDescendantIds.length }} descendants.
-          </span>
-        </label>
-      </div>
-
-      <div
-        v-if="destIsBlocked"
-        class="banner banner-blocked-reason"
-        data-test="cascade-blocked-reason-banner"
-      >
-        <label class="field-label" for="cascade-blocked-reason">
-          Reason for blocking {{ props.parent.id }} (required)
-        </label>
-        <DanxTextarea
-          id="cascade-blocked-reason"
-          v-model="blockedReason"
-          :rows="3"
-          placeholder="e.g. Awaiting answers from product"
-          data-test="cascade-blocked-reason"
-        />
-      </div>
 
       <div
         v-for="group in descendantGroups"

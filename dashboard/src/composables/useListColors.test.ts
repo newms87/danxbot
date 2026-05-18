@@ -7,7 +7,6 @@ const fakeListsFile: ListsFile = {
     { id: "u-archived", name: "Backlog", type: "archived", order: 0, is_default_for_type: true, color: "#aaaaaa" },
     { id: "u-review", name: "Review", type: "review", order: 1, is_default_for_type: true, color: "#3b82f6" },
     { id: "u-ready", name: "To Do", type: "ready", order: 2, is_default_for_type: true, color: "#22d3ee" },
-    { id: "u-blocked", name: "Blocked", type: "blocked", order: 3, is_default_for_type: true, color: "#ef4444" },
     { id: "u-ip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
     { id: "u-done", name: "Done", type: "completed", order: 5, is_default_for_type: true, color: "#22c55e" },
     { id: "u-cancel", name: "Cancelled", type: "cancelled", order: 6, is_default_for_type: true, color: "#71717a" },
@@ -85,7 +84,7 @@ describe("useListColors", () => {
     init();
     await flushHydration();
 
-    expect(lists.value.length).toBe(7);
+    expect(lists.value.length).toBe(6);
     expect(colorFor("Review")).toBe("#3b82f6");
     expect(colorFor("Done")).toBe("#22c55e");
     destroy();

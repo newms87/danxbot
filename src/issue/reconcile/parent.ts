@@ -7,27 +7,30 @@
  * db, no logger — so it can be exercised with hand-built fixtures
  * without any setup.
  *
- * Lives under `src/issue/reconcile/` because it is reconcile step 3a's
- * decision function. The poller's `recomputeParentStatuses` (a Phase-5
- * audit pass) calls this same helper for drift detection; the source of
- * truth is here.
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * (parent epic DX-656) retired `"Blocked"` from `IssueStatus` AND
+ * removed the Blocked rollup rule. Children with `blocked: {at,
+ * reason}` populated keep their semantic status (Review / In Progress
+ * / ToDo / …); the picker reads the gate independently. The parent's
+ * derived status now follows the remaining six rules over the
+ * children's union — a self-blocked child neither pulls the parent
+ * onto a parking status nor stamps the parent's `blocked` field.
  *
  * Priority rules (first match wins). Each rule consults the child's
  * DERIVED status (`deriveStatus(child)`) — never the raw on-disk
  * `child.status` — so a parent rollup never lags the child's
  * timestamp-driven transitions. See `src/issue/derive-status.ts`.
  *
- *  1. Any child `Blocked` → parent `Blocked`.
- *  2. Any child `In Progress` → parent `In Progress`.
- *  3. Any child `ToDo` → parent `ToDo`.
- *  4. All non-cancelled children `Review` → parent `Review`.
- *  5. All non-cancelled children `Backlog` → parent `Backlog` (DX-582).
+ *  1. Any child `In Progress` → parent `In Progress`.
+ *  2. Any child `ToDo` → parent `ToDo`.
+ *  3. All non-cancelled children `Review` → parent `Review`.
+ *  4. All non-cancelled children `Backlog` → parent `Backlog` (DX-582).
  *     Mixed Backlog + Done counts as the project being shelved with
- *     completed work behind it — rule 6 (Done) still wins when every
- *     non-cancelled child is Done. Rule 5 fires only when every
+ *     completed work behind it — rule 5 (Done) still wins when every
+ *     non-cancelled child is Done. Rule 4 fires only when every
  *     non-cancelled child is parked.
- *  6. All non-cancelled children `Done` → parent `Done`.
- *  7. All children `Cancelled` (no exclusion) → parent `Cancelled`.
+ *  5. All non-cancelled children `Done` → parent `Done`.
+ *  6. All children `Cancelled` (no exclusion) → parent `Cancelled`.
  *
  * `Needs Approval` was retired in DX-231 (schema_version 6). The
  * orthogonal `requires_human` field replaces the parking status —
@@ -38,8 +41,8 @@
  * `Cancelled`) returns `null` — the caller leaves the parent's current
  * status untouched. Better than forcing a guess.
  *
- * Cancelled children are excluded from rules 5 + 6 (they don't block a
- * Done / Review derivation). Rule 7 fires only when EVERY child is
+ * Cancelled children are excluded from rules 3-5 (they don't block a
+ * Done / Review derivation). Rule 6 fires only when EVERY child is
  * Cancelled — a single non-Cancelled child shifts the answer.
  *
  * The `rule` string is consumed by reconcile step 5 as the `note` on
@@ -49,7 +52,6 @@
  */
 
 import type {
-  Blocked,
   Issue,
   IssueHistoryEntry,
   IssueStatus,
@@ -69,9 +71,6 @@ export function deriveParentStatus(
 
   const derived = children.map((c) => deriveStatus(c));
 
-  if (derived.some((s) => s === "Blocked")) {
-    return { status: "Blocked", rule: "Any child Blocked — parent Blocked" };
-  }
   if (derived.some((s) => s === "In Progress")) {
     return {
       status: "In Progress",
@@ -113,17 +112,14 @@ export function deriveParentStatus(
 }
 
 /**
- * Apply a `deriveParentStatus` decision to an Issue. Single source of
- * truth for the THREE entangled mutations a parent-derive flip
- * produces:
+ * Apply a `deriveParentStatus` decision to an Issue. Appends a
+ * `worker:auto-derive` `status_change` entry to `history[]` with the
+ * priority-rule string as `note` (DX-147 AC #1).
  *
- *  1. Append `worker:auto-derive` `status_change` to `history[]` with
- *     the priority-rule string as `note` (DX-147 AC #1).
- *  2. If the new status is `Blocked` AND the issue has no self-block
- *     record yet, stamp one whose `reason` carries the derive rule.
- *  3. If the new status is non-Blocked AND a self-block record exists,
- *     clear it. Maintains the schema invariant
- *     `status === "Blocked" ⟺ blocked !== null`.
+ * DX-658 / Phase 2 retired the auto-stamp-clear of `Issue.blocked` —
+ * the gate is now independent of the parent's derived status and
+ * never modified by the parent-derive path. The previous invariant
+ * (`status === "Blocked" ⟺ blocked !== null`) is gone.
  *
  * Both `reconcileIssue` step 3a (the chokepoint) and the legacy
  * `recomputeParentStatuses` audit pass call this helper, so a future
@@ -147,19 +143,9 @@ export function applyParentDeriveMutation(
     to: derived.status,
     note: derived.rule,
   });
-  let updatedBlocked: Blocked | null = issue.blocked;
-  if (derived.status === "Blocked" && issue.blocked === null) {
-    updatedBlocked = {
-      reason: `Auto-derived from children: ${derived.rule}`,
-      at: now,
-    };
-  } else if (derived.status !== "Blocked" && issue.blocked !== null) {
-    updatedBlocked = null;
-  }
   return {
     ...issue,
     status: derived.status,
-    blocked: updatedBlocked,
     history: updatedHistory,
   };
 }

@@ -198,7 +198,7 @@ describe("YAML invariant: (dispatch !== null) === (assigned_agent !== null) — 
       ...createEmptyIssue({
         id: "ISS-4",
         external_id: "ext-4",
-        status: "Blocked",
+        status: "ToDo",
         type: "Feature",
         title: "Blocked card",
         description: "",

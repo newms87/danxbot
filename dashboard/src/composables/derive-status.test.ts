@@ -13,7 +13,6 @@ const SEED_LISTS: readonly List[] = [
   { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
   { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
   { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
-  { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
   { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
   { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
   { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
@@ -44,9 +43,6 @@ describe("SPA deriveStatus — mirrors backend rules", () => {
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Done" }))).toBe("Done");
     expect(deriveStatus(input({ dispatch: { id: "d" }, status: "Cancelled" }))).toBe("Cancelled");
   });
-  it("rule 4: blocked.at → Blocked", () => {
-    expect(deriveStatus(input({ blocked: { at: TS }, status: "ToDo" }))).toBe("Blocked");
-  });
   it("rule 5: ready_at → ToDo", () => {
     expect(deriveStatus(input({ ready_at: TS, status: "Review" }))).toBe("ToDo");
   });
@@ -58,9 +54,6 @@ describe("SPA deriveStatus — mirrors backend rules", () => {
     expect(deriveStatus(input({ status: "In Progress" }))).toBe("In Progress");
   });
 
-  it("dispatch + blocked.at → Blocked (rule 4 fires regardless of dispatch)", () => {
-    expect(deriveStatus(input({ dispatch: { id: "d" }, blocked: { at: TS } }))).toBe("Blocked");
-  });
   it("ready_at + archived_at → ToDo (rule 5 beats rule 6)", () => {
     expect(deriveStatus(input({ ready_at: TS, archived_at: TS }))).toBe("ToDo");
   });
@@ -81,12 +74,11 @@ describe("SPA deriveStatus — mirrors backend rules", () => {
     ).toBe("Cancelled");
   });
 
-  it("completed_at beats blocked / ready_at / archived_at", () => {
+  it("completed_at beats ready_at / archived_at", () => {
     expect(
       deriveStatus(
         input({
           completed_at: TS,
-          blocked: { at: TS },
           ready_at: TS,
           archived_at: TS,
           status: "ToDo",
@@ -109,7 +101,6 @@ describe("DX-639 deriveListTypeFromStatus — total over IssueStatus", () => {
     expect(deriveListTypeFromStatus("Review")).toBe("review");
     expect(deriveListTypeFromStatus("ToDo")).toBe("ready");
     expect(deriveListTypeFromStatus("In Progress")).toBe("in_progress");
-    expect(deriveListTypeFromStatus("Blocked")).toBe("blocked");
     expect(deriveListTypeFromStatus("Done")).toBe("completed");
     expect(deriveListTypeFromStatus("Cancelled")).toBe("cancelled");
   });
@@ -127,15 +118,6 @@ describe("DX-639 derivedListName — projects from triggers + lists taxonomy", (
     ).toBe("Done");
   });
 
-  it("projects from blocked.at over ready_at", () => {
-    expect(
-      derivedListName(
-        input({ blocked: { at: TS }, ready_at: TS, status: "ToDo" }),
-        SEED_LISTS,
-      ),
-    ).toBe("Blocked");
-  });
-
   it("projects to operator-renamed default list (custom name on `ready` type)", () => {
     const renamed = SEED_LISTS.map((l) =>
       l.type === "ready" ? { ...l, name: "Up Next" } : l,
@@ -146,9 +128,9 @@ describe("DX-639 derivedListName — projects from triggers + lists taxonomy", (
   });
 
   it("returns null when the taxonomy has no default for the projected type", () => {
-    const noBlockedDefault = SEED_LISTS.filter((l) => l.type !== "blocked");
+    const noReadyDefault = SEED_LISTS.filter((l) => l.type !== "ready");
     expect(
-      derivedListName(input({ blocked: { at: TS } }), noBlockedDefault),
+      derivedListName(input({ ready_at: TS, status: "Review" }), noReadyDefault),
     ).toBeNull();
   });
 

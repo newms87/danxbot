@@ -797,11 +797,13 @@ async function reconcileBody(
   // src/poller/heal.ts / healOrphanInvariantViolations
   // blocked-with-assignment branch).
   //
-  // Today's invariant: a card whose DERIVED status is `Blocked` MUST
-  // have `assigned_agent: null` — Blocked means the agent declared
-  // "done from my side, operator action needed"; keeping
-  // `assigned_agent` populated would let the picker's resume-owned-card
-  // path pin the agent on a card it cannot work. Clear the stamp.
+  // Today's invariant: a card whose `blocked` gate is populated MUST
+  // have `assigned_agent: null` — a self-block means the agent
+  // declared "done from my side, operator action needed"; keeping
+  // `assigned_agent` populated would let the picker's resume-owned-
+  // card path pin the agent on a card it cannot work. DX-658 / Phase
+  // 2 retired the `"Blocked"` status — the invariant now reads off
+  // the gate field directly.
   //
   // Other shape invariants (`waiting_on.{reason, timestamp, by}` shape,
   // `conflict_on[]` entry shape, `requires_human.{reason, steps, set_by,
@@ -811,7 +813,7 @@ async function reconcileBody(
   // three fields: reconcile NEVER mutates a non-null `conflict_on[]`,
   // `waiting_on`, or `requires_human` payload (the agent / prep-verdict
   // route owns them).
-  if (deriveStatus(mutated) === "Blocked" && mutated.assigned_agent !== null) {
+  if (mutated.blocked !== null && mutated.assigned_agent !== null) {
     const fromStatus = deriveStatus(mutated);
     const cleared: Issue = { ...mutated, assigned_agent: null };
     const toStatus = deriveStatus(cleared);
@@ -823,7 +825,7 @@ async function reconcileBody(
         event: "status_change",
         from: fromStatus,
         to: toStatus,
-        note: "Cleared assigned_agent on Blocked card (shape invariant)",
+        note: "Cleared assigned_agent on blocked card (shape invariant)",
       }),
     };
     mutatedFlag = true;
@@ -1162,7 +1164,11 @@ async function reconcileBody(
   const inTriageScope =
     mutated.waiting_on !== null ||
     mutatedDerived === "Review" ||
-    mutatedDerived === "Blocked";
+    // DX-658 / Phase 2 — `"Blocked"` is no longer an IssueStatus; the
+    // self-block gate (`Issue.blocked != null`) signals a card that
+    // still needs human-level review of the block reason, so it stays
+    // in the triage agent's scope independent of the derived column.
+    mutated.blocked !== null;
   const triageCacheKey = triageExpiresAtKey(repo.name, id);
   let triagePokeReason: string | null = null;
   if (isTerminalStatus || targetBucket === "closed" || !inTriageScope) {

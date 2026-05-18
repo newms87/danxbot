@@ -223,7 +223,9 @@ export class TrelloTracker implements IssueTracker {
     // unwired here, so passing the boolean is a no-op until then.
     const labelIds = await this.resolveLabelIds({
       type: input.type,
-      blocked: input.status === "Blocked",
+      // DX-658 / Phase 2 — Blocked is a gate field, not a status; the
+      // managed label tracks the field directly.
+      blocked: input.blocked != null,
       requires_human: false,
       triaged: isTriaged(input.triage),
     });

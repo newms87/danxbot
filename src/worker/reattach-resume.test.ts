@@ -218,21 +218,15 @@ afterEach(() => {
 });
 
 describe("attemptAutoResume — disk re-verify gate (DX-655)", () => {
-  it("refuses when on-disk YAML has blocked.at populated (stale DB shows In Progress)", async () => {
-    // DB-stale: findInProgressIssueByDispatchId returns the issue as
-    // In Progress (chokidar mirror not yet landed).
-    mockFindInProgress.mockResolvedValue(makeInProgressIssue());
-    mockReadSettings.mockReturnValue({ agents: { phil: { bio: "" } } });
-    // Disk truth: blocked.at populated.
-    writeIssueYaml("TX-100", "2026-05-18T16:02:00Z");
-
-    const result = await attemptAutoResume(makeRow(), makeRepo());
-
-    expect(result.resumed).toBe(false);
-    expect(result.refusalReason).toBe("card-not-in-progress-on-disk");
-    expect(mockDispatch).not.toHaveBeenCalled();
-    expect(mockUpdateDispatch).not.toHaveBeenCalled();
-  });
+  // DX-658 retired the blocked.at → Blocked derivation rule. A card
+  // with `dispatch != null` derives to In Progress regardless of the
+  // `blocked` gate; the disk re-verify gate is keyed on derived
+  // status, not on raw blocked-gate presence. The pre-DX-658 test
+  // case ("refuses when on-disk YAML has blocked.at populated") was
+  // removed because the behavior it asserted no longer exists —
+  // auto-resume proceeds on a YAML that still carries a live dispatch
+  // block, even when blocked.at is populated. The dispatch-session
+  // terminal gate (issue-route.ts) is what reads blocked != null now.
 
   it("proceeds (does not short-circuit on disk gate) when on-disk YAML is genuinely In Progress", async () => {
     mockFindInProgress.mockResolvedValue(makeInProgressIssue());

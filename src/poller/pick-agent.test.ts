@@ -403,11 +403,11 @@ describe("findOwnedCard", () => {
     if (out.kind === "single") expect(out.card.id).toBe("DX-1");
   });
 
-  it("returns kind=single when status is Blocked", () => {
+  it("returns kind=single when self-blocked gate populated", () => {
     const open = [
       issue("DX-1", {
         assigned_agent: "alice",
-        status: "Blocked",
+        status: "ToDo",
         blocked: { reason: "x", at: "2026-04-20T00:00:00Z" },
       }),
     ];

@@ -258,7 +258,7 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
   it("renders the BLOCKED pill (red) when issue.blocked != null", () => {
     const w = mountCard(
       makeListItem({
-        status: "Blocked",
+        status: "ToDo",
         blocked: { reason: "needs ops token", at: "2026-05-12T00:00:00Z" },
       }),
     );
@@ -307,7 +307,7 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
   it("renders ALL three pills together when every gate is set", () => {
     const w = mountCard(
       makeListItem({
-        status: "Blocked",
+        status: "ToDo",
         blocked: { reason: "x", at: "2026-05-12T00:00:00Z" },
         waiting_on: true,
         waiting_on_reason: "y",

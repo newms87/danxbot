@@ -1,11 +1,16 @@
 /**
  * SPA mirror of `src/issue/derive-status.ts` (DX-582 / DX-575).
  *
- * Byte-identical 7-rule precedence so SSE-pushed `issue:updated` rows
+ * Byte-identical 6-rule precedence so SSE-pushed `issue:updated` rows
  * render the derived status without a refetch. The backend's
  * `parseIssue` runs the same logic; the wire-shape carries the
  * lifecycle timestamps + gate fields the dashboard needs to re-derive
  * client-side.
+ *
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * retired rule 3 (`blocked.at → Blocked`). The `IssueStatus` union no
+ * longer contains `"Blocked"`; `blocked` stays on the input shape as a
+ * gate signal consumed elsewhere in the SPA.
  *
  * Lockstep contract: this function MUST stay structurally identical
  * to `deriveStatus` in `src/issue/derive-status.ts`. Adding a field
@@ -13,8 +18,6 @@
  * `DeriveStatusInput` shape here AND to the SPA's wire-shape upstream.
  * The shared unit-test fixture lives in `derive-status.test.ts` on
  * both sides — when one drifts, the other breaks.
- *
- * See the backend file's docstring for rule-7 deviation rationale.
  */
 
 import type { IssueStatus, List, ListType } from "../types";
@@ -32,11 +35,10 @@ export interface DeriveStatusInput {
 export function deriveStatus(issue: DeriveStatusInput): IssueStatus {
   if (issue.cancelled_at) return "Cancelled";
   if (issue.completed_at) return "Done";
-  if (issue.blocked?.at) return "Blocked";
-  // DX-584 (Phase 4) — rule 4. `dispatch != null` is the live-work
-  // signal AFTER terminal-timestamp + blocked rules, guarded against
+  // DX-584 (Phase 4) — rule 3. `dispatch != null` is the live-work
+  // signal AFTER terminal-timestamp rules, guarded against
   // raw-terminal status so a legacy Done/Cancelled card with
-  // lingering dispatch still derives terminal via rule 7 fallthrough.
+  // lingering dispatch still derives terminal via rule 6 fallthrough.
   // Mirror of `src/issue/derive-status.ts`.
   if (
     issue.dispatch &&
@@ -54,10 +56,15 @@ export function deriveStatus(issue: DeriveStatusInput): IssueStatus {
  * DX-639 — semantic-status → `ListType` projection.
  *
  * Pure mirror of `deriveListTypeFromSemanticStatus` in
- * `src/issue/list-resolve.ts`. Total over the seven `IssueStatus`
+ * `src/issue/list-resolve.ts`. Total over the six `IssueStatus`
  * values; the dashboard composes this with `deriveStatus` to project
  * the column the card BELONGS in independent of the denormalized
  * `list_name` field on the wire.
+ *
+ * DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`. A
+ * card whose `blocked` gate is populated still derives one of the six
+ * remaining statuses; the dispatch-gates UI surfaces the gate
+ * separately from the column projection.
  */
 export function deriveListTypeFromStatus(status: IssueStatus): ListType {
   switch (status) {
@@ -69,8 +76,6 @@ export function deriveListTypeFromStatus(status: IssueStatus): ListType {
       return "ready";
     case "In Progress":
       return "in_progress";
-    case "Blocked":
-      return "blocked";
     case "Done":
       return "completed";
     case "Cancelled":

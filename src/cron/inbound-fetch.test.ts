@@ -13,7 +13,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { IssueRef, IssueTracker } from "../issue-tracker/interface.js";
 import type { RepoContext } from "../types.js";
-import { DANXBOT_COMMENT_MARKER } from "../issue-tracker/markers.js";
 
 const isFeatureEnabledMock = vi.hoisted(() => vi.fn());
 const findByExternalIdMock = vi.hoisted(() => vi.fn());
@@ -104,28 +103,6 @@ function makeRef(externalId: string, externalListId = ""): IssueRef {
 
 // DX-621 — checkNeedsHelp needs blocked + ready default lists mapped to
 // Trello list ids. Test setup helper that wires both mocks in lockstep.
-function seedMappedLists(opts: {
-  blockedTrelloListId?: string;
-  readyTrelloListId?: string;
-} = {}): { blocked: string; ready: string } {
-  const blocked = opts.blockedTrelloListId ?? "trello-blocked";
-  const ready = opts.readyTrelloListId ?? "trello-ready";
-  readListsMock.mockReturnValue({
-    lists: [
-      { id: "blocked-id", name: "Blocked", type: "blocked", order: 0, is_default_for_type: true, color: "#000" },
-      { id: "ready-id", name: "ToDo", type: "ready", order: 1, is_default_for_type: true, color: "#000" },
-    ],
-    tombstone_ids: [],
-  });
-  readTrelloListMapMock.mockReturnValue({
-    list_id_to_trello_list_id: {
-      "blocked-id": blocked,
-      "ready-id": ready,
-    },
-  });
-  return { blocked, ready };
-}
-
 describe("runInboundFetch", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -151,36 +128,12 @@ describe("runInboundFetch", () => {
     expect(tracker.moveToList).not.toHaveBeenCalled();
   });
 
-  it("moves a Blocked card to the mapped ToDo list when latest comment lacks the danxbot marker", async () => {
-    isFeatureEnabledMock.mockReturnValue(true);
-    const { blocked, ready } = seedMappedLists();
-    const tracker = makeTracker();
-    const blockedRef = makeRef("ext-1", blocked);
-    vi.mocked(tracker.fetchOpenCards).mockResolvedValue([blockedRef]);
-    vi.mocked(tracker.getComments).mockResolvedValue([
-      { id: "c1", author: "danxbot", text: `${DANXBOT_COMMENT_MARKER} earlier reply`, timestamp: "2026-01-01" },
-      { id: "c2", author: "user", text: "User: please look again", timestamp: "2026-01-02" },
-    ]);
-
-    await runInboundFetch(makeRepo(), tracker);
-
-    expect(tracker.moveToList).toHaveBeenCalledWith("ext-1", ready);
-  });
-
-  it("does NOT move when latest comment carries the danxbot marker (still our turn)", async () => {
-    isFeatureEnabledMock.mockReturnValue(true);
-    const { blocked } = seedMappedLists();
-    const tracker = makeTracker();
-    const blockedRef = makeRef("ext-1", blocked);
-    vi.mocked(tracker.fetchOpenCards).mockResolvedValue([blockedRef]);
-    vi.mocked(tracker.getComments).mockResolvedValue([
-      { id: "c1", author: "danxbot", text: `${DANXBOT_COMMENT_MARKER} latest is from us`, timestamp: "2026-01-02" },
-    ]);
-
-    await runInboundFetch(makeRepo(), tracker);
-
-    expect(tracker.moveToList).not.toHaveBeenCalled();
-  });
+  // DX-658 — `checkNeedsHelp` is a no-op now; the `"blocked"` ListType
+  // was retired and Blocked cards no longer get auto-moved from a
+  // Blocked list to a ToDo list when the latest comment lacks the
+  // danxbot marker. The two tests covering that behavior were removed
+  // because `seedMappedLists` itself relied on the retired
+  // `type: "blocked"` list seed.
 
   it("DX-619: hydrates with list_name resolved via reverse-map (mapped trello list)", async () => {
     isFeatureEnabledMock.mockReturnValue(true);

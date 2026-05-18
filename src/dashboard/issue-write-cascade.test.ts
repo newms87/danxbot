@@ -242,25 +242,10 @@ describe("applyIssueCascade — gates", () => {
     });
   });
 
-  it("400s on empty blocked_reason when destType=blocked", async () => {
-    writeFixture(makeIssue(), "open");
-    await expect(
-      applyIssueCascade(
-        "danxbot",
-        repoLocalPath,
-        {
-          epic_id: "DX-1",
-          dest_list_name: "Blocked",
-          unblock_confirmed: false,
-          blocked_reason: "",
-        },
-        stubDeps(),
-      ),
-    ).rejects.toMatchObject({
-      status: 400,
-      body: { error: expect.stringContaining("blocked_reason is required") },
-    });
-  });
+  // DX-658 — `"blocked"` is no longer a ListType; cascade never touches
+  // Issue.blocked; the `blocked_reason` validation + unblock-confirm
+  // gate are retired. Removed test:
+  //   "400s on empty blocked_reason when destType=blocked"
 });
 
 describe("applyIssueCascade — happy path (epic + 5 descendants)", () => {
@@ -322,7 +307,7 @@ describe("applyIssueCascade — happy path (epic + 5 descendants)", () => {
         id: "DX-5",
         title: "blocked child",
         parent_id: "DX-1",
-        status: "Blocked",
+        status: "In Progress",
         blocked: { at: "2026-05-01T00:00:00Z", reason: "stuck" },
         list_name: "Blocked",
       }),
@@ -401,34 +386,16 @@ describe("applyIssueCascade — happy path (epic + 5 descendants)", () => {
       expect(c.completed_at).toBeTruthy();
     }
 
-    // Blocked descendant got cleared
+    // DX-658: cascade no longer touches Issue.blocked — the gate
+    // persists across the descendant move. The blocked-descendant
+    // unblock-confirm gate is also retired (entire flow removed).
     const dx5 = readYaml("DX-5", "closed");
-    expect(dx5.blocked).toBeNull();
-  });
-
-  it("requires unblock_confirmed=true when cascading across blocked descendants to non-blocked", async () => {
-    await expect(
-      applyIssueCascade(
-        "danxbot",
-        repoLocalPath,
-        {
-          epic_id: "DX-1",
-          dest_list_name: "Done",
-          unblock_confirmed: false,
-        },
-        stubDeps(),
-      ),
-    ).rejects.toMatchObject({
-      status: 409,
-      body: {
-        error: "Unblock confirm required",
-        blocked_descendants: ["DX-5"],
-      },
-    });
-    // Crucially — no writes performed.
-    const dx5 = readYaml("DX-5", "open");
     expect(dx5.blocked).toMatchObject({ at: "2026-05-01T00:00:00Z" });
   });
+
+  // DX-658 — `requires unblock_confirmed=true when cascading across
+  // blocked descendants to non-blocked` test removed: the entire
+  // unblock-confirm gate was retired with the `"blocked"` ListType.
 
   it("override kind=stay skips a descendant regardless of spec", async () => {
     const result = await applyIssueCascade(
@@ -449,30 +416,10 @@ describe("applyIssueCascade — happy path (epic + 5 descendants)", () => {
     expect(dx2.status).toBe("Review");
   });
 
-  it("moving epic INTO blocked stamps parent only; descendants untouched", async () => {
-    const result = await applyIssueCascade(
-      "danxbot",
-      repoLocalPath,
-      {
-        epic_id: "DX-1",
-        dest_list_name: "Blocked",
-        unblock_confirmed: false,
-        blocked_reason: "Cascade test reason",
-      },
-      stubDeps(),
-    );
-    expect(result.updated).toEqual(["DX-1"]);
-    expect(result.skipped).toEqual(
-      expect.arrayContaining(["DX-2", "DX-3", "DX-4", "DX-5", "DX-6"]),
-    );
-
-    const parent = readYaml("DX-1", "open");
-    expect(parent.status).toBe("Blocked");
-    expect(parent.blocked).toMatchObject({ reason: "Cascade test reason" });
-    // Descendants unchanged.
-    const dx2 = readYaml("DX-2", "open");
-    expect(dx2.status).toBe("Review");
-  });
+  // DX-658 — `moving epic INTO blocked stamps parent only` test removed:
+  // `"Blocked"` is no longer a list, so the cascade dest cannot resolve
+  // to it. INTO-blocked is now a standalone `Issue.blocked` gate write
+  // (covered by issue-write.test.ts).
 
   it("publishes one SSE issue:updated event per touched id", async () => {
     mockEventBusPublish.mockClear();
@@ -561,10 +508,12 @@ describe("applyIssueCascade — must-fix coverage gaps", () => {
     expect(dx3.list_name).toBe("Cancelled");
   });
 
-  it("leftward Blocked → ToDo (override) clears blocked + flips raw status off Blocked (v11 invariant)", async () => {
-    // A blocked descendant with override move_to ready-type list must
-    // both clear `blocked` AND have raw status NOT equal to "Blocked"
-    // so parseIssue's status⟺blocked invariant survives the round-trip.
+  it("DX-658: leftward override move_to ready-type list flips raw status off (blocked gate untouched)", async () => {
+    // DX-658 retired the cascade's coupling between list_name moves and
+    // the Issue.blocked field. The override still moves the card off the
+    // (former) Blocked list to a ready-type list, flips status, stamps
+    // ready_at — but `blocked` persists as an independent gate the
+    // operator clears via the dashboard's dispatch-gates affordance.
     writeFixture(
       makeIssue({
         id: "DX-1",
@@ -579,7 +528,7 @@ describe("applyIssueCascade — must-fix coverage gaps", () => {
       makeIssue({
         id: "DX-2",
         parent_id: "DX-1",
-        status: "Blocked",
+        status: "In Progress",
         blocked: { at: "2026-05-01T00:00:00Z", reason: "stuck" },
         list_name: "Blocked",
       }),
@@ -602,7 +551,7 @@ describe("applyIssueCascade — must-fix coverage gaps", () => {
       stubDeps(),
     );
     const dx2 = readYaml("DX-2", "open");
-    expect(dx2.blocked).toBeNull();
+    expect(dx2.blocked).toMatchObject({ at: "2026-05-01T00:00:00Z" });
     expect(dx2.status).toBe("ToDo");
     expect(dx2.ready_at).toBeTruthy();
   });

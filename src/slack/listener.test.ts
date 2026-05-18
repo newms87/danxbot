@@ -601,7 +601,10 @@ describe("Slack feature toggle via settings.json", () => {
 // ============================================================
 
 describe("router error paths", () => {
-  it("routes operational router errors to Needs Help list", async () => {
+  it("DX-658: routes operational router errors to the review default list with needs-help label", async () => {
+    // DX-658 / Phase 2 — the `"blocked"` ListType was retired; operational
+    // router errors land on the review-default list (a human triages there)
+    // with the needs-help label applied so the operator sees the flag.
     mockRunRouter.mockResolvedValue(
       makeRouterResult({
         needsAgent: false,
@@ -619,7 +622,7 @@ describe("router error paths", () => {
       expect.stringContaining("billing_error"),
       expect.any(Object),
       expect.objectContaining({
-        listId: "test-needs-help-list-id",
+        listId: "test-review-list-id",
         labelId: "test-needs-help-label-id",
       }),
     );

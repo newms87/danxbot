@@ -40,8 +40,10 @@ import { ISSUE_TYPE_META, typeToId } from "./issuePalette";
 import { useListColors } from "../../composables/useListColors";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
 import PriorityIcon from "../PriorityIcon.vue";
-import BlockedReasonDialog from "./BlockedReasonDialog.vue";
-import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
+// DX-658 / Phase 2 — `BlockedReasonDialog` / `UnblockConfirmDialog`
+// imports retired: `"blocked"` is no longer a `ListType`, so list
+// moves never route through the dialogs. Phase 3 of the parent epic
+// (DX-656) reroutes both dialogs into the dispatch-gates badge UI.
 import {
   priorityTier,
   PRIORITY_TIERS,
@@ -189,13 +191,13 @@ async function confirmDelete(): Promise<void> {
 
 // ── list / priority / type menus ───────────────────────────────────────
 // DX-586 — status menu retired in favor of a List dropdown driven by
-// `lists.yaml`. The dropdown groups list options by `ListType` (ladder
-// order: archived → review → ready → blocked → in_progress →
-// completed → cancelled). Selecting a list PATCHes `list_name`; the
-// server applies the ladder semantics + auto-stamps timestamps/dispatch.
-// INTO-blocked and OUT-of-blocked moves route through the dedicated
-// dialogs (BlockedReasonDialog + UnblockConfirmDialog) so the reason
-// field gets captured / cleared explicitly.
+// `lists.yaml`. The dropdown groups list options by `ListType` (post-DX-658
+// 6-tier ladder: archived → review → ready → in_progress → completed →
+// cancelled). Selecting a list PATCHes `list_name`; the server applies
+// the ladder semantics + auto-stamps timestamps/dispatch. DX-658 / Phase
+// 2 retired the INTO-blocked / OUT-of-blocked dialog routing from this
+// flow — the self-block gate (`Issue.blocked`) is now owned by the
+// dispatch-gates badge (Phase 3 of the parent epic DX-656).
 const listMenuOpen = ref(false);
 const priorityMenuOpen = ref(false);
 const typeMenuOpen = ref(false);
@@ -258,15 +260,17 @@ function typeLabel(type: ListType): string {
   return LIST_TYPE_LABELS[type];
 }
 
-// INTO-blocked / OUT-of-blocked dialog state. Same shape as
-// IssuesPage's board flow — the drawer is just a second entry point.
-const pendingDialog = ref<
-  | { kind: "into-blocked"; destList: List }
-  | { kind: "out-of-blocked"; destList: List }
-  | null
->(null);
+// DX-658 / Phase 2 — INTO-blocked / OUT-of-blocked dialogs retired
+// from list-move flow. The gate is now cleared via the dispatch-gates
+// badge (phase 3 owns the badge UI). State left here as a structural
+// stub so refs that still bind to it during the phase-3 rewire have
+// a valid value to read.
+const pendingDialog = ref<null>(null);
 const dialogBusy = ref(false);
 const dialogError = ref<string | null>(null);
+void pendingDialog;
+void dialogBusy;
+void dialogError;
 
 // Epic-with-children: status is parent-derived. Show inert pill +
 // tooltip explaining why; priority + type stay editable (knob is
@@ -304,18 +308,13 @@ watch(
   },
 );
 
-async function patchListNameDirect(
-  list: List,
-  blockedPatch: { reason: string } | null | undefined,
-): Promise<void> {
+async function patchListNameDirect(list: List): Promise<void> {
   listSaving.value = true;
   listError.value = null;
   try {
-    const patch: { list_name: string; blocked?: { reason: string } | null } = {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       list_name: list.name,
-    };
-    if (blockedPatch !== undefined) patch.blocked = blockedPatch;
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, patch);
+    });
     emit("update:issue", updated);
   } finally {
     listSaving.value = false;
@@ -328,62 +327,15 @@ async function selectList(list: List): Promise<void> {
     listMenuOpen.value = false;
     return;
   }
-  // Route INTO-blocked / OUT-of-blocked through dialogs; everything
-  // else is a direct PATCH.
-  if (list.type === "blocked") {
-    listMenuOpen.value = false;
-    dialogError.value = null;
-    pendingDialog.value = { kind: "into-blocked", destList: list };
-    return;
-  }
-  if (props.issue.blocked !== null) {
-    listMenuOpen.value = false;
-    dialogError.value = null;
-    pendingDialog.value = { kind: "out-of-blocked", destList: list };
-    return;
-  }
+  // DX-658 / Phase 2 — list moves never route through the blocked
+  // dialogs anymore. The self-block gate is cleared via the
+  // dispatch-gates badge (phase 3).
   try {
-    await patchListNameDirect(list, undefined);
+    await patchListNameDirect(list);
     listMenuOpen.value = false;
   } catch (err) {
     listError.value = err instanceof Error ? err.message : String(err);
   }
-}
-
-async function onBlockedDialogSubmit(reason: string): Promise<void> {
-  const p = pendingDialog.value;
-  if (!p || p.kind !== "into-blocked") return;
-  dialogBusy.value = true;
-  dialogError.value = null;
-  try {
-    await patchListNameDirect(p.destList, { reason });
-    pendingDialog.value = null;
-  } catch (err) {
-    dialogError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    dialogBusy.value = false;
-  }
-}
-
-async function onUnblockDialogConfirm(): Promise<void> {
-  const p = pendingDialog.value;
-  if (!p || p.kind !== "out-of-blocked") return;
-  dialogBusy.value = true;
-  dialogError.value = null;
-  try {
-    await patchListNameDirect(p.destList, null);
-    pendingDialog.value = null;
-  } catch (err) {
-    dialogError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    dialogBusy.value = false;
-  }
-}
-
-function onDialogCancel(): void {
-  pendingDialog.value = null;
-  dialogBusy.value = false;
-  dialogError.value = null;
 }
 
 async function selectPriority(tier: PriorityTier): Promise<void> {
@@ -678,27 +630,9 @@ const rhVariant = computed(() =>
       </div>
     </DanxDialog>
 
-    <BlockedReasonDialog
-      v-if="pendingDialog?.kind === 'into-blocked'"
-      :model-value="true"
-      :issue-id="issue.id"
-      :dest-list-name="pendingDialog.destList.name"
-      :busy="dialogBusy"
-      :error="dialogError"
-      @submit="onBlockedDialogSubmit"
-      @cancel="onDialogCancel"
-    />
-    <UnblockConfirmDialog
-      v-if="pendingDialog?.kind === 'out-of-blocked'"
-      :model-value="true"
-      :issue-id="issue.id"
-      :dest-list-name="pendingDialog.destList.name"
-      :current-reason="issue.blocked?.reason ?? null"
-      :busy="dialogBusy"
-      :error="dialogError"
-      @confirm="onUnblockDialogConfirm"
-      @cancel="onDialogCancel"
-    />
+    <!-- DX-658 / Phase 2 — BlockedReasonDialog + UnblockConfirmDialog
+         removed from the drawer's list-move flow. The self-block gate
+         lifecycle is owned by the dispatch-gates badge in phase 3. -->
   </div>
 </template>
 

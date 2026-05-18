@@ -671,7 +671,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
   describe("auto-flip ToDo → In Progress before spawn", () => {
     async function writeCandidate(
       id: string,
-      status: "Review" | "ToDo" | "In Progress" | "Blocked" = "ToDo",
+      status: "Review" | "ToDo" | "In Progress" = "ToDo",
     ): Promise<void> {
       const { createEmptyIssue, serializeIssue } = await import(
         "../issue-tracker/yaml.js"
@@ -805,52 +805,6 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
       expect(await readCandidateStatus("ISS-102")).toBe("In Progress");
     });
 
-    it("revert respects a concurrent Blocked stamp — does NOT clobber Blocked back to ToDo", async () => {
-      await writeCandidate("ISS-104", "ToDo");
-      // Simulate a concurrent writer (e.g., prep-verdict route, human
-      // dashboard edit) stamping Blocked between the auto-flip and the
-      // spawn-failure revert. We do this by making the spawnAgent
-      // throw, but FIRST we rewrite the YAML to Blocked from inside
-      // the spawn fake — the revert path will read the disk state
-      // back and must not overwrite Blocked.
-      mockSpawnAgent.mockImplementationOnce(async () => {
-        const { createEmptyIssue, serializeIssue } = await import(
-          "../issue-tracker/yaml.js"
-        );
-        const blocked = {
-          ...createEmptyIssue({
-            id: "ISS-104",
-            status: "Blocked",
-            title: "ISS-104 title",
-            description: "fixture",
-          }),
-          blocked: {
-            reason: "concurrent stamp by prep-verdict route",
-            at: "2026-05-14T00:00:00.000Z",
-          },
-        };
-        writeFileSync(
-          resolve(tmpRepoDir, ".danxbot/issues/open/ISS-104.yml"),
-          serializeIssue(blocked),
-        );
-        throw new Error("spawn failed");
-      });
-
-      await expect(
-        dispatch({
-          repo: issueRepo,
-          task: "/danx-prep ISS-104\n\n/danx-next ISS-104",
-          workspace: "issue-worker",
-          overlay: {},
-          apiDispatchMeta: DEFAULT_DISPATCH_META,
-          issueId: "ISS-104",
-          dispatchKind: "work",
-        }),
-      ).rejects.toThrow(/spawn failed/);
-
-      // Card stayed Blocked — the revert did NOT clobber.
-      expect(await readCandidateStatus("ISS-104")).toBe("Blocked");
-    });
 
     it("reverts flip to ToDo when spawnAgent throws", async () => {
       await writeCandidate("ISS-103", "ToDo");

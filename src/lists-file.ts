@@ -157,9 +157,14 @@ export function listsLockPath(localPath: string): string {
 }
 
 /**
- * Canonical 7-list seed. Each repo's first `ensureListsFile` call
+ * Canonical 6-list seed. Each repo's first `ensureListsFile` call
  * lands these with fresh UUIDs; subsequent boots re-read the seeded
  * ids verbatim so worker-side references stay stable.
+ *
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * shrank the seed from 7 to 6 by retiring the `type: "blocked"` list.
+ * `migrateListsFileForDx658` (in `src/lists-file-migrate-blocked.ts`)
+ * strips any pre-DX-658 Blocked list from existing repos on next boot.
  */
 export interface SeedDeps {
   uuid?: () => string;
@@ -176,10 +181,9 @@ const SEED_SPECS: readonly SeedSpec[] = [
   { type: "archived",    name: "Backlog",     order: 0, color: "#64748b" },
   { type: "review",      name: "Review",      order: 1, color: "#3b82f6" },
   { type: "ready",       name: "To Do",       order: 2, color: "#22d3ee" },
-  { type: "blocked",     name: "Blocked",     order: 3, color: "#ef4444" },
-  { type: "in_progress", name: "In Progress", order: 4, color: "#f59e0b" },
-  { type: "completed",   name: "Done",        order: 5, color: "#22c55e" },
-  { type: "cancelled",   name: "Cancelled",   order: 6, color: "#71717a" },
+  { type: "in_progress", name: "In Progress", order: 3, color: "#f59e0b" },
+  { type: "completed",   name: "Done",        order: 4, color: "#22c55e" },
+  { type: "cancelled",   name: "Cancelled",   order: 5, color: "#71717a" },
 ] as const;
 
 export function defaultLists(deps: SeedDeps = {}): ListsFile {

@@ -18,16 +18,18 @@
  *
  *  - `deriveListTypeFromSemanticStatus(status)` — small enum map from
  *    the derived semantic `IssueStatus` (Backlog/Review/ToDo/In Progress/
- *    Blocked/Done/Cancelled) to the lists.yaml `ListType` enum
- *    (archived/review/ready/in_progress/blocked/completed/cancelled).
- *    Pure function; the worker calls it when it needs to recompute
- *    `list_name` from the card's derived state.
+ *    Done/Cancelled) to the lists.yaml `ListType` enum
+ *    (archived/review/ready/in_progress/completed/cancelled). Pure
+ *    function; the worker calls it when it needs to recompute
+ *    `list_name` from the card's derived state. DX-658 / Phase 2 of
+ *    "Blocked becomes a dispatch gate, not a status" retired both the
+ *    `"Blocked"` IssueStatus and the `"blocked"` ListType, so this
+ *    function now totals over 6 values on each side.
  *
- * Together these support the four transitional writes Phase 4 introduces:
+ * Together these support the three transitional writes Phase 4 introduces:
  *   - dispatch start (auto-flip):   `in_progress` list
  *   - terminal completed:           `completed` list
  *   - terminal cancelled / failed:  `cancelled` list
- *   - agent-blocked / blocked:      `blocked` list
  *
  * The exact name resolution is per-repo because operators may rename
  * lists (e.g. "Backlog" → "Icebox"). `resolveListNameForType` always
@@ -69,8 +71,6 @@ export function deriveListTypeFromSemanticStatus(
       return "ready";
     case "In Progress":
       return "in_progress";
-    case "Blocked":
-      return "blocked";
     case "Done":
       return "completed";
     case "Cancelled":

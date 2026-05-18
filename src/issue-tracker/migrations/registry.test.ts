@@ -138,7 +138,7 @@ describe("migration registry", () => {
       id: "DX-1",
       title: "round-trip fixture",
       blocked: { reason: "r", at: "2026-05-10T00:00:00Z" },
-      status: "Blocked",
+      status: "In Progress",
     });
     const text = serializeIssue(issue);
     const parsed = parseIssue(text, { expectedPrefix: "DX" });

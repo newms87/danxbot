@@ -24,33 +24,28 @@
 /**
  * Open-issue status enum.
  *
- * `Blocked` is the non-dispatchable parking status for cards that cannot
- * make progress on their own work — the card itself is blocked. A human
- * (or a subsequent agent run) must clear the block. Distinct from:
- *  - `Issue.waiting_on` field — the card is waiting on OTHER cards in
- *    `waiting_on.by[]` to reach a terminal status before it can start. The
- *    card's own work is fine; it's queued behind dependencies.
- *    Status-independent — the validator allows `waiting_on` at any status
- *    (Review, ToDo, In Progress, Blocked, Done, Cancelled). The picker's
- *    runtime release path (multi-agent-pick) flips an actively-assigned
- *    card to `ToDo` + clears `assigned_agent` when a gate re-fires at
- *    pickup time; that is a runtime side effect, NOT a write-time
- *    invariant.
- *  - `Issue.requires_human` field — orthogonal indicator; the card needs
- *    human-only action (3rd-party token rotation, credential rotation,
- *    ambiguous spec). DX-231 retired the parking `"Needs Approval"`
- *    status in favor of this orthogonal field; the loader fail-loud
- *    rejects YAMLs carrying the legacy status.
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * (parent epic DX-656) retired `"Blocked"` from this union. Cards with
+ * `Issue.blocked: {at, reason}` populated keep their semantic status
+ * (Review / In Progress / ToDo / …); the picker reads `blocked.at !=
+ * null` as an independent dispatch gate.
  *
- * Invariant: `status === "Blocked" ⟺ Issue.blocked !== null`. The two
- * carry the same fact (current self-block); the field carries the
- * human-readable reason and timestamp; the status is the index lookup.
+ * The three independent dispatch gates are now uniform in shape:
+ *  - `Issue.blocked` field — self-block (the card itself cannot make
+ *    progress; a human or subsequent agent must clear the field).
+ *  - `Issue.waiting_on` field — queued behind OTHER cards in
+ *    `waiting_on.by[]` until they reach a terminal status.
+ *  - `Issue.requires_human` field — orthogonal indicator; the card
+ *    needs human-only action (3rd-party token rotation, credential
+ *    rotation, ambiguous spec).
+ *
+ * All three may co-exist; each is cleared by a different actor. The
+ * picker AND-s them: dispatches only when every gate is null.
  */
 export type IssueStatus =
   | "Review"
   | "ToDo"
   | "In Progress"
-  | "Blocked"
   | "Backlog"
   | "Done"
   | "Cancelled";
@@ -371,25 +366,22 @@ export interface WaitingOn {
  * codebase, etc. A human (or a subsequent agent dispatch) must clear the
  * block before the card can proceed.
  *
- * Distinct from `Issue.waiting_on` (dep-chain queue) — `waiting_on` keeps
- * `status: "ToDo"` and is a durable record (derived effective-null when
- * every dep is terminal — see `effectiveWaitingOn`). `blocked` parks the
- * card at `status: "Blocked"` until a human or next dispatch clears it.
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * (parent epic DX-656) — `blocked` is now a pure dispatch gate
+ * independent of `status`. The picker's `blocked?.at != null` filter
+ * skips the card; the card retains whatever semantic status its
+ * lifecycle triggers project (Review / In Progress / ToDo / Done /
+ * Cancelled / Backlog). Both fields can coexist with `waiting_on` /
+ * `requires_human`; each gate is cleared by a different actor.
  *
- * Both fields can technically coexist, but practically rare: a card that is
- * both queued behind deps AND self-blocked. The poller's gates handle each
- * independently.
+ * Shape rationale: no `by[]` field. The reason is free-text human
+ * description of why the card itself is stuck — not a list of other
+ * cards (that's `waiting_on.by`). Resolution is a human / next-dispatch
+ * judgment, not deterministic dep clearing.
  *
- * Shape rationale: no `by[]` field. The card's reason is free-text human
- * description of why the card itself is stuck — not a list of other cards
- * (that's `waiting_on.by`). Resolution is a human / next-dispatch judgment,
- * not deterministic dep clearing.
- *
- * Invariants enforced by `validateIssue` + worker write-paths:
- *  - `status === "Blocked" ⟺ blocked !== null` (worker enforces both
- *    directions: setting one without the other is a validation error).
+ * Invariants enforced by `validateIssue`:
  *  - `reason` non-empty.
- *  - `timestamp` non-empty (caller supplies ISO 8601).
+ *  - `at` non-empty (caller supplies ISO 8601).
  */
 export interface Blocked {
   reason: string;
@@ -626,14 +618,15 @@ export interface Issue {
   waiting_on: WaitingOn | null;
   /**
    * Non-null = the card itself is blocked from performing its own task. A
-   * human (or a subsequent agent dispatch) must clear the block. Worker
-   * enforces the invariant `status === "Blocked" ⟺ blocked !== null` —
-   * setting `blocked` without `status: "Blocked"` (or vice versa) is a
-   * validation error. See `Blocked` for the shape rationale.
+   * human (or a subsequent agent dispatch) must clear the field. DX-658 /
+   * Phase 2 of "Blocked becomes a dispatch gate, not a status" — pure
+   * dispatch gate independent of `status`. The picker's `blocked?.at !=
+   * null` filter skips the card; derived status remains whatever the
+   * lifecycle triggers project. See `Blocked` for the shape rationale.
    *
    * Distinct from `waiting_on`: `blocked` is self-block (THIS card can't
    * proceed); `waiting_on` is dep-chain queue (waiting for OTHER cards to
-   * finish first). Both can coexist (rare).
+   * finish first). Both can coexist.
    */
   blocked: Blocked | null;
   /**
@@ -863,10 +856,9 @@ export interface CreateCardInput {
 export interface ManagedLabels {
   type: IssueType;
   /**
-   * `true` ⟺ status === "Blocked". Mapped to the tracker's "Blocked"
-   * label. The boolean is derived from `status`, NOT from `Issue.blocked`
-   * — the field is the reason cache, the status is the index lookup.
-   * Worker enforces the field/status invariant.
+   * `true` ⟺ `Issue.blocked !== null`. Mapped to the tracker's "Blocked"
+   * label. DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`,
+   * so the boolean is derived directly from the gate field.
    */
   blocked: boolean;
   /**
@@ -970,7 +962,6 @@ export const ISSUE_STATUSES: readonly IssueStatus[] = [
   "Review",
   "ToDo",
   "In Progress",
-  "Blocked",
   "Backlog",
   "Done",
   "Cancelled",

@@ -152,11 +152,12 @@ export interface IssueListItem {
   requires_human_child_count: number;
   /**
    * Self-block record (DX-309). `null` when the card itself can proceed;
-   * full record when the card is parked at `status: "Blocked"`. Surfaced
-   * so the board's BLOCKED pill can render without a detail fetch.
-   * Invariant: `status === "Blocked" ⟺ blocked !== null` (worker enforces
-   * both directions on every write). Optional on the type for backward
-   * compat with pre-DX-309 test fixtures; server always emits.
+   * full record when the gate is populated. DX-658 / Phase 2 of "Blocked
+   * becomes a dispatch gate, not a status" retired `"Blocked"` from
+   * `IssueStatus`; the gate is now independent of `status` and surfaces
+   * via the dispatch-gates pill regardless of which semantic column the
+   * card lives in. Optional on the type for backward compat with
+   * pre-DX-309 test fixtures; server always emits.
    */
   blocked?: Blocked | null;
   /**

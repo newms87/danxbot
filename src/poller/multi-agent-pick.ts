@@ -992,16 +992,39 @@ export async function tryMultiAgentDispatch(
       for (const i of openIssues) byId.set(i.id, i);
       const conflicted = isEffectivelyConflicted(owned.card, openIssues);
       const waiting = isEffectivelyWaitingOn(owned.card, byId);
-      if (conflicted || waiting) {
+      // DX-658 (Phase 2) — `blocked: {at, reason}` is now a pure
+      // dispatch gate alongside conflict_on / waiting_on. The owned-
+      // card resume path must release the claim when ANY gate is
+      // active so the agent doesn't get pinned on a Blocked card
+      // (reconcile's invariant heal also clears the stamp, but
+      // releasing here closes the picker-tick race window).
+      const selfBlocked =
+        owned.card.blocked?.at != null && owned.card.blocked.at !== "";
+      if (conflicted || waiting || selfBlocked) {
+        // DX-658 / Phase 2 — the `blocked` release branch preserves the
+        // card's raw `status` (gate is orthogonal to column; an
+        // In-Progress card that self-blocked mid-flight should stay in
+        // its semantic column, not get force-flipped back to ToDo).
+        // The legacy conflict_on / waiting_on releases keep the
+        // `status: "ToDo"` flip so the dashboard's pre-DX-658 column
+        // grouping behaves the same as before.
         const released: Issue = {
           ...owned.card,
           assigned_agent: null,
           dispatch: null,
-          status: "ToDo",
+          ...(selfBlocked ? {} : { status: "ToDo" as const }),
         };
         await writeIssue(repo.localPath, released);
+        const gateName = conflicted
+          ? "conflict_on"
+          : waiting
+            ? "waiting_on"
+            : "blocked";
+        const statusNote = selfBlocked
+          ? "status preserved (gate orthogonal)"
+          : "status → ToDo";
         log.info(
-          `[${repo.name}] multi-agent pick (release on gate): ${member.name} → ${owned.card.id} — ${conflicted ? "conflict_on" : "waiting_on"} non-terminal; cleared assigned_agent + status → ToDo`,
+          `[${repo.name}] multi-agent pick (release on gate): ${member.name} → ${owned.card.id} — ${gateName} non-terminal; cleared assigned_agent + ${statusNote}`,
         );
         continue;
       }

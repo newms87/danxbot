@@ -321,9 +321,9 @@ function applyTriggerWrite(
   if (write.cancelled_at !== undefined) next.cancelled_at = write.cancelled_at;
   if (write.ready_at !== undefined) next.ready_at = write.ready_at;
   if (write.archived_at !== undefined) next.archived_at = write.archived_at;
-  if (write.blocked !== undefined) {
-    next.blocked = write.blocked === null ? null : { ...write.blocked };
-  }
+  // DX-658 / Phase 2 — `TriggerWrite.blocked` was retired alongside
+  // the `"blocked"` ListType. Cascades never mutate the gate field;
+  // the dashboard's dispatch-gates affordance owns clear/set.
   if (write.list_name !== undefined) next.list_name = write.list_name;
   if (write.priority !== undefined) next.priority = write.priority;
   next.status = rawStatusForListType(destType);
@@ -407,12 +407,13 @@ export async function applyIssueCascade(
   }
   const destListType = destList.type;
 
-  if (destListType === "blocked" && (!body.blocked_reason || body.blocked_reason.length === 0)) {
-    throw new IssuePatchError(400, {
-      error: `blocked_reason is required when dest_list_name resolves to type "blocked"`,
-    });
-  }
-
+  // DX-658 / Phase 2 — `"blocked"` is no longer a `ListType`. The
+  // pre-DX-658 blocked-reason validation + unblock-confirm gate are
+  // both retired; cascades never touch the `Issue.blocked` field, and
+  // the dashboard's dispatch-gates affordance is the operator path
+  // for setting / clearing the self-block gate. Body fields
+  // `blocked_reason` / `unblock_confirmed` linger on the wire shape
+  // as no-ops until the route schema is bumped.
   const dispatchableByPriority = await deps.listDispatchable(
     repoLocalPath,
     expectedPrefix,
@@ -423,34 +424,12 @@ export async function applyIssueCascade(
     descendants,
     destListType,
     destListName: destList.name,
-    unblockConfirmed: body.unblock_confirmed,
-    ...(body.blocked_reason !== undefined ? { blockedReason: body.blocked_reason } : {}),
     ...(body.overrides !== undefined ? { overrides: body.overrides } : {}),
     dispatchableByPriority,
     now: new Date().toISOString(),
   };
 
   const cascadeOutput = cascadeEpicMove(cascadeInput);
-
-  // Surface every blocked descendant so the dialog can render the
-  // per-row confirmation list. `cascadeEpicMove` does not expose which
-  // descendants triggered the gate in its output, so we re-walk via
-  // `deriveStatus` — N is bounded by the descendant count.
-  if (cascadeOutput.requiresUnblockConfirm) {
-    const blockedDescendants = descendants
-      .filter((d) => deriveStatus(d) === "Blocked")
-      .map((d) => d.id);
-    throw new IssuePatchError(409, {
-      error: "Unblock confirm required",
-      blocked_descendants: blockedDescendants,
-    });
-  }
-
-  // `cascadeOutput.blockedReasonRequired` would re-raise the same 400
-  // we already produced at line ~464 (pre-helper validation). Single
-  // source of truth — we trust the pre-validation and do not re-check
-  // here. The helper still emits the field for in-process callers that
-  // bypass `applyIssueCascade`.
 
   const updated: string[] = [];
   const skipped: string[] = [];

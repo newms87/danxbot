@@ -6,15 +6,10 @@ import type { IssueListItem, List } from "../../types";
 // Capture the latest stub instances so each test can reach in and
 // fire a move from the board stub via `boardEmit("move", issue, list)`.
 let boardEmit: ((event: string, ...args: unknown[]) => void) | null = null;
-// Per-test override for the cascade dialog stub's confirm payload —
-// the dest=blocked branch of `onCascadeDialogConfirm` only fires when
-// `blockedReason` is non-empty in the payload, so the test needs to
-// shape the emit accordingly.
+// Per-test override for the cascade dialog stub's confirm payload.
 let cascadeConfirmPayload: {
   overrides: Record<string, unknown>;
-  unblockConfirmed: boolean;
-  blockedReason?: string;
-} = { overrides: {}, unblockConfirmed: true };
+} = { overrides: {} };
 
 const moveIssueListMock =
   vi.fn<(id: string, dest: { name: string; type: string }, options?: unknown) => Promise<void>>(
@@ -56,7 +51,6 @@ vi.mock("../../composables/useListColors", () => {
         { id: "L-review", name: "Review", type: "review", order: 0, is_default_for_type: true, color: "#ccc" },
         { id: "L-todo", name: "ToDo", type: "ready", order: 1, is_default_for_type: true, color: "#ccc" },
         { id: "L-prog", name: "In Progress", type: "in_progress", order: 2, is_default_for_type: true, color: "#ccc" },
-        { id: "L-blocked", name: "Blocked", type: "blocked", order: 3, is_default_for_type: true, color: "#ccc" },
         { id: "L-done", name: "Done", type: "completed", order: 4, is_default_for_type: true, color: "#ccc" },
         { id: "L-cancelled", name: "Cancelled", type: "cancelled", order: 5, is_default_for_type: true, color: "#ccc" },
       ]),
@@ -139,8 +133,6 @@ const globalStubs = {
   FilterToolbar: StubComp("FilterToolbar"),
   TriageButton: StubComp("TriageButton"),
   CreateCardButton: StubComp("CreateCardButton"),
-  BlockedReasonDialog: StubComp("BlockedReasonDialog", ["submit", "cancel"]),
-  UnblockConfirmDialog: StubComp("UnblockConfirmDialog", ["confirm", "cancel"]),
   EpicMoveCascadeDialog: defineComponent({
     name: "EpicMoveCascadeDialog",
     props: ["modelValue", "parent", "destList", "descendants", "defaults", "allLists", "busy", "error"],
@@ -223,14 +215,13 @@ function makeIssue(over: Partial<IssueListItem> & Pick<IssueListItem, "id">): Is
 const listToDo: List = { id: "L-todo", name: "ToDo", type: "ready", order: 1, is_default_for_type: true, color: "#ccc" };
 const listInProgress: List = { id: "L-prog", name: "In Progress", type: "in_progress", order: 2, is_default_for_type: true, color: "#ccc" };
 const listCancelled: List = { id: "L-cancelled", name: "Cancelled", type: "cancelled", order: 5, is_default_for_type: true, color: "#ccc" };
-const listBlocked: List = { id: "L-blocked", name: "Blocked", type: "blocked", order: 3, is_default_for_type: true, color: "#ccc" };
 
 describe("IssuesPage onMove routing", () => {
   beforeEach(() => {
     moveIssueListMock.mockClear();
     cascadeIssueListMock.mockClear();
     boardEmit = null;
-    cascadeConfirmPayload = { overrides: {}, unblockConfirmed: true };
+    cascadeConfirmPayload = { overrides: {} };
   });
 
   it("no-children card → direct PATCH via moveIssueList; cascade dialog does NOT open", async () => {
@@ -276,33 +267,6 @@ describe("IssuesPage onMove routing", () => {
     expect(epicId).toBe("DX-20");
     expect(body).toMatchObject({
       dest_list_name: "Cancelled",
-      unblock_confirmed: true,
-      overrides: {},
-    });
-    // No blocked_reason for non-blocked dest.
-    expect(body).not.toHaveProperty("blocked_reason");
-  });
-
-  it("cascade dialog @confirm to a blocked-type dest → cascadeIssueList payload carries blocked_reason", async () => {
-    const epic = makeIssue({ id: "DX-25", type: "Epic", children: ["DX-26"] });
-    const child = makeIssue({ id: "DX-26", parent_id: "DX-25" });
-    issuesRef.value = [epic, child];
-    cascadeConfirmPayload = {
-      overrides: {},
-      unblockConfirmed: false,
-      blockedReason: "Spec under review",
-    };
-    const w = await mountPage();
-    boardEmit!("move", epic, listBlocked);
-    await flushPromises();
-    await w.find('[data-test="stub-cascade-confirm"]').trigger("click");
-    await flushPromises();
-    expect(cascadeIssueListMock).toHaveBeenCalledTimes(1);
-    const [, body] = cascadeIssueListMock.mock.calls[0];
-    expect(body).toMatchObject({
-      dest_list_name: "Blocked",
-      unblock_confirmed: false,
-      blocked_reason: "Spec under review",
       overrides: {},
     });
   });

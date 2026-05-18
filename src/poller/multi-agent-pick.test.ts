@@ -1179,20 +1179,16 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.resumeSessionId).toBeUndefined();
   });
 
-  it("resumes a Blocked card (status filter does NOT gate the agent's own card)", async () => {
-    // Per DX-360 contract: the agent owns the card, so the agent
-    // decides whether to clear the block or escalate properly. The
-    // picker dispatches regardless of card status (except Done /
-    // Cancelled, which are terminal audit).
+  it("DX-658: releases an owned card whose `blocked` gate is populated (Pass-A release on gate)", async () => {
+    // DX-658 (Phase 2) — `blocked: {at, reason}` is now a pure
+    // dispatch gate alongside conflict_on / waiting_on. The owned-card
+    // resume path must release the claim when ANY gate is populated,
+    // not dispatch on top of it.
     writeSettings({ murphy: agentRecord("murphy") });
-    mockedDispatchWithRecovery.mockResolvedValue({
-      dispatchId: "did",
-      job: {} as never,
-    });
 
     const blocked = issue("DX-351", {
       assigned_agent: "murphy",
-      status: "Blocked",
+      status: "ToDo",
       blocked: {
         reason: "stale spec",
         at: "2026-05-13T00:00:00Z",
@@ -1207,8 +1203,9 @@ describe("tryMultiAgentDispatch", () => {
       now: NOW,
     });
 
-    expect(result.dispatched).toBe(1);
-    expect(mockedDispatchWithRecovery.mock.calls[0][0].issueId).toBe("DX-351");
+    // Released — no resume dispatch happens.
+    expect(result.dispatched).toBe(0);
+    expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
   });
 
   it("releases the agent and flips the card back to ToDo when a conflict_on partner is In Progress", async () => {

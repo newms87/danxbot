@@ -215,14 +215,14 @@ describe("serializeIssue / parseIssue", () => {
       );
     });
 
-    it("accepts requires_human alongside status: Blocked + blocked record (orthogonal field; DX-231)", () => {
+    it("accepts requires_human alongside blocked record (orthogonal field; DX-231)", () => {
       // The orthogonal "needs human" field MUST be permitted alongside
       // a self-block — they are independent dispatch gates that may
       // co-exist. A regression that adds an inadvertent invariant
       // (`requires_human != null ⟹ status: Review`-style) ships
       // unchallenged without this case.
       const issue = fullIssue({
-        status: "Blocked",
+        status: "In Progress",
         blocked: {
           reason: "self-blocked",
           at: "2026-05-10T00:00:00.000Z",
@@ -331,7 +331,7 @@ describe("serializeIssue / parseIssue", () => {
 
     it("round-trips a populated blocked record byte-for-byte", () => {
       const issue = fullIssue({
-        status: "Blocked",
+        status: "In Progress",
         blocked: {
           reason: "Blocked on external dependency",
           at: "2026-05-04T18:00:00.000Z",
@@ -889,11 +889,11 @@ describe("validateIssue", () => {
       at: "2026-05-10T00:00:00Z",
       reason: "human action",
     });
-    // Status: deriveStatus rule 3 (intentionally NOT retired in Phase 1)
-    // re-projects `blocked != null → Blocked` over the migration's
-    // remapped raw status. Phase 2 retires rule 3 and the parsed
-    // status will then reflect the migration's projection (ToDo here).
-    expect(parsed.status).toBe("Blocked");
+    // DX-658 / Phase 2 retired the `blocked.at → Blocked` derivation rule
+    // AND removed `"Blocked"` from `IssueStatus`. Parsed status now
+    // reflects the migration's projection (ToDo) — the gate field is
+    // independent.
+    expect(parsed.status).toBe("ToDo");
 
     // Re-serialized output stamps v12 + preserves blocked record.
     const reEmitted = serializeIssue(parsed);
@@ -925,22 +925,15 @@ describe("validateIssue", () => {
     }
   });
 
-  it("DX-657: v12 validator accepts status: Blocked with blocked: null (retired invariant — symmetric)", () => {
-    // The reverse-direction of the retired invariant: an Issue with
-    // status: "Blocked" but blocked: null was previously rejected with
-    // "status is 'Blocked' but blocked field is null". v12 retires
-    // that coupling — Phase 2 of DX-656 drops the "Blocked" member of
-    // IssueStatus entirely, but until then the validator must not
-    // reject this combination.
+  it("DX-658: v12 validator rejects status: Blocked — Blocked is no longer an IssueStatus", () => {
+    // Phase 2 of DX-656 dropped the "Blocked" member of IssueStatus
+    // entirely. The validator must reject any YAML carrying that raw
+    // status literal.
     const result = validateIssue(
-      valid({ status: "Blocked", blocked: null }),
+      valid({ status: "Blocked" as never, blocked: null }),
       { expectedPrefix: "ISS" },
     );
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.issue.status).toBe("Blocked");
-      expect(result.issue.blocked).toBeNull();
-    }
+    expect(result.ok).toBe(false);
   });
 
   it("schema_version above KNOWN_SCHEMA_MAX is forward-compat accepted with a console.warn (DX-280)", () => {
@@ -1146,9 +1139,11 @@ describe("validateIssue waiting_on is independent of status", () => {
     }
   });
 
-  it("accepts waiting_on != null paired with status: Blocked + blocked record (self-block AND dep-chain note both legal)", () => {
+  it("DX-658: accepts waiting_on != null paired with blocked record on a non-Blocked status (self-block AND dep-chain note both legal)", () => {
+    // The blocked gate is independent of `waiting_on` and from the
+    // semantic status column. Pair both gates on a ToDo card.
     const result = validateIssue(
-      withWaitingOnAndStatus(populatedWaitingOn, "Blocked", {
+      withWaitingOnAndStatus(populatedWaitingOn, "ToDo", {
         reason: "stuck on auth",
         at: "2026-05-09T00:00:00.000Z",
       }),

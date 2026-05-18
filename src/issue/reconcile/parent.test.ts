@@ -42,12 +42,6 @@ function child(id: string, status: IssueStatus): Issue {
     list_name: null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "test self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -56,18 +50,10 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
     expect(deriveParentStatus([])).toBeNull();
   });
 
-  describe("priority rule 1 — any Blocked", () => {
-    it("Blocked wins over every other status", () => {
-      const result = deriveParentStatus([
-        child("DX-2", "In Progress"),
-        child("DX-3", "Done"),
-        child("DX-4", "Blocked"),
-      ]);
-      expect(result?.status).toBe("Blocked");
-      expect(result?.rule).toMatch(/Blocked/);
-    });
-  });
-
+  // DX-658 retired the `any child Blocked → parent Blocked` rule —
+  // `Blocked` is no longer a status; `blocked` is a pure dispatch gate
+  // not propagated through parent rollup.
+  //
   // DX-231 retired the `Needs Approval` parking status; the priority
   // rule that propagated it to parents went away with it. The
   // orthogonal `requires_human` field replaces the status, but it is
@@ -167,9 +153,6 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
   });
 
   it("rule string contains the derived status word", () => {
-    expect(deriveParentStatus([child("DX-2", "Blocked")])?.rule).toContain(
-      "Blocked",
-    );
     expect(deriveParentStatus([child("DX-2", "Done")])?.rule).toContain("Done");
     expect(
       deriveParentStatus([child("DX-2", "Cancelled")])?.rule,
@@ -197,14 +180,6 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
         child("DX-3", "Done"),
       ]);
       expect(result).toBeNull();
-    });
-
-    it("Backlog beaten by Blocked (rule 1 fires first)", () => {
-      const result = deriveParentStatus([
-        child("DX-2", "Backlog"),
-        child("DX-3", "Blocked"),
-      ]);
-      expect(result?.status).toBe("Blocked");
     });
 
     it("Backlog beaten by In Progress (rule 2 fires before rule 5b)", () => {
@@ -252,14 +227,6 @@ describe("deriveParentStatus — pure helper (DX-217)", () => {
       expect(result?.status).toBe("Done");
     });
 
-    it("child with blocked.at populated derives to Blocked even if raw status is ToDo", () => {
-      const c = child("DX-2", "ToDo");
-      c.blocked = { reason: "self-block", at: "2026-05-16T00:00:00Z" };
-      const result = deriveParentStatus([c]);
-      // Derivation rule 4 (blocked.at → Blocked) overrides raw `ToDo`;
-      // parent picks rule 1 (any Blocked → Blocked).
-      expect(result?.status).toBe("Blocked");
-    });
   });
 });
 
@@ -307,12 +274,6 @@ function makeParent(
     list_name: null,
   };
 
-  if (merged.status === "Blocked" && merged.blocked === null) {
-    merged.blocked = {
-      reason: "self-block",
-      at: "2026-01-01T00:00:00.000Z",
-    };
-  }
   return merged;
 }
 
@@ -335,45 +296,6 @@ describe("applyParentDeriveMutation — shared mutation helper (DX-217)", () => 
     expect(entry.to).toBe("In Progress");
     expect(entry.note).toContain("In Progress");
     expect(entry.timestamp).toBe(NOW);
-  });
-
-  it("stamps blocked record when derived → Blocked AND issue had no self-block", () => {
-    const issue = makeParent("In Progress", { blocked: null });
-    const updated = applyParentDeriveMutation(
-      issue,
-      { status: "Blocked", rule: "Any child Blocked — parent Blocked" },
-      NOW,
-    );
-    expect(updated.blocked).not.toBeNull();
-    expect(updated.blocked!.reason).toContain("Auto-derived from children");
-    expect(updated.blocked!.reason).toContain("Blocked");
-    expect(updated.blocked!.at).toBe(NOW);
-  });
-
-  it("clears blocked record when derived from Blocked → non-Blocked (invariant maintenance)", () => {
-    const issue = makeParent("Blocked"); // factory stamps blocked
-    expect(issue.blocked).not.toBeNull();
-    const updated = applyParentDeriveMutation(
-      issue,
-      { status: "In Progress", rule: "Any child In Progress — parent In Progress" },
-      NOW,
-    );
-    expect(updated.status).toBe("In Progress");
-    expect(updated.blocked).toBeNull();
-  });
-
-  it("preserves an EXISTING blocked record on Blocked → Blocked re-derive (no rewrite)", () => {
-    const issue = makeParent("Blocked", {
-      blocked: { reason: "manual operator block", at: "2026-01-01T00:00:00.000Z" },
-    });
-    const updated = applyParentDeriveMutation(
-      issue,
-      { status: "Blocked", rule: "Any child Blocked — parent Blocked" },
-      NOW,
-    );
-    // Existing operator block reason is preserved (the SET branch only
-    // fires when blocked === null).
-    expect(updated.blocked!.reason).toBe("manual operator block");
   });
 
   it("does not mutate the input issue (purity)", () => {

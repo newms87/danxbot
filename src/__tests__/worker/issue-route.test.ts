@@ -1105,12 +1105,6 @@ describe("DX-146: appendDiffEntries (pure helper)", () => {
       tracker: "memory",
       ...overrides,
     };
-    if (merged.status === "Blocked" && merged.blocked === null) {
-      merged.blocked = {
-        reason: "test self-block",
-        at: "2026-01-01T00:00:00.000Z",
-      };
-    }
     return merged;
   }
 

@@ -93,7 +93,7 @@ describe("effectiveWaitingOn", () => {
     expect(effectiveWaitingOn(issue, map)).toBeNull();
   });
 
-  it.each<IssueStatus>(["Review", "ToDo", "In Progress", "Blocked"])(
+  it.each<IssueStatus>(["Review", "ToDo", "In Progress"])(
     "returns record with full by[] when single dep is %s (non-terminal)",
     (status) => {
       const raw = waitingOn(["DX-2"]);

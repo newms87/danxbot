@@ -29,7 +29,6 @@ const SEED_LISTS: readonly List[] = [
   { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
   { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
   { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
-  { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
   { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
   { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
   { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
@@ -50,7 +49,6 @@ function makeIssue(
     Review: "Review",
     ToDo: "To Do",
     "In Progress": "In Progress",
-    Blocked: "Blocked",
     Done: "Done",
     Cancelled: "Cancelled",
   };
@@ -135,11 +133,11 @@ function tid(name: string): string {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("IssueBoard — list-driven columns (DX-586)", () => {
-  it("renders one column per list in ladder order (archived → review → ready → blocked → in_progress → completed)", () => {
+  it("renders one column per list in ladder order (archived → review → ready → in_progress → completed)", () => {
     const { wrapper } = mountBoard([]);
     const cols = wrapper.findAll(".column");
     // showClosed=false hides cancelled-type columns entirely.
-    const expectedNames = ["Backlog", "Review", "To Do", "Blocked", "In Progress", "Done"];
+    const expectedNames = ["Backlog", "Review", "To Do", "In Progress", "Done"];
     expect(cols.length).toBeGreaterThanOrEqual(expectedNames.length - 1);
     const labels = cols.map((c) => c.find(".label").text());
     // Filter out cancelled if showClosed is off — it shouldn't render any column,
@@ -325,41 +323,20 @@ describe("IssueBoard — drag and drop", () => {
     wrapper.unmount();
   });
 
-  it("dropping on Blocked emits move with the Blocked list (parent routes through INTO-blocked dialog)", async () => {
-    const issue = makeIssue("DX-B", "ToDo");
-    const { wrapper, moveSpy } = mountBoard([issue]);
-
-    const card = wrapper.find('[draggable="true"]');
-    await card.trigger("dragstart", { dataTransfer: makeDt() });
-
-    const target = wrapper.find(`[data-test="column-${tid("Blocked")}"]`);
-    await target.trigger("dragover", { dataTransfer: makeDt() });
-    await target.trigger("drop", { dataTransfer: makeDt() });
-    await card.trigger("dragend");
-
-    await vi.waitFor(() => {
-      expect(moveSpy).toHaveBeenCalledOnce();
-    });
-    expect(moveSpy.mock.calls[0][1].type).toBe("blocked");
-    wrapper.unmount();
-  });
-
   it("cards in different columns each get their own drag binding", async () => {
     const a = makeIssue("DX-A", "ToDo");
-    const b = makeIssue("DX-B", "Blocked", {
-      blocked: { at: "2026-05-01T00:00:00Z", reason: "x" },
-    });
+    const b = makeIssue("DX-B", "Review");
     const { wrapper, moveSpy } = mountBoard([a, b]);
 
     const cards = wrapper.findAll('[draggable="true"]');
     expect(cards).toHaveLength(2);
 
-    const blockedCard = cards.find((c) => c.text().includes("DX-B"))!;
-    await blockedCard.trigger("dragstart", { dataTransfer: makeDt() });
+    const reviewCard = cards.find((c) => c.text().includes("DX-B"))!;
+    await reviewCard.trigger("dragstart", { dataTransfer: makeDt() });
     const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
     await todoCol.trigger("dragover", { dataTransfer: makeDt() });
     await todoCol.trigger("drop", { dataTransfer: makeDt() });
-    await blockedCard.trigger("dragend");
+    await reviewCard.trigger("dragend");
 
     await vi.waitFor(() => {
       expect(moveSpy).toHaveBeenCalledOnce();

@@ -11,8 +11,6 @@ import IssueDetailView from "./IssueDetailView.vue";
 import PasteCardsDialog from "./PasteCardsDialog.vue";
 import TriageButton from "./TriageButton.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
-import BlockedReasonDialog from "./BlockedReasonDialog.vue";
-import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
 import EpicMoveCascadeDialog from "./EpicMoveCascadeDialog.vue";
 import { typeToId } from "./issuePalette";
 import { nextPriority } from "../../composables/cardPriority";
@@ -100,24 +98,10 @@ function onUpdateIssue(updated: Issue): void {
   }
 }
 
-// DX-586 — INTO-blocked / OUT-of-blocked dialog state. Holds the
-// destination list + the source issue so the dialog body can render
-// the prompt and the parent can dispatch the actual move on submit.
-interface PendingBlockedIn {
-  kind: "into-blocked";
-  issue: IssueListItem;
-  destList: List;
-}
-interface PendingBlockedOut {
-  kind: "out-of-blocked";
-  issue: IssueListItem;
-  destList: List;
-}
 // DX-632 (Phase 6) — cascade dialog state. Fires when the operator
-// drags any card whose `children.length > 0`; covers BOTH the
-// into-blocked and out-of-blocked transitions in a single surface
-// (the single-card BlockedReason / Unblock dialogs above keep
-// handling the no-children case).
+// drags any card whose `children.length > 0`. DX-658 retired the
+// INTO-blocked / OUT-of-blocked single-card dialogs from the
+// list-move flow — Blocked is now a dispatch gate, not a column.
 interface PendingCascade {
   kind: "cascade";
   issue: IssueListItem;
@@ -125,7 +109,7 @@ interface PendingCascade {
   descendants: IssueListItem[];
   defaults: Record<string, CascadeAction>;
 }
-const pendingMove = ref<PendingBlockedIn | PendingBlockedOut | PendingCascade | null>(null);
+const pendingMove = ref<PendingCascade | null>(null);
 const moveDialogBusy = ref(false);
 const moveDialogError = ref<string | null>(null);
 
@@ -206,65 +190,14 @@ function onMove(issue: IssueListItem, toList: List): void {
     };
     return;
   }
-  // Route through dialogs for the two blocked-state transitions; every
-  // other move fires the optimistic mutation + PATCH directly. The
-  // optimistic update (in `useIssues.moveIssueList`) handles its own
-  // revert + populates the global `error` banner on failure.
-  if (toList.type === "blocked") {
-    moveDialogError.value = null;
-    pendingMove.value = { kind: "into-blocked", issue, destList: toList };
-    return;
-  }
-  if (issue.blocked !== null) {
-    moveDialogError.value = null;
-    pendingMove.value = { kind: "out-of-blocked", issue, destList: toList };
-    return;
-  }
+  // DX-658 — no dialog routing for blocked transitions. Blocked is a
+  // pure dispatch gate now; clearing / setting it happens via the
+  // dispatch-gates badge UI (Phase 3 of DX-656).
   void moveIssueList(issue.id, { name: toList.name, type: toList.type }).catch(() => {});
-}
-
-async function onBlockedDialogSubmit(reason: string): Promise<void> {
-  const p = pendingMove.value;
-  if (!p || p.kind !== "into-blocked") return;
-  moveDialogBusy.value = true;
-  moveDialogError.value = null;
-  try {
-    await moveIssueList(
-      p.issue.id,
-      { name: p.destList.name, type: p.destList.type },
-      { blocked: { reason } },
-    );
-    pendingMove.value = null;
-  } catch (err) {
-    moveDialogError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    moveDialogBusy.value = false;
-  }
-}
-
-async function onUnblockDialogConfirm(): Promise<void> {
-  const p = pendingMove.value;
-  if (!p || p.kind !== "out-of-blocked") return;
-  moveDialogBusy.value = true;
-  moveDialogError.value = null;
-  try {
-    await moveIssueList(
-      p.issue.id,
-      { name: p.destList.name, type: p.destList.type },
-      { blocked: null },
-    );
-    pendingMove.value = null;
-  } catch (err) {
-    moveDialogError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    moveDialogBusy.value = false;
-  }
 }
 
 async function onCascadeDialogConfirm(payload: {
   overrides: Record<string, CascadeAction>;
-  unblockConfirmed: boolean;
-  blockedReason?: string;
 }): Promise<void> {
   const p = pendingMove.value;
   if (!p || p.kind !== "cascade") return;
@@ -273,8 +206,6 @@ async function onCascadeDialogConfirm(payload: {
   try {
     await cascadeIssueList(p.issue.id, {
       dest_list_name: p.destList.name,
-      unblock_confirmed: payload.unblockConfirmed,
-      ...(payload.blockedReason ? { blocked_reason: payload.blockedReason } : {}),
       overrides: payload.overrides,
     });
     pendingMove.value = null;
@@ -338,7 +269,7 @@ const filteredIssues = computed<IssueListItem[]>(() => {
     if (types.value.length > 0 && !types.value.includes(typeToId(i.type))) {
       return false;
     }
-    if (blockedOnly.value && !(i.status === "Blocked" || i.waiting_on)) return false;
+    if (blockedOnly.value && !(i.blocked !== null || i.waiting_on)) return false;
     if (needle) {
       const hay = `${i.id} ${i.title} ${i.description}`.toLowerCase();
       if (!hay.includes(needle)) return false;
@@ -633,27 +564,6 @@ watch(
       </div>
     </template>
 
-    <BlockedReasonDialog
-      v-if="pendingMove?.kind === 'into-blocked'"
-      :model-value="true"
-      :issue-id="pendingMove.issue.id"
-      :dest-list-name="pendingMove.destList.name"
-      :busy="moveDialogBusy"
-      :error="moveDialogError"
-      @submit="onBlockedDialogSubmit"
-      @cancel="onMoveDialogCancel"
-    />
-    <UnblockConfirmDialog
-      v-if="pendingMove?.kind === 'out-of-blocked'"
-      :model-value="true"
-      :issue-id="pendingMove.issue.id"
-      :dest-list-name="pendingMove.destList.name"
-      :current-reason="pendingMove.issue.blocked?.reason ?? null"
-      :busy="moveDialogBusy"
-      :error="moveDialogError"
-      @confirm="onUnblockDialogConfirm"
-      @cancel="onMoveDialogCancel"
-    />
     <EpicMoveCascadeDialog
       v-if="pendingMove?.kind === 'cascade'"
       :model-value="true"

@@ -380,12 +380,12 @@ describe("syncIssue", () => {
 
   // ---- Test gap C: setLabels derived-args shape ----
 
-  it("derives blocked:true from status='Blocked' (gap C)", async () => {
+  it("derives blocked:true from local.blocked != null (gap C)", async () => {
     const tracker = new FakeTracker();
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      status: "Blocked",
+      status: "In Progress",
       blocked: {
         reason: "self-blocked",
         at: "2026-05-04T18:00:00.000Z",
@@ -503,7 +503,7 @@ describe("syncIssue", () => {
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      status: "Blocked",
+      status: "In Progress",
       blocked: { reason: "self-block", at: "2026-05-10T00:00:00.000Z" },
       requires_human: {
         reason: "Need Stripe API key rotated",
@@ -532,7 +532,7 @@ describe("syncIssue", () => {
     const { external_id } = await tracker.createCard(defaultCreate());
     const local: Issue = {
       ...(await tracker.getCard(external_id)),
-      status: "Blocked",
+      status: "In Progress",
       blocked: {
         reason: "self-blocked",
         at: "2026-05-04T18:00:00.000Z",
@@ -677,16 +677,16 @@ describe("syncIssue", () => {
       ...(await tracker.getCard(external_id)),
       title: "Local Title",
       description: "Local Desc",
-      status: "Blocked",
+      status: "In Progress",
       type: "Bug",
     };
     // DX-621 / Phase 9d — status no longer auto-projects to a tracker
     // list. The caller supplies the resolved Trello list id explicitly.
-    await syncIssue(tracker, local, { destinationTrelloListId: "list-Blocked" });
+    await syncIssue(tracker, local, { destinationTrelloListId: "list-In Progress" });
     const after = await tracker.getCard(external_id);
     expect(after.title).toBe("Local Title");
     expect(after.description).toBe("Local Desc");
-    expect(after.tracker_list_id).toBe("list-Blocked");
+    expect(after.tracker_list_id).toBe("list-In Progress");
     expect(after.type).toBe("Bug");
   });
 
@@ -718,8 +718,8 @@ describe("syncIssue", () => {
     expect(retroOnly[0].text).toContain("**What went wrong:** hard");
   });
 
-  it("retro renderer is a no-op on non-terminal status (In Progress / Blocked)", async () => {
-    for (const status of ["In Progress", "Blocked"] as const) {
+  it("retro renderer is a no-op on non-terminal status (In Progress / ToDo)", async () => {
+    for (const status of ["In Progress", "ToDo"] as const) {
       const tracker = new FakeTracker();
       const { external_id } = await tracker.createCard(defaultCreate());
       const local: Issue = {
@@ -1334,10 +1334,10 @@ describe("syncIssue", () => {
     const { external_id } = await tracker.createCard(defaultCreate());
     const fresh = await tracker.getCard(external_id);
 
-    // First sync flips status to Blocked → setLabels write.
+    // First sync flips blocked field → setLabels write.
     const blocked: Issue = {
       ...fresh,
-      status: "Blocked",
+      status: "In Progress",
       blocked: {
         reason: "Self-blocked",
         at: "2026-05-05T00:00:00Z",

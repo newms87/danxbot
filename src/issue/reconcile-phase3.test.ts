@@ -469,7 +469,7 @@ describe("reconcileIssue — 3g epic-lifecycle reset (DX-641)", () => {
     "Epic + blocked-only trigger + non-terminal child → 3g fires and clears blocked",
     async () => {
       const parent: Issue = {
-        ...makeIssue("DX-1700", "Blocked"),
+        ...makeIssue("DX-1700", "In Progress"),
         type: "Epic",
         children: ["DX-1701"],
         blocked: {
@@ -775,7 +775,7 @@ describe("reconcileIssue — 3e invariant heal (DX-641)", () => {
     "clears assigned_agent when derived status is Blocked",
     async () => {
       const card: Issue = {
-        ...makeIssue("DX-3000", "Blocked"),
+        ...makeIssue("DX-3000", "In Progress"),
         blocked: { at: "2026-01-01T00:00:00.000Z", reason: "operator-action" },
         assigned_agent: "alice",
       };
@@ -795,7 +795,7 @@ describe("reconcileIssue — 3e invariant heal (DX-641)", () => {
       const healEntries = updated.history.filter(
         (h) =>
           h.actor === "worker:heal" &&
-          h.note?.startsWith("Cleared assigned_agent on Blocked card"),
+          h.note?.startsWith("Cleared assigned_agent on blocked card"),
       );
       expect(healEntries).toHaveLength(1);
     },
@@ -805,7 +805,7 @@ describe("reconcileIssue — 3e invariant heal (DX-641)", () => {
     "does NOT clobber `waiting_on` on a Blocked card with assigned_agent (no-clobber invariant)",
     async () => {
       const card: Issue = {
-        ...makeIssue("DX-3020", "Blocked"),
+        ...makeIssue("DX-3020", "In Progress"),
         blocked: { at: "2026-01-01T00:00:00.000Z", reason: "operator-action" },
         assigned_agent: "alice",
         waiting_on: {
@@ -837,7 +837,7 @@ describe("reconcileIssue — 3e invariant heal (DX-641)", () => {
     "does NOT clobber `requires_human` on a Blocked card with assigned_agent (no-clobber invariant)",
     async () => {
       const card: Issue = {
-        ...makeIssue("DX-3030", "Blocked"),
+        ...makeIssue("DX-3030", "In Progress"),
         blocked: { at: "2026-01-01T00:00:00.000Z", reason: "operator-action" },
         assigned_agent: "alice",
         requires_human: {
@@ -1082,7 +1082,7 @@ describe("reconcileIssue — 3f triage TTL refresh scheduler poke (DX-641)", () 
     "emits triage-empty poke for a derived-Blocked card",
     async () => {
       const card: Issue = {
-        ...makeIssue("DX-5040", "Blocked"),
+        ...makeIssue("DX-5040", "In Progress"),
         blocked: { at: "2026-01-01T00:00:00.000Z", reason: "operator-action" },
       };
       writeYaml(dbCtx.openDir, "DX-5040", card);

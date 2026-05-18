@@ -71,11 +71,7 @@ import {
 } from "../issue-tracker/interface.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
 import { readLists, type List, type ListType } from "../lists-file.js";
-import {
-  applyListMove,
-  ListMoveError,
-  type BlockedPatchInput,
-} from "../issue/list-move.js";
+import { applyListMove, ListMoveError } from "../issue/list-move.js";
 import { randomUUID } from "node:crypto";
 import type { DispatchProxyDeps } from "./dispatch-proxy.js";
 
@@ -199,20 +195,20 @@ export interface IssuePatch {
    */
   conflict_on?: ConflictOnEntry[];
   /**
-   * Self-block lifecycle trigger (DX-309 + DX-586).
+   * Self-block dispatch gate (DX-658 / Phase 2 of "Blocked becomes a
+   * dispatch gate, not a status").
    *
-   *  - `null` — explicit unblock confirmation (OUT-of-blocked dialog
-   *    submit). The server clears `blocked` and applies the dest list's
-   *    ladder semantics. Always allowed.
-   *  - `{reason: string}` — INTO-blocked dialog submit. ONLY valid
-   *    paired with a `list_name` whose type is `blocked`; the server
-   *    stamps `blocked: {at: now, reason}` and skips the rest of the
-   *    ladder sweep. Standalone `blocked: {reason}` without a
-   *    `list_name` of type `blocked` is rejected as inconsistent.
-   *  - `undefined` — default ladder semantics apply (board drag without
-   *    the confirm dialog auto-clears `blocked` on a leftward move).
+   *  - `null` — clear the gate (dashboard's Clear-Block button).
+   *  - `{reason: string}` — stamp `blocked: {at: now, reason}` on the
+   *    YAML. The card retains its derived semantic column; the picker
+   *    skips dispatch while the gate is populated.
+   *  - `undefined` — leave the gate field unchanged.
+   *
+   * Orthogonal to `list_name` — the patch may carry both, neither, or
+   * either. Pre-DX-658 the field was paired with a `list_name` of
+   * type `"blocked"`; that pairing is retired.
    */
-  blocked?: BlockedPatchInput;
+  blocked?: { reason: string } | null;
 }
 
 const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
@@ -240,7 +236,6 @@ const REOPEN_ALLOWED_LIST_TYPES: ReadonlySet<ListType> = new Set<ListType>([
   "archived",
   "review",
   "ready",
-  "blocked",
   "in_progress",
 ]);
 
@@ -832,12 +827,27 @@ function applyValidatedPatch(
         current: next,
         destListType: destList.type,
         destListName: destList.name,
-        blockedPatch: patch.blocked,
         authUsername,
         nowIso,
         uuid: randomUUID,
       });
       next = moveResult.next;
+      // DX-658 / Phase 2 — `Issue.blocked` is independent of
+      // list_name. Apply the operator's explicit `blocked` patch
+      // here so a list move can ship in the same PATCH as a gate
+      // clear / set (e.g. moving a card off a former "Blocked" list
+      // with `blocked: null`).
+      if (patch.blocked === null) {
+        next = { ...next, blocked: null };
+      } else if (patch.blocked && "reason" in patch.blocked) {
+        const reason = (patch.blocked as { reason: string }).reason;
+        if (typeof reason !== "string" || reason.length === 0) {
+          throw new IssuePatchError(400, {
+            error: `blocked.reason must be a non-empty string`,
+          });
+        }
+        next = { ...next, blocked: { at: nowIso, reason } };
+      }
     } catch (err) {
       if (err instanceof ListMoveError) {
         throw new IssuePatchError(err.status, { error: err.message });
@@ -845,24 +855,21 @@ function applyValidatedPatch(
       throw err;
     }
   } else if (patch.blocked !== undefined) {
-    // No `list_name` in the patch — the `blocked` field is a paired
-    // field with `list_name`; standalone updates are rejected so the
-    // status⟺blocked YAML invariant (`status === "Blocked" ⟺
-    // blocked !== null`) can never be violated by a partial patch.
-    // The dashboard's Clear-Block button (`DispatchGatesSection`)
-    // always pairs `blocked: null` with `list_name: <ready-default>`;
-    // the dialogs in `IssuesPage` + `DrawerHeader` always pair
-    // `{reason}` / `null` with a `list_name` of the matching type.
-    // A future client that wants to standalone-clear must update its
-    // wire format.
+    // DX-658 / Phase 2 — `Issue.blocked` is a pure dispatch gate
+    // independent of `status` / `list_name`. Standalone gate writes
+    // are now legal (and are the path the dashboard's Clear-Block
+    // button uses post-DX-658).
     if (patch.blocked === null) {
-      throw new IssuePatchError(400, {
-        error: `blocked: null must accompany a list_name move (pair with list_name to land the card off the Blocked list)`,
-      });
+      next = { ...next, blocked: null };
+    } else if ("reason" in patch.blocked) {
+      const reason = (patch.blocked as { reason: string }).reason;
+      if (typeof reason !== "string" || reason.length === 0) {
+        throw new IssuePatchError(400, {
+          error: `blocked.reason must be a non-empty string`,
+        });
+      }
+      next = { ...next, blocked: { at: nowIso, reason } };
     }
-    throw new IssuePatchError(400, {
-      error: `blocked.reason may only accompany a move into a "blocked"-type list (pair with list_name)`,
-    });
   }
 
   const persisted = persistMutatedIssue(
@@ -1311,11 +1318,17 @@ export async function createIssue(
     // starting status is encoded into the sentinel reason; the
     // `danxbot:danx-flesh-out` skill parses it back out and restores
     // `status` (plus clears `blocked: null`) as its final YAML edit.
+    // DX-544 — close the create-flow race: every newly-created card
+    // lands with the self-block gate populated so the picker cannot
+    // dispatch a work-agent before the flesh-out agent rewrites the
+    // description. DX-658 / Phase 2 retired the paired `status:
+    // "Blocked"` write (Blocked is no longer an IssueStatus); the
+    // gate field alone is the dispatch signal.
     const draft = createEmptyIssue({
       id: newId,
       title: input.title,
       description: input.description,
-      status: "Blocked",
+      status: input.status,
       type: input.type,
       priority: input.priority,
       blocked: {

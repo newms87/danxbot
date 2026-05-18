@@ -4,7 +4,7 @@
  * Pure-function core of the recursive epic-move cascade. Given a parent
  * card being moved to a destination `ListType` + `listName`, computes
  * the per-descendant trigger writes that produce the desired derived
- * status on each child per the 5×5 spec table in DX-626.
+ * status on each child per the 4×4 spec table in DX-626.
  *
  * The helper is PURE — no `Date.now()`, no I/O, no MCP, no DB. The
  * caller passes `now: string` (or accepts the boundary default) so unit
@@ -19,28 +19,28 @@
  * `EpicMoveCascadeDialog.vue`. This phase ships ONLY the pure fn +
  * tests; do not import dispatcher / route / dialog code here.
  *
- * Spec table (FROM rows ↓, TO cols →) — source of truth is DX-626's
- * body. `completed` / `cancelled` rows stay-on-everything: terminal
- * sources never auto-cancel or auto-complete via cascade.
+ * DX-658 / Phase 2 of "Blocked becomes a dispatch gate, not a status"
+ * (parent epic DX-656) retired the `"blocked"` ListType + the
+ * `"Blocked"` IssueStatus. List-moves (drag + cascade) NEVER touch
+ * the `Issue.blocked` gate field — clearing / setting the gate is a
+ * separate dispatch-gates affordance in the dashboard. The cascade's
+ * source-row / destination-column branches that previously special-
+ * cased the blocked tier are gone.
  *
- *   FROM ↓ \ TO →         review/ready/archived | blocked | in_progress       | completed       | cancelled
- *   review/ready/archived | SAME-TYPE-LATERAL   | stay    | FIRST-DISPATCH    | move→completed  | move→cancelled
- *   in_progress           | stay                | stay    | stay              | move→completed  | move→cancelled
- *   blocked               | stay                | stay    | confirm→in_prog   | confirm→done    | confirm→cancel
- *   completed             | stay                | stay    | stay              | stay            | stay
- *   cancelled             | stay                | stay    | stay              | stay            | stay
+ * Spec table (FROM rows ↓, TO cols →) — source of truth is DX-626's
+ * body, post-DX-658 simplification.
+ *
+ *   FROM ↓ \ TO →         review/ready/archived | in_progress       | completed       | cancelled
+ *   review/ready/archived | SAME-TYPE-LATERAL   | FIRST-DISPATCH    | move→completed  | move→cancelled
+ *   in_progress           | stay                | stay              | move→completed  | move→cancelled
+ *   completed             | stay                | stay              | stay            | stay
+ *   cancelled             | stay                | stay              | stay            | stay
  *
  * - `SAME-TYPE-LATERAL`: descendant in `parent.list_name` moves to
  *   `destListName`; descendants in another same-type list stay.
  * - `FIRST-DISPATCH`: only the first entry in `dispatchableByPriority`
  *   whose current `ListType` ∈ {review, ready, archived} moves;
  *   helper consumes the list, never recomputes it.
- * - `confirm→X`: blocked descendants moving out require
- *   `unblockConfirmed: true`. When false, helper returns
- *   `requiresUnblockConfirm: true` and skips the blocked descendants'
- *   childWrites (non-blocked descendants still get their writes).
- *
- * Dest=blocked is epic-only: parent stamped, no descendant writes.
  */
 
 import type { Issue } from "../issue-tracker/interface.js";
@@ -63,13 +63,15 @@ export type CascadeAction =
  *
  * `priority` is currently unused by the cascade — reserved for a
  * future hook (e.g. drag-reorder priority bump during a cascade).
+ *
+ * DX-658 / Phase 2 — the `blocked` field is intentionally absent;
+ * cascades never touch the self-block gate.
  */
 export interface TriggerWrite {
   completed_at?: string | null;
   cancelled_at?: string | null;
   ready_at?: string | null;
   archived_at?: string | null;
-  blocked?: { at: string; reason: string } | null;
   list_name?: string;
   priority?: number;
 }
@@ -81,9 +83,6 @@ export interface CascadeMoveInput {
   descendants: Issue[];
   destListType: ListType;
   destListName: string;
-  unblockConfirmed: boolean;
-  /** Required when `destListType === "blocked"`. */
-  blockedReason?: string;
   /** Per-descendant override keyed by `issue.id`. */
   overrides?: Record<string, CascadeAction>;
   /**
@@ -99,8 +98,6 @@ export interface CascadeMoveInput {
 export interface CascadeMoveOutput {
   parentWrite: TriggerWrite;
   childWrites: Array<{ id: string; write: TriggerWrite }>;
-  requiresUnblockConfirm: boolean;
-  blockedReasonRequired: boolean;
 }
 
 /**
@@ -118,60 +115,16 @@ export function cascadeEpicMove(input: CascadeMoveInput): CascadeMoveOutput {
     descendants,
     destListType,
     destListName,
-    unblockConfirmed,
-    blockedReason,
     overrides = {},
     dispatchableByPriority = [],
     now = new Date().toISOString(),
   } = input;
 
-  // Gate 1 — blockedReasonRequired. When moving the parent to a
-  // blocked-type list, the YAML invariant requires `{at, reason}` both
-  // populated. Without a reason, refuse to compute any writes.
-  const blockedReasonRequired =
-    destListType === "blocked" && !blockedReason;
-
-  if (blockedReasonRequired) {
-    return {
-      parentWrite: {},
-      childWrites: [],
-      requiresUnblockConfirm: false,
-      blockedReasonRequired: true,
-    };
-  }
-
-  // Gate 2 — requiresUnblockConfirm. Any descendant currently in the
-  // blocked tier AND a non-blocked destination AND no explicit
-  // confirmation → flag the dialog to surface the forced-confirm
-  // banner. Non-blocked descendants still get their writes; blocked
-  // ones are skipped until the operator confirms.
-  const anyDescendantBlocked = descendants.some(
-    (d) => deriveListTypeForIssue(d) === "blocked",
+  const parentWrite: TriggerWrite = triggerWritesForDest(
+    destListType,
+    destListName,
+    now,
   );
-  const requiresUnblockConfirm =
-    destListType !== "blocked" && anyDescendantBlocked && !unblockConfirmed;
-
-  // Parent write — destBlocked is its own branch (the only trigger is
-  // the blocked record itself, no lifecycle timestamps). Every other
-  // dest stamps the standard trigger pattern for that ListType.
-  const parentWrite: TriggerWrite =
-    destListType === "blocked"
-      ? {
-          blocked: { at: now, reason: blockedReason! },
-          list_name: destListName,
-        }
-      : triggerWritesForDest(destListType, destListName, now);
-
-  // Moving the parent to blocked stamps no descendants — the spec is
-  // epic-only block (children carry on in their own state).
-  if (destListType === "blocked") {
-    return {
-      parentWrite,
-      childWrites: [],
-      requiresUnblockConfirm: false,
-      blockedReasonRequired: false,
-    };
-  }
 
   const parentSourceListName = parent.list_name;
 
@@ -196,17 +149,6 @@ export function cascadeEpicMove(input: CascadeMoveInput): CascadeMoveOutput {
     const childCurrentType = deriveListTypeForIssue(child);
     const override = overrides[child.id];
 
-    // Default-path skip: blocked descendant + non-blocked dest +
-    // !unblockConfirmed → don't emit a write. Explicit override
-    // bypasses this (operator decided per-row).
-    if (
-      !override &&
-      childCurrentType === "blocked" &&
-      !unblockConfirmed
-    ) {
-      continue;
-    }
-
     const action: CascadeAction =
       override ??
       defaultAction({
@@ -230,22 +172,10 @@ export function cascadeEpicMove(input: CascadeMoveInput): CascadeMoveOutput {
     }
 
     const write = triggerWritesForDest(writeListType, writeListName, now);
-
-    // Any move out of the blocked tier clears the gate field so
-    // `deriveStatus` rule 3 stops firing on the next read.
-    if (childCurrentType === "blocked") {
-      write.blocked = null;
-    }
-
     childWrites.push({ id: child.id, write });
   }
 
-  return {
-    parentWrite,
-    childWrites,
-    requiresUnblockConfirm,
-    blockedReasonRequired: false,
-  };
+  return { parentWrite, childWrites };
 }
 
 /**
@@ -275,32 +205,8 @@ function defaultAction(args: {
     return { kind: "stay" };
   }
 
-  // Caller short-circuited dest=blocked before invoking this function;
-  // reaching here means a caller invariant broke. Fail loud rather than
-  // silently returning stay (which would hide a real bug).
-  if (destListType === "blocked") {
-    throw new Error("cascadeEpicMove: defaultAction reached with destListType=blocked — caller must short-circuit");
-  }
-
-  // FROM blocked rows: only TO in_progress / completed / cancelled
-  // trigger the confirm-clear path. The unblockConfirmed gate is
-  // enforced by the caller's skip branch — by the time we reach the
-  // default-action function, the caller has either passed the gate
-  // or the descendant was already filtered out.
-  if (childCurrentType === "blocked") {
-    if (
-      destListType === "in_progress" ||
-      destListType === "completed" ||
-      destListType === "cancelled"
-    ) {
-      return { kind: "move_same_type" };
-    }
-    return { kind: "stay" };
-  }
-
   // FROM in_progress rows: only TO completed / cancelled move; the
-  // rest stay (passive dest = stay; in_progress dest = stay; blocked
-  // dest already returned).
+  // rest stay.
   if (childCurrentType === "in_progress") {
     if (destListType === "completed" || destListType === "cancelled") {
       return { kind: "move_same_type" };
@@ -344,15 +250,9 @@ function defaultAction(args: {
  *
  * `in_progress`: stamps `ready_at` + `list_name` only. The card
  * becomes dispatchable; the picker spawns an agent on the next tick
- * which auto-flips `dispatch != null` (rule 4 → In Progress). Writing
+ * which auto-flips `dispatch != null` (rule 3 → In Progress). Writing
  * `dispatch` directly here would conflate the cascade with the
  * picker's pickup responsibility — the gotcha in DX-630's body.
- *
- * `blocked`: not reachable from descendants — the dest=blocked
- * short-circuit returns before any descendant write is requested,
- * and override targets to `blocked` would need a reason which is not
- * threaded through to this scope. Fail loud rather than emit a
- * silently-incomplete patch.
  */
 function triggerWritesForDest(
   type: ListType,
@@ -394,7 +294,5 @@ function triggerWritesForDest(
       };
     case "cancelled":
       return { cancelled_at: now, list_name: listName };
-    case "blocked":
-      throw new Error("cascadeEpicMove: triggerWritesForDest called with type=blocked — descendant writes never target blocked");
   }
 }

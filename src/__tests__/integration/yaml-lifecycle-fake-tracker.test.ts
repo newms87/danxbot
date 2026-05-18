@@ -164,7 +164,7 @@ function setIssueTracker(seed: Issue): {
     ...seed,
     labels: {
       type: seed.type,
-      blocked: seed.status === "Blocked",
+      blocked: seed.blocked !== null,
       requires_human: seed.requires_human !== null,
       triaged: seed.triage.last_status !== "",
     },
@@ -687,7 +687,7 @@ describe.skip("Integration: YAML lifecycle vs FakeTracker (Phase 4 AC #6) — DX
     // unblocked it) drives it through to Done. Same external_id, same
     // YAML file, second dispatch.
     const externalId = "mem-yaml-3";
-    const seed = buildSeedIssue(externalId, "Blocked");
+    const seed = buildSeedIssue(externalId, "ToDo");
     setIssueTracker(seed);
 
     // Filename = internal id, NOT external_id. fake-claude edits the

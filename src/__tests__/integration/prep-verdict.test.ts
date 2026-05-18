@@ -261,7 +261,8 @@ describe("prep-verdict round-trip — MCP client → worker route", () => {
     );
 
     const yaml = readIssue(h.root, "DX-100");
-    expect(yaml.status).toBe("Blocked");
+    // DX-658: stamp is a pure gate write — status untouched.
+    expect(yaml.status).toBe("ToDo");
     expect(yaml.blocked?.reason).toBe("spec ambiguous");
     expect(stop).toHaveBeenCalledWith(
       "completed",

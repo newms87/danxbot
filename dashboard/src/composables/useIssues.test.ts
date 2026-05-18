@@ -434,7 +434,7 @@ describe("useIssues — moveIssueList (DX-586)", () => {
     wrapper.unmount();
   });
 
-  it("forwards optional `blocked` patch to the server (INTO-blocked dialog flow)", async () => {
+  it("forwards optional `blocked` patch alongside a list move", async () => {
     mockFetchIssues.mockResolvedValue([makeIssue("DX-1", "ToDo")]);
     mockPatchIssue.mockResolvedValue(undefined);
 
@@ -443,19 +443,19 @@ describe("useIssues — moveIssueList (DX-586)", () => {
 
     await ret.moveIssueList(
       "DX-1",
-      { name: "Blocked", type: "blocked" },
+      { name: "In Progress", type: "in_progress" },
       { blocked: { reason: "Spec ambiguous" } },
     );
     expect(mockPatchIssue).toHaveBeenCalledWith("danxbot", "DX-1", {
-      list_name: "Blocked",
+      list_name: "In Progress",
       blocked: { reason: "Spec ambiguous" },
     });
     wrapper.unmount();
   });
 
-  it("forwards `blocked: null` for the OUT-of-blocked dialog flow", async () => {
+  it("forwards `blocked: null` to clear the gate alongside a list move", async () => {
     mockFetchIssues.mockResolvedValue([
-      makeIssue("DX-1", "Blocked"),
+      makeIssue("DX-1", "ToDo"),
     ]);
     mockPatchIssue.mockResolvedValue(undefined);
 
@@ -493,18 +493,18 @@ describe("useIssues — moveIssueList (DX-586)", () => {
   });
 
   it("same-list move (matching list_name + projected status) short-circuits", async () => {
-    // makeIssue defaults list_name to null; pre-seed it to "Blocked" so the
+    // makeIssue defaults list_name to null; pre-seed it to "Done" so the
     // short-circuit triggers when the dest matches.
-    const seeded = makeIssue("DX-3", "Blocked");
-    (seeded as { list_name: string | null }).list_name = "Blocked";
+    const seeded = makeIssue("DX-3", "Done");
+    (seeded as { list_name: string | null }).list_name = "Done";
     mockFetchIssues.mockResolvedValue([seeded]);
     const { wrapper, ret } = mountWithIssues(ref("danxbot"));
     await flushPromises();
 
-    await ret.moveIssueList("DX-3", { name: "Blocked", type: "blocked" });
+    await ret.moveIssueList("DX-3", { name: "Done", type: "completed" });
 
     expect(mockPatchIssue).not.toHaveBeenCalled();
-    expect(ret.issues.value[0].status).toBe("Blocked");
+    expect(ret.issues.value[0].status).toBe("Done");
     wrapper.unmount();
   });
 

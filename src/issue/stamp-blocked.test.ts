@@ -39,7 +39,7 @@ describe("stampIssueBlocked", () => {
     );
   }
 
-  it("stamps status: Blocked + blocked.reason + blocked.at on the candidate YAML", async () => {
+  it("stamps blocked.reason + blocked.at on the candidate YAML (DX-658: status untouched)", async () => {
     writeFixture("DX-1");
     const ts = "2026-05-14T00:00:00.000Z";
     await stampIssueBlocked({
@@ -54,7 +54,8 @@ describe("stampIssueBlocked", () => {
       readFileSync(join(root, ".danxbot/issues/open/DX-1.yml"), "utf-8"),
       { expectedPrefix: "DX" },
     );
-    expect(parsed.status).toBe("Blocked");
+    // DX-658: status is NOT touched by stamp — only the gate field changes.
+    expect(parsed.status).toBe("ToDo");
     expect(parsed.blocked).toEqual({
       reason: "agent cannot proceed",
       at: ts,
@@ -81,7 +82,7 @@ describe("stampIssueBlocked", () => {
       readFileSync(join(root, ".danxbot/issues/open/DX-1.yml"), "utf-8"),
       { expectedPrefix: "DX" },
     );
-    expect(parsed.status).toBe("Blocked");
+    expect(parsed.status).toBe("ToDo");
     expect(parsed.blocked?.reason).toBe("second reason");
     expect(parsed.blocked?.at).toBe("2026-05-14T01:00:00.000Z");
   });
@@ -98,7 +99,7 @@ describe("stampIssueBlocked", () => {
     ).rejects.toThrow(/candidate YAML not found/);
   });
 
-  it("DX-584: preserves ready_at, stamps list_name='Blocked', clears dispatch", async () => {
+  it("DX-658: preserves ready_at, list_name, and dispatch byte-identical (gate-only write)", async () => {
     writeFixture("DX-3", "In Progress");
     // Seed ready_at + a live dispatch block before stamping blocked —
     // mirrors a card mid-dispatch when the agent self-blocks.
@@ -115,6 +116,7 @@ describe("stampIssueBlocked", () => {
       started_at: "2026-05-14T00:00:01.000Z",
       ttl_seconds: 7200,
     };
+    const preStampListName = seeded.list_name;
     writeFileSync(yamlPath, serializeIssue(seeded));
 
     await stampIssueBlocked({
@@ -128,16 +130,12 @@ describe("stampIssueBlocked", () => {
     const parsed = parseIssue(readFileSync(yamlPath, "utf-8"), {
       expectedPrefix: "DX",
     });
-    // ready_at survives — records the moment the card became
-    // dispatch-eligible and Phase 4 preserves it across every save.
+    // DX-658 — the stamp is a pure gate write. status, list_name,
+    // dispatch, and ready_at are byte-identical to pre-stamp values.
+    expect(parsed.status).toBe("In Progress");
     expect(parsed.ready_at).toBe("2026-05-14T00:00:00.000Z");
-    // list_name auto-resolved to the default Blocked list (lists.yaml
-    // seed name).
-    expect(parsed.list_name).toBe("Blocked");
-    // dispatch cleared — the self-block signal is terminal for the
-    // session; leaving stale dispatch would falsely re-claim on the
-    // next poller startup's reattach pass.
-    expect(parsed.dispatch).toBeNull();
+    expect(parsed.list_name).toBe(preStampListName);
+    expect(parsed.dispatch).toEqual(seeded.dispatch);
   });
 
   it("preserves an existing waiting_on record (independent of status)", async () => {
@@ -165,7 +163,7 @@ describe("stampIssueBlocked", () => {
     const parsed = parseIssue(readFileSync(yamlPath, "utf-8"), {
       expectedPrefix: "DX",
     });
-    expect(parsed.status).toBe("Blocked");
+    expect(parsed.status).toBe("ToDo");
     expect(parsed.waiting_on).toEqual({
       reason: "dep chain",
       timestamp: "2026-05-13T00:00:00.000Z",

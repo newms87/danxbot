@@ -164,7 +164,6 @@ const allLists: List[] = [
   makeList({ id: "L-review", name: "Review", type: "review" }),
   makeList({ id: "L-todo", name: "ToDo", type: "ready" }),
   makeList({ id: "L-prog", name: "In Progress", type: "in_progress" }),
-  makeList({ id: "L-blocked", name: "Blocked", type: "blocked" }),
   makeList({ id: "L-done", name: "Done", type: "completed" }),
   makeList({ id: "L-cancelled", name: "Cancelled", type: "cancelled" }),
 ];
@@ -317,8 +316,6 @@ describe("EpicMoveCascadeDialog", () => {
     expect(emitted).toBeTruthy();
     const payload = emitted![0][0] as {
       overrides: Record<string, CascadeAction>;
-      unblockConfirmed: boolean;
-      blockedReason?: string;
     };
     expect(payload.overrides["DX-401"]).toEqual({ kind: "stay" });
     // DX-402 left at default — server re-computes spec default.
@@ -346,69 +343,6 @@ describe("EpicMoveCascadeDialog", () => {
     });
   });
 
-  it("renders unblock-confirm banner + gates submit when any descendant blocked + dest non-blocked", async () => {
-    const descendants = [
-      makeIssue({
-        id: "DX-601",
-        parent_id: "DX-600",
-        status: "Blocked",
-        blocked: { at: "2026-05-18T00:00:00Z", reason: "spec" },
-      }),
-      makeIssue({ id: "DX-602", parent_id: "DX-600" }),
-    ];
-    const defaults: Record<string, CascadeAction> = {
-      "DX-601": { kind: "move_same_type" },
-      "DX-602": { kind: "move_same_type" },
-    };
-    const parent = makeIssue({ id: "DX-600", type: "Epic", children: ["DX-601", "DX-602"] });
-    const destList = makeList({ id: "L-cancelled", name: "Cancelled", type: "cancelled" });
-    const w = mountDialog({ parent, destList, descendants, defaults });
-    await flushPromises();
-    expect(w.find('[data-test="cascade-unblock-banner"]').exists()).toBe(true);
-    // Confirm button initially disabled (toggle not flipped).
-    const confirmBtn = w.find('[data-test="stub-dialog-confirm"]')
-      .element as HTMLButtonElement;
-    expect(confirmBtn.hasAttribute("disabled")).toBe(true);
-    // Flip toggle on → confirm enabled.
-    await w.find('[data-test="cascade-unblock-toggle"]').setValue(true);
-    await flushPromises();
-    expect(
-      (w.find('[data-test="stub-dialog-confirm"]').element as HTMLButtonElement)
-        .hasAttribute("disabled"),
-    ).toBe(false);
-    // Submit → payload's unblockConfirmed === true.
-    await w.find('[data-test="stub-dialog-confirm"]').trigger("click");
-    const payload = w.emitted("confirm")![0][0] as { unblockConfirmed: boolean };
-    expect(payload.unblockConfirmed).toBe(true);
-  });
-
-  it("renders blocked-reason textarea when destList.type === blocked; gates submit on non-empty reason", async () => {
-    const descendants = [makeIssue({ id: "DX-701", parent_id: "DX-700" })];
-    const parent = makeIssue({ id: "DX-700", type: "Epic", children: ["DX-701"] });
-    const destList = makeList({ id: "L-blocked", name: "Blocked", type: "blocked" });
-    const defaults: Record<string, CascadeAction> = {
-      "DX-701": { kind: "stay" },
-    };
-    const w = mountDialog({ parent, destList, descendants, defaults });
-    await flushPromises();
-    expect(w.find('[data-test="cascade-blocked-reason-banner"]').exists()).toBe(true);
-    // Confirm gated on empty reason.
-    expect(
-      (w.find('[data-test="stub-dialog-confirm"]').element as HTMLButtonElement)
-        .hasAttribute("disabled"),
-    ).toBe(true);
-    // Fill reason → enabled.
-    await w.find('[data-test="cascade-blocked-reason"]').setValue("Operator request");
-    await flushPromises();
-    expect(
-      (w.find('[data-test="stub-dialog-confirm"]').element as HTMLButtonElement)
-        .hasAttribute("disabled"),
-    ).toBe(false);
-    await w.find('[data-test="stub-dialog-confirm"]').trigger("click");
-    const payload = w.emitted("confirm")![0][0] as { blockedReason?: string };
-    expect(payload.blockedReason).toBe("Operator request");
-  });
-
   it("Cancel button emits @cancel and does NOT emit @confirm", async () => {
     const w = mountDialog();
     await flushPromises();
@@ -417,17 +351,13 @@ describe("EpicMoveCascadeDialog", () => {
     expect(w.emitted("confirm")).toBeFalsy();
   });
 
-  it("Confirm with default selections emits payload with empty overrides + unblockConfirmed false", async () => {
+  it("Confirm with default selections emits payload with empty overrides", async () => {
     const w = mountDialog();
     await flushPromises();
     await w.find('[data-test="stub-dialog-confirm"]').trigger("click");
     const payload = w.emitted("confirm")![0][0] as {
       overrides: Record<string, CascadeAction>;
-      unblockConfirmed: boolean;
-      blockedReason?: string;
     };
     expect(payload.overrides).toEqual({});
-    expect(payload.unblockConfirmed).toBe(false);
-    expect(payload.blockedReason).toBeUndefined();
   });
 });

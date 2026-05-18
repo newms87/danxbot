@@ -40,10 +40,13 @@ import type {
  * `assigned_agent` there is almost certainly leftover triage residue, not
  * active work. Mirrors pre-extraction logic in `issues-reader.ts`.
  */
+// DX-658 / Phase 2 — `"Blocked"` is no longer an `IssueStatus`. A
+// self-blocked card retains its semantic column (typically In
+// Progress or ToDo); the assignment rollup catches it through those
+// entries. The picker treats the `blocked` gate orthogonally.
 const ASSIGNABLE_STATUSES = new Set<IssueStatus>([
   "ToDo",
   "In Progress",
-  "Blocked",
 ]);
 
 function collectChildAssignments(
