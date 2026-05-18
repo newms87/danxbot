@@ -120,8 +120,10 @@ export function runCanonicalHash(
  * Run the JSON.stringify task in the pool. Input is any serializable
  * value; output is the stringified payload. Used (indirectly via
  * `recordError` in `src/system-repair/categorize.ts`) by the audit-
- * error reporting chain in `src/cron/audit-pass.ts` +
- * `src/issue/reconcile.ts`, where the `SystemErrorSamplePayload` can
+ * error reporting chain in `src/db/issues-mirror.ts`'s sweep-reconcile
+ * path (`periodicReconcile`, DX-642 Phase 4 — replaces the retired
+ * `src/cron/audit-pass.ts`) and `src/issue/reconcile.ts`, where the
+ * `SystemErrorSamplePayload` can
  * grow large (5-frame stack + raw_msg + caller-supplied context).
  *
  * REJECTS `value === undefined` fail-loud — `JSON.stringify(undefined)`

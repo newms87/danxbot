@@ -323,11 +323,14 @@ export interface HealOrphanInvariantResult {
  *
  * DX-641 Phase 3 folded the per-card invocation into `reconcileIssue`
  * sub-step 3d, and DX-663 retired the bulk per-tick + boot wrappers
- * in favor of the audit-pass per-card walk
- * (`src/cron/sync-and-audit.ts` → `runAuditPass` →
- * `reconcileIssue(card, "audit")`). This function remains as the pure
- * tested-in-isolation primitive — same logic, kept here so the
- * audit-pass fold doesn't lose dedicated coverage.
+ * in favor of the audit-pass per-card walk. DX-642 Phase 4 then folded
+ * the audit-pass entry point INTO the issues-mirror's `periodicReconcile`
+ * (`src/db/issues-mirror.ts`) — the per-minute sweep walks every open
+ * YAML, mirrors it to the DB, and fires
+ * `onReconcile(id, "audit")` → `reconcileIssue(card, "audit")`. This
+ * function remains as the pure tested-in-isolation primitive — same
+ * logic, kept here so the audit-pass fold doesn't lose dedicated
+ * coverage.
  *
  * Idempotent: `clearDispatchAndWrite` short-circuits when dispatch is
  * already null. Tracker-independent. Tolerates malformed YAMLs.
@@ -366,9 +369,10 @@ export async function healOrphanInvariantViolations(
     // DX-658 / Phase 2 — the `blocked-with-assignment` branch
     // (`status === "Blocked" + assigned_agent != null`) is retired.
     // Reconcile sub-step 3e enforces the field-keyed invariant
-    // (`blocked != null` ⇒ `assigned_agent: null`) on every audit-pass
-    // reconcile, so this per-tick scan only needs to cover the
-    // dead-dispatch orphan case below.
+    // (`blocked != null` ⇒ `assigned_agent: null`) on every sweep
+    // reconcile (DX-642 Phase 4 — fired from the issues-mirror's
+    // `periodicReconcile`), so this per-tick scan only needs to cover
+    // the dead-dispatch orphan case below.
     if (issue.dispatch === null) continue;
 
     const verdict = checkYamlDispatchLiveness(issue.dispatch, livenessDeps);

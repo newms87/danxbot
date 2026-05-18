@@ -5,7 +5,7 @@
  * BEFORE `writeFileSync`, so the DB row is consistent the moment
  * `writeIssue` resolves. The chokidar watcher is a backstop: its later
  * event finds the hash already matches and runs the skip-match branch
- * (which still fires `onWatcherUpsert` so reconcile fanout happens
+ * (which still fires `onReconcile` so reconcile fanout happens
  * exactly once per writer save).
  *
  * Behaviors pinned here:

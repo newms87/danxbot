@@ -497,11 +497,15 @@ async function startWorkerMode(): Promise<void> {
     {
       pool: getPool(),
       ...(reconcileIntervalMs !== undefined && { reconcileIntervalMs }),
-      // Phase 1 of Event-Driven Worker (DX-216) — reconcile fires after
-      // every watcher upsert. Phase 1 body is a no-op chokepoint; later
-      // phases activate derived-state computation, tracker push, and
-      // scheduler poke.
-      onWatcherUpsert: (id) =>
+      // Phase 1 of Event-Driven Worker (DX-216) wired reconcile to
+      // fire after every chokidar watcher upsert. DX-642 Phase 4
+      // extended the same callback to ALSO fire from the mirror's
+      // periodic sweep (source "audit"), so cards without chokidar
+      // traffic finally get the heal pipeline. The mirror collects
+      // each reconcile's ReconcileResult to compute per-sweep metrics
+      // + drift accounting (recordSystemError({source:
+      // "audit-drift"})), so the consumer MUST return the result here.
+      onReconcile: (id, source) =>
         reconcileIssue(
           {
             name: repo.name,
@@ -509,8 +513,8 @@ async function startWorkerMode(): Promise<void> {
             issuePrefix: repo.issuePrefix,
           },
           id,
-          "watcher",
-        ).then(() => undefined),
+          source,
+        ),
     },
   );
   log.debug(`[${repo.name}] Issues mirror started`);

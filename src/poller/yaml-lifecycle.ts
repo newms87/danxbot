@@ -163,7 +163,7 @@ export function setWriteIssueReconcileHook(
  *      (dispatched agents, dashboard reload, periodic reconcile). The
  *      DB row already reflects the new content, so chokidar's later
  *      event finds the hash matches and skips a duplicate upsert; its
- *      `onWatcherUpsert` callback still fires so reconcile fans out as
+ *      `onReconcile` callback still fires so reconcile fans out as
  *      normal.
  *
  * Returns a Promise that resolves once both the DB commit AND the file

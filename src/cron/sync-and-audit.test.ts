@@ -511,15 +511,11 @@ vi.mock("../worker/sync-root.js", () => ({
   syncRepoRoot: (...args: unknown[]) => mockSyncRepoRoot(...args),
 }));
 
-// DX-368: mock runAuditPass so the ordering + audit-throws tests can
-// drive specific scenarios without the real reconcile pass touching
-// the (mocked) filesystem. Default = clean tick (no drift, no errors).
-const mockRunAuditPass = vi
-  .fn()
-  .mockResolvedValue({ scanned: 0, drifted: [], errors: [] });
-vi.mock("./audit-pass.js", () => ({
-  runAuditPass: (...args: unknown[]) => mockRunAuditPass(...args),
-}));
+// DX-642 Phase 4 retired `runAuditPass` — the per-tick reconcile sweep
+// folded into `periodicReconcile` in `src/db/issues-mirror.ts`. The
+// ordering invariant (picker fires LAST) now pins against
+// `runOrphanInProgressHeal`, which is the last local-only stage inside
+// `_sync` before the picker. See the picker-safety-net describe block.
 
 // Shared logger instance so tests can spy on log.error (e.g. crash-isolation
 // tests assert the top-level catch fires exactly once). Created via
@@ -2293,15 +2289,17 @@ describe("poll — runSync crash isolation (DX-149)", () => {
 
   it("survives an early-runSync throw from runOrphanInProgressHeal (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
     // Reviewer-recommended representative test for the deeper-in-runSync
-    // throw paths the wrap covers (runOrphanInProgressHeal, runAuditPass;
+    // throw paths the wrap covers (runOrphanInProgressHeal;
     // reapOrphans has its own inner try/catch and never reaches the
     // outer wrap). Pins the contract that the catch covers the WHOLE
     // body, not just the tracker subset.
     //
     // `runOrphanInProgressHeal` is a representative local-only stage
     // that reaches the outer catch directly. DX-663 retired the prior
-    // `runInvariantHeal` stage (folded into the audit-pass per-card
-    // reconcile walk).
+    // `runInvariantHeal` stage (folded into reconcile sub-step 3d via
+    // the per-card walk). DX-642 Phase 4 then retired the standalone
+    // `runAuditPass` (folded into the issues-mirror's sweep) — so
+    // `runOrphanInProgressHeal` is the remaining representative.
     mockRunOrphanInProgressHeal.mockRejectedValueOnce(
       new Error("disk full during invariant heal pass"),
     );
@@ -2927,27 +2925,35 @@ describe("poll — DX-368 cron-tick picker safety net", () => {
     expect(mockFirePickerWithMutex).toHaveBeenCalledTimes(2);
   });
 
-  it("picker fires AFTER runAuditPass (ordering invariant)", async () => {
-    // The card description: "AFTER the audit-pass + reconcile sweep
-    // completes." Pin the relative call order so a refactor that
+  it("picker fires AFTER runOrphanInProgressHeal (ordering invariant)", async () => {
+    // Pre-DX-642 the ordering pin was against `runAuditPass`. DX-642
+    // Phase 4 retired that stage (folded into the issues-mirror's
+    // periodicReconcile). The closest equivalent inside `_sync` is
+    // `runOrphanInProgressHeal` — the last local-only stage before
+    // the picker. Pin the relative call order so a refactor that
     // re-orders the steps doesn't silently let the picker observe
     // stale dispatchable state. `invocationCallOrder` is monotonic
     // across all vi.fn calls within a test.
     await poll(MOCK_REPO_CONTEXT);
-    const auditOrder = mockRunAuditPass.mock.invocationCallOrder[0];
+    const healOrder =
+      mockRunOrphanInProgressHeal.mock.invocationCallOrder[0];
     const pickerOrder = mockFirePickerWithMutex.mock.invocationCallOrder[0];
-    expect(auditOrder).toBeDefined();
+    expect(healOrder).toBeDefined();
     expect(pickerOrder).toBeDefined();
-    expect(auditOrder).toBeLessThan(pickerOrder!);
+    expect(healOrder).toBeLessThan(pickerOrder!);
   });
 
-  it("does NOT fire the picker when runAuditPass throws (caught by _sync's outer guard)", async () => {
-    // The picker call is sequenced AFTER `await runAuditPass(repo)`,
-    // both inside the same outer try/catch. If audit-pass rejects, the
-    // catch fires before the picker line is reached. A refactor that
-    // wraps audit-pass in its own try/catch (so _sync continues past)
-    // would silently break this — the test pins the current contract.
-    mockRunAuditPass.mockRejectedValueOnce(new Error("audit boom"));
+  it("does NOT fire the picker when runOrphanInProgressHeal throws (caught by _sync's outer guard)", async () => {
+    // The picker call is sequenced AFTER `await runOrphanInProgressHeal(...)`,
+    // both inside the same outer try/catch. If a local-only stage rejects,
+    // the catch fires before the picker line is reached. A refactor that
+    // wraps the heal in its own try/catch (so _sync continues past) would
+    // silently break this — the test pins the current contract. The
+    // pre-DX-642 version of this test pinned the same shape against
+    // `runAuditPass` (since retired).
+    mockRunOrphanInProgressHeal.mockRejectedValueOnce(
+      new Error("heal boom"),
+    );
 
     await expect(poll(MOCK_REPO_CONTEXT)).resolves.toBeUndefined();
 

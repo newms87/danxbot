@@ -22,6 +22,7 @@ import {
 } from "./issues-mirror.js";
 import { canonicalize, sha256 } from "./canonicalize.js";
 import { flagPath, readFlag } from "../critical-failure.js";
+import type { ReconcileResult } from "../issue/reconcile-types.js";
 
 interface DbStateRow {
   data: Record<string, unknown>;
@@ -569,19 +570,23 @@ describe("issues-mirror — public-API contract", () => {
   });
 });
 
-describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
-  it("invokes onWatcherUpsert exactly once per watcher add event AFTER the upsert", async () => {
+describe("issues-mirror — onReconcile (DX-216 + DX-642)", () => {
+  it("invokes onReconcile exactly once per watcher add event AFTER the upsert", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
-    const calls: Array<{ id: string; rowsAtCallTime: number }> = [];
+    const calls: Array<{
+      id: string;
+      source: "watcher" | "audit";
+      rowsAtCallTime: number;
+    }> = [];
     const mirror = await startIssuesMirror(repo, {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async (id) => {
+      onReconcile: async (id, source) => {
         // Capture the DB state at callback time so we can assert the
         // upsert ran first (the precondition the wiring guarantees).
-        calls.push({ id, rowsAtCallTime: db.rows.size });
+        calls.push({ id, source, rowsAtCallTime: db.rows.size });
       },
     });
     try {
@@ -592,14 +597,16 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
         SAMPLE_YAML("DX-300"),
       );
       await mirror.simulateWatcherEvent({ event: "add", path });
-      expect(calls).toEqual([{ id: "DX-300", rowsAtCallTime: 1 }]);
+      expect(calls).toEqual([
+        { id: "DX-300", source: "watcher", rowsAtCallTime: 1 },
+      ]);
     } finally {
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });
     }
   });
 
-  it("invokes onWatcherUpsert even when content is unchanged (no upsert this tick)", async () => {
+  it("invokes onReconcile even when content is unchanged (no upsert this tick)", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
     const calls: string[] = [];
@@ -607,7 +614,7 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async (id) => {
+      onReconcile: async (id) => {
         calls.push(id);
       },
     });
@@ -634,33 +641,36 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
     }
   });
 
-  it("does NOT invoke onWatcherUpsert for boot-scan or reconcile sources", async () => {
+  it("DX-642: fires onReconcile with source='audit' for the periodic sweep", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
-    const calls: string[] = [];
-    // Pre-populate disk; boot scan must NOT fire reconcile.
+    const calls: Array<{ id: string; source: "watcher" | "audit" }> = [];
+    // Pre-populate disk so the periodic sweep has a card to walk.
     writeYaml(repo.localPath, "open", "DX-302", SAMPLE_YAML("DX-302"));
     const mirror = await startIssuesMirror(repo, {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async (id) => {
-        calls.push(id);
+      onReconcile: async (id, source) => {
+        calls.push({ id, source });
       },
     });
     try {
-      // Boot scan ran during startIssuesMirror and shouldn't have invoked.
+      // Boot scan ran during startIssuesMirror and must NOT fire reconcile
+      // — boot defers to the first sweep tick to avoid 100+ reconciles
+      // before the worker is otherwise ready.
       expect(calls).toEqual([]);
+      // The periodic sweep MUST now fire reconcile per id (was the
+      // pre-DX-642 gap — cards without chokidar traffic were skipped).
       await mirror.reconcileNow();
-      // reconcileNow source is "reconcile" — also no invocation.
-      expect(calls).toEqual([]);
+      expect(calls).toEqual([{ id: "DX-302", source: "audit" }]);
     } finally {
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });
     }
   });
 
-  it("does NOT invoke onWatcherUpsert for unlink events (Phase 1 scope)", async () => {
+  it("does NOT invoke onReconcile for unlink events (Phase 1 scope)", async () => {
     const repo = makeRepo();
     const db = createFakeDb();
     const calls: string[] = [];
@@ -668,7 +678,7 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async (id) => {
+      onReconcile: async (id) => {
         calls.push(id);
       },
     });
@@ -703,7 +713,7 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async (id) => {
+      onReconcile: async (id) => {
         throw new Error(`Issue validation failed for ${id}`);
       },
     });
@@ -742,7 +752,7 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
       db,
       disableWatcher: true,
       reconcileIntervalMs: 0,
-      onWatcherUpsert: async () => {
+      onReconcile: async () => {
         throw new Error("boom");
       },
     });
@@ -780,6 +790,216 @@ describe("issues-mirror — onWatcherUpsert (DX-216)", () => {
       await mirror.simulateWatcherEvent({ event: "add", path: path2 });
       expect(db.rows.has(rowKey("test-repo", "DX-305"))).toBe(true);
     } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("issues-mirror — periodic sweep drift + metrics (DX-642 Phase 4)", () => {
+  it("records audit-drift system error when sweep reconcile rewrites a YAML", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const { listSystemErrors, _clearSystemErrors } = await import(
+      "../dashboard/system-errors.js"
+    );
+    _clearSystemErrors();
+    writeYaml(repo.localPath, "open", "DX-700", SAMPLE_YAML("DX-700"));
+    writeYaml(repo.localPath, "open", "DX-701", SAMPLE_YAML("DX-701"));
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onReconcile: async (id) =>
+        id === "DX-700"
+          ? // Drifted card — reconcile rewrote the YAML on disk.
+            {
+              changed: true,
+              prevHash: "abc",
+              nextHash: "def",
+              errors: [],
+              fanout: { parentId: null, dependents: [], dispatchableChanged: false },
+            }
+          : // Idempotent — common case, no drift.
+            {
+              changed: false,
+              prevHash: "xyz",
+              nextHash: "xyz",
+              errors: [],
+              fanout: { parentId: null, dependents: [], dispatchableChanged: false },
+            },
+    });
+    try {
+      await mirror.reconcileNow();
+      const drifts = listSystemErrors({ repo: "test-repo" }).filter(
+        (e) => e.source === "audit-drift",
+      );
+      expect(drifts).toHaveLength(1);
+      expect(drifts[0]!.message).toContain("DX-700");
+      expect(drifts[0]!.severity).toBe("warn");
+      expect(drifts[0]!.details).toMatchObject({
+        prevHash: "abc",
+        nextHash: "def",
+      });
+    } finally {
+      _clearSystemErrors();
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a per-sweep INFO summary with seen / skipped / drifted counts", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const logSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    writeYaml(repo.localPath, "open", "DX-710", SAMPLE_YAML("DX-710"));
+    writeYaml(repo.localPath, "open", "DX-711", SAMPLE_YAML("DX-711"));
+    writeYaml(repo.localPath, "open", "DX-712", SAMPLE_YAML("DX-712"));
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onReconcile: async (id) => ({
+        changed: id === "DX-710",
+        prevHash: "a",
+        nextHash: id === "DX-710" ? "b" : "a",
+        errors: [],
+        fanout: { parentId: null, dependents: [], dispatchableChanged: false },
+      }),
+    });
+    try {
+      await mirror.reconcileNow();
+      const summary = logSpy.mock.calls
+        .map((c) => String(c[0] ?? ""))
+        .find((line) => line.includes("sweep reconcile:"));
+      expect(summary, "expected per-sweep INFO summary line").toBeDefined();
+      // Pin the full format so a regression that drops `errored=`, the
+      // `(X%)` skip-rate, or the `— drift:` prefix trips immediately.
+      expect(summary).toMatch(
+        /sweep reconcile: seen=3 skipped=2 \(67%\) drifted=1 errored=0/,
+      );
+      expect(summary).toContain("— drift: DX-710");
+    } finally {
+      const { _clearSystemErrors } = await import(
+        "../dashboard/system-errors.js"
+      );
+      _clearSystemErrors();
+      logSpy.mockRestore();
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("callback returning void counts cardsSeen but neither skipped nor drifted", async () => {
+    // Defense against a refactor that treats `undefined` reconcile
+    // results as "skipped" (would falsely report 100% skip rate even
+    // when the consumer wasn't wired). The `if (!result) continue`
+    // branch must keep the void case out of both buckets.
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const logSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    writeYaml(repo.localPath, "open", "DX-720", SAMPLE_YAML("DX-720"));
+    writeYaml(repo.localPath, "open", "DX-721", SAMPLE_YAML("DX-721"));
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onReconcile: async () => {
+        // Legacy void return — consumer not wired for drift accounting.
+      },
+    });
+    try {
+      await mirror.reconcileNow();
+      const summary = logSpy.mock.calls
+        .map((c) => String(c[0] ?? ""))
+        .find((line) => line.includes("sweep reconcile:"));
+      expect(summary).toBeDefined();
+      expect(summary).toMatch(
+        /sweep reconcile: seen=2 skipped=0 \(0%\) drifted=0 errored=0/,
+      );
+      expect(summary).not.toContain("— drift:");
+    } finally {
+      logSpy.mockRestore();
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("recordSystemError throw does NOT take down the sweep (defense-in-depth)", async () => {
+    // Same defense the watcher path's `fireReconcile` carries: even if
+    // the audit-drift recorder itself errors, the sweep continues to
+    // the next card. Without this catch, a single bad record call
+    // would mask all subsequent cards' drift signals on that tick.
+    const repo = makeRepo();
+    const db = createFakeDb();
+    writeYaml(repo.localPath, "open", "DX-730", SAMPLE_YAML("DX-730"));
+    writeYaml(repo.localPath, "open", "DX-731", SAMPLE_YAML("DX-731"));
+    const systemErrors = await import("../dashboard/system-errors.js");
+    const recordSpy = vi
+      .spyOn(systemErrors, "recordSystemError")
+      .mockImplementationOnce(() => {
+        throw new Error("recorder boom");
+      });
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onReconcile: async () => {
+        // Both cards report drift — second call exercises the
+        // "after recorder threw, sweep still iterates" path.
+        const drift: ReconcileResult = {
+          changed: true,
+          prevHash: "x",
+          nextHash: "y",
+          errors: [],
+          fanout: { parentId: null, dependents: [], dispatchableChanged: false },
+        };
+        return drift;
+      },
+    });
+    try {
+      await expect(mirror.reconcileNow()).resolves.toBeUndefined();
+      // Recorder was attempted for BOTH cards even though the first
+      // call threw — proves the sweep walked past the throw.
+      expect(recordSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      recordSpy.mockRestore();
+      systemErrors._clearSystemErrors();
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
+
+  it("emits no INFO summary when the open dir is empty (no false positives)", async () => {
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const logSpy = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      onReconcile: async () => ({
+        changed: false,
+        prevHash: "x",
+        nextHash: "x",
+        errors: [],
+        fanout: { parentId: null, dependents: [], dispatchableChanged: false },
+      }),
+    });
+    try {
+      await mirror.reconcileNow();
+      const summary = logSpy.mock.calls
+        .map((c) => String(c[0] ?? ""))
+        .find((line) => line.includes("sweep reconcile:"));
+      expect(summary).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
       await mirror.stop();
       rmSync(repo.tmpdir, { recursive: true, force: true });
     }

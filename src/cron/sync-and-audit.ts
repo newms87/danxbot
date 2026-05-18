@@ -27,11 +27,10 @@
  *   4. `runInboundFetch` — Trello inbound: Needs Help comment scan +
  *      `tracker.fetchOpenCards` + bulk hydrate missing YAMLs. Gated
  *      on `trelloSync` per-repo toggle (DX-302).
- *   5. `runAuditPass` — for each open YAML: `reconcileIssue(card,
- *      "audit")`. Drift surfaces as `recordSystemError({source:
- *      "audit-drift"})` so the dashboard banner counts divergence.
- *      Sub-steps 3a (parent-derive), 3d (orphan-dispatch heal), and 3e
- *      (blocked-with-assignment shape) all run per-card here.
+ *   5. [retired DX-642] The per-tick audit reconcile sweep folded INTO
+ *      `periodicReconcile` in `src/db/issues-mirror.ts` — one timer
+ *      owns "walk open YAMLs + mirror to DB + fire reconcile per id".
+ *      Drift + metrics surface inside the mirror.
  *   6. `firePickerWithMutex(repo.name)` — DX-368 convergence safety
  *      net. Fires the picker unconditionally after audit-pass so a
  *      dropped event-driven poke (reconcile / roster / dispatch
@@ -66,7 +65,6 @@ import {
 } from "../agent/agent-locks.js";
 import { readAgents } from "../settings-file.js";
 import { syncRepoFiles } from "../inject/sync.js";
-import { runAuditPass } from "./audit-pass.js";
 import { runInboundFetch } from "./inbound-fetch.js";
 import { firePickerWithMutex } from "../dispatch/scheduler.js";
 import { hasRepoRootSyncError, syncRepoRoot } from "../worker/sync-root.js";
@@ -338,18 +336,18 @@ async function _sync(repo: RepoContext): Promise<void> {
       readAgents,
     });
 
-    // Phase 5 (DX-220) — audit reconcile pass over every open YAML.
-    // Calls `reconcileIssue(card, "audit")` and records drift via
-    // `recordSystemError({source: "audit-drift"})` when the audit
-    // body rewrote the file. The chokidar mirror + per-event
-    // reconcile are the primary path for state convergence; this
-    // audit pass is the safety net for any missed event.
-    const audit = await runAuditPass(repo);
-    if (audit.drifted.length > 0) {
-      log.warn(
-        `[${repo.name}] audit pass: ${audit.drifted.length} drift / ${audit.errors.length} errors / ${audit.scanned} scanned`,
-      );
-    }
+    // Audit reconcile pass — DX-642 Phase 4 folded this INTO the
+    // issues-mirror's periodic sweep (`periodicReconcile` in
+    // `src/db/issues-mirror.ts`). The mirror's timer (default 60s, same
+    // cadence as this cron) walks every open YAML, calls
+    // `mirrorOne(path, "reconcile")` which fires the consumer's
+    // `onReconcile(id, "audit")` callback — wired to
+    // `reconcileIssue(repo, id, "audit")` in `src/index.ts`. Drift +
+    // metrics surface inside the mirror via `recordSystemError({source:
+    // "audit-drift"})` + a per-sweep INFO log. Two separate sweep
+    // timers (the retired `runAuditPass` here + the mirror's
+    // `periodicReconcile`) would have double-reconciled every open
+    // card every minute; folding into one owner closes that.
 
     // DX-558 — root-clone sync retry. The post-dispatch hook runs
     // `syncRepoRoot` after every terminal dispatch. This per-tick

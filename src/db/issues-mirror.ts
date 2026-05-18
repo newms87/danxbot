@@ -54,6 +54,7 @@ import {
   bumpEnvGen,
   graphFieldsChanged,
 } from "../issue/env-generation.js";
+import type { ReconcileResult } from "../issue/reconcile-types.js";
 
 const log = createLogger("issues-mirror");
 
@@ -136,21 +137,46 @@ export interface StartIssuesMirrorOptions {
    */
   disableWatcher?: boolean;
   /**
-   * Called once per watcher-sourced filesystem event (`add` / `change`),
-   * AFTER the DB row reflects the new content. Phase 1 of the
-   * Event-Driven Worker epic (DX-215 / DX-216) wires this to
-   * `reconcileIssue(repo, id, "watcher")`. Invoked even when the upsert
-   * was a no-op (content unchanged), so every fs event reaches reconcile;
-   * the precondition the parenthetical hand-off makes is "the DB row is
-   * in place," not "an upsert ran on this tick".
+   * Called once per chokidar filesystem event AND once per periodic
+   * reconcile sweep tick, AFTER the DB row reflects the disk content.
    *
-   * Errors thrown from the callback are caught + logged here and routed
-   * through `recordSystemError({source: "reconcile"})` so a reconcile
-   * crash never kills the watcher. Callers MUST NOT silently swallow
-   * errors inside the callback — surfacing failures is the entire
-   * reason the wiring point catches.
+   * Source semantics (mapped from the mirror's internal `EventSource`):
+   *   - `"watcher"` — fired for chokidar `add` / `change` events. Phase 1
+   *     of the Event-Driven Worker epic (DX-215 / DX-216) wires this
+   *     into `reconcileIssue(repo, id, "watcher")`.
+   *   - `"audit"` — fired for the periodic `reconcileIntervalMs` sweep
+   *     (DX-642 Phase 4). The mirror walks every open YAML, mirrors
+   *     each into the DB via `mirrorOne`, then invokes this callback
+   *     so the consumer can run `reconcileIssue(repo, id, "audit")`.
+   *     Drift (`changed: true` in the returned `ReconcileResult`) is
+   *     recorded by the mirror itself via `recordSystemError({source:
+   *     "audit-drift"})` and surfaced in the per-sweep metrics log.
+   *
+   * Invoked even when the mirror upsert was a no-op (content unchanged),
+   * so every fs event AND every sweep tick reaches reconcile; the
+   * precondition the parenthetical hand-off makes is "the DB row is in
+   * place," not "an upsert ran on this tick".
+   *
+   * **NOT invoked** for `"boot-scan"` sources (the first cron sweep
+   * after boot runs the audit pass on the entire open dir) nor for
+   * `unlink` events (Phase 1 contract — tombstone fanout is the
+   * parent-recursion path's job, not the watcher's).
+   *
+   * Return value: the consumer SHOULD return the `ReconcileResult` so
+   * the mirror can compute drift + per-sweep metrics. Returning
+   * `undefined` is allowed (legacy callers, error swallow upstream)
+   * but disables drift accounting for that invocation.
+   *
+   * Errors thrown from the callback are caught + logged here and
+   * routed through `recordSystemError({source: "reconcile"})` so a
+   * reconcile crash never kills the watcher or the sweep. Callers
+   * MUST NOT silently swallow errors inside the callback — surfacing
+   * failures is the entire reason the wiring point catches.
    */
-  onWatcherUpsert?: (id: string) => Promise<void>;
+  onReconcile?: (
+    id: string,
+    source: "watcher" | "audit",
+  ) => Promise<ReconcileResult | void>;
   /**
    * Override chokidar's `awaitWriteFinish` debounce. Production callers
    * MUST omit — `DEFAULT_AWAIT_WRITE_FINISH` (5s threshold) smooths the
@@ -705,11 +731,21 @@ export async function startIssuesMirror(
    * cost to offload and the postMessage roundtrip would only add
    * latency.
    */
+  /** Result row produced by `mirrorOne` — used by `periodicReconcile`
+   * to compute per-sweep metrics + drift accounting. The `reconcile`
+   * field is undefined when the consumer's callback did not return one
+   * (legacy wiring, error swallow), or when the source is not eligible
+   * to fire reconcile (boot-scan). */
+  interface MirrorOneResult {
+    id: string;
+    reconcile: ReconcileResult | void;
+  }
+
   async function mirrorOne(
     path: string,
     source: EventSource,
     opts: { usePool?: boolean } = {},
-  ): Promise<string | null> {
+  ): Promise<MirrorOneResult | null> {
     const parsed = opts.usePool
       ? await readAndParseViaPool(path, repoName)
       : readAndParse(path, repoName);
@@ -760,8 +796,8 @@ export async function startIssuesMirror(
       // The DB row is in place (from a prior tick). The fs event still
       // reached us, so reconcile MUST fire — its fanout is independent
       // of whether THIS tick wrote a row.
-      await fireOnWatcherUpsert(parsed.id, source);
-      return parsed.id;
+      const reconcile = await fireReconcile(parsed.id, source);
+      return { id: parsed.id, reconcile };
     }
     try {
       await withRetry(() =>
@@ -793,25 +829,42 @@ export async function startIssuesMirror(
         `${source}:${parsed.id} children/parent_id mutated`,
       );
     }
-    await fireOnWatcherUpsert(parsed.id, source);
-    return parsed.id;
+    const reconcile = await fireReconcile(parsed.id, source);
+    return { id: parsed.id, reconcile };
   }
 
   /**
-   * Phase 1 of the Event-Driven Worker epic (DX-215 / DX-216): notify the
-   * reconcile chokepoint that a watcher-sourced filesystem event landed
-   * for `id`. Boot-scan / reconcile / unlink sources do NOT fire — Phase 1
-   * only wires the live watcher path. Errors are routed through
-   * `recordSystemError` so a reconcile crash cannot kill the watcher.
+   * Notify the reconcile chokepoint that a mirror event landed for `id`.
+   *
+   * Phase 1 of the Event-Driven Worker epic (DX-215 / DX-216) wired the
+   * `watcher` source. DX-642 Phase 4 added the `reconcile` source so
+   * the per-minute sweep ALSO fires reconcile (mapped to `"audit"` for
+   * the consumer) — without this, cards without chokidar traffic
+   * never received the heal pipeline.
+   *
+   * Source mapping (mirror → consumer):
+   *   - `watcher` → `"watcher"`
+   *   - `reconcile` → `"audit"`
+   *   - `boot-scan`, `writer` → skipped (boot scan defers to the
+   *     first sweep tick; writer events fold back through the
+   *     watcher's later skip-match fire to keep reconcile-exactly-once
+   *     per logical mutation).
+   *
+   * Errors are routed through `recordSystemError({source:
+   * "reconcile"})` so a reconcile crash cannot kill the watcher or
+   * the sweep. Returns the consumer's `ReconcileResult` (or `undefined`
+   * when the callback returned void / was not invoked / threw) so
+   * callers can drive drift accounting + metrics off the result.
    */
-  async function fireOnWatcherUpsert(
+  async function fireReconcile(
     id: string,
     source: EventSource,
-  ): Promise<void> {
-    if (source !== "watcher") return;
-    if (!options.onWatcherUpsert) return;
+  ): Promise<ReconcileResult | void> {
+    const consumerSource = mapToConsumerSource(source);
+    if (consumerSource === null) return;
+    if (!options.onReconcile) return;
     try {
-      await options.onWatcherUpsert(id);
+      return await options.onReconcile(id, consumerSource);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       log.error(
@@ -833,7 +886,16 @@ export async function startIssuesMirror(
           recordErr,
         );
       }
+      return;
     }
+  }
+
+  function mapToConsumerSource(
+    source: EventSource,
+  ): "watcher" | "audit" | null {
+    if (source === "watcher") return "watcher";
+    if (source === "reconcile") return "audit";
+    return null;
   }
 
   /**
@@ -936,7 +998,7 @@ export async function startIssuesMirror(
     );
     for (const entry of settled) {
       if (entry.status === "fulfilled" && entry.value !== null) {
-        seenIds.add(entry.value);
+        seenIds.add(entry.value.id);
       }
     }
     // Tombstone DB rows whose YAML disappeared during the scan window.
@@ -970,11 +1032,86 @@ export async function startIssuesMirror(
     // open/ (not closed/), so the same-id race window is narrower,
     // but `mirrorOne` per id still owns a select+upsert sequence that
     // is safer under sequential cadence.
-    await runWithYields(
+    //
+    // DX-642 Phase 4 — the sweep now fires reconcile per id (via
+    // `mirrorOne` → `fireReconcile` with source "audit") and collects
+    // the ReconcileResult so we can:
+    //   - Record `audit-drift` system errors when reconcile rewrote a
+    //     YAML during the sweep (= chokidar missed an event OR a code
+    //     path wrote without going through reconcile).
+    //   - Emit a one-line INFO summary with cardsSeen / cardsSkipped /
+    //     cardsReconciled / cardsDrifted so operators can confirm
+    //     idempotency (skipped should be ~100% in steady state).
+    const settled = await runWithYields(
       paths,
       (path) => mirrorOne(path, "reconcile", { usePool: true }),
       { concurrency: 1 },
     );
+
+    let cardsSeen = 0;
+    let cardsSkipped = 0;
+    let cardsReconciled = 0;
+    let cardsDrifted = 0;
+    let cardsErrored = 0;
+    const driftedIds: string[] = [];
+
+    for (const entry of settled) {
+      if (entry.status === "rejected") {
+        cardsErrored += 1;
+        continue;
+      }
+      if (entry.value === null) continue;
+      cardsSeen += 1;
+      const result = entry.value.reconcile;
+      if (!result) {
+        // Callback returned void / not wired / errored upstream (already
+        // routed through recordSystemError). No drift accounting.
+        continue;
+      }
+      if (result.changed) {
+        cardsReconciled += 1;
+        cardsDrifted += 1;
+        driftedIds.push(entry.value.id);
+        try {
+          recordSystemError({
+            source: "audit-drift",
+            severity: "warn",
+            repo: repoName,
+            message: `Sweep reconcile rewrote ${entry.value.id} — drift detected (the chokidar event for the prior write was likely missed)`,
+            details: {
+              prevHash: result.prevHash,
+              nextHash: result.nextHash,
+              errors: result.errors.map((e) => ({
+                step: e.step,
+                message: e.message,
+                fatal: e.fatal,
+              })),
+            },
+          });
+        } catch (recordErr) {
+          // Defense in depth: the recording path must not throw past
+          // the sweep tick.
+          log.error(
+            `[${repoName}] recordSystemError(audit-drift) failed for ${entry.value.id}`,
+            recordErr,
+          );
+        }
+      } else {
+        cardsSkipped += 1;
+      }
+    }
+
+    if (cardsSeen > 0 || cardsErrored > 0) {
+      const skipRate =
+        cardsSeen > 0
+          ? `${Math.round((cardsSkipped / cardsSeen) * 100)}%`
+          : "n/a";
+      log.info(
+        `[${repoName}] sweep reconcile: seen=${cardsSeen} skipped=${cardsSkipped} (${skipRate}) drifted=${cardsDrifted} errored=${cardsErrored}${
+          driftedIds.length > 0 ? ` — drift: ${driftedIds.join(", ")}` : ""
+        }`,
+      );
+    }
   }
 
   async function startWatcher(): Promise<void> {

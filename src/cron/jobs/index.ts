@@ -5,6 +5,16 @@
  * INTO the worker. The registry is unchanged — each job's `intervalSec`
  * still gates its own dispatch via `lastRunMs`.
  *
+ * DX-642 Phase 4 retired the standalone audit-pass sweep
+ * (`src/cron/audit-pass.ts` + its `runAuditPass` call inside
+ * `src/cron/sync-and-audit.ts`) — the per-minute reconcile walk
+ * folded INTO `src/db/issues-mirror.ts#periodicReconcile`. One timer
+ * (the mirror's `reconcileIntervalMs`, default 60s) now owns "walk
+ * open YAMLs + mirror to DB + fire `reconcileIssue(card, 'audit')` +
+ * record drift + log skip-rate metrics". The mirror's sweep is NOT a
+ * CronJob — it runs on its own `setInterval` inside the mirror's
+ * lifecycle (created by `startIssuesMirror`).
+ *
  * Append-only API: every entry MUST satisfy the `CronJob` contract
  * in `../types.ts`. Renaming a `name` field forfeits the prior
  * `lastRunMs` in `<repo>/.danxbot/cron-state.json` and the job fires
