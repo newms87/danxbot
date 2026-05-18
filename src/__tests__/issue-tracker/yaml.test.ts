@@ -26,7 +26,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -263,17 +263,17 @@ describe("serializeIssue / parseIssue", () => {
 
     it("schema_version: 5 is now rejected — pre-MIN versions belong to the boot sweep, not the validator (DX-628)", () => {
       // Pre-DX-592 the validator silently accepted v3..v9; the single-
-      // version tolerance window (MIN=10, MAX=11 after DX-628) tightens
+      // version tolerance window (MIN=11, MAX=12 after DX-657) tightens
       // that to the immediate predecessor + canonical only. Older
       // files are migrated forward by the boot sweep before they ever
       // reach the validator; a v5 file arriving in-process is a
       // programming error.
       const yaml1 = serializeIssue(fullIssue()).replace(
-        "schema_version: 11",
+        "schema_version: 12",
         "schema_version: 5",
       );
       expect(() => parseIssue(yaml1, { expectedPrefix: "ISS" })).toThrow(
-        /schema_version must be an integer >= 10/,
+        /schema_version must be an integer >= 11/,
       );
     });
 
@@ -444,13 +444,13 @@ describe("serializeIssue / parseIssue", () => {
     // retired the migration scripts themselves.
     const yaml = "schema_version: 1\ntracker: trello\n";
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      /schema_version must be an integer >= 10/,
+      /schema_version must be an integer >= 11/,
     );
   });
 
   it("tolerates a prior `phases: [...]` key on read and drops it on re-serialize (ISS-81)", () => {
     const legacyYaml = [
-      "schema_version: 11",
+      "schema_version: 12",
       "tracker: trello",
       "id: ISS-1",
       'external_id: "ext-1"',
@@ -501,7 +501,7 @@ describe("validateIssue", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-42",
       external_id: "x1",
@@ -735,41 +735,40 @@ describe("validateIssue", () => {
 
   // ---- Test gap E: pin exact validator error wording ----
 
-  it("schema_version: 11 is the canonical version (DX-592 — current writer literal)", () => {
-    const result = validateIssue(valid({ schema_version: 11 }));
+  it("schema_version: 12 is the canonical version (DX-592 — current writer literal)", () => {
+    const result = validateIssue(valid({ schema_version: 12 }));
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 10 is the immediate predecessor and migrates forward via the registry (DX-628)", () => {
-    // Single-version tolerance window: MIN=10, MAX=11. The validator
-    // invokes `migrateForward` ahead of per-field validation for v10
-    // inputs; the v10→v11 migration drops the `position` field
-    // (folding any non-integer decimal into `priority`). The returned
-    // Issue's `schema_version` is the canonical type literal (11), not
-    // the input's 10 — same silent-downgrade discipline DX-280 set for
+  it("schema_version: 11 is the immediate predecessor and migrates forward via the registry (DX-657)", () => {
+    // Single-version tolerance window: MIN=11, MAX=12. The validator
+    // invokes `migrateForward` ahead of per-field validation for v11
+    // inputs; the v11→v12 migration remaps any `status: "Blocked"` to
+    // the deriveStatus-without-rule-3 projection. The returned
+    // Issue's `schema_version` is the canonical type literal (12), not
+    // the input's 11 — same silent-downgrade discipline DX-280 set for
     // forward-compat reads.
-    const result = validateIssue(valid({ schema_version: 10, position: null }));
+    const result = validateIssue(valid({ schema_version: 11 }));
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.issue.schema_version).toBe(11);
-      expect("position" in (result.issue as unknown as Record<string, unknown>)).toBe(false);
+      expect(result.issue.schema_version).toBe(12);
     }
   });
 
-  it("schema_version: 9 is rejected — pre-MIN versions reach the validator only when boot sweep failed (DX-592)", () => {
-    const result = validateIssue(valid({ schema_version: 9 }));
+  it("schema_version: 10 is rejected — pre-MIN versions reach the validator only when boot sweep failed (DX-592)", () => {
+    const result = validateIssue(valid({ schema_version: 10 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 10/.test(e),
+          /schema_version must be an integer >= 11/.test(e),
         ),
       ).toBe(true);
     }
   });
 
-  it("schema_version: 8 is rejected for the same reason (DX-592 single-version tolerance)", () => {
-    const result = validateIssue(valid({ schema_version: 8 }));
+  it("schema_version: 9 is rejected for the same reason (DX-592 single-version tolerance)", () => {
+    const result = validateIssue(valid({ schema_version: 9 }));
     expect(result.ok).toBe(false);
   });
 
@@ -791,7 +790,7 @@ describe("validateIssue", () => {
 
   it("DX-628: validateIssue wraps a registry throw as {ok:false, errors:[\"schema migration failed: ...\"]} (does not let raw throws escape)", async () => {
     // Defense-in-depth — `validateIssue` invokes `migrateForward` for
-    // v10 inputs (single-version tolerance) and the wrap-as-errors
+    // v11 inputs (single-version tolerance) and the wrap-as-errors
     // contract is what callers (chokidar mirror, /api/issues, sync.ts)
     // rely on. A future regression that drops the try/catch would let
     // a raw `MigrationRegistryError` escape and bring down every save.
@@ -801,17 +800,17 @@ describe("validateIssue", () => {
       "../../issue-tracker/migrations/registry.js"
     );
     const yamlMod = await import("../../issue-tracker/yaml.js");
-    const original = registry.migrationsByFromVersion.get(10);
+    const original = registry.migrationsByFromVersion.get(11);
     try {
-      // Swap the v10→v11 step for one that throws inside the chain.
+      // Swap the v11→v12 step for one that throws inside the chain.
       (registry.migrationsByFromVersion as Map<number, (prev: unknown) => unknown>).set(
-        10,
+        11,
         () => {
           throw new registry.MigrationRegistryError("synthetic mid-chain failure");
         },
       );
-      const v10Input = valid({ schema_version: 10 });
-      const result = yamlMod.validateIssue(v10Input, { expectedPrefix: "ISS" });
+      const v11Input = valid({ schema_version: 11 });
+      const result = yamlMod.validateIssue(v11Input, { expectedPrefix: "ISS" });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(
@@ -823,34 +822,40 @@ describe("validateIssue", () => {
     } finally {
       if (original) {
         (registry.migrationsByFromVersion as Map<number, (prev: unknown) => unknown>).set(
-          10,
+          11,
           original,
         );
       }
     }
   });
 
-  it("DX-628: a v10 raw YAML text round-trips end-to-end through parseIssue → serializeIssue with position dropped + priority folded", () => {
-    // Operator-facing surface: on-disk v10 YAMLs continue to parse
+  it("DX-657: a v11 raw YAML text round-trips end-to-end through parseIssue → serializeIssue, advancing schema_version + preserving blocked record", () => {
+    // Operator-facing surface: on-disk v11 YAMLs continue to parse
     // (single-version tolerance window) and re-serialize as canonical
-    // v11 — the `position` field is dropped, and any non-integer
-    // `position` decimal is folded into `priority`'s decimal portion
-    // so visible row order survives the bump. Locks the round-trip
-    // contract that the boot sweep relies on.
-    const v10Yaml = [
-      "schema_version: 10",
+    // v12. The migration remaps any raw `status: "Blocked"` to the
+    // deriveStatus-without-rule-3 projection; `blocked.at` +
+    // `blocked.reason` survive verbatim. Phase 2 of DX-656 retires
+    // `deriveStatus` rule 3 + drops `"Blocked"` from the IssueStatus
+    // union in lockstep, at which point parsed `status` will reflect
+    // the migrated projection. Until then, parseIssue overlays
+    // `deriveStatus(issue)` and rule 3 fires when `blocked != null`,
+    // so the in-memory status reads back as `"Blocked"` — the raw
+    // on-disk remap is verified by the migration's own unit test in
+    // `src/issue-tracker/migrations/v11-to-v12.test.ts`. Locks the
+    // round-trip contract that the boot sweep relies on.
+    const v11Yaml = [
+      "schema_version: 11",
       "tracker: trello",
       "id: ISS-42",
       'external_id: ""',
       "parent_id: null",
       "children: []",
       "dispatch: null",
-      "status: ToDo",
+      "status: Blocked",
       "type: Feature",
       "title: legacy",
       "description: body",
       "priority: 3.0",
-      "position: 4.25",
       "triage:",
       "  expires_at: ''",
       "  reassess_hint: ''",
@@ -863,30 +868,79 @@ describe("validateIssue", () => {
       "retro: { good: '', bad: '', action_item_ids: [], commits: [] }",
       "assigned_agent: null",
       "waiting_on: null",
-      "blocked: null",
+      "blocked: { at: '2026-05-10T00:00:00Z', reason: 'human action' }",
       "requires_human: null",
       "conflict_on: []",
       "effort_level: null",
       "history: []",
       "db_updated_at: ''",
       "archived_at: null",
-      "ready_at: null",
+      "ready_at: '2026-05-01T00:00:00Z'",
       "completed_at: null",
       "cancelled_at: null",
       "list_name: null",
       "",
     ].join("\n");
 
-    const parsed = parseIssue(v10Yaml, { expectedPrefix: "ISS" });
-    expect(parsed.schema_version).toBe(11);
-    // floor(3.0) + (4.25 - floor(4.25)) = 0.0 + 0.25... wait, floor(3.0) = 3, decimal = 0.25, sum = 3.25
-    expect(parsed.priority).toBe(3.25);
-    expect("position" in (parsed as unknown as Record<string, unknown>)).toBe(false);
+    const parsed = parseIssue(v11Yaml, { expectedPrefix: "ISS" });
+    expect(parsed.schema_version).toBe(12);
+    // blocked record preserved verbatim through the migration.
+    expect(parsed.blocked).toEqual({
+      at: "2026-05-10T00:00:00Z",
+      reason: "human action",
+    });
+    // Status: deriveStatus rule 3 (intentionally NOT retired in Phase 1)
+    // re-projects `blocked != null → Blocked` over the migration's
+    // remapped raw status. Phase 2 retires rule 3 and the parsed
+    // status will then reflect the migration's projection (ToDo here).
+    expect(parsed.status).toBe("Blocked");
 
-    // Re-serialized output omits position entirely + stamps v11.
+    // Re-serialized output stamps v12 + preserves blocked record.
     const reEmitted = serializeIssue(parsed);
-    expect(reEmitted).not.toMatch(/^position:/m);
-    expect(reEmitted).toMatch(/^schema_version: 11$/m);
+    expect(reEmitted).toMatch(/^schema_version: 12$/m);
+    expect(reEmitted).toMatch(/reason: human action/);
+  });
+
+  it("DX-657: v12 validator accepts blocked != null alongside non-Blocked status (retired invariant)", () => {
+    // Pre-Phase-1, validateIssue enforced
+    // `status === "Blocked" ⟺ blocked !== null` on read; v11→v12
+    // migration eagerly produces YAMLs where `blocked != null` carries
+    // a remapped non-Blocked status, so the invariant must be retired.
+    // Pin both directions so a future re-introduction of the check
+    // ships red.
+    const blockedWithToDoStatus = validateIssue(
+      valid({
+        status: "ToDo",
+        blocked: { at: "2026-05-10T00:00:00Z", reason: "human action" },
+      }),
+      { expectedPrefix: "ISS" },
+    );
+    expect(blockedWithToDoStatus.ok).toBe(true);
+    if (blockedWithToDoStatus.ok) {
+      expect(blockedWithToDoStatus.issue.status).toBe("ToDo");
+      expect(blockedWithToDoStatus.issue.blocked).toEqual({
+        at: "2026-05-10T00:00:00Z",
+        reason: "human action",
+      });
+    }
+  });
+
+  it("DX-657: v12 validator accepts status: Blocked with blocked: null (retired invariant — symmetric)", () => {
+    // The reverse-direction of the retired invariant: an Issue with
+    // status: "Blocked" but blocked: null was previously rejected with
+    // "status is 'Blocked' but blocked field is null". v12 retires
+    // that coupling — Phase 2 of DX-656 drops the "Blocked" member of
+    // IssueStatus entirely, but until then the validator must not
+    // reject this combination.
+    const result = validateIssue(
+      valid({ status: "Blocked", blocked: null }),
+      { expectedPrefix: "ISS" },
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.issue.status).toBe("Blocked");
+      expect(result.issue.blocked).toBeNull();
+    }
   });
 
   it("schema_version above KNOWN_SCHEMA_MAX is forward-compat accepted with a console.warn (DX-280)", () => {
@@ -925,7 +979,7 @@ describe("validateIssue", () => {
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 10/.test(e),
+          /schema_version must be an integer >= 11/.test(e),
         ),
       ).toBe(true);
     }
@@ -937,7 +991,7 @@ describe("validateIssue", () => {
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 10/.test(e),
+          /schema_version must be an integer >= 11/.test(e),
         ),
       ).toBe(true);
     }
@@ -1038,7 +1092,7 @@ describe("validateIssue waiting_on is independent of status", () => {
     blocked: unknown = null,
   ): Record<string, unknown> {
     return {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-42",
       external_id: "",
@@ -1105,7 +1159,7 @@ describe("validateIssue waiting_on is independent of status", () => {
 
   it("parseIssue round-trips a serialized YAML carrying waiting_on + In Progress", () => {
     const yaml = [
-      "schema_version: 11",
+      "schema_version: 12",
       "tracker: trello",
       "id: ISS-42",
       'external_id: ""',
@@ -1149,7 +1203,7 @@ describe("children field (epic → phase linkage)", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-100",
       external_id: "x1",
@@ -1245,7 +1299,7 @@ describe("schema_version < MIN (boot sweep escapes)", () => {
   it("rejects schema_version 2 with the canonical < MIN error", () => {
     const yaml = "schema_version: 2\ntracker: trello\n";
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      /schema_version must be an integer >= 10/,
+      /schema_version must be an integer >= 11/,
     );
   });
 });
@@ -1306,7 +1360,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1354,7 +1408,7 @@ describe("serializeIssue byte-stable snapshot", () => {
 
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 11
+      "schema_version: 12
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1426,7 +1480,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     // — broken for diffing + git history. The companion test for the
     // `null` shape pins the same field's absence-from-payload contract.
     const fixture: Issue = {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1475,7 +1529,7 @@ describe("serializeIssue byte-stable snapshot", () => {
 
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 11
+      "schema_version: 12
       tracker: trello
       id: ISS-99
       external_id: card-99

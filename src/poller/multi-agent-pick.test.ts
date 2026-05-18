@@ -208,7 +208,7 @@ function fakeRepo(): RepoContext {
 
 function issue(id: string, overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,

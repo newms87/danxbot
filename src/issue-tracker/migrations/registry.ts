@@ -36,6 +36,7 @@ import { KNOWN_SCHEMA_MAX } from "../schema-versions.js";
 import { migrateLegacyToV10 } from "./legacy-to-v10.js";
 import { migrateV9ToV10 } from "./v9-to-v10.js";
 import { migrateV10ToV11 } from "./v10-to-v11.js";
+import { migrateV11ToV12 } from "./v11-to-v12.js";
 
 export class MigrationRegistryError extends Error {
   constructor(message: string) {
@@ -69,6 +70,7 @@ export const migrationsByFromVersion: ReadonlyMap<
   [8, migrateLegacyToV10],
   [9, migrateV9ToV10],
   [10, migrateV10ToV11],
+  [11, migrateV11ToV12],
 ]);
 
 /**

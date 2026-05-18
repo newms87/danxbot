@@ -169,7 +169,7 @@ describe("rewriteIdFields", () => {
   it("rewrites id, parent_id, children, waiting_on.by, action_item_ids", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 11,
+        schema_version: 12,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -241,7 +241,7 @@ describe("rewriteIdFields", () => {
   it("leaves cross-prefix refs untouched (defensive)", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 11,
+        schema_version: 12,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",

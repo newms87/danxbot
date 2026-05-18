@@ -18,7 +18,7 @@ import type {
 
 function defaultCreate(): CreateCardInput {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -190,7 +190,7 @@ describe("syncIssue", () => {
   describe("orphan recovery (empty external_id → createCard)", () => {
     function orphan(): Issue {
       return {
-        schema_version: 11,
+        schema_version: 12,
         tracker: "memory",
         id: "ISS-1",
         external_id: "",
@@ -587,7 +587,7 @@ describe("syncIssue", () => {
     // Build a tracker pre-seeded with a card whose triage record IS set on
     // the server (via seed Issue), then sync a local that has cleared it.
     const seed: Issue = {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "memory",
       id: "ISS-2",
       external_id: "card-triaged",

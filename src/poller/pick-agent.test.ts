@@ -47,7 +47,7 @@ function issue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id,
     external_id: "",

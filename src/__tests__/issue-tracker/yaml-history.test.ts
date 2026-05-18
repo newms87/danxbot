@@ -26,7 +26,7 @@ import type {
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -241,7 +241,7 @@ describe("validateIssue history field", () => {
     // A hand-edited YAML with a stray scalar/object value here must fail
     // loud, not be silently coerced.
     const result = validateIssue({
-      schema_version: 11,
+      schema_version: 12,
       tracker: "trello",
       id: "ISS-1",
       external_id: "x",

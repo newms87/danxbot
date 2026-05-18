@@ -80,6 +80,14 @@ const TRIAGE_HISTORY_CAP = 10;
  *    dropped. Non-integer position decimals are folded into priority's
  *    decimal portion by the migration so visible row order survives
  *    the bump; drag-reorder is rewired onto `priority` in Phase 3.
+ *  - v12 (DX-657 / parent epic DX-656): Phase 1 of "Blocked becomes a
+ *    dispatch gate, not a status". Cards with `status: "Blocked"` are
+ *    remapped to the deriveStatus-without-rule-3 projection
+ *    (Cancelled / Done / In Progress / ToDo / Backlog / Review);
+ *    `blocked.at` + `blocked.reason` survive verbatim as the gate
+ *    payload Phase 2 consumes. `deriveStatus` rule 3 and the
+ *    `"Blocked"` member of the `IssueStatus` union are intentionally
+ *    NOT touched here — Phase 2 retires both in lockstep.
  *
  * The literal values live in `./schema-versions.ts` so the migration
  * registry can import them without creating a yaml.ts ↔ registry.ts
@@ -212,7 +220,8 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 11 (v11 — DX-628, position field stripped)
+ *  - schema_version: 12 (v12 — DX-657, status: "Blocked" remapped via
+ *    migration; Phase 2 of DX-656 drops the union member)
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -246,7 +255,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -635,7 +644,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -942,32 +951,23 @@ export function validateIssue(
     else blockedResult = r;
   }
 
-  // Invariant: status === "Blocked" ⟺ blocked !== null. Worker write-paths
-  // enforce this on write; the parser enforces it on read so a hand-edited
-  // file with a half-set state fails loud rather than landing in memory.
+  // v12 (DX-657 Phase 1): the prior invariant
+  // `status === "Blocked" ⟺ blocked !== null` is retired here. Phase 1 of
+  // "Blocked becomes a dispatch gate, not a status" decouples the two —
+  // `blocked.at` is now the sole self-block signal; the raw `status`
+  // field reflects the semantic column the card belongs to (Review /
+  // ToDo / In Progress / Backlog / Done / Cancelled). The v11→v12
+  // migration remaps every prior `status: "Blocked"` card to its
+  // deriveStatus-without-rule-3 projection while preserving `blocked`,
+  // so v12 YAMLs may freely carry `blocked != null` alongside any
+  // status. Phase 2 of the epic retires `deriveStatus` rule 3 and the
+  // `"Blocked"` member of the `IssueStatus` union in lockstep.
   //
-  // `waiting_on` is independent of `status`. Any status (ToDo, In Progress,
-  // Review, Blocked, Done, Cancelled) is legal with any waiting_on shape.
-  // waiting_on is a pure dispatch gate — the picker checks effective
-  // resolution of every id in `by[]`; the field itself is a durable record
-  // never mutated by the system as a side effect of a status change.
-  if (
-    typeof v.status === "string" &&
-    ISSUE_STATUSES.includes(v.status as IssueStatus)
-  ) {
-    const statusBlocked = v.status === "Blocked";
-    const fieldBlocked = blockedResult !== null;
-    if (statusBlocked && !fieldBlocked) {
-      errors.push(
-        "status is 'Blocked' but blocked field is null — must populate blocked record",
-      );
-    }
-    if (!statusBlocked && fieldBlocked) {
-      errors.push(
-        `blocked field is non-null but status is '${v.status}' — must set status to 'Blocked'`,
-      );
-    }
-  }
+  // `waiting_on` is independent of `status`. Any status is legal with
+  // any waiting_on shape. waiting_on is a pure dispatch gate — the
+  // picker checks effective resolution of every id in `by[]`; the
+  // field itself is a durable record never mutated by the system as a
+  // side effect of a status change.
 
   // requires_human — optional field. Missing → null. Present must be
   // either YAML null OR `{reason, steps[], set_by, set_at}`. Independent
@@ -1104,7 +1104,7 @@ export function validateIssue(
     // disk. Lockstep contract: when the writer bumps, bump this literal
     // AND KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 11,
+    schema_version: 12,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,

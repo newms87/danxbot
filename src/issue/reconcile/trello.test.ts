@@ -63,7 +63,7 @@ import * as persistModule from "./trello-persist.js";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "trello",
     id: "DX-1",
     external_id: "ext-1",

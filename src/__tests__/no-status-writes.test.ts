@@ -52,6 +52,9 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // stamps status terminals on cards being canonicalized.
   "issue-tracker/migrations/legacy-to-v10.ts",
   "issue-tracker/migrations/v9-to-v10.ts",
+  // v11→v12 migration — remaps legacy `status: "Blocked"` cards to the
+  // deriveStatus-without-rule-3 projection (DX-657, parent epic DX-656).
+  "issue-tracker/migrations/v11-to-v12.ts",
   "issue-tracker/migrations/registry.ts",
   // Worker stamp helpers — write `status: "Blocked"` alongside the
   // `blocked` timestamp for SQL-readability (DX-584 contract).

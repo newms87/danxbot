@@ -389,7 +389,7 @@ export class FakeTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 11,
+      schema_version: 12,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,

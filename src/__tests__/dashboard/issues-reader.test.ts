@@ -59,7 +59,7 @@ let nextHistorySeq = 0;
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",

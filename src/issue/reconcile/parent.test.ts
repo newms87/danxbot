@@ -4,7 +4,7 @@ import { applyParentDeriveMutation, deriveParentStatus } from "./parent.js";
 
 function child(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -268,7 +268,7 @@ function makeParent(
   overrides: Partial<Issue> = {},
 ): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: "DX-1",
     external_id: "",

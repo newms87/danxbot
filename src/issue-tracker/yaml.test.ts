@@ -22,7 +22,7 @@ import {
 } from "./yaml.js";
 import type { Issue } from "./interface.js";
 
-const BASE = `schema_version: 11
+const BASE = `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -134,7 +134,7 @@ describe("AGENT_NAME_SHAPE — local copy stays in sync with settings-file", () 
     // exported regex source string so we compare structurally.
     const expected = settings.AGENT_NAME_SHAPE.source;
     // Round-trip a known-good value to exercise the local copy:
-    const txt = `schema_version: 11
+    const txt = `schema_version: 12
 tracker: trello
 id: DX-7
 external_id: ""
@@ -173,7 +173,7 @@ history: []
   });
 
   it("rejects an assigned_agent value that violates the shape", () => {
-    const txt = `schema_version: 11
+    const txt = `schema_version: 12
 tracker: trello
 id: DX-7
 external_id: ""
@@ -230,7 +230,7 @@ history: []
  */
 describe("validateAcList — DX-347 check_item_id auto-heal", () => {
   function yamlWithAc(acBlock: string): string {
-    return `schema_version: 11
+    return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -389,7 +389,7 @@ describe("serializeIssue — requires_human tolerates undefined", () => {
    */
   function legacyIssueWithoutRequiresHuman(): Issue {
     return {
-      schema_version: 11,
+      schema_version: 12,
       tracker: "memory",
       id: "DX-1",
       external_id: "",
@@ -667,7 +667,7 @@ describe("DX-280 — schema_version forward-compat bound", () => {
  * sees the healed value without re-running the migration.
  */
 function yamlV7WithoutEffortLevel(): string {
-  return `schema_version: 11
+  return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -702,7 +702,7 @@ history: []
 }
 
 function yamlV8WithEffortLevel(value: string): string {
-  return `schema_version: 11
+  return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -845,8 +845,8 @@ describe("DX-511 — effort_level field (v8)", () => {
     expect(issueToCreateInput(withLevel).effort_level).toBe("very_high");
   });
 
-  it("KNOWN_SCHEMA_MAX bumped to 11 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
-    expect(KNOWN_SCHEMA_MAX).toBe(11);
+  it("KNOWN_SCHEMA_MAX bumped to 12 (DX-280 lockstep invariant: writer == KNOWN_SCHEMA_MAX)", () => {
+    expect(KNOWN_SCHEMA_MAX).toBe(12);
     const fresh = createEmptyIssue();
     expect(fresh.schema_version).toBe(KNOWN_SCHEMA_MAX);
     expect(issueToCreateInput(fresh).schema_version).toBe(KNOWN_SCHEMA_MAX);
@@ -866,7 +866,7 @@ describe("DX-511 — effort_level field (v8)", () => {
  */
 describe("DX-546 — db_updated_at field (v9)", () => {
   function yamlWithoutDbUpdatedAt(): string {
-    return `schema_version: 11
+    return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -902,7 +902,7 @@ history: []
   }
 
   function yamlWithDbUpdatedAt(value: string): string {
-    return `schema_version: 11
+    return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -1010,7 +1010,7 @@ db_updated_at: ${value}
 
 describe("parseIssue — priority bounds widened to (0.01, 5.99) (DX-521)", () => {
   function withPriority(priorityYamlLiteral: string): string {
-    return `schema_version: 11
+    return `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""
@@ -1147,7 +1147,7 @@ describe("DX-594 — strict canonical reader", () => {
   }
 
   describe("schema_version", () => {
-    it.each([1, 2, 3, 4, 5, 6, 7, 8])(
+    it.each([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])(
       "rejects schema_version %s (below KNOWN_SCHEMA_MIN) with the canonical < MIN error",
       (version) => {
         const txt = strictCanonical({ schema_version: String(version) });
@@ -1158,11 +1158,13 @@ describe("DX-594 — strict canonical reader", () => {
     );
 
     it("accepts schema_version === KNOWN_SCHEMA_MIN via migrateForward (defense-in-depth)", () => {
-      // v9 → v10 migration: the registry stamps schema_version: 11 + adds
-      // the five v10 computed-timestamp fields. The boot sweep handles
-      // this before any reader sees a v9 file, but the inline registry
-      // call remains as a safety net.
-      const v9Txt = `schema_version: 10
+      // v11 → v12 migration: the registry stamps schema_version: 12 and
+      // remaps any status: "Blocked" to the deriveStatus-without-rule-3
+      // projection. This input has status: ToDo so the remap is a no-op;
+      // the migration's job here is solely to advance the version. The
+      // boot sweep handles every below-MAX YAML before any reader sees
+      // it; the inline registry call remains as a safety net.
+      const v9Txt = `schema_version: 12
 tracker: trello
 id: DX-1
 external_id: ""

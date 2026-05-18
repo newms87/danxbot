@@ -84,7 +84,7 @@ if (handle) {
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "trello",
     id: "ISS-1",
     external_id: "ext-1",

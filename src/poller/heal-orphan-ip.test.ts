@@ -29,7 +29,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string; status: IssueStatus },
 ): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     external_id: "",
     parent_id: null,

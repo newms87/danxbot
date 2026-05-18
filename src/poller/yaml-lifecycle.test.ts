@@ -98,7 +98,7 @@ import type { CreateCardInput, Issue, IssueStatus } from "../issue-tracker/inter
 
 function buildIssueLite(id: string, status: IssueStatus): Issue {
   const merged: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id,
     external_id: "",
@@ -149,7 +149,7 @@ function defaultCreate(
   overrides: Partial<CreateCardInput> = {},
 ): CreateCardInput {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: "ISS-1",
     parent_id: null,
@@ -296,7 +296,7 @@ describe("yaml-lifecycle", () => {
       // (not just well-typed) so a hydration regression that drops a
       // remote field's content (e.g. returns `[]` for a non-empty AC
       // list) fails loudly here.
-      expect(issue.schema_version).toBe(11);
+      expect(issue.schema_version).toBe(12);
       expect(issue.id).toBe("ISS-200");
       expect(issue.external_id).toBe(external_id);
       expect(issue.parent_id).toBeNull();

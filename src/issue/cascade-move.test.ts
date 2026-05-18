@@ -22,7 +22,7 @@ interface MakeOpts {
 
 function makeIssue(opts: MakeOpts): Issue {
   const base: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: opts.id ?? "DX-1",
     external_id: "",

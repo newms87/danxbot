@@ -134,7 +134,7 @@ export function buildIssueSubtreePayload(
       if (!visited.has(childId)) queue.push(childId);
     }
   }
-  return { schema_version: 11, issues: out };
+  return { schema_version: 12, issues: out };
 }
 
 /**
@@ -172,7 +172,7 @@ export function buildIssueSubtreePayload(
  */
 function stripIssueForCopy(issue: Issue): Issue {
   const stripped: Issue = {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: issue.id,
     external_id: "",
@@ -502,7 +502,7 @@ function rewriteForImport(
     .filter((id): id is string => id !== null);
 
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id: newId,
     external_id: "",

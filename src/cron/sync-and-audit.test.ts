@@ -247,7 +247,7 @@ vi.mock("../agent/resolve-parent-session.js", () => ({
  * preserves the existing-file path.
  */
 const FAKE_ISSUE_FOR_TESTS = {
-  schema_version: 11 as const,
+  schema_version: 12 as const,
   tracker: "trello",
   id: "ISS-FAKE",
   external_id: "fake",
@@ -302,7 +302,7 @@ const mockEnsureGitignoreEntry = vi.fn();
  */
 function refToFakeIssue(ref: TestRef): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "trello",
     id: ref.id || `ISS-FAKE-${ref.external_id}`,
     external_id: ref.external_id,
@@ -652,7 +652,7 @@ function setupRepoConfigMocks() {
  * return a `ToDo`-status Issue.
  */
 const DEFAULT_GET_CARD_ISSUE = {
-  schema_version: 11 as const,
+  schema_version: 12 as const,
   tracker: "trello",
   id: "ISS-DEFAULT",
   external_id: "default-card",

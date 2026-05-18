@@ -53,7 +53,7 @@ function makeRepo(): { localPath: string; tmpdir: string } {
 
 function makeIssue(id: string): Issue {
   return {
-    schema_version: 11,
+    schema_version: 12,
     tracker: "memory",
     id,
     external_id: "",
