@@ -82,6 +82,7 @@ import {
 import { watchSettingsFile } from "../settings-file.js";
 import { createLogger } from "../logger.js";
 import { reportSystemError } from "../system-repair/report.js";
+import { runWithYields } from "../util/yield-loop.js";
 
 const log = createLogger("scheduler");
 
@@ -283,7 +284,19 @@ export function bootScheduler(args: {
       },
     });
     settingsWatchersByRepo.set(repo.name, handle);
-    scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
+    // DX-634: scanAndArmTriageTimers is now async (bounded concurrency
+    // + yields). `bootScheduler` is sync and the triage scan is a
+    // best-effort fire-and-forget at wire time; per-card failures are
+    // already isolated inside the scan via the try/catch + reportSystemError.
+    void scanAndArmTriageTimers({ repo: reconcileRepo, reconcile }).catch(
+      (err) => {
+        log.warn(
+          `[${repo.name}] scheduler boot: triage timer scan failed (${
+            err instanceof Error ? err.message : String(err)
+          })`,
+        );
+      },
+    );
   } else {
     // No reconcile dep — drop any prior watcher cleanly. Matches the
     // hot-reload-without-picker branch above.
@@ -316,27 +329,24 @@ export function bootScheduler(args: {
 async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
   const openDir = resolve(repo.localPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) return [];
+  const stems = readdirSync(openDir)
+    .filter((entry) => entry.endsWith(".yml"))
+    .map((entry) => ({ entry, stem: entry.slice(0, -".yml".length) }));
+
+  // DX-634: bounded concurrency + setImmediate yields. Pre-DX-634 boot
+  // rehydrate walked every open YAML in a tight for-await, blocking the
+  // event loop long enough to starve pg-pool's 15s connection timeout
+  // on 50+-card repos (DX-633 root cause).
+  const settled = await runWithYields(stems, async ({ entry, stem }) => {
+    const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
+    return { entry, stem, issue };
+  });
+
   const issues: Issue[] = [];
-  for (const entry of readdirSync(openDir)) {
-    if (!entry.endsWith(".yml")) continue;
-    const stem = entry.slice(0, -".yml".length);
-    try {
-      const issue = await loadLocal(repo.localPath, stem, repo.issuePrefix);
-      if (!issue) continue;
-      if ((issue as unknown as { _malformed?: boolean })._malformed === true) {
-        log.warn(
-          `[${repo.name}] bootRehydrate: skipping malformed ${entry} — DB row carries _malformed marker (YAML parse failed at last mirror); fix the YAML so it round-trips`,
-        );
-        void reportSystemError({
-          repo: repo.name,
-          component: "scheduler.bootRehydrate",
-          err: new Error(`bootRehydrate: skipping malformed ${entry} — _malformed marker`),
-          samplePayload: { path: entry, issue_id: stem },
-        });
-        continue;
-      }
-      if (issue.dispatch != null) issues.push(issue);
-    } catch (err) {
+  for (const result of settled) {
+    if (result.status === "rejected") {
+      const { entry, stem } = result.item;
+      const err = result.reason;
       log.warn(
         `[${repo.name}] bootRehydrate: skipping ${entry}: ${
           err instanceof Error ? err.message : String(err)
@@ -348,7 +358,23 @@ async function loadDispatchedIssues(repo: RepoContext): Promise<Issue[]> {
         err,
         samplePayload: { path: entry, issue_id: stem },
       });
+      continue;
     }
+    const { entry, stem, issue } = result.value;
+    if (!issue) continue;
+    if ((issue as unknown as { _malformed?: boolean })._malformed === true) {
+      log.warn(
+        `[${repo.name}] bootRehydrate: skipping malformed ${entry} — DB row carries _malformed marker (YAML parse failed at last mirror); fix the YAML so it round-trips`,
+      );
+      void reportSystemError({
+        repo: repo.name,
+        component: "scheduler.bootRehydrate",
+        err: new Error(`bootRehydrate: skipping malformed ${entry} — _malformed marker`),
+        samplePayload: { path: entry, issue_id: stem },
+      });
+      continue;
+    }
+    if (issue.dispatch != null) issues.push(issue);
   }
   return issues;
 }
@@ -456,7 +482,7 @@ export async function bootRehydrate(args: {
     findNonTerminalDispatches,
   });
   // Step 3 — arm triage timers from open YAMLs.
-  scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
+  await scanAndArmTriageTimers({ repo: reconcileRepo, reconcile });
   const fn =
     plan.alive.length > 0 || plan.cleared.length > 0 || ttlScan.armed > 0
       ? log.info

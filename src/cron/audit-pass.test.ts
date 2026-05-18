@@ -181,4 +181,35 @@ describe("runAuditPass", () => {
       chmodSync(openDir, 0o755);
     }
   });
+
+  it("yields between batches — DX-634 (drains macrotask queue to avoid pg-pool 15s timeout regression)", async () => {
+    // 100 mocked YAMLs, default concurrency=4 → floor(100/4) = 25 yields.
+    // The pre-DX-634 sync for-await loop never reached setImmediate; this
+    // test pins the new contract so a future regression that drops the
+    // yield surfaces here.
+    const N = 100;
+    for (let i = 1; i <= N; i++) {
+      writeFileSync(resolve(openDir, `DX-${i}.yml`), "");
+    }
+    reconcileMock.mockResolvedValue(makeReconcileResult(false));
+
+    const originalSetImmediate = global.setImmediate;
+    let setImmediateCalls = 0;
+    const spy = vi
+      .spyOn(global, "setImmediate")
+      .mockImplementation(((cb: (...args: unknown[]) => void, ...args: unknown[]) => {
+        setImmediateCalls++;
+        return originalSetImmediate(cb as never, ...(args as never[]));
+      }) as typeof setImmediate);
+    try {
+      const result = await runAuditPass(makeRepo(tmpRoot));
+      expect(result.scanned).toBe(N);
+    } finally {
+      spy.mockRestore();
+    }
+    // Default concurrency = 4, yieldEveryN = 4 → floor(100 / 4) = 25.
+    // Allow slack for any setImmediate scheduled by surrounding code; the
+    // contract is "at least floor(N / yieldEveryN)".
+    expect(setImmediateCalls).toBeGreaterThanOrEqual(Math.floor(N / 4));
+  });
 });

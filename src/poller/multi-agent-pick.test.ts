@@ -860,6 +860,27 @@ describe("tryMultiAgentDispatch", () => {
     expect(dispatchInput.agent!.name).toBe("murphy");
   });
 
+  // DX-634 — heal-loop fail-fast contract. The pre-DX-634 sequential
+  // for-await let a writeIssue throw propagate out of the picker tick;
+  // the runWithYields conversion settles-and-rethrows the first
+  // rejection to preserve that behavior exactly. A future regression
+  // that silently swallows the rejection (e.g. logging + continuing)
+  // would let an orphan card slip back into the dispatch path with a
+  // stale `assigned_agent` stamp.
+  it("propagates writeIssue rejection out of the heal loop (preserves pre-DX-634 fail-fast)", async () => {
+    writeSettings({ murphy: agentRecord("murphy") });
+    vi.mocked(writeIssue).mockRejectedValueOnce(new Error("write-fail"));
+    const orphanCard = issue("DX-700", { assigned_agent: "phil" });
+    await expect(
+      tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [orphanCard],
+        tracker: fakeTracker(),
+        now: NOW,
+      }),
+    ).rejects.toThrow("write-fail");
+  });
+
   // DX-501 — replaces the pre-DX-501 "skip + manual operator clear" path.
   // Duplicate `assigned_agent` ownership is fully resolvable from inside a
   // dispatched session, so the picker dispatches a reconcile task body

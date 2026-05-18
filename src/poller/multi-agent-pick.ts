@@ -145,6 +145,7 @@ import type { Issue } from "../issue-tracker/interface.js";
 import { isEffectivelyConflicted } from "../issue/effective-conflict-on.js";
 import { isEffectivelyWaitingOn } from "../issue/effective-waiting-on.js";
 import type { RepoContext } from "../types.js";
+import { runWithYields } from "../util/yield-loop.js";
 import type { DispatchKind } from "../agent/agent-types.js";
 import {
   buildReconcileTaskBody,
@@ -309,22 +310,41 @@ export async function tryMultiAgentDispatch(
   // there is no double-spawn risk; the other claimed cards simply
   // wait for the next eligible tick.
   const rosterNames = new Set(roster.map((r) => r.name));
+  // DX-634: bounded concurrency + setImmediate yields. The picker tick
+  // walks every candidate card (50+ on busy repos) for orphan-stamp
+  // heal; without yields this loop runs to completion as one synchronous
+  // burst and starves pg-pool's 15s connection timeout (DX-633 root
+  // cause). `runWithYields` interleaves a macrotask yield between
+  // batches so the pool's timer callback gets a turn.
+  const healSettled = await runWithYields(
+    cards,
+    async (c) => {
+      if (c.assigned_agent === null) return c;
+      if (!rosterNames.has(c.assigned_agent)) {
+        log.warn(
+          `[${repo.name}] heal: ${c.id} carries orphan assigned_agent=${c.assigned_agent} (not in roster) — clearing claim`,
+        );
+        const cleared: Issue = {
+          ...c,
+          assigned_agent: null,
+          dispatch: null,
+        };
+        await writeIssue(repo.localPath, cleared);
+        return cleared;
+      }
+      return c;
+    },
+  );
+  // Preserve original error semantics — the pre-DX-634 sequential loop
+  // propagated the first writeIssue throw and stopped, so any
+  // subsequent items also went unprocessed. Settle-and-rethrow the
+  // first rejection here matches that behavior exactly: later
+  // rejections in the settled array are intentionally discarded along
+  // with the rest of the picker tick.
   const healedCards: Issue[] = [];
-  for (const c of cards) {
-    if (c.assigned_agent === null) {
-      healedCards.push(c);
-      continue;
-    }
-    if (!rosterNames.has(c.assigned_agent)) {
-      log.warn(
-        `[${repo.name}] heal: ${c.id} carries orphan assigned_agent=${c.assigned_agent} (not in roster) — clearing claim`,
-      );
-      const cleared: Issue = { ...c, assigned_agent: null, dispatch: null };
-      await writeIssue(repo.localPath, cleared);
-      healedCards.push(cleared);
-      continue;
-    }
-    healedCards.push(c);
+  for (const entry of healSettled) {
+    if (entry.status === "rejected") throw entry.reason;
+    healedCards.push(entry.value);
   }
   const { createWorktreeManager } = await import(
     "../agent/worktree-manager.js"

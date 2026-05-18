@@ -195,13 +195,13 @@ describe("triage-timer", () => {
       writeFileSync(path, serializeIssue(issue));
     }
 
-    it("arms a timer for every open YAML with a future expires_at", () => {
+    it("arms a timer for every open YAML with a future expires_at", async () => {
       const future1 = new Date(Date.now() + 60_000).toISOString();
       const future2 = new Date(Date.now() + 120_000).toISOString();
       writeIssue("DX-1", future1);
       writeIssue("DX-2", future2);
 
-      scanAndArmTriageTimers({ repo, reconcile });
+      await scanAndArmTriageTimers({ repo, reconcile });
 
       expect(_isTriageTimerArmed("danxbot", "DX-1")).toBe(true);
       expect(_isTriageTimerArmed("danxbot", "DX-2")).toBe(true);
@@ -213,10 +213,10 @@ describe("triage-timer", () => {
       );
     });
 
-    it("arms an immediate-fire timer when expires_at is empty (never triaged)", () => {
+    it("arms an immediate-fire timer when expires_at is empty (never triaged)", async () => {
       writeIssue("DX-3", "");
 
-      scanAndArmTriageTimers({ repo, reconcile });
+      await scanAndArmTriageTimers({ repo, reconcile });
 
       expect(_isTriageTimerArmed("danxbot", "DX-3")).toBe(true);
       expect(_getTriageTimerExpiresAt("danxbot", "DX-3")).toBe(0);
@@ -225,41 +225,45 @@ describe("triage-timer", () => {
       expect(reconcile).toHaveBeenCalledWith(repo, "DX-3", "audit");
     });
 
-    it("arms an immediate-fire timer when expires_at is unparseable", () => {
+    it("arms an immediate-fire timer when expires_at is unparseable", async () => {
       writeIssue("DX-4", "not-a-date");
 
-      scanAndArmTriageTimers({ repo, reconcile });
+      await scanAndArmTriageTimers({ repo, reconcile });
 
       expect(_isTriageTimerArmed("danxbot", "DX-4")).toBe(true);
       expect(_getTriageTimerExpiresAt("danxbot", "DX-4")).toBe(0);
     });
 
-    it("arms an immediate-fire timer when expires_at is in the past", () => {
+    it("arms an immediate-fire timer when expires_at is in the past", async () => {
       const past = new Date(Date.now() - 60_000).toISOString();
       writeIssue("DX-5", past);
 
-      scanAndArmTriageTimers({ repo, reconcile });
+      await scanAndArmTriageTimers({ repo, reconcile });
 
       expect(_isTriageTimerArmed("danxbot", "DX-5")).toBe(true);
       vi.advanceTimersByTime(0);
       expect(reconcile).toHaveBeenCalledWith(repo, "DX-5", "audit");
     });
 
-    it("skips a malformed YAML and continues the scan", () => {
+    it("skips a malformed YAML and continues the scan", async () => {
       writeFileSync(
         join(tempDir, ".danxbot", "issues", "open", "DX-99.yml"),
         "not: [valid: yaml: at all",
       );
       writeIssue("DX-1", new Date(Date.now() + 60_000).toISOString());
 
-      expect(() => scanAndArmTriageTimers({ repo, reconcile })).not.toThrow();
+      await expect(
+        scanAndArmTriageTimers({ repo, reconcile }),
+      ).resolves.not.toThrow();
       expect(_isTriageTimerArmed("danxbot", "DX-1")).toBe(true);
       expect(_isTriageTimerArmed("danxbot", "DX-99")).toBe(false);
     });
 
-    it("no-op when open/ does not exist", () => {
+    it("no-op when open/ does not exist", async () => {
       rmSync(join(tempDir, ".danxbot"), { recursive: true });
-      expect(() => scanAndArmTriageTimers({ repo, reconcile })).not.toThrow();
+      await expect(
+        scanAndArmTriageTimers({ repo, reconcile }),
+      ).resolves.not.toThrow();
     });
   });
 

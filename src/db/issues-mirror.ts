@@ -48,6 +48,7 @@ import { recordSystemError } from "../dashboard/system-errors.js";
 import { reportSystemError } from "../system-repair/report.js";
 import { createLogger } from "../logger.js";
 import { setRepoName, clearRepoName } from "../poller/repo-name.js";
+import { runWithYields } from "../util/yield-loop.js";
 
 const log = createLogger("issues-mirror");
 
@@ -825,10 +826,25 @@ export async function startIssuesMirror(
 
   async function bootScan(): Promise<void> {
     const paths = listYamlPaths(["open", "closed"]);
+    // DX-634: sequential walk + setImmediate yields. Pre-DX-634 boot
+    // scan walked every YAML in a tight for-await that starved
+    // pg-pool's 15s connectionTimeoutMillis on 50+-card repos
+    // (DX-633 root cause). `runWithYields` pumps the macrotask queue
+    // between batches; the `concurrency: 1` cap is deliberate — `paths`
+    // covers BOTH open/ and closed/, and a card mid-move briefly exists
+    // in both, so two concurrent `mirrorOne` calls for the same id
+    // would race on `selectExisting → upsert`. The yield (not
+    // concurrency) is what fixes the event-loop hog.
     const seenIds = new Set<string>();
-    for (const path of paths) {
-      const id = await mirrorOne(path, "boot-scan");
-      if (id !== null) seenIds.add(id);
+    const settled = await runWithYields(
+      paths,
+      (path) => mirrorOne(path, "boot-scan"),
+      { concurrency: 1 },
+    );
+    for (const entry of settled) {
+      if (entry.status === "fulfilled" && entry.value !== null) {
+        seenIds.add(entry.value);
+      }
     }
     // Tombstone DB rows whose YAML disappeared during the scan window.
     let dbIds: Array<{ id: string; content_hash: string }>;
@@ -838,10 +854,15 @@ export async function startIssuesMirror(
       reportFailure(`boot scan listIds`, err);
       return;
     }
-    for (const row of dbIds) {
-      if (seenIds.has(row.id)) continue;
-      await tombstoneOne(row.id, "boot-scan");
-    }
+    const tombstoneIds = dbIds.filter((row) => !seenIds.has(row.id));
+    // Sequential — tombstones share the same DELETE transaction
+    // family; no benefit to parallelism, and `concurrency: 1` keeps
+    // the symmetry with the scan above.
+    await runWithYields(
+      tombstoneIds,
+      (row) => tombstoneOne(row.id, "boot-scan"),
+      { concurrency: 1 },
+    );
     log.info(
       `[${repoName}] boot scan complete: ${seenIds.size} on disk, ${dbIds.length} in DB`,
     );
@@ -851,9 +872,16 @@ export async function startIssuesMirror(
     // Only `open/` is rescanned — closed YAMLs rarely change and
     // chokidar covers runtime mutations.
     const paths = listYamlPaths(["open"]);
-    for (const path of paths) {
-      await mirrorOne(path, "reconcile");
-    }
+    // DX-634: same yield-loop primitive as bootScan above with the
+    // same `concurrency: 1` rationale — periodicReconcile only walks
+    // open/ (not closed/), so the same-id race window is narrower,
+    // but `mirrorOne` per id still owns a select+upsert sequence that
+    // is safer under sequential cadence.
+    await runWithYields(
+      paths,
+      (path) => mirrorOne(path, "reconcile"),
+      { concurrency: 1 },
+    );
   }
 
   async function startWatcher(): Promise<void> {

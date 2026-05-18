@@ -289,6 +289,18 @@ function isActive(
   return s.key === key && s.direction === direction;
 }
 
+function activeSortLabel(colName: string): string | null {
+  if (boardSort.isDefault(colName)) return null;
+  const s = boardSort.getSort(colName);
+  const opt = BOARD_SORT_OPTIONS.find((o) => o.key === s.key);
+  if (!opt) return null;
+  return opt.label;
+}
+
+function activeSortArrow(colName: string): string {
+  return boardSort.getSort(colName).direction === "desc" ? "↓" : "↑";
+}
+
 /**
  * Per-column `👤 N` subscript when any card in the column has
  * `requires_human != null`. Carried over from pre-DX-586.
@@ -380,13 +392,22 @@ function testIdFor(name: string): string {
               size="sm"
               class="sort-btn"
               :class="{ 'sort-btn-active': !boardSort.isDefault(col.name) }"
-              :tooltip="`Sort ${col.name}`"
-              :aria-label="`Sort ${col.name}`"
+              :tooltip="activeSortLabel(col.name)
+                ? `Sorted by ${activeSortLabel(col.name)} ${boardSort.getSort(col.name).direction === 'desc' ? 'descending' : 'ascending'}`
+                : `Sort ${col.name}`"
+              :aria-label="activeSortLabel(col.name)
+                ? `Sorted by ${activeSortLabel(col.name)} ${boardSort.getSort(col.name).direction === 'desc' ? 'descending' : 'ascending'}`
+                : `Sort ${col.name}`"
               :data-test="`column-sort-${testIdFor(col.name)}`"
             >
               <template #icon>
                 <DanxIcon :icon="sortIcon" />
               </template>
+              <span
+                v-if="activeSortLabel(col.name)"
+                class="sort-active-label"
+                :data-test="`column-sort-active-${testIdFor(col.name)}`"
+              >{{ activeSortLabel(col.name) }} {{ activeSortArrow(col.name) }}</span>
             </DanxButton>
           </template>
           <div class="sort-menu" :data-test="`column-sort-menu-${testIdFor(col.name)}`">
@@ -562,6 +583,14 @@ function testIdFor(name: string): string {
 .sort-btn :deep(.danx-icon) {
   width: 12px;
   height: 12px;
+}
+.sort-active-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+  margin-left: 4px;
+  color: inherit;
 }
 .sort-menu {
   display: flex;

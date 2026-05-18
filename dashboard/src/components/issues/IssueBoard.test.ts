@@ -407,6 +407,30 @@ describe("IssueBoard — per-column sort (DX-625)", () => {
     wrapper.unmount();
   });
 
+  it("shows the active sort label + direction arrow on the column header when non-default", async () => {
+    const { wrapper } = mountBoard([makeIssue("DX-1", "ToDo")]);
+    const todoTid = tid("To Do");
+    const reviewTid = tid("Review");
+
+    expect(wrapper.find(`[data-test="column-sort-active-${todoTid}"]`).exists()).toBe(false);
+
+    await wrapper.find(`[data-test="column-sort-${todoTid}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${todoTid}-created-desc"]`).trigger("click");
+    await vi.waitFor(() => {
+      const active = wrapper.find(`[data-test="column-sort-active-${todoTid}"]`);
+      expect(active.exists()).toBe(true);
+      expect(active.text()).toBe("Created at ↓");
+    });
+    expect(wrapper.find(`[data-test="column-sort-active-${reviewTid}"]`).exists()).toBe(false);
+
+    await wrapper.find(`[data-test="column-sort-${todoTid}"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${todoTid}-dispatch-asc"]`).trigger("click");
+    await vi.waitFor(() => {
+      expect(wrapper.find(`[data-test="column-sort-active-${todoTid}"]`).exists()).toBe(false);
+    });
+    wrapper.unmount();
+  });
+
   it("setting sort on To Do does not affect Review", async () => {
     const a = makeIssue("DX-10", "ToDo");
     const b = makeIssue("DX-2", "ToDo");

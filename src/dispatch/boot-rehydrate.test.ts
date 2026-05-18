@@ -167,7 +167,7 @@ describe("bootRehydrate", () => {
     openDir = resolve(tmpRoot, ".danxbot", "issues", "open");
     mkdirSync(openDir, { recursive: true });
     scanTtlMock.mockResolvedValue({ armed: 0, skipped: 0 });
-    scanTriageMock.mockReturnValue(undefined);
+    scanTriageMock.mockResolvedValue(undefined);
     findNonTerminalMock.mockResolvedValue([]);
   });
 

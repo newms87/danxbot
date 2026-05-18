@@ -38,6 +38,7 @@ import { reportSystemError } from "../system-repair/report.js";
 import { createLogger } from "../logger.js";
 import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
 import type { RepoContext } from "../types.js";
+import { runWithYields } from "../util/yield-loop.js";
 
 const log = createLogger("audit-pass");
 
@@ -102,47 +103,60 @@ export async function runAuditPass(
     return result;
   }
 
-  for (const filename of entries) {
-    if (!filename.endsWith(".yml")) continue;
-    const cardId = basename(filename, ".yml");
-    result.scanned += 1;
+  // DX-634: bounded concurrency + setImmediate yields. A synchronous
+  // for-await loop over 100+ open YAMLs starved pg-pool's 15s
+  // connectionTimeoutMillis (DX-633 root cause) — `runWithYields` caps
+  // in-flight reconciles and pumps the macrotask queue between batches
+  // so the pool's timer callback gets a turn.
+  const cardIds = entries
+    .filter((filename) => filename.endsWith(".yml"))
+    .map((filename) => basename(filename, ".yml"));
+  result.scanned = cardIds.length;
 
-    try {
-      const reconcileResult = await reconcileIssue(
-        reconcileRepo,
-        cardId,
-        "audit",
-      );
-      if (reconcileResult.changed) {
-        result.drifted.push(cardId);
-        recordSystemError({
-          source: "audit-drift",
-          severity: "warn",
-          repo: repo.name,
-          message: `Audit reconcile rewrote ${cardId} — drift detected (the chokidar event for the prior write was likely missed)`,
-          details: {
-            prevHash: reconcileResult.prevHash,
-            nextHash: reconcileResult.nextHash,
-            errors: reconcileResult.errors.map((e) => ({
-              step: e.step,
-              message: e.message,
-              fatal: e.fatal,
-            })),
-          },
-        });
-      }
-    } catch (err) {
-      result.errors.push(cardId);
+  const settled = await runWithYields(cardIds, async (cardId) => {
+    const reconcileResult = await reconcileIssue(
+      reconcileRepo,
+      cardId,
+      "audit",
+    );
+    return { cardId, reconcileResult };
+  });
+
+  for (const entry of settled) {
+    if (entry.status === "rejected") {
+      result.errors.push(entry.item);
       log.warn(
-        `[${repo.name}] audit pass: reconcile ${cardId} threw — skipping (${
-          err instanceof Error ? err.message : String(err)
+        `[${repo.name}] audit pass: reconcile ${entry.item} threw — skipping (${
+          entry.reason instanceof Error
+            ? entry.reason.message
+            : String(entry.reason)
         })`,
       );
       void reportSystemError({
         repo: repo.name,
         component: "audit-pass",
-        err,
-        samplePayload: { issue_id: cardId },
+        err: entry.reason,
+        samplePayload: { issue_id: entry.item },
+      });
+      continue;
+    }
+    const { cardId, reconcileResult } = entry.value;
+    if (reconcileResult.changed) {
+      result.drifted.push(cardId);
+      recordSystemError({
+        source: "audit-drift",
+        severity: "warn",
+        repo: repo.name,
+        message: `Audit reconcile rewrote ${cardId} — drift detected (the chokidar event for the prior write was likely missed)`,
+        details: {
+          prevHash: reconcileResult.prevHash,
+          nextHash: reconcileResult.nextHash,
+          errors: reconcileResult.errors.map((e) => ({
+            step: e.step,
+            message: e.message,
+            fatal: e.fatal,
+          })),
+        },
       });
     }
   }

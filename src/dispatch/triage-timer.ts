@@ -37,6 +37,7 @@ import { createLogger } from "../logger.js";
 import { reportSystemError } from "../system-repair/report.js";
 import type { ReconcileRepoContext } from "../issue/reconcile.js";
 import type { ReconcileResult } from "../issue/reconcile-types.js";
+import { runWithYields } from "../util/yield-loop.js";
 
 const log = createLogger("triage-timer");
 
@@ -183,10 +184,10 @@ export function parseTriageExpiresAtMs(raw: string): number {
  * Best-effort: a single malformed YAML logs a warning and the scan
  * continues. Boot must never fail because of one bad file.
  */
-export function scanAndArmTriageTimers(args: {
+export async function scanAndArmTriageTimers(args: {
   repo: ReconcileRepoContext;
   reconcile: ReconcileFn;
-}): void {
+}): Promise<void> {
   const { repo, reconcile } = args;
   const openDir = join(repo.localPath, ".danxbot", "issues", "open");
   if (!existsSync(openDir)) return;
@@ -209,9 +210,17 @@ export function scanAndArmTriageTimers(args: {
     return;
   }
 
-  for (const filename of entries) {
-    if (!filename.endsWith(".yml")) continue;
-    const cardId = basename(filename, ".yml");
+  // DX-634: sequential walk + setImmediate yields. Per-card work is
+  // synchronous I/O (readFileSync + parseIssue + armTriageTimer); the
+  // `setImmediate` yields between batches are what give the macrotask
+  // queue (and pg-pool's 15s connection timer) a chance to run during
+  // a 100+-YAML boot scan. `concurrency: 1` because concurrency adds no
+  // value over sync work and keeps timer-arming order deterministic.
+  const cardIds = entries
+    .filter((filename) => filename.endsWith(".yml"))
+    .map((filename) => basename(filename, ".yml"));
+
+  await runWithYields(cardIds, async (cardId) => {
     const path = issuePath(repo.localPath, cardId, "open");
     let text: string;
     try {
@@ -228,7 +237,7 @@ export function scanAndArmTriageTimers(args: {
         err,
         samplePayload: { path, issue_id: cardId },
       });
-      continue;
+      return;
     }
 
     let expiresAtMs: number;
@@ -253,9 +262,9 @@ export function scanAndArmTriageTimers(args: {
         err,
         samplePayload: { path, issue_id: cardId },
       });
-      continue;
+      return;
     }
 
     armTriageTimer({ repo, cardId, expiresAtMs, reconcile });
-  }
+  }, { concurrency: 1 });
 }
