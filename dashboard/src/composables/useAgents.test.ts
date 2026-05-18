@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { defineComponent, h, nextTick, ref } from "vue";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import { nextTick, ref } from "vue";
 import type { Ref } from "vue";
-import { mount, flushPromises } from "@vue/test-utils";
+import { flushPromises } from "@vue/test-utils";
 import type { AgentSnapshot } from "../types";
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
@@ -19,8 +19,6 @@ vi.mock("../api", () => ({
     mockClearCriticalFailure(...args),
 }));
 
-// useStream is mocked with a capturing handle so tests can push events on
-// demand AND inspect subscription lifecycle.
 type Handler = (e: { topic: string; data: unknown }) => void;
 type StreamMock = {
   connectionState: Ref<"connecting" | "connected" | "disconnected">;
@@ -60,9 +58,6 @@ vi.mock("./useStream", async () => {
     useStream: () => currentStream,
   };
 });
-
-// Import AFTER mocks.
-import { useAgents, applyAgentEvent, isAgentSnapshot } from "./useAgents";
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -117,44 +112,22 @@ function snap(
   } as AgentSnapshot;
 }
 
-function mountWithAgents() {
-  const exposed = { ret: null as ReturnType<typeof useAgents> | null };
-  const Host = defineComponent({
-    setup() {
-      exposed.ret = useAgents();
-      return () => h("div");
-    },
-  });
-  const wrapper = mount(Host);
-  return {
-    wrapper,
-    get ret() {
-      return exposed.ret!;
-    },
-  };
+// Module-singleton (DX-687): every test needs a fresh module to reset
+// the shared refs / stream singleton. Re-import after `vi.resetModules`.
+type UseAgentsMod = typeof import("./useAgents");
+let mod: UseAgentsMod;
+
+async function reloadModule(): Promise<UseAgentsMod> {
+  vi.resetModules();
+  mod = await import("./useAgents");
+  return mod;
 }
 
-/**
- * Simulate a visibility change — happy-dom ships a visibilityState setter
- * via Object.defineProperty. We flip + dispatch the event the browser would.
- */
-function setVisibility(state: "hidden" | "visible"): void {
-  Object.defineProperty(document, "visibilityState", {
-    configurable: true,
-    get: () => state,
-  });
-  document.dispatchEvent(new Event("visibilitychange"));
-}
-
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   currentStream = makeStreamMock();
   mockFetchAgents.mockResolvedValue([snap("danxbot"), snap("platform")]);
-  setVisibility("visible");
-});
-
-afterEach(() => {
-  setVisibility("visible");
+  await reloadModule();
 });
 
 // ─── Pure reducer tests ──────────────────────────────────────────────────────
@@ -163,14 +136,14 @@ describe("applyAgentEvent — reducer", () => {
   it("replaces the matching row by name and preserves order", () => {
     const state = [snap("a"), snap("b"), snap("c")];
     const patched = snap("b", { slack: false });
-    const next = applyAgentEvent(state, patched);
+    const next = mod.applyAgentEvent(state, patched);
     expect(next.map((a) => a.name)).toEqual(["a", "b", "c"]);
     expect(next[1].settings.overrides.slack.enabled).toBe(false);
   });
 
   it("returns a new array and does not mutate the input", () => {
     const state = [snap("a")];
-    const next = applyAgentEvent(state, snap("a", { slack: true }));
+    const next = mod.applyAgentEvent(state, snap("a", { slack: true }));
     expect(next).not.toBe(state);
     expect(next[0]).not.toBe(state[0]);
     expect(state[0].settings.overrides.slack.enabled).toBeNull();
@@ -179,7 +152,7 @@ describe("applyAgentEvent — reducer", () => {
   it("appends + warns when the snapshot's name is not in state (unknown repo)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const state = [snap("a")];
-    const next = applyAgentEvent(state, snap("newcomer"));
+    const next = mod.applyAgentEvent(state, snap("newcomer"));
     expect(next.map((a) => a.name)).toEqual(["a", "newcomer"]);
     expect(warn).toHaveBeenCalledOnce();
     warn.mockRestore();
@@ -188,58 +161,86 @@ describe("applyAgentEvent — reducer", () => {
 
 describe("isAgentSnapshot — type guard", () => {
   it("rejects non-object inputs", () => {
-    expect(isAgentSnapshot(null)).toBe(false);
-    expect(isAgentSnapshot(undefined)).toBe(false);
-    expect(isAgentSnapshot(42)).toBe(false);
-    expect(isAgentSnapshot("x")).toBe(false);
+    expect(mod.isAgentSnapshot(null)).toBe(false);
+    expect(mod.isAgentSnapshot(undefined)).toBe(false);
+    expect(mod.isAgentSnapshot(42)).toBe(false);
+    expect(mod.isAgentSnapshot("x")).toBe(false);
   });
 
   it("rejects objects missing `name` or with non-string `name`", () => {
-    expect(isAgentSnapshot({})).toBe(false);
-    expect(isAgentSnapshot({ name: 123, settings: {} })).toBe(false);
+    expect(mod.isAgentSnapshot({})).toBe(false);
+    expect(mod.isAgentSnapshot({ name: 123, settings: {} })).toBe(false);
   });
 
   it("rejects objects missing `settings`", () => {
-    expect(isAgentSnapshot({ name: "x" })).toBe(false);
-    expect(isAgentSnapshot({ name: "x", settings: null })).toBe(false);
+    expect(mod.isAgentSnapshot({ name: "x" })).toBe(false);
+    expect(mod.isAgentSnapshot({ name: "x", settings: null })).toBe(false);
   });
 
   it("accepts objects with string `name` + object `settings`", () => {
-    expect(isAgentSnapshot({ name: "x", settings: {} })).toBe(true);
+    expect(mod.isAgentSnapshot({ name: "x", settings: {} })).toBe(true);
   });
 });
 
-// ─── Composable integration tests ────────────────────────────────────────────
+// ─── Module-singleton lifecycle ──────────────────────────────────────────────
 
-describe("useAgents — fetch + refresh", () => {
-  it("hydrates via REST on mount and subscribes to agent:updated", async () => {
-    const { wrapper, ret } = mountWithAgents();
+describe("useAgents — init/destroy singleton", () => {
+  it("init() hydrates via REST and subscribes to agent:updated", async () => {
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     expect(mockFetchAgents).toHaveBeenCalledOnce();
     expect(ret.agents.value.map((a) => a.name)).toEqual(["danxbot", "platform"]);
     expect(currentStream.handlerCount("agent:updated")).toBe(1);
+  });
 
-    wrapper.unmount();
+  it("init() is idempotent — multiple calls share ONE fetch + ONE subscription (DX-687)", async () => {
+    const a = mod.useAgents();
+    const b = mod.useAgents();
+    a.init();
+    b.init();
+    a.init();
+    await flushPromises();
+
+    expect(mockFetchAgents).toHaveBeenCalledOnce();
+    expect(currentStream.handlerCount("agent:updated")).toBe(1);
+  });
+
+  it("multiple useAgents() callers see the SAME agents ref", async () => {
+    const a = mod.useAgents();
+    const b = mod.useAgents();
+    a.init();
+    await flushPromises();
+
+    expect(a.agents).toBe(b.agents);
+    expect(b.agents.value.map((x) => x.name)).toEqual(["danxbot", "platform"]);
+  });
+
+  it("destroy() unsubscribes and disconnects the stream", async () => {
+    const ret = mod.useAgents();
+    ret.init();
+    await flushPromises();
+    expect(currentStream.handlerCount("agent:updated")).toBe(1);
+
+    ret.destroy();
+
+    expect(currentStream.handlerCount("agent:updated")).toBe(0);
+    expect(currentStream.disconnect).toHaveBeenCalled();
   });
 
   it("sets `error` and flips `loading` false when fetch fails", async () => {
     mockFetchAgents.mockRejectedValueOnce(new Error("network down"));
-
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     expect(ret.error.value).toContain("network down");
     expect(ret.loading.value).toBe(false);
     expect(ret.agents.value).toEqual([]);
-
-    wrapper.unmount();
   });
 
   it("contains no setInterval / setTimeout polling (source check)", async () => {
-    // Source-grep guard: the whole point of Phase 5 is to replace the 10s
-    // polling with a stream subscription. A future edit that reintroduces
-    // a timer silently regresses the epic — this test catches that.
     const fs = await import("node:fs/promises");
     const path = await import("node:path");
     const source = await fs.readFile(
@@ -253,7 +254,8 @@ describe("useAgents — fetch + refresh", () => {
 
 describe("useAgents — stream events", () => {
   it("merges a live agent:updated snapshot by name", async () => {
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     const patched = snap("danxbot", { slack: false });
@@ -262,31 +264,25 @@ describe("useAgents — stream events", () => {
 
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBe(false);
     expect(ret.agents.value[0].counts.total.slack).toBe(99);
-    // Row position unchanged.
     expect(ret.agents.value.map((a) => a.name)).toEqual(["danxbot", "platform"]);
-
-    wrapper.unmount();
   });
 
   it("skips malformed payloads and logs a warning (no half-rendered rows)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     currentStream.emit("agent:updated", null);
     currentStream.emit("agent:updated", "not an object");
     currentStream.emit("agent:updated", { noName: true });
 
-    // State unchanged by any of the three malformed events.
     expect(ret.agents.value.map((a) => a.name)).toEqual(["danxbot", "platform"]);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
-
-    wrapper.unmount();
   });
 
   it("replays events that arrive during the REST fetch (hydrate race)", async () => {
-    // Delay the fetch so we can inject a stream event mid-flight.
     let resolveFetch!: (v: AgentSnapshot[]) => void;
     mockFetchAgents.mockReturnValueOnce(
       new Promise<AgentSnapshot[]>((r) => {
@@ -294,18 +290,15 @@ describe("useAgents — stream events", () => {
       }),
     );
 
-    const { wrapper, ret } = mountWithAgents();
-    // Subscription wired synchronously in onMounted — emit before fetch resolves.
+    const ret = mod.useAgents();
+    ret.init();
     await nextTick();
     currentStream.emit("agent:updated", snap("danxbot", { slack: false }));
 
     resolveFetch([snap("danxbot"), snap("platform")]);
     await flushPromises();
 
-    // The in-flight stream event must apply on top of REST, not be lost.
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBe(false);
-
-    wrapper.unmount();
   });
 });
 
@@ -315,7 +308,8 @@ describe("useAgents — refresh public API", () => {
       .mockRejectedValueOnce(new Error("transient"))
       .mockResolvedValueOnce([snap("danxbot"), snap("platform")]);
 
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
     expect(ret.error.value).toBe("transient");
     expect(ret.agents.value).toEqual([]);
@@ -323,114 +317,6 @@ describe("useAgents — refresh public API", () => {
     await ret.refresh();
     expect(ret.error.value).toBeNull();
     expect(ret.agents.value.map((a) => a.name)).toEqual(["danxbot", "platform"]);
-
-    wrapper.unmount();
-  });
-});
-
-describe("useAgents — visibility-pause", () => {
-  it("disconnects the stream when the tab is hidden", async () => {
-    const { wrapper } = mountWithAgents();
-    await flushPromises();
-    expect(currentStream.handlerCount("agent:updated")).toBe(1);
-
-    setVisibility("hidden");
-    await nextTick();
-
-    expect(currentStream.disconnect).toHaveBeenCalled();
-    expect(currentStream.handlerCount("agent:updated")).toBe(0);
-
-    wrapper.unmount();
-  });
-
-  it("is idempotent — visible->visible does not double-subscribe", async () => {
-    const { wrapper } = mountWithAgents();
-    await flushPromises();
-    expect(currentStream.handlerCount("agent:updated")).toBe(1);
-    const subCallsBefore = currentStream.subscribe.mock.calls.length;
-
-    setVisibility("visible");
-    setVisibility("visible");
-    await flushPromises();
-
-    // Still exactly one handler — the `if (unsubUpdated) return` guard holds.
-    expect(currentStream.handlerCount("agent:updated")).toBe(1);
-    expect(currentStream.subscribe.mock.calls.length).toBe(subCallsBefore);
-
-    wrapper.unmount();
-  });
-
-  it("re-subscribes and re-hydrates when the tab becomes visible again", async () => {
-    const { wrapper } = mountWithAgents();
-    await flushPromises();
-    const fetchesBefore = mockFetchAgents.mock.calls.length;
-
-    setVisibility("hidden");
-    await nextTick();
-    expect(currentStream.handlerCount("agent:updated")).toBe(0);
-
-    setVisibility("visible");
-    await flushPromises();
-
-    expect(currentStream.handlerCount("agent:updated")).toBe(1);
-    expect(mockFetchAgents.mock.calls.length).toBe(fetchesBefore + 1);
-
-    wrapper.unmount();
-  });
-
-  it("buffer is torn down on hidden — events emitted during hidden are NOT delivered", async () => {
-    // Phase 7 regression guard: stopStream now closes the buffer (was just an
-    // unsub before). Events emitted during the hidden window must not surface
-    // when the tab returns — the resume-time hydrate() reconciles state.
-    const { wrapper, ret } = mountWithAgents();
-    await flushPromises();
-    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
-
-    setVisibility("hidden");
-    await nextTick();
-
-    // No subscription on the topic — emit goes nowhere because handlerCount = 0.
-    currentStream.emit("agent:updated", snap("danxbot", { slack: false }));
-    // Visible state is unchanged (no live handler took the event).
-    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
-
-    // On resume, the freshly-mounted buffer has zero queued events from the
-    // hidden window; only the new REST hydrate populates state.
-    mockFetchAgents.mockResolvedValueOnce([
-      snap("danxbot", { slack: false }),
-      snap("platform"),
-    ]);
-    setVisibility("visible");
-    await flushPromises();
-    expect(ret.agents.value[0].settings.overrides.slack.enabled).toBe(false);
-
-    wrapper.unmount();
-  });
-});
-
-describe("useAgents — teardown", () => {
-  it("unmount unsubscribes, disconnects stream, removes visibility listener", async () => {
-    const removeSpy = vi.spyOn(document, "removeEventListener");
-    const { wrapper } = mountWithAgents();
-    await flushPromises();
-    expect(currentStream.handlerCount("agent:updated")).toBe(1);
-
-    wrapper.unmount();
-
-    expect(currentStream.handlerCount("agent:updated")).toBe(0);
-    expect(currentStream.disconnect).toHaveBeenCalled();
-    expect(removeSpy).toHaveBeenCalledWith(
-      "visibilitychange",
-      expect.any(Function),
-    );
-    removeSpy.mockRestore();
-
-    // After unmount, a spurious event must not cause a re-hydrate.
-    const fetchesAfter = mockFetchAgents.mock.calls.length;
-    setVisibility("hidden");
-    setVisibility("visible");
-    await flushPromises();
-    expect(mockFetchAgents.mock.calls.length).toBe(fetchesAfter);
   });
 });
 
@@ -442,7 +328,8 @@ describe("useAgents — optimistic toggle", () => {
     updated.counts.total.slack = 99;
     mockPatchToggle.mockResolvedValue(updated);
 
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     const togglePromise = ret.toggle("danxbot", "slack", false);
@@ -453,8 +340,6 @@ describe("useAgents — optimistic toggle", () => {
     expect(ret.agents.value[0].counts.total.slack).toBe(99);
     expect(mockPatchToggle).toHaveBeenCalledWith("danxbot", "slack", false);
     expect(ret.error.value).toBeNull();
-
-    wrapper.unmount();
   });
 
   it("rolls back the local override and surfaces an error when PATCH fails", async () => {
@@ -464,7 +349,8 @@ describe("useAgents — optimistic toggle", () => {
     });
     mockPatchToggle.mockRejectedValue(err);
 
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     await ret.toggle("danxbot", "slack", false);
@@ -472,20 +358,17 @@ describe("useAgents — optimistic toggle", () => {
 
     expect(ret.agents.value[0].settings.overrides.slack.enabled).toBeNull();
     expect(ret.error.value).toBe("disk full");
-
-    wrapper.unmount();
   });
 
   it("records an error and does NOT patch when the repo is unknown", async () => {
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     await ret.toggle("nonexistent", "slack", false);
 
     expect(mockPatchToggle).not.toHaveBeenCalled();
     expect(ret.error.value).toContain("Unknown repo");
-
-    wrapper.unmount();
   });
 });
 
@@ -502,7 +385,8 @@ describe("useAgents — clearCriticalFailure", () => {
     mockClearCriticalFailure.mockResolvedValue({ cleared: true });
     mockFetchAgent.mockResolvedValue(snap("danxbot"));
 
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     await ret.clearCriticalFailure("danxbot");
@@ -511,8 +395,6 @@ describe("useAgents — clearCriticalFailure", () => {
     expect(mockFetchAgent).toHaveBeenCalledWith("danxbot");
     expect(ret.agents.value[0].criticalFailure).toBeNull();
     expect(ret.error.value).toBeNull();
-
-    wrapper.unmount();
   });
 
   it("surfaces an error and leaves the agents list untouched when DELETE fails", async () => {
@@ -531,7 +413,8 @@ describe("useAgents — clearCriticalFailure", () => {
       }),
     );
 
-    const { wrapper, ret } = mountWithAgents();
+    const ret = mod.useAgents();
+    ret.init();
     await flushPromises();
 
     await ret.clearCriticalFailure("danxbot");
@@ -539,7 +422,5 @@ describe("useAgents — clearCriticalFailure", () => {
     expect(ret.error.value).toBe("Worker unreachable");
     expect(mockFetchAgent).not.toHaveBeenCalled();
     expect(ret.agents.value[0].criticalFailure).not.toBeNull();
-
-    wrapper.unmount();
   });
 });

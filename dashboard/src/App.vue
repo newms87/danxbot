@@ -13,6 +13,8 @@ import SettingsPage from "./components/SettingsPage.vue";
 import Login from "./components/auth/Login.vue";
 import { useDispatches } from "./composables/useDispatches";
 import { useSystemErrors } from "./composables/useSystemErrors";
+import { useAgents } from "./composables/useAgents";
+import { resetBrokenAgentsState } from "./composables/useBrokenAgents";
 import { useAuth } from "./composables/useAuth";
 import { fetchRepos, type RepoInfo } from "./api";
 import type { Dispatch } from "./types";
@@ -73,6 +75,12 @@ const {
   destroy: destroySystemErrors,
 } = useSystemErrors();
 
+// DX-687 — `useAgents` is a module-level singleton (mirrors
+// `useDispatches`). One fetch + one SSE subscription feeds every caller
+// (SettingsPage, BrokenAgentsBanner via useBrokenAgents). App.vue owns
+// the lifecycle.
+const { init: initAgents, destroy: destroyAgents } = useAgents();
+
 /**
  * Central 401 handler: `api.ts::fetchWithAuth` dispatches `auth:expired`
  * on any 401. Drop local auth state, which flips `currentUser` to null
@@ -84,6 +92,8 @@ function onAuthExpired(): void {
   selectedDispatch.value = null;
   destroy();
   destroySystemErrors();
+  destroyAgents();
+  resetBrokenAgentsState();
 }
 
 async function loadDashboard(): Promise<void> {
@@ -96,6 +106,7 @@ async function loadDashboard(): Promise<void> {
   }
   initDispatches();
   void initSystemErrors();
+  initAgents();
 }
 
 onMounted(async () => {
@@ -110,6 +121,8 @@ onUnmounted(() => {
   window.removeEventListener("popstate", onPopState);
   destroy();
   destroySystemErrors();
+  destroyAgents();
+  resetBrokenAgentsState();
 });
 
 // Drive dashboard loading off a single source of truth. `immediate: true`
