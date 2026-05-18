@@ -817,6 +817,58 @@ export async function patchTrelloCredentials(
   return res.json();
 }
 
+/**
+ * Wire shape of `GET /api/agents/:repo/github-credentials` (DX-648). Mirror
+ * of backend `GithubCredentialsSnapshot` — re-declared here so the SPA does
+ * not depend on backend type re-exports just for one shape. The PATCH 200
+ * response returns the same shape.
+ */
+export interface GithubCredentialsSnapshot {
+  registered: boolean;
+  token_shape_valid: boolean;
+  last_validated_at: string | null;
+  last_validation_error: string | null;
+}
+
+/**
+ * GET /api/agents/:repo/github-credentials — DX-649. Probes the live
+ * `DANX_GITHUB_TOKEN` health for the named repo. Never returns the token
+ * value; only validation metadata. Errors surface as `ToggleError` so the
+ * Settings panel can render the server's `error` string inline.
+ */
+export async function getGithubCredentials(
+  repo: string,
+): Promise<GithubCredentialsSnapshot> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/github-credentials`,
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as GithubCredentialsSnapshot;
+}
+
+/**
+ * PATCH /api/agents/:repo/github-credentials — DX-649. Rotates
+ * `DANX_GITHUB_TOKEN` in the repo's `.danxbot/.env`. Server shape-validates,
+ * probes `api.github.com/user`, and only writes when the probe returns 2xx.
+ * 422 surfaces shape / probe rejections inline; on 200 returns the fresh
+ * snapshot so the badge updates without a separate GET round-trip.
+ */
+export async function patchGithubCredentials(
+  repo: string,
+  token: string,
+): Promise<GithubCredentialsSnapshot> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/github-credentials`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token }),
+    },
+  );
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as GithubCredentialsSnapshot;
+}
+
 export interface IssuePrefixResult {
   prefix: string;
   migratedFiles: number;

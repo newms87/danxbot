@@ -11,6 +11,7 @@ import { useRepoRootSync } from "../composables/useRepoRootSync";
 import RepoCard from "./agents/RepoCard.vue";
 import RepoRootDirtyBanner from "./agents/RepoRootDirtyBanner.vue";
 import TrelloConfigPanel from "./agents/TrelloConfigPanel.vue";
+import GitHubCredentialsSection from "./agents/GitHubCredentialsSection.vue";
 import BacklogBootstrapBanner from "./settings/BacklogBootstrapBanner.vue";
 import EffortLevelsSection from "./settings/EffortLevelsSection.vue";
 import ListsManager from "./settings/ListsManager.vue";
@@ -105,14 +106,13 @@ async function onSaveIssuePrefix(repo: string, prefix: string): Promise<void> {
   }
 }
 
-// DX-304: TrelloConfigPanel handles its own credential PATCH and asks
-// us to re-hydrate when the rotation succeeds so the masked display
-// values update + the agent snapshot's overrides round-trip stays in
-// sync with the operator's view. `refreshAgents` is the existing
-// composable refresh — re-fetches every agent (one-per-worker today)
-// and patches `agents.value` so the panel's `:agent` prop receives the
-// new shape.
-async function onTrelloRefresh(_repo: string): Promise<void> {
+// DX-304 + DX-649: TrelloConfigPanel + GitHubCredentialsSection handle
+// their own credential PATCH and ask us to re-hydrate when the rotation
+// succeeds so the snapshot fields (masked Trello display, GitHub probe
+// state) round-trip from the canonical source. `refreshAgents` is the
+// existing composable refresh — re-fetches every agent and patches
+// `agents.value` so each panel's `:agent` prop receives the new shape.
+async function onAgentSnapshotRefresh(_repo: string): Promise<void> {
   await refreshAgents();
 }
 
@@ -194,7 +194,11 @@ function dismissResult(): void {
           :agent="activeAgent"
           :busy-feature="busyFeature"
           @toggle="onToggle"
-          @refresh="onTrelloRefresh"
+          @refresh="onAgentSnapshotRefresh"
+        />
+        <GitHubCredentialsSection
+          :agent="activeAgent"
+          @refresh="onAgentSnapshotRefresh"
         />
         <EffortLevelsSection
           :repo="activeRepoName"

@@ -214,6 +214,20 @@ describe("SettingsPage", () => {
       );
     });
 
+    // DX-649 AC #4 — GitHubCredentialsSection mounts next to the Trello
+    // panel for the active repo, fed by the same agent snapshot.
+    it("renders GitHubCredentialsSection next to TrelloConfigPanel", () => {
+      mockAgentsRef.value = [snapshot("danxbot")];
+      const w = mountPage();
+      const githubSection = w.find('[data-test="github-credentials-section"]');
+      expect(githubSection.exists()).toBe(true);
+      expect(
+        githubSection
+          .find('[data-test="github-credentials-badge-missing"]')
+          .text(),
+      ).toContain("Not registered");
+    });
+
     // AC #6 regression guard: the trelloSync row was moved into the
     // panel; RepoCard must NOT render its own duplicate switch. Asserts
     // exactly one role=switch with the "Trello sync" label exists in
