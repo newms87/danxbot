@@ -17,7 +17,7 @@
  * See the backend file's docstring for rule-7 deviation rationale.
  */
 
-import type { IssueStatus } from "../types";
+import type { IssueStatus, List, ListType } from "../types";
 
 export interface DeriveStatusInput {
   status: IssueStatus;
@@ -48,4 +48,57 @@ export function deriveStatus(issue: DeriveStatusInput): IssueStatus {
   if (issue.ready_at) return "ToDo";
   if (issue.archived_at) return "Backlog";
   return issue.status;
+}
+
+/**
+ * DX-639 — semantic-status → `ListType` projection.
+ *
+ * Pure mirror of `deriveListTypeFromSemanticStatus` in
+ * `src/issue/list-resolve.ts`. Total over the seven `IssueStatus`
+ * values; the dashboard composes this with `deriveStatus` to project
+ * the column the card BELONGS in independent of the denormalized
+ * `list_name` field on the wire.
+ */
+export function deriveListTypeFromStatus(status: IssueStatus): ListType {
+  switch (status) {
+    case "Backlog":
+      return "archived";
+    case "Review":
+      return "review";
+    case "ToDo":
+      return "ready";
+    case "In Progress":
+      return "in_progress";
+    case "Blocked":
+      return "blocked";
+    case "Done":
+      return "completed";
+    case "Cancelled":
+      return "cancelled";
+  }
+}
+
+/**
+ * DX-639 — derive the list name a card SHOULD live in from its
+ * lifecycle triggers + the per-repo list taxonomy. Composes
+ * `deriveStatus(card)` → `deriveListTypeFromStatus(status)` →
+ * the type's default list. Returns null when the taxonomy carries
+ * no default list for the projected type (lists-routes guarantees
+ * ≥1 default per type, so null is only reachable during the brief
+ * pre-hydrate window before the SPA's first lists fetch resolves).
+ *
+ * Reading the raw `list_name` field for column grouping is forbidden
+ * — DX-624 proved a single missed `list_name` projection event
+ * leaves a Done card rendered in In Progress forever. This helper is
+ * the single read-path projection; the field stays writable as a
+ * denormalized display cache + tracker round-trip carrier but never
+ * informs grouping decisions.
+ */
+export function derivedListName(
+  card: DeriveStatusInput,
+  lists: readonly List[],
+): string | null {
+  const type = deriveListTypeFromStatus(deriveStatus(card));
+  const def = lists.find((l) => l.is_default_for_type && l.type === type);
+  return def?.name ?? null;
 }

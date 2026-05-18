@@ -48,6 +48,14 @@ export function resolveListNameForType(
  * Map the derived `IssueStatus` (the semantic enum the worker reads via
  * `deriveStatus`) to the `ListType` enum the lists.yaml file uses.
  * Total: every `IssueStatus` value maps to exactly one `ListType`.
+ *
+ * Lockstep contract (DX-639): mirrored byte-identically in
+ * `dashboard/src/composables/derive-status.ts#deriveListTypeFromStatus`
+ * — the SPA cannot import this module (browser bundle), so the switch
+ * is duplicated. Any change to the mapping MUST land on BOTH sides in
+ * the same commit. TypeScript catches additions to the `IssueStatus`
+ * enum (exhaustive switch becomes a compile error on either side);
+ * silent mapping changes have no compile guard, hence this comment.
  */
 export function deriveListTypeFromSemanticStatus(
   status: IssueStatus,

@@ -15,6 +15,7 @@ import { LIST_TYPE_LADDER } from "../../types";
 import IssueCard from "./IssueCard.vue";
 import { isInScope, type ScopeMode } from "../../composables/useIssueFilters";
 import { useCardDrag } from "../../composables/useCardDrag";
+import { deriveListTypeFromStatus } from "../../composables/derive-status";
 import {
   BOARD_SORT_OPTIONS,
   useBoardSort,
@@ -31,9 +32,15 @@ import {
  * (archived → review → ready → blocked → in_progress → completed →
  * cancelled), with multiple lists of the same type sorted by `order`.
  *
- * Cards are grouped by `IssueListItem.list_name`. Pre-DX-586 cards (no
- * `list_name`) fall back to the type's default list so the operator
- * never sees an orphaned card.
+ * DX-639 (Phase 1 of DX-638) — Cards are grouped by the type's
+ * default list as projected from `deriveStatus(card)`. The raw
+ * `IssueListItem.list_name` field is a denormalized display cache /
+ * tracker round-trip carrier; it is NEVER read here. DX-624 burned
+ * the budget proving that a single missed `list_name` projection
+ * event leaves a Done card rendered in In Progress forever; the
+ * derived projection is immune because lifecycle triggers
+ * (`cancelled_at`, `completed_at`, `blocked.at`, `dispatch`,
+ * `ready_at`, `archived_at`) are the canonical source.
  *
  * The board emits `move` with the destination `List` (name + type) so
  * the parent can route through the INTO-blocked / OUT-of-blocked
@@ -118,14 +125,7 @@ const columns = computed<List[]>(() => {
   return sorted;
 });
 
-/** Map list_name → List for quick lookup (drop targets + card accent). */
-const listsByName = computed<Map<string, List>>(() => {
-  const m = new Map<string, List>();
-  for (const l of props.lists) m.set(l.name, l);
-  return m;
-});
-
-/** Default list per type — used as the fallback for cards with no `list_name`. */
+/** Default list per type — column-grouping target for every card. */
 const defaultByType = computed<Map<ListType, List>>(() => {
   const m = new Map<ListType, List>();
   for (const l of props.lists) {
@@ -135,42 +135,25 @@ const defaultByType = computed<Map<ListType, List>>(() => {
 });
 
 /**
- * Map issue status → ListType so a pre-DX-586 card with `list_name:
- * null` can be bucketed into its derived type's default list.
- * Mirrors `deriveListTypeFromSemanticStatus` server-side.
- */
-function listTypeForStatus(status: IssueListItem["status"]): ListType {
-  switch (status) {
-    case "Backlog":
-      return "archived";
-    case "Review":
-      return "review";
-    case "ToDo":
-      return "ready";
-    case "In Progress":
-      return "in_progress";
-    case "Blocked":
-      return "blocked";
-    case "Done":
-      return "completed";
-    case "Cancelled":
-      return "cancelled";
-  }
-}
-
-/**
- * Resolve a card to the list it belongs in for column grouping.
- * Priority: explicit `list_name` (if it matches a current list) →
- * default list for the card's derived type → null (uncategorized;
- * dropped from the board, surfaces via the audit log).
+ * DX-639 — resolve a card's column purely from its server-derived
+ * semantic type. The wire-shape `IssueListItem` carries only the
+ * already-derived `status` (projected by `parseIssue` → `deriveStatus`
+ * server-side, NOT the raw lifecycle triggers), so the SPA short-cuts
+ * the composition to `deriveListTypeFromStatus(issue.status)` and
+ * lands the card in that type's default list.
+ *
+ * Callers with the full trigger shape (`DeriveStatusInput`) should
+ * use `derivedListName(card, lists)` from the same module — it
+ * composes `deriveStatus → deriveListTypeFromStatus → default-of-type`
+ * for sites that need to re-derive without trusting the wire `status`.
+ *
+ * Either way, the raw `list_name` field is intentionally ignored —
+ * drift in that denormalized cache (the DX-624 failure mode) cannot
+ * leak into column grouping when grouping reads only the derivation.
  */
 function listForIssue(issue: IssueListItem): List | null {
-  if (issue.list_name) {
-    const hit = listsByName.value.get(issue.list_name);
-    if (hit) return hit;
-  }
-  const fallbackType = listTypeForStatus(issue.status);
-  return defaultByType.value.get(fallbackType) ?? null;
+  const type = deriveListTypeFromStatus(issue.status);
+  return defaultByType.value.get(type) ?? null;
 }
 
 const cardDrag = useCardDrag<List>({
@@ -224,11 +207,18 @@ function isCompletedRecent(issue: IssueListItem): boolean {
 }
 
 /**
- * Grouped cards per column. Each card lands in exactly one column —
- * the resolution priority is `list_name` → type-default → drop.
- * Uncategorized cards (no list matches AND no default for type) are
- * silently dropped; the lists-routes guarantees ≥1 list per type so
- * this is unreachable in practice.
+ * Grouped cards per column. Each card lands in exactly one column,
+ * resolved via `listForIssue` — DX-639 derived projection.
+ *
+ * Multi-list-per-type note (Phase 1 trade-off): non-default lists of
+ * a type ("Sprint 1 Backlog", "Sprint 2 Backlog" both type=archived)
+ * render as empty columns under this scheme — every card funnels to
+ * the type's default. DX-638 Phase 2 introduces multi-list-per-type
+ * bucketing on top of this read-side projection.
+ *
+ * Uncategorized cards (no default for the projected type) are
+ * silently dropped; the lists-routes guarantees ≥1 default list per
+ * type so this is unreachable in practice.
  */
 const grouped = computed<Record<string, IssueListItem[]>>(() => {
   const result: Record<string, IssueListItem[]> = {};

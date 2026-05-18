@@ -40,10 +40,11 @@ function makeIssue(
   status: IssueStatus,
   overrides: Partial<IssueListItem> = {},
 ): IssueListItem {
-  // Auto-resolve list_name to match the status if not overridden — the
-  // dashboard expects `list_name` on every projection (server-side
-  // auto-resolve write path), and the board falls back to the type's
-  // default when list_name is null.
+  // DX-639: the board IGNORES `list_name` for column grouping; the
+  // field is kept on this fixture only for wire-shape parity with the
+  // server-side `IssueListItem` projection (DispatchGatesSection +
+  // DrawerHeader still display/PATCH it). Grouping reads only the
+  // derived status → ListType → default-of-type chain.
   const defaultByStatus: Record<IssueStatus, string> = {
     Backlog: "Backlog",
     Review: "Review",
@@ -159,7 +160,7 @@ describe("IssueBoard — list-driven columns (DX-586)", () => {
     onBoard.wrapper.unmount();
   });
 
-  it("groups cards into the column matching their list_name", () => {
+  it("groups cards into the column derived from their semantic status", () => {
     const card = makeIssue("DX-1", "ToDo");
     const { wrapper } = mountBoard([card]);
     const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
@@ -167,13 +168,16 @@ describe("IssueBoard — list-driven columns (DX-586)", () => {
     expect(todoCol.text()).toContain("DX-1");
   });
 
-  it("renders operator-renamed lists with their custom names + colors", () => {
+  it("renders operator-renamed default lists via the derived projection", () => {
+    // No `list_name` override on the card — the derived path lands on
+    // the renamed default for type=ready ("Up Next"), independent of
+    // the field on the wire.
     const customLists: List[] = SEED_LISTS.map((l) =>
       l.type === "ready"
         ? { ...l, name: "Up Next", color: "#abcdef" }
         : l,
     );
-    const card = makeIssue("DX-1", "ToDo", { list_name: "Up Next" });
+    const card = makeIssue("DX-1", "ToDo");
     const { wrapper } = mountBoard([card], { lists: customLists });
     const col = wrapper.find(`[data-test="column-${tid("Up Next")}"]`);
     expect(col.exists()).toBe(true);
@@ -182,11 +186,26 @@ describe("IssueBoard — list-driven columns (DX-586)", () => {
     wrapper.unmount();
   });
 
-  it("falls back to the type's default list when list_name is null", () => {
-    const card = makeIssue("DX-1", "ToDo", { list_name: null });
-    const { wrapper } = mountBoard([card]);
-    const todoCol = wrapper.find(`[data-test="column-${tid("To Do")}"]`);
-    expect(todoCol.text()).toContain("DX-1");
+  it("DX-624 regression — Done card with stale `list_name: In Progress` still lands in Done column", () => {
+    // The exact shape DX-624 surfaced: server-derived status is Done
+    // (completed_at fired), but the denormalized `list_name` cache
+    // still reads "In Progress" because a projection event got
+    // dropped. Pre-DX-639 the board would render this card in In
+    // Progress forever; the derived projection lands it in Done.
+    // Done cards are gated to the recent-24h slice when showClosed is
+    // off — bump updated_at to "now" so the fixture clears the filter.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const card = makeIssue("DX-624", "Done", {
+      list_name: "In Progress",
+      updated_at: nowSec,
+    });
+    const { wrapper } = mountBoard([card], { showClosed: true });
+    const doneCol = wrapper.find(`[data-test="column-${tid("Done")}"]`);
+    expect(doneCol.exists()).toBe(true);
+    expect(doneCol.text()).toContain("DX-624");
+    const wipCol = wrapper.find(`[data-test="column-${tid("In Progress")}"]`);
+    expect(wipCol.text()).not.toContain("DX-624");
+    wrapper.unmount();
   });
 });
 
