@@ -53,132 +53,208 @@ function splitEvents(buffer: string): { events: string[]; tail: string } {
 /**
  * Multiplexed SSE stream over `GET /api/stream?topics=<...>`.
  *
- * Each call to `useStream()` creates an independent connection manager.
- * Call `subscribe(topic, handler)` to register interest in a topic —
- * the first subscription (or a batch of synchronous subscriptions)
- * opens the connection. Call `disconnect()` in `onBeforeUnmount` to
- * clean up.
+ * `useStream()` returns a per-call facade backed by ONE process-wide
+ * connection manager. Every composable in the dashboard that needs
+ * live updates may call `useStream()` independently — all of their
+ * topic subscriptions multiplex onto the single underlying
+ * `/api/stream` fetch. This is load-bearing: browsers cap concurrent
+ * connections per origin at 6 over HTTP/1.1, and the dashboard has
+ * ~11 composables that subscribe; without sharing, REST fetches
+ * head-of-line-block behind exhausted SSE slots (DX-681).
+ *
+ * The facade tracks the subscriptions THIS caller created so
+ * `disconnect()` releases only those handlers — sibling composables
+ * still holding subscriptions keep the shared connection alive.
+ * When the LAST handler across every facade unsubscribes, the shared
+ * connection is aborted; the next subscription re-opens it.
  *
  * Reconnect backoff: 1 s → 2 s → 4 s … capped at 30 s, with up to
- * 25 % jitter. Backoff is cumulative — it does not reset on reconnect.
+ * 25 % jitter. Backoff is cumulative across the shared connection
+ * — it resets only when every handler has gone away.
  */
-export function useStream(): UseStreamReturn {
-  const connectionState = ref<ConnectionState>("disconnected");
-  /** topic → set of registered handlers */
-  const handlers = new Map<string, Set<StreamEventHandler>>();
 
-  let ctrl: AbortController | null = null;
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  let backoffMs = 1_000;
-
+interface SharedStreamState {
+  /** topic → set of registered handlers, summed across every facade */
+  handlers: Map<string, Set<StreamEventHandler>>;
+  connectionState: Ref<ConnectionState>;
+  ctrl: AbortController | null;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
+  backoffMs: number;
   /** True while the microtask that calls connect() is queued but not yet run. */
-  let connectScheduled = false;
+  connectScheduled: boolean;
+}
 
-  function getTopics(): string[] {
-    return [...handlers.keys()];
+function createSharedState(): SharedStreamState {
+  return {
+    handlers: new Map(),
+    connectionState: ref<ConnectionState>("disconnected"),
+    ctrl: null,
+    reconnectTimer: null,
+    backoffMs: 1_000,
+    connectScheduled: false,
+  };
+}
+
+let shared: SharedStreamState = createSharedState();
+
+function getTopics(s: SharedStreamState): string[] {
+  return [...s.handlers.keys()];
+}
+
+function dispatchEvent(s: SharedStreamState, raw: string): void {
+  try {
+    const event = JSON.parse(raw) as StreamEvent;
+    const subs = s.handlers.get(event.topic);
+    if (subs) for (const h of [...subs]) h(event);
+  } catch {
+    // Malformed JSON — skip.
   }
+}
 
-  function dispatch(raw: string): void {
-    try {
-      const event = JSON.parse(raw) as StreamEvent;
-      const subs = handlers.get(event.topic);
-      if (subs) for (const h of [...subs]) h(event);
-    } catch {
-      // Malformed JSON — skip.
+async function connect(s: SharedStreamState): Promise<void> {
+  if (s !== shared) return;
+  if (s.connectionState.value !== "disconnected") return;
+  const topics = getTopics(s);
+  if (topics.length === 0) return;
+
+  s.connectionState.value = "connecting";
+  s.ctrl = new AbortController();
+
+  try {
+    const res = await fetchWithAuth(
+      `/api/stream?topics=${topics.map(encodeURIComponent).join(",")}`,
+      { signal: s.ctrl.signal, headers: { Accept: "text/event-stream" } },
+    );
+    if (s !== shared) return; // teardown raced this fetch
+    if (!res.ok || !res.body) {
+      s.connectionState.value = "disconnected";
+      scheduleReconnect(s);
+      return;
     }
-  }
 
-  async function connect(): Promise<void> {
-    if (connectionState.value !== "disconnected") return;
-    const topics = getTopics();
-    if (topics.length === 0) return;
+    s.connectionState.value = "connected";
 
-    connectionState.value = "connecting";
-    ctrl = new AbortController();
+    const reader = res.body.getReader();
+    const dec = new TextDecoder("utf-8");
+    let buf = "";
 
-    try {
-      const res = await fetchWithAuth(
-        `/api/stream?topics=${topics.map(encodeURIComponent).join(",")}`,
-        { signal: ctrl.signal, headers: { Accept: "text/event-stream" } },
-      );
-      if (!res.ok || !res.body) {
-        connectionState.value = "disconnected";
-        scheduleReconnect();
+    while (true) {
+      const { value, done } = await reader.read();
+      if (s !== shared) return;
+      if (done) {
+        s.connectionState.value = "disconnected";
+        scheduleReconnect(s);
         return;
       }
-
-      connectionState.value = "connected";
-
-      const reader = res.body.getReader();
-      const dec = new TextDecoder("utf-8");
-      let buf = "";
-
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) {
-          connectionState.value = "disconnected";
-          scheduleReconnect();
-          return;
-        }
-        buf += dec.decode(value, { stream: true });
-        const { events, tail } = splitEvents(buf);
-        buf = tail;
-        for (const raw of events) dispatch(raw);
-      }
-    } catch (err) {
-      connectionState.value = "disconnected";
-      if ((err as { name?: string }).name !== "AbortError") {
-        scheduleReconnect();
-      }
+      buf += dec.decode(value, { stream: true });
+      const { events, tail } = splitEvents(buf);
+      buf = tail;
+      for (const raw of events) dispatchEvent(s, raw);
+    }
+  } catch (err) {
+    if (s !== shared) return;
+    s.connectionState.value = "disconnected";
+    if ((err as { name?: string }).name !== "AbortError") {
+      scheduleReconnect(s);
     }
   }
+}
 
-  function scheduleReconnect(): void {
-    const jitter = Math.random() * 0.25 * backoffMs;
-    const delay = backoffMs + jitter;
-    backoffMs = Math.min(backoffMs * 2, 30_000);
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null;
-      void connect();
-    }, delay);
-  }
+function scheduleReconnect(s: SharedStreamState): void {
+  const jitter = Math.random() * 0.25 * s.backoffMs;
+  const delay = s.backoffMs + jitter;
+  s.backoffMs = Math.min(s.backoffMs * 2, 30_000);
+  s.reconnectTimer = setTimeout(() => {
+    s.reconnectTimer = null;
+    if (s === shared && s.handlers.size > 0) void connect(s);
+  }, delay);
+}
 
-  function scheduleConnect(): void {
-    if (connectScheduled || connectionState.value !== "disconnected") return;
-    connectScheduled = true;
-    void Promise.resolve().then(() => {
-      connectScheduled = false;
-      if (connectionState.value === "disconnected" && handlers.size > 0) {
-        void connect();
-      }
-    });
+function scheduleConnect(s: SharedStreamState): void {
+  if (s.connectScheduled || s.connectionState.value !== "disconnected") return;
+  s.connectScheduled = true;
+  void Promise.resolve().then(() => {
+    s.connectScheduled = false;
+    if (
+      s === shared &&
+      s.connectionState.value === "disconnected" &&
+      s.handlers.size > 0
+    ) {
+      void connect(s);
+    }
+  });
+}
+
+/**
+ * Abort the underlying fetch + reset backoff. Called when the LAST
+ * subscriber across every facade has unsubscribed. The shared state
+ * object itself stays — the next subscribe() re-opens the connection
+ * with fresh backoff.
+ */
+function teardownSharedIfEmpty(s: SharedStreamState): void {
+  if (s !== shared) return;
+  if (s.handlers.size > 0) return;
+  if (s.reconnectTimer !== null) {
+    clearTimeout(s.reconnectTimer);
+    s.reconnectTimer = null;
   }
+  s.ctrl?.abort();
+  s.ctrl = null;
+  s.backoffMs = 1_000;
+  s.connectionState.value = "disconnected";
+  s.connectScheduled = false;
+}
+
+/**
+ * Test-only: reset the module-level shared state to a fresh instance.
+ * Existing facade references become orphans (their `disconnect` is a
+ * no-op against the new shared state). Tests call this in `beforeEach`
+ * so backoff / connection state don't leak across cases.
+ */
+export function __resetSharedStreamForTesting(): void {
+  if (shared.reconnectTimer !== null) clearTimeout(shared.reconnectTimer);
+  shared.ctrl?.abort();
+  shared = createSharedState();
+}
+
+export function useStream(): UseStreamReturn {
+  // Per-facade tracking of THIS caller's unsubs so `disconnect()` releases
+  // only this caller's handlers — sibling facades keep the shared
+  // connection alive while they still hold subscriptions.
+  const local = new Set<() => void>();
 
   function subscribe(topic: string, handler: StreamEventHandler): () => void {
-    if (!handlers.has(topic)) handlers.set(topic, new Set());
-    handlers.get(topic)!.add(handler);
-    scheduleConnect();
+    const s = shared;
+    if (!s.handlers.has(topic)) s.handlers.set(topic, new Set());
+    s.handlers.get(topic)!.add(handler);
+    scheduleConnect(s);
 
-    return () => {
-      const subs = handlers.get(topic);
+    const unsub = (): void => {
+      // Bind to the shared instance captured at subscribe time. If a test
+      // reset replaced `shared` between subscribe and unsub, the captured
+      // state is an orphan and removing from it is a no-op — correct
+      // behavior, since the orphan's handlers are no longer live.
+      const subs = s.handlers.get(topic);
       if (subs) {
         subs.delete(handler);
-        if (subs.size === 0) handlers.delete(topic);
+        if (subs.size === 0) s.handlers.delete(topic);
       }
+      local.delete(unsub);
+      teardownSharedIfEmpty(s);
     };
+    local.add(unsub);
+    return unsub;
   }
 
   function disconnect(): void {
-    if (reconnectTimer !== null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-    ctrl?.abort();
-    ctrl = null;
-    connectionState.value = "disconnected";
+    for (const unsub of [...local]) unsub();
   }
 
-  return { connectionState, subscribe, disconnect };
+  return {
+    connectionState: shared.connectionState,
+    subscribe,
+    disconnect,
+  };
 }
 
 export interface HydrationBuffer<T> {

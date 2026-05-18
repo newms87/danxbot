@@ -16,7 +16,11 @@ vi.mock("../api", async () => {
   };
 });
 
-import { useStream, createHydrationBuffer } from "./useStream";
+import {
+  useStream,
+  createHydrationBuffer,
+  __resetSharedStreamForTesting,
+} from "./useStream";
 import type { StreamEvent, ConnectionState, UseStreamReturn } from "./useStream";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -115,6 +119,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   vi.spyOn(Math, "random").mockReturnValue(0); // no jitter → deterministic delays
+  // Reset the module-level shared connection so backoff / connection state
+  // / handler accumulation does not leak across tests now that useStream()
+  // is a singleton.
+  __resetSharedStreamForTesting();
 });
 
 afterEach(() => {
@@ -240,6 +248,97 @@ describe("useStream — subscribe + dispatch", () => {
     expect(mockFetchWithAuth).toHaveBeenCalledTimes(1);
 
     disconnect();
+  });
+});
+
+// ─── singleton: one underlying connection across N callers (DX-681) ─────────
+
+describe("useStream — singleton sharing (DX-681)", () => {
+  it("N callers subscribing to different topics open exactly ONE underlying fetch", async () => {
+    mockFetchWithAuth.mockResolvedValue(okStream(hangingReader() as ReturnType<typeof fakeReader>));
+
+    const a = useStream();
+    const b = useStream();
+    const c = useStream();
+    a.subscribe("topic-a", () => {});
+    b.subscribe("topic-b", () => {});
+    c.subscribe("topic-c", () => {});
+    await flushPromises();
+
+    expect(mockFetchWithAuth).toHaveBeenCalledTimes(1);
+    const url = (mockFetchWithAuth.mock.calls[0] as [string])[0];
+    expect(url).toContain(encodeURIComponent("topic-a"));
+    expect(url).toContain(encodeURIComponent("topic-b"));
+    expect(url).toContain(encodeURIComponent("topic-c"));
+
+    a.disconnect();
+    b.disconnect();
+    c.disconnect();
+  });
+
+  it("N callers share the same connectionState ref", () => {
+    const a = useStream();
+    const b = useStream();
+    expect(a.connectionState).toBe(b.connectionState);
+  });
+
+  it("one facade's disconnect() does NOT close the shared connection while another facade still subscribes", async () => {
+    mockFetchWithAuth.mockResolvedValue(okStream(hangingReader() as ReturnType<typeof fakeReader>));
+
+    const a = useStream();
+    const b = useStream();
+    a.subscribe("topic-a", () => {});
+    const handlerB = vi.fn();
+    b.subscribe("topic-b", handlerB);
+    await flushPromises();
+
+    expect(mockFetchWithAuth).toHaveBeenCalledTimes(1);
+    expect(a.connectionState.value).toBe("connected");
+
+    // Disconnect A — only A's handler released; B still holds topic-b so
+    // the shared connection stays up.
+    a.disconnect();
+    expect(b.connectionState.value).toBe("connected");
+
+    b.disconnect();
+  });
+
+  it("LAST unsubscribe across every facade aborts the shared fetch", async () => {
+    const ctrl = controllableReader();
+    mockFetchWithAuth.mockResolvedValue(okStream(ctrl.reader as ReturnType<typeof fakeReader>));
+
+    const a = useStream();
+    const b = useStream();
+    a.subscribe("topic-a", () => {});
+    b.subscribe("topic-b", () => {});
+    await flushPromises();
+
+    expect(a.connectionState.value).toBe("connected");
+
+    a.disconnect();
+    b.disconnect(); // now zero handlers → teardown
+    expect(a.connectionState.value).toBe("disconnected");
+  });
+
+  it("a fresh subscribe after full teardown re-opens the connection with reset backoff", async () => {
+    mockFetchWithAuth
+      .mockResolvedValueOnce(okStream(hangingReader() as ReturnType<typeof fakeReader>))
+      .mockResolvedValueOnce(okStream(hangingReader() as ReturnType<typeof fakeReader>));
+
+    const a = useStream();
+    a.subscribe("topic-a", () => {});
+    await flushPromises();
+    expect(mockFetchWithAuth).toHaveBeenCalledTimes(1);
+
+    a.disconnect();
+    expect(a.connectionState.value).toBe("disconnected");
+
+    const b = useStream();
+    b.subscribe("topic-b", () => {});
+    await flushPromises();
+    expect(mockFetchWithAuth).toHaveBeenCalledTimes(2);
+
+    b.disconnect();
   });
 });
 
