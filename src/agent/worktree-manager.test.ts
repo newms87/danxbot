@@ -658,6 +658,10 @@ describe("WorktreeManager", () => {
             response: { stdout: "alice\n" },
           },
           { match: "add -A", response: { stdout: "" } },
+          {
+            match: "diff --cached --quiet",
+            response: { code: 1 }, // staged changes present
+          },
           { match: "commit -m", response: { stdout: "ok" } },
           {
             match: "rev-parse HEAD",
@@ -673,15 +677,20 @@ describe("WorktreeManager", () => {
         kind: "snapshotted",
         sha: "deadbeefcafe1234",
       });
-      // Exact call sequence: status → branch check → add → commit → head sha.
+      // Exact call sequence: status → branch check → add → diff-cached → commit → head sha.
       const argvs = runner.calls.map((c) => c.args.join(" "));
-      expect(argvs).toEqual([
-        "status --porcelain",
-        "rev-parse --abbrev-ref HEAD",
-        "add -A",
+      expect(argvs[0]).toBe("status --porcelain");
+      expect(argvs[1]).toBe("rev-parse --abbrev-ref HEAD");
+      // DX-643 — `git add -A` now carries inject-pipeline exclude
+      // pathspecs so three writers stop fighting regenerated files.
+      expect(argvs[2]).toMatch(/^add -A -- \. :!\.danxbot\/workspaces\/\*\//);
+      expect(argvs[2]).toContain(":!.danxbot/workspaces/*/.mcp.json");
+      expect(argvs[2]).toContain(":!.danxbot/workspaces/*/.claude/rules/danx-*.md");
+      expect(argvs[3]).toBe("diff --cached --quiet");
+      expect(argvs[4]).toBe(
         "commit -m wip(autosave): pre-sync snapshot of prior-dispatch residue",
-        "rev-parse HEAD",
-      ]);
+      );
+      expect(argvs[5]).toBe("rev-parse HEAD");
       // Forbidden destructive ops MUST not appear.
       expect(
         argvs.some(
@@ -763,6 +772,10 @@ describe("WorktreeManager", () => {
           },
           { match: "add -A", response: { stdout: "" } },
           {
+            match: "diff --cached --quiet",
+            response: { code: 1 }, // staged changes present
+          },
+          {
             match: "commit -m",
             response: {
               code: 1,
@@ -812,6 +825,92 @@ describe("WorktreeManager", () => {
       await expect(wm.snapshotIfDirty(ctx, "../evil")).rejects.toThrow(
         WorktreeError,
       );
+    });
+
+    // DX-643 — narrow autosave: exclude inject-pipeline-regenerated paths.
+    it("returns {kind: 'clean'} when ONLY inject-pipeline-owned paths are dirty (nothing to commit after exclusions)", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: {
+              // Only inject-regenerated paths — three writers race these.
+              stdout:
+                " M .danxbot/workspaces/issue-worker/.mcp.json\n" +
+                " M .danxbot/workspaces/self-repair/.mcp.json\n" +
+                " M .danxbot/workspaces/issue-worker/.claude/rules/danx-tools.md\n",
+            },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "alice\n" },
+          },
+          { match: "add -A", response: { stdout: "" } },
+          {
+            match: "diff --cached --quiet",
+            response: { code: 0 }, // index matches HEAD — nothing staged
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toEqual({ kind: "clean" });
+      // No commit attempted — short-circuited at diff-cached check.
+      const argvs = runner.calls.map((c) => c.args.join(" "));
+      expect(argvs.some((a) => a.startsWith("commit"))).toBe(false);
+    });
+
+    it("commits genuine task residue (src edits) while inject-pipeline paths are excluded by pathspec", async () => {
+      const runner = fakeRunner({
+        responses: [
+          {
+            match: "status --porcelain",
+            response: {
+              stdout:
+                " M src/foo.ts\n" + // genuine task residue
+                " M .danxbot/workspaces/issue-worker/.mcp.json\n", // inject-regenerated
+            },
+          },
+          {
+            match: "rev-parse --abbrev-ref HEAD",
+            response: { stdout: "alice\n" },
+          },
+          { match: "add -A", response: { stdout: "" } },
+          {
+            match: "diff --cached --quiet",
+            response: { code: 1 }, // src/foo.ts is staged
+          },
+          { match: "commit -m", response: { stdout: "ok" } },
+          {
+            match: "rev-parse HEAD",
+            response: { stdout: "abc1234567\n" },
+          },
+        ],
+      });
+      const wm = createWorktreeManager(runner);
+
+      const result = await wm.snapshotIfDirty(ctx, "alice");
+
+      expect(result).toEqual({ kind: "snapshotted", sha: "abc1234567" });
+      const addCall = runner.calls.find((c) => c.args[0] === "add");
+      expect(addCall).toBeDefined();
+      // Exclude pathspecs present.
+      expect(addCall!.args).toContain(":!.danxbot/workspaces/*/.mcp.json");
+      expect(addCall!.args).toContain(
+        ":!.danxbot/workspaces/*/.claude/rules/danx-*.md",
+      );
+      // Positive pathspec `.` is present so non-excluded paths still stage.
+      expect(addCall!.args).toContain(".");
+      // Argv order — positive selector `.` MUST precede `:!` exclusions
+      // or git treats the call as exclude-only with no positive match.
+      const dotIdx = addCall!.args.indexOf(".");
+      const firstExcludeIdx = addCall!.args.findIndex((a) =>
+        a.startsWith(":!"),
+      );
+      expect(dotIdx).toBeGreaterThan(-1);
+      expect(firstExcludeIdx).toBeGreaterThan(dotIdx);
     });
   });
 

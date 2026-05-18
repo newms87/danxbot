@@ -47,6 +47,15 @@ const UNIVERSAL_PATTERNS: readonly string[] = [
  * gpt-manager's `schema-builder`) are NOT in this list because the repo
  * owns them end-to-end; inject never writes into a workspace that
  * doesn't have a matching template dir.
+ *
+ * Consumed by TWO sites — keep them in sync:
+ *   1. `ensureWorkspaceGitignoreEntries` below — gitignore entries
+ *      written per templated workspace name (readdirSync at inject time).
+ *   2. `getInjectOwnedExcludePathspecs` below — `git add` exclude
+ *      pathspecs that use a `workspaces/<anyname>/<suffix>` glob (no
+ *      readdirSync at autosave hot path). The glob will also match
+ *      repo-custom workspaces, which is safe — excluding inject-shaped
+ *      paths from autosave is a no-op when the file does not exist.
  */
 const TEMPLATED_WORKSPACE_PATTERNS: readonly string[] = [
   "CLAUDE.md",
@@ -83,4 +92,30 @@ export function ensureWorkspaceGitignoreEntries(repoLocalPath: string): void {
       ensureGitignoreEntry(repoLocalPath, `workspaces/${name}/${suffix}`);
     }
   }
+}
+
+/**
+ * DX-643 — pathspecs identifying inject-pipeline-regenerated files,
+ * repo-root-relative (prefixed with `.danxbot/`). Consumed by
+ * `WorktreeManager.snapshotIfDirty`'s `git add` to exclude files
+ * three independent writers race on every tick. `gitignore` alone
+ * does not protect previously-tracked files — the autosave's
+ * `git add -A` must also exclude them explicitly.
+ *
+ * Wildcards use git's default pathspec fnmatch: `*` matches within
+ * one path segment but does not cross `/`. Every pattern here is
+ * one workspace-dir segment, so default fnmatch covers them.
+ */
+export function getInjectOwnedExcludePathspecs(): readonly string[] {
+  const pathspecs: string[] = [];
+  for (const pattern of UNIVERSAL_PATTERNS) {
+    pathspecs.push(`.danxbot/${pattern}`);
+  }
+  // `workspaces/*/<suffix>` glob covers every templated workspace name
+  // without a readdirSync at autosave time. Pattern that matches
+  // nothing in a given workspace is a harmless no-op.
+  for (const suffix of TEMPLATED_WORKSPACE_PATTERNS) {
+    pathspecs.push(`.danxbot/workspaces/*/${suffix}`);
+  }
+  return pathspecs;
 }

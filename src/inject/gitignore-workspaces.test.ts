@@ -16,7 +16,10 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { injectDir } from "./_shared/inject-utils.js";
-import { ensureWorkspaceGitignoreEntries } from "./gitignore-workspaces.js";
+import {
+  ensureWorkspaceGitignoreEntries,
+  getInjectOwnedExcludePathspecs,
+} from "./gitignore-workspaces.js";
 
 function readGitignoreLines(repoRoot: string): string[] {
   const content = readFileSync(
@@ -119,5 +122,54 @@ describe("ensureWorkspaceGitignoreEntries (DX-340)", () => {
     expect(lines).toContain(".trello-retry/");
     expect(lines).toContain("features.md");
     expect(lines).toContain("workspaces/*/.claude/rules/danx-*.md");
+  });
+});
+
+describe("getInjectOwnedExcludePathspecs (DX-643)", () => {
+  it("returns repo-root-relative pathspecs covering every inject-owned workspace path class", () => {
+    const pathspecs = getInjectOwnedExcludePathspecs();
+    // Universal patterns — apply to every workspace dir.
+    expect(pathspecs).toContain(".danxbot/workspaces/*/.claude/rules/danx-*.md");
+    expect(pathspecs).toContain(
+      ".danxbot/workspaces/*/.claude/hooks/worktree-guard.mjs",
+    );
+    expect(pathspecs).toContain(
+      ".danxbot/workspaces/*/.claude/scheduled_tasks.lock",
+    );
+    expect(pathspecs).toContain(".danxbot/workspaces/*/.claude/clad.json");
+    // Templated-per-workspace patterns — applied via `workspaces/*/` glob.
+    expect(pathspecs).toContain(".danxbot/workspaces/*/.mcp.json");
+    expect(pathspecs).toContain(".danxbot/workspaces/*/CLAUDE.md");
+    expect(pathspecs).toContain(".danxbot/workspaces/*/workspace.yml");
+    expect(pathspecs).toContain(".danxbot/workspaces/*/.claude/settings.json");
+  });
+
+  it("every pathspec is repo-root-relative (prefixed with .danxbot/)", () => {
+    for (const p of getInjectOwnedExcludePathspecs()) {
+      expect(p.startsWith(".danxbot/")).toBe(true);
+    }
+  });
+
+  it("pathspec count equals UNIVERSAL_PATTERNS + TEMPLATED_WORKSPACE_PATTERNS (drift guard — adding to one list without the other fails loudly)", () => {
+    // Read the source file to enumerate both lists without re-exporting
+    // implementation-private constants. The arrays are TS literals so a
+    // simple regex match on `"<entry>",` covers them.
+    const src = readFileSync(
+      resolve(injectDir, "gitignore-workspaces.ts"),
+      "utf-8",
+    );
+    const universalBlock = src.match(
+      /UNIVERSAL_PATTERNS:\s*readonly\s+string\[\]\s*=\s*\[([\s\S]*?)\]/,
+    );
+    const templatedBlock = src.match(
+      /TEMPLATED_WORKSPACE_PATTERNS:\s*readonly\s+string\[\]\s*=\s*\[([\s\S]*?)\]/,
+    );
+    expect(universalBlock).not.toBeNull();
+    expect(templatedBlock).not.toBeNull();
+    const universalCount = (universalBlock![1].match(/"/g) ?? []).length / 2;
+    const templatedCount = (templatedBlock![1].match(/"/g) ?? []).length / 2;
+    expect(getInjectOwnedExcludePathspecs().length).toBe(
+      universalCount + templatedCount,
+    );
   });
 });

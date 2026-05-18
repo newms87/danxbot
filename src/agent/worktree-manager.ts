@@ -69,6 +69,7 @@ import {
   symlinkSync,
 } from "node:fs";
 import { mirrorWorkspaceTree } from "../inject/workspaces.js";
+import { getInjectOwnedExcludePathspecs } from "../inject/gitignore-workspaces.js";
 import { createLogger } from "../logger.js";
 import { AGENT_NAME_SHAPE } from "../settings-file.js";
 import type { RepoConfig } from "../types.js";
@@ -607,9 +608,52 @@ export function createWorktreeManager(
         };
       }
 
-      const add = await runner.run(path, ["add", "-A"]);
+      // DX-643 — exclude inject-pipeline-regenerated files so three
+      // independent writers (issue-worker, self-repair, system-evaluator)
+      // racing the same regenerated `.mcp.json` / rule scraps stop
+      // committing themselves as `wip(autosave)` on every cycle.
+      // `gitignore` (DX-340) does not protect previously-tracked files;
+      // the pathspec exclusion does. Source list lives in
+      // `gitignore-workspaces.ts` so the gitignore + pathspec views
+      // stay in sync.
+      //
+      // Note: previously-tracked inject files still show as modified in
+      // `git status` after this change (the index entry is unchanged).
+      // The autosave handles that cleanly via the `diff --cached --quiet`
+      // short-circuit below — when only inject files are dirty, nothing
+      // stages and snapshot returns `{kind: "clean"}`. A future cleanup
+      // (out of Phase 1 scope) can `git rm --cached` the inject files at
+      // worktree bootstrap to drop them from the index entirely.
+      //
+      // `:!` is git's pathspec exclude magic. The positive selector `.`
+      // MUST precede the exclusions or git treats the result as
+      // "exclude-only" with no positive matches.
+      const PATHSPEC_EXCLUDE = ":!";
+      const excludePathspecs = getInjectOwnedExcludePathspecs().map(
+        (p) => `${PATHSPEC_EXCLUDE}${p}`,
+      );
+      const add = await runner.run(path, [
+        "add",
+        "-A",
+        "--",
+        ".",
+        ...excludePathspecs,
+      ]);
       if (add.code !== 0) {
         return buildSnapshotAbort("git add failed", "git add", add);
+      }
+
+      // If the dirty paths were ALL inject-owned, nothing is staged.
+      // `git diff --cached --quiet` exits 0 when the index matches HEAD.
+      // Treat as clean — no genuine residue means no autosave commit
+      // (and no `nothing to commit` abort downstream).
+      const diffCached = await runner.run(path, [
+        "diff",
+        "--cached",
+        "--quiet",
+      ]);
+      if (diffCached.code === 0) {
+        return { kind: "clean" };
       }
 
       const commit = await runner.run(path, [
