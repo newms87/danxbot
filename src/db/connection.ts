@@ -38,6 +38,15 @@ function createPoolOptions(dbConfig: DbConfig): PoolConfig {
     max: POOL_MAX,
     idleTimeoutMillis: IDLE_TIMEOUT_MS,
     connectionTimeoutMillis: config.db.connectTimeoutMs,
+    // DX-616: enable TCP keepalive on every pg socket so the OS detects
+    // a remote-side FIN/RST before the pool hands the dead client back
+    // out on `pool.connect()`. Pre-DX-616 the mirror saw "Connection
+    // terminated due to connection timeout" every few minutes — a stale
+    // idle conn (Postgres or network middlebox dropped the socket while
+    // it was parked in the pool). Keepalive flips that into a clean
+    // ECONNRESET that pg-pool itself prunes before checkout.
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
   };
 }
 

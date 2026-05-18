@@ -238,8 +238,11 @@ describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () =
     expect(readFlag(repo.localPath)).toBeNull();
   });
 
-  it("DB write failure: writes CRITICAL_FAILURE flag + mirror keeps running", async () => {
-    db.fail = new Error("connection refused");
+  it("DB write failure (fatal — schema / constraint class): writes CRITICAL_FAILURE flag + mirror keeps running", async () => {
+    // SQLSTATE 23505 = unique_violation — fatal class, never retried.
+    db.fail = Object.assign(new Error("duplicate key value"), {
+      code: "23505",
+    });
     const path = writeYaml(repo.localPath, "open", "DX-6", SAMPLE_YAML("DX-6"));
     await mirror.simulateWatcherEvent({ event: "add", path });
     const flag = readFlag(repo.localPath);
@@ -258,7 +261,115 @@ describe("issues-mirror — per-event flow (mocked DB, simulated watcher)", () =
     await mirror.simulateWatcherEvent({ event: "add", path: path2 });
     expect(db.rows.has(rowKey("test-repo", "DX-7"))).toBe(true);
   });
+});
 
+describe("issues-mirror — transient pg retry (DX-616)", () => {
+  let repo: ReturnType<typeof makeRepo>;
+  let db: FakeDb;
+  let mirror: IssuesMirror;
+
+  beforeEach(async () => {
+    repo = makeRepo();
+    db = createFakeDb();
+    mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      // Skip real wall-clock waits; budget large so retries don't escalate.
+      retryOpts: {
+        sleep: async () => undefined,
+        initialDelayMs: 1,
+        maxDelayMs: 1,
+        budgetMs: 60_000,
+      },
+    });
+  });
+
+  afterEach(async () => {
+    await mirror.stop();
+    rmSync(repo.tmpdir, { recursive: true, force: true });
+  });
+
+  it("transient 'Connection terminated' clears on retry — no CRITICAL_FAILURE written", async () => {
+    db.failOnce = new Error("Connection terminated due to connection timeout");
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-100",
+      SAMPLE_YAML("DX-100"),
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(db.rows.has(rowKey("test-repo", "DX-100"))).toBe(true);
+    expect(readFlag(repo.localPath)).toBeNull();
+  });
+
+  it("transient ECONNRESET on upsert clears on retry", async () => {
+    let failed = false;
+    const realUpsert = db.upsertWithHistory.bind(db);
+    db.upsertWithHistory = async (args) => {
+      if (!failed) {
+        failed = true;
+        throw Object.assign(new Error("socket hang up"), {
+          code: "ECONNRESET",
+        });
+      }
+      return realUpsert(args);
+    };
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-101",
+      SAMPLE_YAML("DX-101"),
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(db.rows.has(rowKey("test-repo", "DX-101"))).toBe(true);
+    expect(readFlag(repo.localPath)).toBeNull();
+  });
+
+  it("transient error STILL writes flag once retry budget elapses", async () => {
+    db.fail = new Error("Connection terminated due to connection timeout");
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-102",
+      SAMPLE_YAML("DX-102"),
+    );
+    // Stop the mirror's default-budget retry; this single test rebuilds
+    // its own mirror with zero budget so the transient error escapes
+    // immediately and the CRITICAL_FAILURE safety net fires.
+    await mirror.stop();
+    const escalating = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+      retryOpts: { budgetMs: 0, sleep: async () => undefined },
+    });
+    try {
+      await escalating.simulateWatcherEvent({ event: "add", path });
+      const flag = readFlag(repo.localPath);
+      expect(flag).not.toBeNull();
+      expect(flag?.reason).toMatch(/select existing for DX-102/);
+    } finally {
+      await escalating.stop();
+    }
+  });
+
+  it("fatal SQLSTATE 23505 is NOT retried — flag fires on first failure", async () => {
+    let attempts = 0;
+    db.selectExisting = async () => {
+      attempts += 1;
+      throw Object.assign(new Error("duplicate key value"), { code: "23505" });
+    };
+    const path = writeYaml(
+      repo.localPath,
+      "open",
+      "DX-103",
+      SAMPLE_YAML("DX-103"),
+    );
+    await mirror.simulateWatcherEvent({ event: "add", path });
+    expect(attempts).toBe(1);
+    expect(readFlag(repo.localPath)).not.toBeNull();
+  });
 });
 
 describe("issues-mirror — boot scan", () => {
@@ -694,9 +805,12 @@ describe("upsertIssueRowNow (DX-547 — writer path)", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("selectExisting failure: writes CRITICAL_FAILURE + rethrows", async () => {
+  it("selectExisting failure (fatal class): writes CRITICAL_FAILURE + rethrows", async () => {
     const db = createFakeDb();
-    const boom = new Error("pg connection lost");
+    // Fatal — not on the transient list, so no retry, immediate flag.
+    const boom = Object.assign(new Error("duplicate key value"), {
+      code: "23505",
+    });
     db.fail = boom;
     registerWriterDb(repo.localPath, db);
 
@@ -719,12 +833,14 @@ describe("upsertIssueRowNow (DX-547 — writer path)", () => {
     expect(flag!.reason).toContain("select existing for DX-1");
   });
 
-  it("upsertWithHistory failure: writes CRITICAL_FAILURE + rethrows", async () => {
+  it("upsertWithHistory failure (fatal class): writes CRITICAL_FAILURE + rethrows", async () => {
     const db = createFakeDb();
     // Override upsertWithHistory in isolation so selectExisting still
     // succeeds — targets the second try/catch branch in
-    // `upsertIssueRowNow`.
-    const boom = new Error("pg insert deadlock");
+    // `upsertIssueRowNow`. Fatal SQLSTATE 23514 = check_violation.
+    const boom = Object.assign(new Error("check constraint violated"), {
+      code: "23514",
+    });
     db.upsertWithHistory = async () => {
       throw boom;
     };

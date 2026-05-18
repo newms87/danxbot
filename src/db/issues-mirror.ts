@@ -38,6 +38,11 @@ import { createPatch } from "rfc6902";
 import { parse as parseYamlText } from "yaml";
 import type { Pool, PoolClient } from "pg";
 import { canonicalize, sha256 } from "./canonicalize.js";
+import {
+  isTransientPgError,
+  retryTransient,
+  type RetryOpts,
+} from "./pg-retry.js";
 import { writeFlag } from "../critical-failure.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
 import { reportSystemError } from "../system-repair/report.js";
@@ -150,6 +155,15 @@ export interface StartIssuesMirrorOptions {
    * times out 7/9 tests on every host (DX-223).
    */
   awaitWriteFinish?: { stabilityThreshold: number; pollInterval: number };
+  /**
+   * Retry-with-backoff options for pg ops on the mirror's hot path
+   * (`selectExisting`, `upsertWithHistory`, `tombstone`, `listIds`).
+   * Production: omitted — defaults to a 5-minute budget with 200ms-30s
+   * exponential backoff (`pg-retry.ts`). Tests override `sleep` + `now`
+   * to skip real wall-clock waits. Setting `budgetMs: 0` disables retry
+   * entirely (the pre-DX-616 behavior).
+   */
+  retryOpts?: RetryOpts;
 }
 
 export interface RepoContextLike {
@@ -175,20 +189,31 @@ export function getMirrorByLocalPath(
  * the file-only legacy path (pre-DX-547) keeps working without touching pg.
  */
 const writerDbRegistry = new Map<string, IssuesMirrorDb>();
+const writerRetryRegistry = new Map<string, RetryOpts>();
 
 export function registerWriterDb(
   repoLocalPath: string,
   db: IssuesMirrorDb,
+  retryOpts?: RetryOpts,
 ): void {
-  writerDbRegistry.set(resolve(repoLocalPath), db);
+  const key = resolve(repoLocalPath);
+  writerDbRegistry.set(key, db);
+  if (retryOpts) writerRetryRegistry.set(key, retryOpts);
+  else writerRetryRegistry.delete(key);
 }
 
 export function unregisterWriterDb(repoLocalPath: string): void {
-  writerDbRegistry.delete(resolve(repoLocalPath));
+  const key = resolve(repoLocalPath);
+  writerDbRegistry.delete(key);
+  writerRetryRegistry.delete(key);
 }
 
 export function getWriterDb(repoLocalPath: string): IssuesMirrorDb | undefined {
   return writerDbRegistry.get(resolve(repoLocalPath));
+}
+
+function getWriterRetryOpts(repoLocalPath: string): RetryOpts {
+  return writerRetryRegistry.get(resolve(repoLocalPath)) ?? {};
 }
 
 export interface UpsertIssueRowNowArgs {
@@ -232,11 +257,15 @@ export async function upsertIssueRowNow(
 ): Promise<void> {
   const db = getWriterDb(args.repoLocalPath);
   if (!db) return;
+  const retryOpts = getWriterRetryOpts(args.repoLocalPath);
   let existing:
     | { data: Record<string, unknown>; content_hash: string }
     | null;
   try {
-    existing = await db.selectExisting(args.repoName, args.id);
+    existing = await retryTransient(
+      () => db.selectExisting(args.repoName, args.id),
+      retryOpts,
+    );
   } catch (err) {
     reportWriterFailure(
       args.repoLocalPath,
@@ -253,15 +282,19 @@ export async function upsertIssueRowNow(
     return;
   }
   try {
-    await db.upsertWithHistory({
-      repoName: args.repoName,
-      id: args.id,
-      data: args.data,
-      contentHash: args.contentHash,
-      prevData: existing?.data ?? null,
-      prevHash: existing?.content_hash ?? null,
-      source: "writer",
-    });
+    await retryTransient(
+      () =>
+        db.upsertWithHistory({
+          repoName: args.repoName,
+          id: args.id,
+          data: args.data,
+          contentHash: args.contentHash,
+          prevData: existing?.data ?? null,
+          prevHash: existing?.content_hash ?? null,
+          source: "writer",
+        }),
+      retryOpts,
+    );
   } catch (err) {
     reportWriterFailure(
       args.repoLocalPath,
@@ -544,6 +577,26 @@ export async function startIssuesMirror(
   const db: IssuesMirrorDb =
     options.db ?? createPgIssuesMirrorDb(options.pool!);
 
+  // Wrap every pg op in `retryTransient` so a stale-idle-conn checkout
+  // (the pg-pool "Connection terminated due to connection timeout"
+  // class) does not flip the CRITICAL_FAILURE tripwire. Fatal errors
+  // (schema mismatch, constraint violation, anything not on the
+  // transient list) still bubble through unchanged and reach
+  // `reportFailure` immediately.
+  const retryOpts: RetryOpts = {
+    ...(options.retryOpts ?? {}),
+    onRetry:
+      options.retryOpts?.onRetry ??
+      ((err, attempt, delayMs) => {
+        log.warn(
+          `[${repoName}] transient pg error (attempt ${attempt}, retry in ${delayMs}ms): ${err.message}`,
+        );
+      }),
+  };
+  function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    return retryTransient(fn, retryOpts);
+  }
+
   let watcher: FSWatcher | null = null;
   let reconcileTimer: NodeJS.Timeout | null = null;
   let stopped = false;
@@ -609,7 +662,9 @@ export async function startIssuesMirror(
       | { data: Record<string, unknown>; content_hash: string }
       | null;
     try {
-      existing = await db.selectExisting(repoName, parsed.id);
+      existing = await withRetry(() =>
+        db.selectExisting(repoName, parsed.id),
+      );
     } catch (err) {
       reportFailure(`select existing for ${parsed.id}`, err);
       return null;
@@ -630,15 +685,17 @@ export async function startIssuesMirror(
       return parsed.id;
     }
     try {
-      await db.upsertWithHistory({
-        repoName,
-        id: parsed.id,
-        data: parsed.data,
-        contentHash,
-        prevData: existing?.data ?? null,
-        prevHash: existing?.content_hash ?? null,
-        source,
-      });
+      await withRetry(() =>
+        db.upsertWithHistory({
+          repoName,
+          id: parsed.id,
+          data: parsed.data,
+          contentHash,
+          prevData: existing?.data ?? null,
+          prevHash: existing?.content_hash ?? null,
+          source,
+        }),
+      );
     } catch (err) {
       reportFailure(`upsert ${parsed.id}`, err);
       return null;
@@ -702,20 +759,22 @@ export async function startIssuesMirror(
       | { data: Record<string, unknown>; content_hash: string }
       | null;
     try {
-      existing = await db.selectExisting(repoName, id);
+      existing = await withRetry(() => db.selectExisting(repoName, id));
     } catch (err) {
       reportFailure(`select existing for tombstone ${id}`, err);
       return;
     }
     if (!existing) return;
     try {
-      await db.tombstone({
-        repoName,
-        id,
-        existingData: existing.data,
-        existingHash: existing.content_hash,
-        source,
-      });
+      await withRetry(() =>
+        db.tombstone({
+          repoName,
+          id,
+          existingData: existing!.data,
+          existingHash: existing!.content_hash,
+          source,
+        }),
+      );
     } catch (err) {
       reportFailure(`tombstone ${id}`, err);
       return;
@@ -774,7 +833,7 @@ export async function startIssuesMirror(
     // Tombstone DB rows whose YAML disappeared during the scan window.
     let dbIds: Array<{ id: string; content_hash: string }>;
     try {
-      dbIds = await db.listIds(repoName);
+      dbIds = await withRetry(() => db.listIds(repoName));
     } catch (err) {
       reportFailure(`boot scan listIds`, err);
       return;
@@ -893,7 +952,7 @@ export async function startIssuesMirror(
   // lookup matches the mirror's name (production also does this at
   // worker boot; mirroring it here keeps unit-test setups simple).
   // Both unregistered on stop().
-  registerWriterDb(repoLocalPath, db);
+  registerWriterDb(repoLocalPath, db, retryOpts);
   setRepoName(repoLocalPath, repoName);
   return mirror;
 }
