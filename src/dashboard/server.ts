@@ -79,6 +79,7 @@ import {
   handlePatchIssue,
   handlePostIssue,
 } from "./issue-write.js";
+import { handlePatchIssueCascade } from "./issue-write-cascade.js";
 import {
   handleGetIssueSubtree,
   handleImportIssues,
@@ -515,6 +516,21 @@ async function route(
       res,
       url.searchParams.get("repo"),
       decodeURIComponent(agentByNameMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // PATCH /api/issues/cascade?repo=<name> — DX-631 (Phase 5 of DX-626).
+  // Recursive epic-move write — one drop spans N descendant YAMLs + the
+  // parent. Matched AHEAD of the generic `/api/issues/:id` route so the
+  // literal `cascade` path is not captured by the id-shaped regex below.
+  // Same per-user bearer auth band as the per-id PATCH.
+  if (method === "PATCH" && url.pathname === "/api/issues/cascade") {
+    await handlePatchIssueCascade(
+      req,
+      res,
+      url.searchParams.get("repo"),
       dispatchDeps,
     );
     return true;

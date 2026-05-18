@@ -20,6 +20,7 @@ import type {
   JsonlBlock,
   List,
   ListsFile,
+  ListType,
   RepairErrorWithAttempts,
   SyncRootStateEntry,
   SystemError,
@@ -238,6 +239,83 @@ export async function patchIssue(
   if (!res.ok) throw toggleError(res.status, await readJsonError(res));
   const body = (await res.json()) as PatchIssueResult;
   return body;
+}
+
+/**
+ * DX-631 (Phase 5 of DX-626) — body shape for the cascade endpoint.
+ * Mirrors the backend's `CascadeRequestBody`. Each override key is a
+ * `<PREFIX>-N` descendant id; each value is one of the three
+ * `CascadeAction` variants.
+ */
+export type CascadeAction =
+  | { kind: "stay" }
+  | { kind: "move_same_type" }
+  | { kind: "move_to"; listType: ListType; listName: string };
+
+export interface CascadeIssueListBody {
+  epic_id: string;
+  dest_list_name: string;
+  unblock_confirmed: boolean;
+  blocked_reason?: string;
+  overrides?: Record<string, CascadeAction>;
+}
+
+export interface CascadeIssueListResult {
+  updated: string[];
+  skipped: string[];
+}
+
+/**
+ * Thrown when the cascade endpoint returns 409 `Unblock confirm required`.
+ * Carries the descendant ids the operator must confirm in the dialog
+ * before retrying with `unblock_confirmed: true`. Other status codes
+ * surface as plain `ToggleError` via the same helper used by `patchIssue`.
+ */
+export class CascadeUnblockRequiredError extends Error {
+  constructor(public readonly blockedDescendants: string[]) {
+    super("Unblock confirm required");
+    this.name = "CascadeUnblockRequiredError";
+  }
+}
+
+/**
+ * PATCH /api/issues/cascade?repo=<name> — DX-631 (Phase 5). Apply a
+ * cascade move spanning the epic + every descendant per the 5×5 spec
+ * table the pure `cascadeEpicMove` helper encodes.
+ *
+ * Returns `{updated, skipped}` on 200. Throws `CascadeUnblockRequiredError`
+ * on 409 with the blocked-descendant id list so the calling dialog can
+ * render the per-row confirmation checkboxes. All other 4xx/5xx errors
+ * surface as `ToggleError` carrying the server's `error` string.
+ */
+export async function patchIssueCascade(
+  repo: string,
+  body: CascadeIssueListBody,
+): Promise<CascadeIssueListResult> {
+  const res = await fetchWithAuth(
+    `/api/issues/cascade?repo=${encodeURIComponent(repo)}`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (res.status === 409) {
+    let payload: { blocked_descendants?: unknown } = {};
+    try {
+      payload = (await res.json()) as { blocked_descendants?: unknown };
+    } catch {
+      /* fall through with empty payload */
+    }
+    const ids = Array.isArray(payload.blocked_descendants)
+      ? payload.blocked_descendants.filter(
+          (x): x is string => typeof x === "string",
+        )
+      : [];
+    throw new CascadeUnblockRequiredError(ids);
+  }
+  if (!res.ok) throw toggleError(res.status, await readJsonError(res));
+  return (await res.json()) as CascadeIssueListResult;
 }
 
 /**

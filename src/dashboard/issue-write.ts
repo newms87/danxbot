@@ -258,7 +258,7 @@ function mutexKey(repoLocalPath: string, id: string): string {
   return `${resolve(repoLocalPath)}::${id}`;
 }
 
-async function withPerIdLock<T>(
+export async function withPerIdLock<T>(
   repoLocalPath: string,
   id: string,
   fn: () => Promise<T>,
@@ -375,19 +375,113 @@ export function writeIssueYamlAtomic(
 export class IssuePatchError extends Error {
   constructor(
     public status: number,
-    public body: { error: string },
+    public body: { error: string; [key: string]: unknown },
   ) {
     super(body.error);
     this.name = "IssuePatchError";
   }
 }
 
-interface ResolvedSource {
+export interface ResolvedSource {
   state: "open" | "closed";
   path: string;
 }
 
-function locateIssueFile(
+/**
+ * Read + parse the on-disk YAML for `id` under the caller-held per-id
+ * mutex. Throws `IssuePatchError` for not-found (404) / malformed (500)
+ * — the two read-path failure modes shared between the PATCH and the
+ * cascade write paths.
+ *
+ * Caller MUST hold the per-id mutex (via `withPerIdLock`). The helper
+ * does not acquire the lock itself.
+ */
+export function readIssueUnderLock(
+  repoLocalPath: string,
+  id: string,
+  expectedPrefix: string,
+): { source: ResolvedSource; current: Issue } {
+  const source = locateIssueFile(repoLocalPath, id);
+  if (!source) {
+    throw new IssuePatchError(404, {
+      error: `Issue "${id}" not found in open/ or closed/`,
+    });
+  }
+  const text = readFileSync(source.path, "utf-8");
+  let current: Issue;
+  try {
+    current = parseIssue(text, { expectedPrefix });
+  } catch (err) {
+    throw new IssuePatchError(500, {
+      error: `On-disk YAML for ${id} is malformed: ${(err as Error).message}`,
+    });
+  }
+  return { source, current };
+}
+
+/**
+ * Serialize `next`, round-trip-validate, atomically write to the
+ * derived target path, and unlink the source path if the YAML moved
+ * (open ↔ closed on a terminal-status transition). Returns the target
+ * path + state + mtime so the caller can publish the SSE upsert.
+ *
+ * The round-trip parse guards every write site — any patch / cascade /
+ * future writer that produces an invariant-violating YAML (e.g.
+ * `status: Blocked` without `blocked`) 400s BEFORE the disk write.
+ *
+ * Caller MUST hold the per-id mutex (via `withPerIdLock`). The helper
+ * does not acquire the lock itself.
+ */
+export interface PersistIssueResult {
+  targetPath: string;
+  targetState: "open" | "closed";
+  mtimeMs: number;
+}
+
+export function persistMutatedIssue(
+  repoLocalPath: string,
+  id: string,
+  source: ResolvedSource,
+  next: Issue,
+  expectedPrefix: string,
+): PersistIssueResult {
+  const targetState: "open" | "closed" =
+    next.status === "Done" || next.status === "Cancelled" ? "closed" : "open";
+  const targetPath = issuePath(repoLocalPath, id, targetState);
+
+  const serialized = serializeIssue(next);
+  try {
+    parseIssue(serialized, { expectedPrefix });
+  } catch (err) {
+    throw new IssuePatchError(400, {
+      error: `Patch produced invalid YAML: ${(err as Error).message}`,
+    });
+  }
+
+  ensureIssuesDirs(repoLocalPath);
+  writeIssueYamlAtomic(targetPath, serialized, id);
+
+  // Source unlink AFTER the rename so a crash between the two leaves
+  // both files on disk — the reconcile pass detects the duplicate and
+  // the dashboard reader's "open wins" rule recovers the active state.
+  if (source.path !== targetPath) {
+    try {
+      unlinkSync(source.path);
+    } catch (err) {
+      // Don't fail the whole patch — destination is the new truth.
+      // chokidar's unlink event would tombstone in the mirror; here it
+      // doesn't fire so the periodic reconcile tombstones eventually.
+      log.warn(
+        `Failed to unlink old source ${source.path} after rename to ${targetPath}: ${(err as Error).message}`,
+      );
+    }
+  }
+
+  const mtimeMs = statSync(targetPath).mtimeMs;
+  return { targetPath, targetState, mtimeMs };
+}
+
+export function locateIssueFile(
   repoLocalPath: string,
   id: string,
 ): ResolvedSource | null {
@@ -642,12 +736,11 @@ function applyValidatedPatch(
   authUsername: string,
   expectedPrefix: string,
 ): ApplyResult {
-  const source = locateIssueFile(repoLocalPath, id);
-  if (!source) {
-    throw new IssuePatchError(404, {
-      error: `Issue "${id}" not found in open/ or closed/`,
-    });
-  }
+  const { source, current } = readIssueUnderLock(
+    repoLocalPath,
+    id,
+    expectedPrefix,
+  );
 
   // Reopen pre-flight: only valid against a closed source. The
   // dest-list-type compatibility check happens AFTER list resolution
@@ -659,16 +752,6 @@ function applyValidatedPatch(
         error: `reopen requires source to be in closed/; ${id} is in ${source.state}/`,
       });
     }
-  }
-
-  const text = readFileSync(source.path, "utf-8");
-  let current: Issue;
-  try {
-    current = parseIssue(text, { expectedPrefix });
-  } catch (err) {
-    throw new IssuePatchError(500, {
-      error: `On-disk YAML for ${id} is malformed: ${(err as Error).message}`,
-    });
   }
 
   const nowIso = new Date().toISOString();
@@ -782,53 +865,20 @@ function applyValidatedPatch(
     });
   }
 
-  // Compute target state from the post-patch status. Done / Cancelled
-  // close the card; everything else opens it. Reopen is a special case
-  // of "force open" — the list-move helper above set `next.status` to a
-  // non-terminal value for the dest type, so this branch lands on
-  // `open` automatically.
-  const targetState: "open" | "closed" =
-    next.status === "Done" || next.status === "Cancelled" ? "closed" : "open";
-  const targetPath = issuePath(repoLocalPath, id, targetState);
-
-  // Validate the merged Issue by serializing + re-parsing through the
-  // strict schema. Any patch that produces an invalid document (e.g.
-  // status: Blocked without populating `blocked`) fails here BEFORE any
-  // disk write.
-  const serialized = serializeIssue(next);
-  try {
-    parseIssue(serialized, { expectedPrefix });
-  } catch (err) {
-    throw new IssuePatchError(400, {
-      error: `Patch produced invalid YAML: ${(err as Error).message}`,
-    });
-  }
-
-  ensureIssuesDirs(repoLocalPath);
-  writeIssueYamlAtomic(targetPath, serialized, id);
-
-  // Source unlink AFTER the rename so a crash between the two leaves
-  // both files on disk — the reconcile pass detects the duplicate and
-  // the dashboard reader's "open wins" rule recovers the active state.
-  if (source.path !== targetPath) {
-    try {
-      unlinkSync(source.path);
-    } catch (err) {
-      // Don't fail the whole patch — destination is the new truth.
-      // chokidar's unlink event would tombstone in the mirror; here it
-      // doesn't fire so the periodic reconcile tombstones eventually.
-      log.warn(
-        `Failed to unlink old source ${source.path} after rename to ${targetPath}: ${(err as Error).message}`,
-      );
-    }
-  }
+  const persisted = persistMutatedIssue(
+    repoLocalPath,
+    id,
+    source,
+    next,
+    expectedPrefix,
+  );
 
   return {
     issue: next,
     sourceState: source.state,
-    targetState,
+    targetState: persisted.targetState,
     sourcePath: source.path,
-    targetPath,
+    targetPath: persisted.targetPath,
   };
 }
 

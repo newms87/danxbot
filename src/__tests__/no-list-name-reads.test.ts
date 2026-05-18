@@ -95,6 +95,13 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // invoked by the dashboard's cascade PATCH endpoint (Phase 5), not a
   // worker dispatch decision path.
   "issue/cascade-move.ts",
+  // DX-631 — `issue-write-cascade.ts` writes `next.list_name = write.list_name`
+  // from the cascade TriggerWrite output as part of persisting cascade
+  // results. Same trust boundary as `issue/list-move.ts` — the read is
+  // a serializer-side passthrough copying the operator-chosen list name
+  // out of the trigger write onto the YAML; never drives a worker
+  // dispatch decision.
+  "dashboard/issue-write-cascade.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {

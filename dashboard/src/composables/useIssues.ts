@@ -1,6 +1,13 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { Ref } from "vue";
-import { fetchIssueDetail, fetchIssues, patchIssue } from "../api";
+import {
+  fetchIssueDetail,
+  fetchIssues,
+  patchIssue,
+  patchIssueCascade,
+  type CascadeIssueListBody,
+  type CascadeIssueListResult,
+} from "../api";
 import {
   createHydrationBuffer,
   useStream,
@@ -120,6 +127,27 @@ export interface UseIssues {
    * projects to `IssueListItem`.
    */
   applyIssueUpdate: (id: string) => void;
+  /**
+   * DX-631 (Phase 5) — drop an epic onto a list and recursively apply
+   * trigger writes across every descendant per the cascade spec table.
+   *
+   * Server is the authoritative writer; the per-card SSE `issue:updated`
+   * events arrive within ~50ms of each YAML write and reproject the
+   * `IssueListItem` rows. The composable does NOT optimistically pre-
+   * update local rows — the cascade can span N descendants and projecting
+   * the per-card trigger semantics client-side would re-implement the
+   * full Phase 4 spec table. Trade SSE-arrival latency (~50ms) for
+   * implementation surface.
+   *
+   * Returns the `{updated, skipped}` result so the caller can render
+   * per-card transparency (e.g. confirmation banner counting touched
+   * cards). The Phase 6 dialog catches `CascadeUnblockRequiredError`
+   * to surface the unblock-confirm checklist.
+   */
+  cascadeIssueList: (
+    epicId: string,
+    body: Omit<CascadeIssueListBody, "epic_id">,
+  ) => Promise<CascadeIssueListResult>;
 }
 
 /**
@@ -400,6 +428,31 @@ export function useIssues(
     detailCache.delete(`${requestRepo}:${id}`);
   }
 
+  async function cascadeIssueList(
+    epicId: string,
+    body: Omit<CascadeIssueListBody, "epic_id">,
+  ): Promise<CascadeIssueListResult> {
+    const requestRepo = repo.value;
+    if (!requestRepo) throw new Error("No repo selected");
+    try {
+      const result = await patchIssueCascade(requestRepo, {
+        epic_id: epicId,
+        ...body,
+      });
+      // Invalidate every touched id's cached detail so the next drawer
+      // open re-fetches. List-row updates flow through the per-card SSE
+      // events the server publishes inside `applyIssueCascade`.
+      for (const id of result.updated) {
+        detailCache.delete(`${requestRepo}:${id}`);
+      }
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      error.value = message;
+      throw err;
+    }
+  }
+
   return {
     issues,
     loading,
@@ -409,5 +462,6 @@ export function useIssues(
     moveIssueList,
     moveIssuePriority,
     applyIssueUpdate,
+    cascadeIssueList,
   };
 }

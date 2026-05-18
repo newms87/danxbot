@@ -49,7 +49,7 @@ import { deriveListTypeFromSemanticStatus } from "./list-resolve.js";
  * `CLAUDE.md` Forbidden Patterns); the server lifecycle write path is
  * the only legitimate writer.
  */
-function rawStatusForListType(type: ListType): IssueStatus {
+export function rawStatusForListType(type: ListType): IssueStatus {
   switch (type) {
     case "archived":
       return "Backlog";
