@@ -3,5 +3,6 @@ description: Per-board operator chat with the danxbot agent (DX-84). Read-only b
 required-placeholders:
   - DANXBOT_STOP_URL
   - DANX_REPO_ROOT
-optional-placeholders: []
+optional-placeholders:
+  - DANX_AGENT_WORKTREE
 required-gates: []

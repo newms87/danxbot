@@ -89,6 +89,25 @@ describe("worktree-guard hook (DX-309)", () => {
     expect(result.status).toBe(0);
   });
 
+  // DX-660: workspace-mode dispatches (flesh-out, non-agent /api/launch)
+  // route through the resolver's optional-placeholder substitution,
+  // which yields `DANX_AGENT_WORKTREE=""` (empty string) in the spawned
+  // process env — not `undefined`. The hook's `if (!worktree)` guard
+  // treats both falsy values identically; pin the production-realistic
+  // empty-string case so a future refactor that switches to
+  // `worktree === undefined` doesn't accidentally turn the hook into
+  // an "allow everything outside" gate on workspace-mode dispatches.
+  it("no-ops when DANX_AGENT_WORKTREE is empty string (workspace-mode dispatch)", () => {
+    const result = run(
+      {
+        tool_name: "Edit",
+        tool_input: { file_path: resolve(outsideDir, "main.ts") },
+      },
+      { DANX_AGENT_WORKTREE: "" },
+    );
+    expect(result.status).toBe(0);
+  });
+
   it("allows Edit on a file inside the worktree", () => {
     const path = resolve(worktreeDir, "src", "foo.ts");
     mkdirSync(dirname(path), { recursive: true });

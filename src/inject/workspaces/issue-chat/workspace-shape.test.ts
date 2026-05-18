@@ -78,7 +78,11 @@ describe("issue-chat workspace shape (DX-351)", () => {
     expect([...required].sort()).toEqual(
       ["DANXBOT_STOP_URL", "DANX_REPO_ROOT"].sort(),
     );
-    expect(optional).toEqual([]);
+    // DX-660: DANX_AGENT_WORKTREE is optional so workspace-mode chat
+    // dispatches substitute it to `""`; the env block declares it so
+    // the PreToolUse worktree-guard hook sees an empty string and
+    // gracefully no-ops on non-agent dispatches.
+    expect(optional).toEqual(["DANX_AGENT_WORKTREE"]);
   });
 
   it(".claude/settings.json enables base + danxbot plugins (DX-273 AC 5)", () => {

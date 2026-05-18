@@ -4,6 +4,7 @@ required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT
   - DANX_REPO_ROOT
-optional-placeholders: []
+optional-placeholders:
+  - DANX_AGENT_WORKTREE
 required-gates: []
 staging-paths: []

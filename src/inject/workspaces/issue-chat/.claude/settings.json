@@ -1,5 +1,7 @@
 {
-  "env": {},
+  "env": {
+    "DANX_AGENT_WORKTREE": "${DANX_AGENT_WORKTREE}"
+  },
   "hooks": {
     "PreToolUse": [
       {

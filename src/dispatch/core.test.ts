@@ -1931,6 +1931,8 @@ required-placeholders:
   - DANXBOT_WORKER_PORT
   - DANXBOT_SLACK_REPLY_URL
   - DANXBOT_SLACK_UPDATE_URL
+optional-placeholders:
+  - DANX_AGENT_WORKTREE
 required-gates:
   - "settings.slack.enabled ≠ false"
 staging-paths:

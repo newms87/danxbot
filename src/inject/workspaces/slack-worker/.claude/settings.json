@@ -1,6 +1,7 @@
 {
   "env": {
-    "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}"
+    "DANXBOT_WORKER_PORT": "${DANXBOT_WORKER_PORT}",
+    "DANX_AGENT_WORKTREE": "${DANX_AGENT_WORKTREE}"
   },
   "hooks": {
     "PreToolUse": [

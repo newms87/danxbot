@@ -4,7 +4,7 @@ This directory is the dispatched cwd for the danxbot poller. Operational rules,
 skills, and tools live in `.claude/`. The danxbot MCP server is infrastructure
 injected at dispatch time; any additional MCP servers (e.g. playwright) are
 declared in `.mcp.json` and resolved from overlay placeholders. There is no
-tracker MCP — issues are local YAMLs at `<worktree>/.danxbot/issues/open/`.
+tracker MCP — issues are local YAMLs at `$DANX_REPO_ROOT/.danxbot/issues/open/`.
 
 ## Pre-task sync
 
@@ -68,27 +68,49 @@ Step 7a covers exit-code routing (`0` PUSHED, `1` rebase conflict, `2`
 push race exhausted, `64` usage error, `65` wrong branch, `NO_OP` for
 docs-only dispatches).
 
-## Path placeholder convention — `<worktree>`
+## Path placeholder convention — use `$DANX_REPO_ROOT`
 
-Every absolute path in the rules and skills shipped to this workspace uses
-`<worktree>` as the placeholder for the agent's persistent worktree dir. Its
-literal value lands in your dispatch prompt's persona block on the line
-`Your worktree: <absolute path>`. Use that exact string for every Read /
-Edit / Write / Bash absolute path you produce.
+`$DANX_REPO_ROOT` is the ONE source of truth for absolute paths your
+dispatch operates on. It is always populated in the agent's bash session
+(DX-660 wired it through the workspace's `.claude/settings.json` env
+block); use it for every Read / Edit / Write / Bash path you produce.
+Issue YAMLs live at `$DANX_REPO_ROOT/.danxbot/issues/{open,closed}/<id>.yml`
+— canonical regardless of dispatch shape.
 
-Do NOT substitute `<worktree>` with `<repo>/.danxbot/worktrees/<name>` or
-walk through `repos/<name>` symlinks — Claude's read-before-edit gate keys
-on the literal path string, so an aliased spelling that resolves to the
-same inode still fails because the gate sees a different string than the
-one you Read from. The worktree-guard PreToolUse hook
-(`DANX_AGENT_WORKTREE`) also rejects writes whose literal prefix is not
-under your worktree; aliased spellings can trip it depending on which
-symlinks resolve where.
+What `$DANX_REPO_ROOT` resolves to per dispatch shape (the dispatch core
+swaps this in `src/dispatch/core.ts:1152`, so the value is always
+correct for THIS dispatch):
 
-Issue YAMLs live at `<worktree>/.danxbot/issues/{open,closed}/<id>.yml` —
-the `<worktree>/.danxbot/issues` subtree is a symlink back to the main
-clone so every agent shares one canonical issue store, but you always
-address it via your worktree path.
+- **Agent-bound** (multi-worker workers like `phil`) → agent worktree
+  at `<repo>/.danxbot/worktrees/<name>`. The worktree's `.danxbot/issues`
+  is a symlink back to the main clone so every agent shares one
+  canonical issue store.
+- **Workspace-mode** (`/api/flesh-out`, `/api/launch` without an `agent`
+  field) → main clone path. `.danxbot/issues` is the real directory.
+
+When plugin-skill bodies use `<worktree>` as a placeholder, substitute
+`$DANX_REPO_ROOT`. The `<worktree>` literal predates DX-660 and only
+distinguished agent-bound from workspace-mode; `$DANX_REPO_ROOT` already
+encodes that distinction.
+
+Persona-block dispatches additionally echo the literal absolute path on a
+`Your worktree: <absolute path>` line — that string equals `$DANX_REPO_ROOT`
+on agent-bound dispatches; use the literal form when the read-before-edit
+gate keys on it (verbatim absolute paths only).
+
+A second env var, `$DANX_AGENT_WORKTREE`, exists for the PreToolUse
+worktree-guard hook (`_shared/hooks/worktree-guard.mjs`) — non-empty
+only on agent-bound dispatches, where it equals `$DANX_REPO_ROOT` and
+gates write paths against the worktree boundary. Workspace-mode
+dispatches see `""`, the hook gracefully no-ops, and the boundary
+intentionally does not apply. Agents do not normally reference this
+var directly — use `$DANX_REPO_ROOT`.
+
+Do NOT walk through `repos/<name>` symlinks — Claude's read-before-edit
+gate keys on the literal path string, so an aliased spelling that resolves
+to the same inode still fails because the gate sees a different string
+than the one you Read from. The worktree-guard hook also rejects writes
+whose literal prefix is not under your worktree.
 
 ## Skill triggers (invoke via Skill tool)
 

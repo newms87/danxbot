@@ -21,11 +21,21 @@
  *      here catches a regression that resurrects the inject duplicate
  *      before it propagates through `mirrorWorkspaceTree`.
  */
-import { describe, it, expect } from "vitest";
-import { readFileSync, statSync } from "node:fs";
+import { describe, it, expect, afterEach } from "vitest";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
+import { resolveWorkspace } from "../../../workspace/resolve.js";
+import { makeRepoContext } from "../../../__tests__/helpers/fixtures.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -64,7 +74,37 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     expect([...required].sort()).toEqual(
       ["DANXBOT_STOP_URL", "DANXBOT_WORKER_PORT", "DANX_REPO_ROOT"].sort(),
     );
-    expect(optional).toEqual([]);
+    // DX-660: `DANX_AGENT_WORKTREE` is optional — only the dispatch
+    // core's agent-bound path sets it on the overlay (multi-worker
+    // dispatches like `phil`). Workspace-mode dispatches like
+    // `/api/flesh-out` or `/api/launch` leave it unset and the
+    // resolver substitutes the placeholder to `""`. Declaring it as
+    // optional is what lets the env block reference `${DANX_AGENT_WORKTREE}`
+    // without throwing `PlaceholderError` on workspace-mode dispatches.
+    expect(optional).toEqual(["DANX_AGENT_WORKTREE"]);
+  });
+
+  // DX-660: the agent's process env is built from
+  // `.claude/settings.json`'s `env` block (post-overlay substitution)
+  // — see `src/workspace/resolve.ts#resolveEnv` →
+  // `src/dispatch/core.ts` `env` build at the spawnAgent call site.
+  // `DANX_REPO_ROOT` and `DANX_AGENT_WORKTREE` MUST be declared here
+  // so they propagate to the spawned claude process AND the
+  // PreToolUse worktree-guard hook (which reads
+  // `process.env.DANX_AGENT_WORKTREE` to gate write paths). Without
+  // these entries, the hook silently no-ops on agent-bound dispatches
+  // (boundary disappears) and the agent's bash shell sees both vars
+  // empty (forcing fallback to absolute paths that bypass the
+  // workspace's `<worktree>`-relative skill body conventions).
+  it(".claude/settings.json env block declares DANX_REPO_ROOT + DANX_AGENT_WORKTREE + DANXBOT_WORKER_PORT (DX-660)", () => {
+    const path = resolve(HERE, ".claude/settings.json");
+    const settings = JSON.parse(readFileSync(path, "utf-8")) as {
+      env?: Record<string, string>;
+    };
+    expect(settings.env).toBeDefined();
+    expect(settings.env?.DANX_REPO_ROOT).toBe("${DANX_REPO_ROOT}");
+    expect(settings.env?.DANX_AGENT_WORKTREE).toBe("${DANX_AGENT_WORKTREE}");
+    expect(settings.env?.DANXBOT_WORKER_PORT).toBe("${DANXBOT_WORKER_PORT}");
   });
 
   // DX-203: the `danx-issue` MCP server's env contract shrank to exactly
@@ -90,6 +130,91 @@ describe("issue-worker workspace shape (Phase 4 invariants)", () => {
     for (const value of Object.values(danxIssue.env ?? {})) {
       expect(value).toMatch(/^\$\{[A-Z_]+\}$/);
     }
+  });
+});
+
+// DX-660: end-to-end integration — copy the actual issue-worker source
+// into a temp repo, run `resolveWorkspace` against it, and assert the
+// env block the dispatch core feeds to `spawnAgent` carries
+// `DANX_REPO_ROOT` and `DANX_AGENT_WORKTREE` after overlay substitution.
+// Pairs with the static-content sweep above: the sweep pins what's on
+// disk; this integration test pins what reaches the spawned process
+// after the resolver runs. The pre-fix bug surface was "settings.json
+// declared only DANXBOT_WORKER_PORT, so the agent's bash + the
+// PreToolUse worktree-guard hook saw both vars empty" — without this
+// integration test, a partial fix that bumps the static contract but
+// regresses the resolver substitution path would slip past the sweep.
+describe("issue-worker workspace env propagation (DX-660 integration)", () => {
+  const cleanupDirs: string[] = [];
+
+  afterEach(() => {
+    while (cleanupDirs.length > 0) {
+      const dir = cleanupDirs.pop();
+      if (dir) rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  function setupRepoWithIssueWorkerSource(): {
+    repoDir: string;
+  } {
+    const repoDir = mkdtempSync(resolve(tmpdir(), "danxbot-dx660-"));
+    cleanupDirs.push(repoDir);
+    const workspaceDir = resolve(
+      repoDir,
+      ".danxbot",
+      "workspaces",
+      "issue-worker",
+    );
+    mkdirSync(resolve(repoDir, ".danxbot", "workspaces"), { recursive: true });
+    cpSync(HERE, workspaceDir, { recursive: true });
+    return { repoDir };
+  }
+
+  function baseOverlay(workerPort: number): Record<string, string> {
+    return {
+      DANXBOT_STOP_URL: `http://localhost:${workerPort}/api/stop/test`,
+      DANXBOT_WORKER_PORT: String(workerPort),
+      DANX_REPO_ROOT: "/test/repo/root",
+      // Auto-injected by `src/dispatch/core.ts` for every real
+      // dispatch — referenced by the workspace's `staging-paths`.
+      DANXBOT_DISPATCH_ID: "test-dispatch-id",
+    };
+  }
+
+  it("agent-bound dispatch (overlay sets DANX_AGENT_WORKTREE) → resolver propagates both vars to the env block", () => {
+    const { repoDir } = setupRepoWithIssueWorkerSource();
+    const repo = makeRepoContext({ localPath: repoDir });
+    const result = resolveWorkspace({
+      repo,
+      workspaceName: "issue-worker",
+      overlay: {
+        ...baseOverlay(repo.workerPort),
+        DANX_REPO_ROOT: "/agents/phil/worktree",
+        DANX_AGENT_WORKTREE: "/agents/phil/worktree",
+      },
+    });
+    cleanupDirs.push(resolve(result.mcpSettingsPath, ".."));
+    cleanupDirs.push(resolve(result.settingsPath, ".."));
+    expect(result.env.DANX_REPO_ROOT).toBe("/agents/phil/worktree");
+    expect(result.env.DANX_AGENT_WORKTREE).toBe("/agents/phil/worktree");
+    expect(result.env.DANXBOT_WORKER_PORT).toBe(String(repo.workerPort));
+  });
+
+  it("workspace-mode dispatch (overlay omits DANX_AGENT_WORKTREE) → substitutes to empty string (hook no-ops, bash sees `\"\"`)", () => {
+    const { repoDir } = setupRepoWithIssueWorkerSource();
+    const repo = makeRepoContext({ localPath: repoDir });
+    const result = resolveWorkspace({
+      repo,
+      workspaceName: "issue-worker",
+      overlay: baseOverlay(repo.workerPort),
+    });
+    cleanupDirs.push(resolve(result.mcpSettingsPath, ".."));
+    cleanupDirs.push(resolve(result.settingsPath, ".."));
+    expect(result.env.DANX_REPO_ROOT).toBe("/test/repo/root");
+    // Optional placeholder substitutes to empty string when overlay
+    // omits it. This is the documented contract — see
+    // `src/workspace/placeholders.ts` "Required vs optional placeholders".
+    expect(result.env.DANX_AGENT_WORKTREE).toBe("");
   });
 });
 

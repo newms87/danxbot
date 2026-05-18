@@ -87,7 +87,11 @@ describe("skill-eval workspace shape", () => {
     expect([...required].sort()).toEqual(
       ["DANXBOT_STOP_URL", "DANXBOT_WORKER_PORT", "DANX_REPO_ROOT"].sort(),
     );
-    expect(manifest["optional-placeholders"] ?? []).toEqual([]);
+    // DX-660: optional so workspace-mode dispatches substitute the
+    // placeholder to `""` and the worktree-guard hook gracefully no-ops.
+    expect(manifest["optional-placeholders"] ?? []).toEqual([
+      "DANX_AGENT_WORKTREE",
+    ]);
     expect(manifest["staging-paths"] ?? []).toEqual([]);
   });
 

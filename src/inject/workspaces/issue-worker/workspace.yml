@@ -4,7 +4,14 @@ required-placeholders:
   - DANXBOT_STOP_URL
   - DANXBOT_WORKER_PORT
   - DANX_REPO_ROOT
-optional-placeholders: []
+# DX-660: DANX_AGENT_WORKTREE is set by `src/dispatch/core.ts` ONLY for
+# agent-bound dispatches (multi-worker workers like `phil`). Workspace-
+# mode dispatches (`/api/launch`, `/api/flesh-out`) leave it unset; the
+# resolver substitutes the placeholder to `""` so the agent's process
+# env carries an empty string + the PreToolUse worktree-guard hook
+# no-ops (its own contract — see `_shared/hooks/worktree-guard.mjs`).
+optional-placeholders:
+  - DANX_AGENT_WORKTREE
 required-gates:
   - "settings.issuePoller.enabled ≠ false"
   - "no CRITICAL_FAILURE flag"
