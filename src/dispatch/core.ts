@@ -1311,6 +1311,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     stagedFiles: input.stagedFiles ?? [],
     stagingPaths: workspace.stagingPaths,
     overlay,
+    requiresStagedFiles: workspace.requiresStagedFiles,
   });
   const stagedFilePaths = await writeStagedFiles(prepared);
 

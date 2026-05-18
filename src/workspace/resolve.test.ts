@@ -247,6 +247,38 @@ describe("resolveWorkspace", () => {
       expect(result.env.TEST_OPTIONAL_FLAG).toBe("");
     });
 
+    it("defaults requiresStagedFiles to false when the manifest omits the field (DX-667)", () => {
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: goodOverlay(),
+        }),
+      );
+      expect(result.requiresStagedFiles).toBe(false);
+    });
+
+    it("propagates requiresStagedFiles: true from the manifest into ResolvedWorkspace (DX-667)", () => {
+      const wsRoot = resolve(
+        repoDir,
+        ".danxbot",
+        "workspaces",
+        "test-workspace",
+      );
+      const original = readFileSync(resolve(wsRoot, "workspace.yml"), "utf-8");
+      writeFileSync(
+        resolve(wsRoot, "workspace.yml"),
+        `${original}\nrequires-staged-files: true\nstaging-paths:\n  - "/tmp/danxbot-stage-${"\${ID}"}/"\n`,
+      );
+      const result = capture(
+        resolveWorkspace({
+          repo,
+          workspaceName: "test-workspace",
+          overlay: { ...goodOverlay(), ID: "abc" },
+        }),
+      );
+      expect(result.requiresStagedFiles).toBe(true);
+    });
   });
 
   describe("agentName worktree swap (DX-309)", () => {

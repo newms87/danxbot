@@ -18,6 +18,7 @@ function manifest(
     optionalPlaceholders: optional,
     requiredGates: [],
     stagingPaths: [],
+    requiresStagedFiles: false,
   };
 }
 

@@ -29,6 +29,60 @@ describe("prepareStagedFiles", () => {
     ).toEqual([]);
   });
 
+  it("rejects empty stagedFiles when requiresStagedFiles is true", () => {
+    expect(() =>
+      prepareStagedFiles({
+        stagedFiles: [],
+        stagingPaths: ["/tmp/schemas/${ID}/"],
+        overlay,
+        requiresStagedFiles: true,
+      }),
+    ).toThrow(StagedFilesError);
+    expect(() =>
+      prepareStagedFiles({
+        stagedFiles: [],
+        stagingPaths: ["/tmp/schemas/${ID}/"],
+        overlay,
+        requiresStagedFiles: true,
+      }),
+    ).toThrow(/requires-staged-files/);
+  });
+
+  it("accepts non-empty stagedFiles when requiresStagedFiles is true", () => {
+    const prepared = prepareStagedFiles({
+      stagedFiles: [{ path: "/tmp/schemas/42/x.json", content: "{}" }],
+      stagingPaths: ["/tmp/schemas/42/"],
+      overlay,
+      requiresStagedFiles: true,
+    });
+    expect(prepared).toHaveLength(1);
+  });
+
+  it("requires-staged-files gate fires BEFORE empty-allowlist gate when both apply", () => {
+    // stagedFiles: [], stagingPaths: [], requiresStagedFiles: true
+    // The requires-gate runs inside the `length === 0` branch BEFORE the
+    // empty-allowlist check, so the requires-staged-files message wins.
+    expect(() =>
+      prepareStagedFiles({
+        stagedFiles: [],
+        stagingPaths: [],
+        overlay,
+        requiresStagedFiles: true,
+      }),
+    ).toThrow(/requires-staged-files/);
+  });
+
+  it("returns [] when requiresStagedFiles is explicitly false + empty input + non-empty allowlist (backwards-compat for existing workspaces)", () => {
+    expect(
+      prepareStagedFiles({
+        stagedFiles: [],
+        stagingPaths: ["/tmp/schemas/${ID}/"],
+        overlay,
+        requiresStagedFiles: false,
+      }),
+    ).toEqual([]);
+  });
+
   it("rejects non-empty stagedFiles when stagingPaths is empty", () => {
     expect(() =>
       prepareStagedFiles({

@@ -189,6 +189,52 @@ staging-paths:
     expect(() => parseManifest(yaml)).toThrow(/staging-paths/);
   });
 
+  it("parses requires-staged-files: true", () => {
+    const yaml = `name: x
+description: y
+staging-paths:
+  - "/tmp/schemas/\${SCHEMA_DEFINITION_ID}/"
+requires-staged-files: true
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.requiresStagedFiles).toBe(true);
+  });
+
+  it("defaults requires-staged-files to false when absent", () => {
+    const yaml = `name: x
+description: y
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.requiresStagedFiles).toBe(false);
+  });
+
+  it("throws when requires-staged-files is not a boolean", () => {
+    const yaml = `name: x
+description: y
+requires-staged-files: "yes"
+`;
+    expect(() => parseManifest(yaml)).toThrow(WorkspaceManifestError);
+    expect(() => parseManifest(yaml)).toThrow(/requires-staged-files/);
+  });
+
+  it("throws when requires-staged-files is a number (no coercion)", () => {
+    const yaml = `name: x
+description: y
+requires-staged-files: 1
+`;
+    expect(() => parseManifest(yaml)).toThrow(WorkspaceManifestError);
+    expect(() => parseManifest(yaml)).toThrow(/requires-staged-files/);
+  });
+
+  it("defaults requires-staged-files to false when explicitly null", () => {
+    const yaml = `name: x
+description: y
+requires-staged-files: ~
+`;
+    const manifest = parseManifest(yaml);
+    expect(manifest.requiresStagedFiles).toBe(false);
+  });
+
   it("parses top_level_agent string", () => {
     const yaml = `name: x
 description: y

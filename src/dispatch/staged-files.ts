@@ -144,6 +144,14 @@ export interface PrepareStagedFilesOptions {
   readonly stagingPaths: readonly string[];
   /** Substitution map — same shape the workspace resolver uses. */
   readonly overlay: Readonly<Record<string, string>>;
+  /**
+   * Mirrors `WorkspaceManifest.requiresStagedFiles` (DX-667). When true,
+   * an empty `stagedFiles` input is a caller error (HTTP 400) — the
+   * dispatched agent has nothing useful to do without caller-supplied
+   * source. Default false preserves existing dispatch shapes (every
+   * danxbot-shipped workspace today).
+   */
+  readonly requiresStagedFiles?: boolean;
 }
 
 function isContentEntry(
@@ -279,10 +287,18 @@ function substituteHeaders(
 export function prepareStagedFiles(
   options: PrepareStagedFilesOptions,
 ): readonly PreparedStagedFile[] {
-  const { stagedFiles, stagingPaths, overlay } = options;
+  const { stagedFiles, stagingPaths, overlay, requiresStagedFiles } = options;
   validateShape(stagedFiles);
 
-  if (stagedFiles.length === 0) return [];
+  if (stagedFiles.length === 0) {
+    if (requiresStagedFiles) {
+      throw new StagedFilesError(
+        "validation",
+        "workspace declares requires-staged-files: true — launch payload must include a non-empty staged_files[]",
+      );
+    }
+    return [];
+  }
 
   if (stagingPaths.length === 0) {
     throw new StagedFilesError(

@@ -175,6 +175,13 @@ export interface ResolvedWorkspace {
    */
   stagingPaths: readonly string[];
   /**
+   * Mirrors `WorkspaceManifest.requiresStagedFiles` (DX-667). When true,
+   * the dispatch pipeline rejects a launch with empty `staged_files[]`
+   * — `prepareStagedFiles` raises a validation error that the HTTP
+   * handler maps to 400.
+   */
+  requiresStagedFiles: boolean;
+  /**
    * Top-level agent name forwarded as `--agent <name>` to claude. Set
    * when the workspace's `workspace.yml` declares `top_level_agent: X`
    * AND `.claude/agents/X.md` exists. Undefined otherwise. The dispatch
@@ -443,6 +450,7 @@ export function resolveWorkspace(
     mcpSettingsPath,
     promptDelivery: "at-file",
     stagingPaths,
+    requiresStagedFiles: manifest.requiresStagedFiles,
     topLevelAgent,
     settingsPath,
   };

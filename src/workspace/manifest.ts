@@ -50,6 +50,22 @@ export interface WorkspaceManifest {
    */
   readonly stagingPaths: readonly string[];
   /**
+   * When true, `/api/launch` MUST receive a non-empty `staged_files[]`
+   * payload — empty input is rejected with a 400 by the staged-files
+   * validator (DX-667). Defaults to false. The opt-in is for workspaces
+   * whose dispatched agent has nothing useful to do without
+   * caller-supplied source (gpt-manager's schema-builder / template-
+   * builder pattern): better to fail fast at launch than spawn an agent
+   * that immediately discovers it has no inputs. Workspaces that omit
+   * `staging-paths` entirely cannot meaningfully set this true — the
+   * existing empty-allowlist gate already rejects every non-empty
+   * payload; the resolver does not enforce that combination here, but
+   * an operator who declares `requires-staged-files: true` without
+   * `staging-paths` will see every launch fail validation (the second
+   * gate fires before the first becomes relevant).
+   */
+  readonly requiresStagedFiles: boolean;
+  /**
    * Optional top-level agent name. When set, the resolver validates that
    * `<workspace>/.claude/agents/<topLevelAgent>.md` exists, and the
    * spawner forwards `--agent <name>` to claude so the top-level session
@@ -97,6 +113,21 @@ function readOptionalString(
   if (typeof value !== "string" || !value.trim()) {
     throw new WorkspaceManifestError(
       `workspace manifest field "${key}" must be a non-empty string when present${locator(options)}`,
+    );
+  }
+  return value;
+}
+
+function readOptionalBoolean(
+  raw: Record<string, unknown>,
+  key: string,
+  options?: ParseManifestOptions,
+): boolean {
+  const value = raw[key];
+  if (value === undefined || value === null) return false;
+  if (typeof value !== "boolean") {
+    throw new WorkspaceManifestError(
+      `workspace manifest field "${key}" must be a boolean${locator(options)}`,
     );
   }
   return value;
@@ -163,6 +194,11 @@ export function parseManifest(
     ),
     requiredGates: readStringArray(obj, "required-gates", options),
     stagingPaths: readStringArray(obj, "staging-paths", options),
+    requiresStagedFiles: readOptionalBoolean(
+      obj,
+      "requires-staged-files",
+      options,
+    ),
     topLevelAgent: readOptionalString(obj, "top_level_agent", options),
   };
 }

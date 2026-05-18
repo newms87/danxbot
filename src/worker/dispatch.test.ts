@@ -2195,6 +2195,30 @@ describe("handleLaunch — P5 cutover (workspace required, legacy fields rejecte
     expect(mockSpawnAgent).not.toHaveBeenCalled();
   });
 
+  it("maps StagedFilesError(validation) thrown by dispatch() to 400 — covers requires-staged-files rejection (DX-667)", async () => {
+    const { StagedFilesError } = await import("../dispatch/staged-files.js");
+    mockDispatchFn.mockRejectedValue(
+      new StagedFilesError(
+        "validation",
+        "workspace declares requires-staged-files: true — launch payload must include a non-empty staged_files[]",
+      ),
+    );
+    const req = createMockReqWithBody("POST", {
+      repo: MOCK_REPO.name,
+      workspace: "issue-worker",
+      task: "Do something",
+      staged_files: [],
+    });
+    const res = createMockRes();
+
+    await handleLaunch(req, res, MOCK_REPO);
+
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody()).error).toMatch(
+      /requires-staged-files: true/,
+    );
+  });
+
   it("legacy-field rejection precedes missing-workspace check (legacy body without workspace produces the legacy error, not Missing workspace)", async () => {
     const req = createMockReqWithBody("POST", {
       repo: MOCK_REPO.name,
