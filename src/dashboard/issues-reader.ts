@@ -120,15 +120,13 @@ export interface IssueListItem {
    */
   priority: number;
   /**
-   * Operator manual ordering knob inside a status column (DX-264).
-   * `null` (default) means "fall back to the canonical ICE → priority →
-   * mtime tier"; a finite number sorts ASC ahead of every `null`-
-   * positioned sibling in the same priority bucket. The board does NOT
-   * re-sort using this field — the backend's `sortIssuesForStatus`
-   * applies the position tier and ships rows in canonical order. The
-   * SPA only reads `position` for the drag affordance (compute the
-   * neighbor midpoint on intra-column drop and PATCH `/api/issues/:id`
-   * with the new value).
+   * Operator manual ordering knob inside a status column (DX-264). No
+   * longer affects the priority-bucket sort (DX-627 — priority canon,
+   * Phase 1 stripped position from the comparator); dropped from the
+   * schema entirely in a follow-up phase. Retained on the list item
+   * for the drag affordance: the SPA computes a neighbor midpoint on
+   * intra-column drop and PATCHes `/api/issues/:id` with the new value
+   * for display compatibility until the drop ships.
    */
   position: number | null;
   /**

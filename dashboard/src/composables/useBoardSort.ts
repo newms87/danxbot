@@ -17,7 +17,7 @@ export interface BoardColumnSort {
 }
 
 export const BOARD_SORT_OPTIONS: { key: BoardSortKey; label: string }[] = [
-  { key: "dispatch", label: "Dispatch order" },
+  { key: "dispatch", label: "Priority order" },
   { key: "created", label: "Created at" },
   { key: "updated", label: "Updated at" },
   { key: "type", label: "Type" },

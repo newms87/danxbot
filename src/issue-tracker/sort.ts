@@ -1,5 +1,5 @@
 /**
- * Single canonical sort for `Issue` lists. Both the poller's dispatch
+ * Single canonical sort for `Issue` lists. Both the poller's priority
  * order (`listDispatchableYamls`) and the dashboard's per-status board
  * column ordering call `sortIssuesForStatus`; the SPA renders the
  * resulting order verbatim and never re-sorts. ISS-210 introduced the
@@ -9,10 +9,10 @@
  *
  * ## Per-status order
  *
- * | Status                                 | Sort                                                             |
- * |----------------------------------------|------------------------------------------------------------------|
- * | Review, ToDo, Blocked                  | tier (not waiting/blocked first) → position ASC (nulls last) → epic phase-order (same parent Epic, children[] index ASC) → priority DESC → ICE total DESC (untriaged = +Inf) → id numeric ASC (FIFO by creation) |
- * | In Progress, Backlog, Done, Cancelled  | updated_at DESC                                                  |
+ * | Status                                 | Sort                                                          |
+ * |----------------------------------------|---------------------------------------------------------------|
+ * | Review, ToDo, Blocked                  | tier (not waiting/blocked first) → priority DESC → id numeric ASC (FIFO by creation) |
+ * | In Progress, Backlog, Done, Cancelled  | updated_at DESC                                               |
  *
  * DX-582 added `Backlog` (computed-card-state derivation rule 6 —
  * `archived_at` set without a terminal timestamp). Cards in Backlog
@@ -20,13 +20,13 @@
  * shelved cards top the column, oldest sink. Operators looking at a
  * parking-lot column most often want to see what was just put there.
  *
- * Priority becomes the primary sort key for Review/ToDo/Blocked in
- * DX-521 (pre-DX-521 ICE was primary and priority was the
- * tiebreaker). Rationale: the operator's priority knob is the human
- * intent signal; the triage agent's ICE score is the machine
- * heuristic. The operator's signal SHOULD outrank the machine's when
- * both are present, with ICE breaking ties among priority-equal
- * cards.
+ * DX-627 (priority canon, Phase 1) collapsed the priority-bucket
+ * comparator down to `priority DESC → id numeric ASC`. The prior
+ * `position` (DX-264) / epic phase-order / ICE total DESC tiebreaks
+ * were all stripped — priority is now the sole expression of dispatch
+ * intent and id-FIFO breaks ties. `position` is dropped entirely in
+ * a follow-up phase; `triage.ice.total` survives on the schema for
+ * triage history / UI display but no longer participates in ordering.
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
  * `blocked` fields AND any ancestor's. Ancestor walking re-uses the
@@ -35,15 +35,6 @@
  * waiting / blocked cards in the bottom tier (visually demoted but
  * visible); the poller already filters them out before sorting, so the
  * tier acts as a no-op there.
- *
- * Untriaged cards (`triage.expires_at === ""`) sort above every triaged
- * card via an effective ICE total of `+Infinity` — flushed first so an
- * operator gets a priority signal ASAP. Once the triage agent stamps an
- * ICE total, the card joins the triaged tier at its scored position.
- *
- * `updated_at` ASC on the priority bucket implements FIFO mtime — older
- * cards rise. The recency bucket (In Progress / Done / Cancelled) flips
- * to DESC so the most recently active card surfaces first.
  */
 
 import type { Issue, IssueStatus } from "./interface.js";
@@ -135,12 +126,6 @@ function parseIdNumeric(id: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** Untriaged cards score as `+Infinity` so they top every triaged card. */
-function effectiveIce(issue: Issue): number {
-  if (issue.triage.expires_at === "") return Number.POSITIVE_INFINITY;
-  return issue.triage.ice.total;
-}
-
 /**
  * Sort a slice of `SortInput<T>` rows for the given status, returning a
  * NEW array of payloads in the canonical order. Pure — never mutates
@@ -175,67 +160,17 @@ export function sortInputsForStatus<T>(
     const bBlocked = isWaitingOrBlocked(b.issue, byId);
     if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
 
-    // Position tier (DX-264) — operator manual ordering wins over the
-    // triage agent's ICE tier inside the priority bucket. `position`
-    // ASC, NULLs last: a card with a finite numeric position sorts
-    // ahead of every `null`-positioned sibling; among non-null
-    // positions, lower number first. Among `null`-position cards the
-    // existing ICE / priority / FIFO chain decides. Recency-bucket
-    // statuses (In Progress / Done / Cancelled) take the early DESC
-    // return above and never see this branch — manual position never
-    // overrides updated_at on the activity columns.
-    const aPos = a.issue.position;
-    const bPos = b.issue.position;
-    if (aPos !== null && bPos === null) return -1;
-    if (aPos === null && bPos !== null) return 1;
-    if (aPos !== null && bPos !== null && aPos !== bPos) return aPos - bPos;
-
-    // Epic phase-order tier — when two cards share the same `parent_id`
-    // and the parent is `type: "Epic"`, dispatch them in the order they
-    // appear in the epic's `children[]` array. Phases of an epic are
-    // authored as an ordered sequence; the default expectation is that
-    // Phase 1 ships before Phase 2 even when neither phase stamped
-    // `waiting_on` on the next. Operator `position` (above) still wins,
-    // so a manual reorder can override declared phase order.
-    if (
-      a.issue.parent_id !== null &&
-      a.issue.parent_id === b.issue.parent_id
-    ) {
-      const parent = byId.get(a.issue.parent_id);
-      if (parent && parent.type === "Epic") {
-        const aIdx = parent.children.indexOf(a.issue.id);
-        const bIdx = parent.children.indexOf(b.issue.id);
-        // Both present → lower index first. One missing → present wins
-        // (defensive; an epic with a phase missing from children[] is
-        // already a workflow violation but we still order deterministically).
-        if (aIdx !== -1 && bIdx === -1) return -1;
-        if (aIdx === -1 && bIdx !== -1) return 1;
-        if (aIdx !== -1 && bIdx !== -1 && aIdx !== bIdx) return aIdx - bIdx;
-      }
-    }
-
-    // Priority is the PRIMARY sort key for Review/ToDo/Blocked buckets
-    // (DX-521). The operator's priority knob directly drives dispatch
-    // order; ICE total acts as the tiebreaker among priority-equal
-    // cards. Pre-DX-521 the order was reversed (ICE primary, priority
-    // tiebreaker) — the swap keeps the operator's human-intent signal
-    // ranked above the triage agent's machine-derived ICE score.
+    // DX-627 — priority is the sole canonical dispatch signal inside
+    // the priority bucket. Operator's intent (priority DESC) wins; the
+    // prior position / epic phase-order / ICE total tiebreaks were
+    // stripped in Phase 1 of the priority-canon epic.
     const priorityDelta = b.issue.priority - a.issue.priority;
     if (priorityDelta !== 0) return priorityDelta;
 
-    // Both untriaged → both score +Infinity → iceDelta is NaN. Fall
-    // through to FIFO. A finite delta or ±Infinity (one untriaged,
-    // one triaged) is a real ordering signal and must be returned —
-    // only NaN is the "no signal" case.
-    const iceDelta = effectiveIce(b.issue) - effectiveIce(a.issue);
-    if (!Number.isNaN(iceDelta) && iceDelta !== 0) return iceDelta;
-
     // FIFO by creation order — parse numeric N from `<PREFIX>-N` and
     // sort ASC. IDs are allocated monotonically so the lower number is
-    // the older card. Replaces the prior `updated_at ASC` mtime tiebreak
-    // (operator-edit churn shouldn't shuffle the queue). Falls back to
-    // `localeCompare` when either id is malformed so a typo card still
-    // resolves deterministically.
+    // the older card. Falls back to `localeCompare` when either id is
+    // malformed so a typo card still resolves deterministically.
     const aN = parseIdNumeric(a.issue.id);
     const bN = parseIdNumeric(b.issue.id);
     if (aN !== null && bN !== null && aN !== bN) return aN - bN;

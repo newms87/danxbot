@@ -571,40 +571,30 @@ export interface Issue {
    * discretization.
    *
    * The field is consumed by `sortIssuesForStatus` (in
-   * `src/issue-tracker/sort.ts`) as the PRIMARY sort key for the
-   * Review / ToDo / Blocked buckets — `priority` DESC ranks above
-   * ICE total DESC (DX-521; pre-DX-521 ICE was primary and priority
-   * was the tiebreaker). In Progress / Done / Cancelled keep
-   * `updated_at` DESC and ignore priority. Out-of-range / missing
-   * values are clamped to `[0.01, 5.99]` on read by `parseIssue` and
-   * missing values default to `3.0`. ISS-210 introduced the field with
-   * a v4 → v5 schema bump and a one-off backfill migration (retired in
-   * DX-595); DX-521 widened the bounds without a schema version bump
-   * (value shape unchanged, only the clamp range widened).
+   * `src/issue-tracker/sort.ts`) as the SOLE sort key for the
+   * Review / ToDo / Blocked buckets — `priority` DESC, with id numeric
+   * ASC (FIFO) breaking ties. DX-627 (priority canon, Phase 1) made
+   * priority the sole expression of dispatch intent; the prior
+   * position / epic phase-order / ICE-total tiebreaks were stripped.
+   * In Progress / Done / Cancelled keep `updated_at` DESC and ignore
+   * priority. Out-of-range / missing values are clamped to
+   * `[0.01, 5.99]` on read by `parseIssue` and missing values default
+   * to `3.0`. ISS-210 introduced the field with a v4 → v5 schema bump
+   * and a one-off backfill migration (retired in DX-595); DX-521
+   * widened the bounds without a schema version bump (value shape
+   * unchanged, only the clamp range widened).
    */
   priority: number;
   /**
-   * Operator manual ordering knob INSIDE a status column (DX-264). `null`
-   * (default) means "fall back to the canonical ICE → priority → mtime
-   * tier"; a finite number sorts ASC ahead of every `null`-positioned
-   * sibling in the same priority bucket. Used by the dashboard's
-   * drag-to-reorder gesture inside a column and by the poller's dispatch
-   * sort so the operator's manual ordering wins over the triage agent's
-   * automated ICE ranking when context only the human has matters.
+   * Operator manual ordering knob inside a status column (DX-264).
    *
-   * Positions are computed with the fractional-indexing midpoint algorithm
-   * (`nextPosition` in `src/issue-tracker/position.ts`) so a reorder
-   * between two neighbors is a single-card PATCH — the rest of the column
-   * keeps its existing values. Compared with float midpoints; `null`
-   * sorts last. Bucket-local — the sort never compares positions across
-   * status columns.
-   *
-   * Recency-bucket statuses (In Progress / Done / Cancelled) IGNORE the
-   * field; they continue to sort by `updated_at` DESC. A card that
-   * accumulates a position while in ToDo retains the value when it moves
-   * through In Progress (where it has no effect) and back to a priority
-   * bucket (where it does), so the operator's order survives the round
-   * trip.
+   * **No longer participates in the priority-bucket sort as of DX-627
+   * (priority canon, Phase 1).** Priority is the sole canonical
+   * expression of dispatch intent; this field is dropped entirely in
+   * a follow-up phase of the same epic. Retained on the schema for
+   * round-trip stability of existing YAMLs until the drop ships. The
+   * dashboard's drag-to-reorder gesture still writes the field for
+   * display compatibility but the comparator ignores it.
    */
   position: number | null;
   /**

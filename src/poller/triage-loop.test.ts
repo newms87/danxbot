@@ -5,8 +5,8 @@
  *
  *   1. activeDispatches non-empty? → liveness scan + return early
  *   2. (handled by Phase 2 startup reattach — invariant: in-memory matches YAML)
- *   3. work-ready: oldest open ToDo+blocked=null+dispatch=null,
- *      sorted untriaged-first then ICE total DESC.
+ *   3. work-ready: open ToDo+blocked=null+dispatch=null,
+ *      sorted by priority DESC → id numeric ASC (DX-627 canon).
  *   4. triage-due: oldest open card with status ∈ {Review, Blocked}
  *      OR waiting_on != null AND triage.expires_at empty/past;
  *      sorted never-triaged-first then expires_at ASC.
@@ -205,7 +205,7 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
   );
 
   it.skipIf(!handle)(
-    "Case 3 — 5 ToDo (3 untriaged, 2 triaged ICE 60+40) → untriaged-first oldest",
+    "Case 3 — 5 ToDo all default priority (DX-627 canon) → id-numeric ASC FIFO",
     async () => {
       await seed(
         makeIssue({
@@ -252,18 +252,21 @@ describe("triage-loop wiring (Phase 4 of ISS-90)", () => {
         4000,
       );
       const result = await listDispatchableYamls(REPO_PATH, "ISS");
+      // All five cards share the default priority 3.0; the canon
+      // tiebreak is id numeric ASC (DX-627). ICE total + untriaged
+      // status no longer affect the comparator.
       expect(result.map((i) => i.id)).toEqual([
+        "ISS-101",
+        "ISS-102",
         "ISS-201",
         "ISS-202",
         "ISS-203",
-        "ISS-101",
-        "ISS-102",
       ]);
     },
   );
 
   it.skipIf(!handle)(
-    "Case 4 — 5 ToDo all triaged (ICE 80, 60, 40, 20, 10) → ICE 80 first",
+    "Case 4 — 5 ToDo all default priority (DX-627 canon) → id-numeric ASC FIFO",
     async () => {
       function triagedToDo(id: string, total: number): Issue {
         return makeIssue({

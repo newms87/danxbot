@@ -551,77 +551,20 @@ describe("local-issues — DB-backed", () => {
     );
 
     it.skipIf(!handle)(
-      "sorts untriaged cards before triaged cards regardless of mirror_updated_at",
+      "sorts by priority DESC across the dispatchable rows (DX-627 — priority canon)",
       async () => {
-        // Triaged with high ICE (older mirror_updated_at = 1000) — would win FIFO
+        // Lower priority, older mirror_updated_at — would win FIFO under
+        // the pre-DX-627 chain, loses now because priority is canonical.
         await seed(
-          makeIssue({
-            id: "ISS-1",
-            external_id: "a",
-            triage: {
-              expires_at: "2026-09-01T00:00:00Z",
-              reassess_hint: "",
-              last_status: "Keep",
-              last_explain: "",
-              ice: { total: 100, i: 5, c: 5, e: 4 },
-              history: [],
-            },
-          }),
-          1000,
-        );
-        // Untriaged (mirror_updated_at = 5000) — should still win.
-        await seed(makeIssue({ id: "ISS-2", external_id: "b" }), 5000);
-        const result = await listDispatchableYamls(REPO_PATH, "ISS");
-        expect(result.map((i) => i.id)).toEqual(["ISS-2", "ISS-1"]);
-      },
-    );
-
-    it.skipIf(!handle)(
-      "among triaged cards, sorts by triage.ice.total DESC",
-      async () => {
-        await seed(
-          makeIssue({
-            id: "ISS-1",
-            external_id: "a",
-            triage: {
-              expires_at: "2026-09-01T00:00:00Z",
-              reassess_hint: "",
-              last_status: "Keep",
-              last_explain: "",
-              ice: { total: 20, i: 5, c: 2, e: 2 },
-              history: [],
-            },
-          }),
+          makeIssue({ id: "ISS-1", external_id: "a", priority: 2.0 }),
           1000,
         );
         await seed(
-          makeIssue({
-            id: "ISS-2",
-            external_id: "b",
-            triage: {
-              expires_at: "2026-09-01T00:00:00Z",
-              reassess_hint: "",
-              last_status: "Keep",
-              last_explain: "",
-              ice: { total: 100, i: 5, c: 5, e: 4 },
-              history: [],
-            },
-          }),
-          2000,
+          makeIssue({ id: "ISS-2", external_id: "b", priority: 4.0 }),
+          5000,
         );
         await seed(
-          makeIssue({
-            id: "ISS-3",
-            external_id: "c",
-            triage: {
-              expires_at: "2026-09-01T00:00:00Z",
-              reassess_hint: "",
-              last_status: "Keep",
-              last_explain: "",
-              ice: { total: 60, i: 4, c: 3, e: 5 },
-              history: [],
-            },
-          }),
+          makeIssue({ id: "ISS-3", external_id: "c", priority: 3.0 }),
           3000,
         );
         const result = await listDispatchableYamls(REPO_PATH, "ISS");

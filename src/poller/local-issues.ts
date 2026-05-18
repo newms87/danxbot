@@ -24,9 +24,10 @@
  *
  *  - **Work-ready** (`listDispatchableYamls`): canonical
  *    `sortInputsForStatus("ToDo", ...)` order — tier (waiting/blocked
- *    last) → priority DESC → ICE total DESC (untriaged = +Inf) →
- *    `updatedAt` ASC (FIFO). DX-521 made priority the primary sort key
- *    above ICE; pre-DX-521 the order was reversed. The poller filters
+ *    last) → priority DESC → id numeric ASC (FIFO by creation). DX-627
+ *    (priority canon, Phase 1) collapsed the priority bucket to
+ *    `priority DESC → id ASC`; the prior position / epic phase-order /
+ *    ICE-total tiebreaks were stripped. The poller filters
  *    waiting/blocked rows out before sorting, so the tier predicate is
  *    a no-op there.
  *
@@ -34,9 +35,9 @@
  *    (`triage.expires_at === ""`), then `expires_at` ASC (oldest stale
  *    first). FIFO `mirror_updated_at` tiebreak.
  *
- * `mirrorUpdatedAtMs` replaces file mtime as the FIFO signal. The
- * mirror stamps it on every content-changing upsert, so it is a logical
- * mtime under the SQL projection.
+ * `mirrorUpdatedAtMs` is retained on the row shape for the triage-due
+ * sort's FIFO tiebreak; the priority-bucket sort no longer reads it
+ * (DX-627 — id-numeric ASC is the FIFO signal).
  */
 
 import {

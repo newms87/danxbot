@@ -1412,10 +1412,12 @@ describe("listIssues — position projection + sort tier (DX-264)", () => {
     expect(byId["ISS-2"].position).toBeNull();
   });
 
-  it("position ASC wins over ICE within a ToDo column", async () => {
+  it("position + ICE no longer affect ToDo column order — id-numeric ASC FIFO tiebreaks at equal priority (DX-627 canon)", async () => {
     const repo = setupRepo();
-    // High-ICE card with null position should sit BELOW the low-ICE
-    // positioned card — position tier dominates the ICE tier.
+    // Pre-DX-627 the high-ICE positioned card would have outranked the
+    // null-position low-ICE card. DX-627 (priority canon, Phase 1)
+    // stripped position + ICE from the comparator: both cards share
+    // the default priority 3.0, so id ASC decides — ISS-1 first.
     writeIssue(
       repo,
       "open",
@@ -1455,7 +1457,7 @@ describe("listIssues — position projection + sort tier (DX-264)", () => {
     const todoOrder = items
       .filter((i) => i.status === "ToDo")
       .map((i) => i.id);
-    expect(todoOrder).toEqual(["ISS-2", "ISS-1"]);
+    expect(todoOrder).toEqual(["ISS-1", "ISS-2"]);
   });
 });
 
