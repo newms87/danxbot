@@ -185,6 +185,7 @@ function isPathInsideWorktree(target, worktreeLiteral, worktreeReal) {
   //    they realpath into main — that subtree is intentionally shared
   //    (single canonical issue YAML store).
   const abs = isAbsolute(target) ? target : resolve(target);
+  if (abs === "/tmp" || abs.startsWith("/tmp/")) return { ok: true };
   const wtNorm = worktreeLiteral.replace(/\/+$/, "");
   if (abs === wtNorm || abs.startsWith(wtNorm + "/")) return { ok: true };
 
