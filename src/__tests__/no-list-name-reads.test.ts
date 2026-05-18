@@ -102,6 +102,13 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // out of the trigger write onto the YAML; never drives a worker
   // dispatch decision.
   "dashboard/issue-write-cascade.ts",
+  // DX-641 / Sub-step 3c list_name audit (projection re-affirm). Reads
+  // `mutated.list_name` ONLY to compare against the derived expected
+  // list name; on mismatch it overwrites the field. This is the
+  // audit-side counterpart of the writer paths (`list-resolve.ts`,
+  // `stamp-*`, `dispatch/core.ts`) — the read drives a self-heal of
+  // the denormalized projection, not a worker dispatch decision.
+  "issue/reconcile.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {

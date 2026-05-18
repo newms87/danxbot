@@ -100,6 +100,15 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // Agent-locks docstring references status: "In Progress" in the
   // claim-staleness rationale.
   "agent/agent-locks.ts",
+  // DX-641 / Sub-step 3g epic-lifecycle reset writes `status: "ToDo"`
+  // on the candidate Epic AFTER clearing all four residual triggers
+  // (completed_at / cancelled_at / blocked / dispatch) AND ready_at.
+  // The literal "ToDo" is the "back to ready ladder" default; 3a's
+  // parent-derive then overwrites the raw status to the children's
+  // union when non-ToDo children are present. Same trust boundary as
+  // the existing `poller/heal.ts` / `multi-agent-pick.ts` / `dispatch/
+  // core.ts` worker-side stamp paths.
+  "issue/reconcile.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {

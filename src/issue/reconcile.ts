@@ -102,6 +102,18 @@ import {
 import type { IssueTracker } from "../issue-tracker/interface.js";
 import { createLogger } from "../logger.js";
 import { isTrelloSyncOverrideDisabled } from "../settings-file.js";
+import { checkYamlDispatchLiveness } from "../poller/dispatch-liveness-yaml.js";
+import { isPidAlive } from "../agent/host-pid.js";
+import { hostname as osHostname } from "node:os";
+import {
+  deriveListTypeFromSemanticStatus,
+  resolveListNameForType,
+} from "./list-resolve.js";
+
+// Stable for the lifetime of the worker process — hoist out of the
+// per-reconcile body so 3d's liveness check doesn't repeat the syscall
+// once per audit-pass card.
+const HOST_NAME = osHostname();
 
 const log = createLogger("reconcile");
 
@@ -610,9 +622,212 @@ async function reconcileBody(
   // the contract that `applyHealHistory` only fires on real semantic
   // deltas (not steady-state projection re-affirm) is enforced inside
   // each gate below.
+  //
+  // Sub-step ordering:
+  //   3g — epic-lifecycle reset (clears stale Epic completion / cancel
+  //        / blocked / dispatch when any child is non-terminal). Runs
+  //        FIRST so subsequent sub-steps observe the cleaned state.
+  //   3d — orphan dispatch heal (clears `dispatch` when the PID /
+  //        TTL says the dispatch is dead). Runs early because clearing
+  //        `dispatch` flips derived status (rule 4) which feeds the
+  //        parent-derive.
+  //   3e — invariant heal (shape re-assert). Today: clear
+  //        `assigned_agent` on derived-Blocked cards (the picker's
+  //        resume-owned-card path would pin the agent forever).
+  //        `waiting_on` / `conflict_on[]` / `requires_human` shape
+  //        invariants are enforced by the parse-time validator; the
+  //        no-clobber path here protects in-flight `conflict_on[]`
+  //        partner stamps from accidental mutation.
+  //   3a — parent-derive (from children's union). Runs after the heals
+  //        so it observes consistent derived-status inputs.
+  //   3b — file location heal (open ↔ closed).
+  //   3c — list_name audit (projection re-affirm; ZERO history).
+  //   3f — triage TTL refresh (scheduler poke; ZERO YAML write).
   let mutated: Issue = issue;
   let mutatedFlag = false;
   const now = new Date().toISOString();
+
+  // Shared children lookup — 3g (Epic-lifecycle reset gate) AND 3a
+  // (parent-derive) both read the same row set keyed by `(repoName,
+  // mutated.id)`. Hoisting the fetch above 3g halves the DB round-trip
+  // count for every Epic with children that fires the audit pass.
+  // Fetched ONLY when this card has children (the only sub-steps that
+  // consume the result both gate on children.length > 0 — see 3g + 3a
+  // bodies below). Cards with empty children skip the query.
+  let childrenForDerive: Issue[] | null = null;
+  if (mutated.children.length > 0) {
+    childrenForDerive = await dbListChildrenByParent(repoName, mutated.id);
+  }
+
+  // 3g. Epic-lifecycle reset (DX-641).
+  //
+  // When an Epic carries any of {completed_at, cancelled_at, blocked,
+  // dispatch} populated AND any child is non-terminal, the trigger is
+  // stale and the epic must return to the ready ladder. Two regression
+  // classes are covered:
+  //
+  //   (a) DX-576 / DX-580 — an agent erroneously called
+  //       `danxbot_complete({status: "completed"})` on an Epic whose
+  //       children were still non-terminal; the worker stamped
+  //       `completed_at` and the epic stuck at derived `Done` while
+  //       children kept advancing. Pre-DX-641 reconcile then flipped
+  //       between Done (from `completed_at`) and the children's union
+  //       status (from parent-derive) every tick — ~250 history entries
+  //       in 3 minutes.
+  //   (b) Epic-conversion — an operator/agent flipped `type: Epic`
+  //       mid-life-cycle without clearing residual triggers
+  //       (`dispatch` from the prior Feature life cycle, `ready_at`
+  //       from a past pickup). The conversion places the card back on
+  //       the ready ladder; residual triggers must clear.
+  //
+  // State-based + idempotent: re-running on a clean state (no residual
+  // triggers OR every child terminal) is a no-op. Runs BEFORE 3a so
+  // the parent-derive that follows runs on cleaned state.
+  //
+  // Single history entry on each fire (the `status_change` shape with
+  // `note: "Epic-lifecycle reset — non-terminal children present"`
+  // identifies the semantic). The schema's `IssueHistoryEvent` enum
+  // does not include `epic_reset` (cross-repo MCP coordination would
+  // be needed to add it); the existing `status_change` event carries
+  // the same observability — `from` / `to` track the derived-status
+  // transition AND the note carries the rule name.
+  if (mutated.type === "Epic") {
+    const hasResidualTrigger =
+      mutated.completed_at !== null ||
+      mutated.cancelled_at !== null ||
+      mutated.blocked !== null ||
+      mutated.dispatch !== null;
+    if (hasResidualTrigger) {
+      const epicChildren = childrenForDerive ?? [];
+      const hasNonTerminalChild = epicChildren.some((c) => {
+        const d = deriveStatus(c);
+        return d !== "Done" && d !== "Cancelled";
+      });
+      if (hasNonTerminalChild) {
+        const fromStatus = deriveStatus(mutated);
+        // Clear all four residual triggers AND `ready_at`. Why also
+        // `ready_at` despite the AC text saying "stamp ready_at if
+        // null"? `deriveStatus` rule 5 (ready_at populated → ToDo)
+        // takes precedence over rule 7 (fallthrough to raw status).
+        // For an Epic whose post-3g state should reflect parent-derive
+        // (3a) from children, a stamped ready_at would lock the
+        // derived value at ToDo regardless of what 3a writes to the
+        // raw status field — making 3a's parent-derive a no-op
+        // observable through `deriveStatus`. The right semantic for an
+        // Epic is "status comes from children's union" — i.e. rule 7
+        // fallthrough to whatever 3a writes to raw status. Clearing
+        // `ready_at` lands the right derive precedence for both the
+        // DX-576/DX-580 case (all-ToDo children → raw "ToDo" → derive
+        // "ToDo") AND the non-ToDo children case (e.g. Blocked + IP
+        // child → 3a sets raw "In Progress" → derive "In Progress").
+        const cleared: Issue = {
+          ...mutated,
+          completed_at: null,
+          cancelled_at: null,
+          blocked: null,
+          dispatch: null,
+          ready_at: null,
+          // Set raw status to "ToDo" as the "back to ready ladder"
+          // default. 3a's parent-derive will overwrite this when
+          // children's union resolves to a different status. With
+          // all-ToDo children, the post-3g raw "ToDo" matches the 3a
+          // derived "ToDo" so 3a is a no-op — single history entry
+          // per epic-reset event (AC #7 / regression repro).
+          status: "ToDo",
+        };
+        const toStatus = deriveStatus(cleared);
+        mutated = {
+          ...cleared,
+          history: appendHistory(cleared.history, {
+            timestamp: now,
+            actor: "worker:auto-derive",
+            event: "status_change",
+            from: fromStatus,
+            to: toStatus,
+            note: "Epic-lifecycle reset — non-terminal children present",
+          }),
+        };
+        mutatedFlag = true;
+      }
+    }
+  }
+
+  // 3d. Orphan dispatch heal (folded from src/poller/heal.ts /
+  // healOrphanInvariantViolations).
+  //
+  // When `dispatch != null` AND the PID/TTL says the dispatch is dead
+  // (cross-host, dead-pid, dead-ttl per `checkYamlDispatchLiveness`),
+  // clear the slot. The orphan crash IS a state event — flagged as
+  // real delta so a `worker:heal` history entry fires (DX-147 AC #3
+  // semantics, extended to dispatch slots).
+  //
+  // Liveness gate matches the legacy pass exactly so the per-card
+  // reconcile observes the same outcome the per-tick scan produced
+  // pre-DX-641. The legacy `runInvariantHeal` per-tick / boot scans
+  // can be retired in favor of the audit-pass per-card
+  // `reconcileIssue` walk (which calls THIS sub-step on every open
+  // YAML).
+  if (mutated.dispatch !== null) {
+    const verdict = checkYamlDispatchLiveness(mutated.dispatch, {
+      currentHost: HOST_NAME,
+      now: Date.now(),
+      isPidAlive,
+    });
+    if (verdict.kind !== "alive") {
+      const priorDispatchId = mutated.dispatch.id;
+      const fromStatus = deriveStatus(mutated);
+      const cleared: Issue = { ...mutated, dispatch: null };
+      const toStatus = deriveStatus(cleared);
+      mutated = {
+        ...cleared,
+        history: appendHistory(cleared.history, {
+          timestamp: now,
+          actor: "worker:heal",
+          event: "status_change",
+          from: fromStatus,
+          to: toStatus,
+          note: `Cleared orphan dispatch ${priorDispatchId} (${verdict.kind})`,
+        }),
+      };
+      mutatedFlag = true;
+    }
+  }
+
+  // 3e. Invariant heal — shape re-assert (folded from
+  // src/poller/heal.ts / healOrphanInvariantViolations
+  // blocked-with-assignment branch).
+  //
+  // Today's invariant: a card whose DERIVED status is `Blocked` MUST
+  // have `assigned_agent: null` — Blocked means the agent declared
+  // "done from my side, operator action needed"; keeping
+  // `assigned_agent` populated would let the picker's resume-owned-card
+  // path pin the agent on a card it cannot work. Clear the stamp.
+  //
+  // Other shape invariants (`waiting_on.{reason, timestamp, by}` shape,
+  // `conflict_on[]` entry shape, `requires_human.{reason, steps, set_by,
+  // set_at}` shape) are enforced at parse time by the validator — by
+  // the time a YAML reaches reconcile it has already passed shape
+  // checks. This sub-step is therefore a NO-CLOBBER zone for those
+  // three fields: reconcile NEVER mutates a non-null `conflict_on[]`,
+  // `waiting_on`, or `requires_human` payload (the agent / prep-verdict
+  // route owns them).
+  if (deriveStatus(mutated) === "Blocked" && mutated.assigned_agent !== null) {
+    const fromStatus = deriveStatus(mutated);
+    const cleared: Issue = { ...mutated, assigned_agent: null };
+    const toStatus = deriveStatus(cleared);
+    mutated = {
+      ...cleared,
+      history: appendHistory(cleared.history, {
+        timestamp: now,
+        actor: "worker:heal",
+        event: "status_change",
+        from: fromStatus,
+        to: toStatus,
+        note: "Cleared assigned_agent on Blocked card (shape invariant)",
+      }),
+    };
+    mutatedFlag = true;
+  }
 
   // 3a. Parent-derive — only when this card has children AND is not
   // itself queued behind other work. The waiting_on guard mirrors the
@@ -625,7 +840,7 @@ async function reconcileBody(
   // mutated.status`). A re-derive that lands the same status —
   // steady-state projection re-affirm — emits zero history.
   if (mutated.children.length > 0 && mutated.waiting_on === null) {
-    const children = await dbListChildrenByParent(repoName, mutated.id);
+    const children = childrenForDerive ?? [];
     if (children.length > 0) {
       const derived = deriveParentStatus(children);
       if (derived !== null && derived.status !== mutated.status) {
@@ -652,6 +867,61 @@ async function reconcileBody(
   }
   const targetBucket: IssueBucket = fileMove?.targetDir ?? loaded.bucket;
   const bucketChanged = targetBucket !== loaded.bucket;
+
+  // 3c. list_name audit — projection re-affirm (DX-641).
+  //
+  // `list_name` is display-only (workers never read it; static guard
+  // at `src/__tests__/no-list-name-reads.test.ts`). Even so, write
+  // paths CAN drift the field — the stamp-paths (`stamp-terminal.ts`,
+  // `stamp-blocked.ts`, `dispatch/core.ts`) all stamp event-stamped
+  // `list_name` on their writes, and a dashboard list-move dropdown
+  // can desync the field from the derived semantic. This audit
+  // recomputes the expected list name from the current derived status
+  // and re-asserts when mismatched.
+  //
+  // Flagged as PROJECTION RE-AFFIRM — NO history entry. The semantic
+  // state (derived status) was already represented before this audit;
+  // the field was a stale denormalization. DX-624 class.
+  //
+  // Scope: re-asserts ONLY when `list_name` is non-null but doesn't
+  // match the derived expected name. A `list_name: null` card has no
+  // stamp to audit — the next stamp path (terminal / blocked /
+  // dispatch / list-move PATCH) fills the field. Filling null on
+  // audit would churn every never-stamped card on every reconcile,
+  // and the contract elsewhere (e.g. `createEmptyIssue` returning
+  // `list_name: null`) treats null as a valid steady state.
+  //
+  // Policy: audit always re-asserts on derived-inconsistent
+  // `list_name`. A human override via the dashboard list-move dropdown
+  // must re-stamp the trigger (e.g. `ready_at` to move to ToDo) for
+  // the change to stick — otherwise the audit reverts it on the next
+  // reconcile. Decision recorded on DX-641 comments.
+  if (mutated.list_name !== null) {
+    const derivedStatus = deriveStatus(mutated);
+    const expectedListType = deriveListTypeFromSemanticStatus(derivedStatus);
+    let expectedListName: string | null = null;
+    try {
+      expectedListName = resolveListNameForType(
+        repo.localPath,
+        expectedListType,
+      );
+    } catch (err) {
+      // lists.yaml missing or unreadable — record a non-fatal error but
+      // keep going. The audit is best-effort; production has the seeded
+      // 7-default `lists.yaml` so this branch fires only in tests that
+      // skipped the seed setup.
+      errors.push({
+        step: "list-name-audit",
+        message: `Failed to resolve expected list name for type ${expectedListType}: ${(err as Error).message}`,
+        fatal: false,
+      });
+    }
+    if (expectedListName !== null && mutated.list_name !== expectedListName) {
+      mutated = { ...mutated, list_name: expectedListName };
+      mutatedFlag = true;
+      // No history entry — projection re-affirm.
+    }
+  }
 
   // ---- Step 4: diff vs prior canonical ----
   // Even when step 3 detected no derived-state mutation, the on-disk
@@ -849,7 +1119,8 @@ async function reconcileBody(
     }
   }
 
-  // ---- Step 7b: triage timer re-arm (DX-289 / Phase 4b.2) ----
+  // ---- Step 7b: triage timer re-arm (DX-289 / Phase 4b.2)
+  //              + 3f triage TTL refresh poke (DX-641) ----
   // Re-arm the per-card triage `setTimeout` whenever `triage.expires_at`
   // differs from the value we last saw for this `(repo, id)` pair AND
   // the card is currently in the triage agent's scope (Review /
@@ -857,6 +1128,28 @@ async function reconcileBody(
   // — arming the timer would just fire a moot audit reconcile that
   // re-arms again, looping on `expires_at === ""`. Terminal status (or
   // bucket move to closed) clears the timer too.
+  //
+  // DX-641 / Sub-step 3f extends this block: when `triage.expires_at` is
+  // EMPTY AND the card is in triage scope (i.e. it needs to be triaged
+  // BUT no triage agent has stamped an expiry yet), emit the signal
+  // `fanout.schedulerPokeReason: "triage-empty"`. Idempotent: the
+  // `triageExpiresAtByCardId` cache holds the last-observed value; the
+  // signal fires ONLY on the cache miss / value change. The triage
+  // agent stamps a non-empty `expires_at` on dispatch which flips the
+  // cache; subsequent reconciles with the same expiry observe `prior
+  // === current` and skip the signal.
+  //
+  // NOTE — signal-only today (no consumer wiring). The
+  // `onReconcileResult` hook in `src/dispatch/scheduler.ts` reads only
+  // `fanout.dispatchableChanged`, so the `schedulerPokeReason` field is
+  // observable through `ReconcileResult` but does NOT itself trigger a
+  // triage dispatch. The per-tick cron path's `checkAndSpawnTriage`
+  // (in `src/cron/sync-and-audit.ts`) remains the dispatch source.
+  // Wiring `onReconcileResult` to also fire a triage poke when this
+  // signal fires is a follow-up task (Phase 3 ships the producer; the
+  // consumer ships in a later DX-* phase). Until that lands, 3f's
+  // observable effect is limited to the signal surface — it shortens
+  // triage time only via the existing per-tick path.
   //
   // The triage-timer import is module-cyclic-safe because the timer
   // imports `ReconcileRepoContext` as a type-only symbol.
@@ -871,6 +1164,7 @@ async function reconcileBody(
     mutatedDerived === "Review" ||
     mutatedDerived === "Blocked";
   const triageCacheKey = triageExpiresAtKey(repo.name, id);
+  let triagePokeReason: string | null = null;
   if (isTerminalStatus || targetBucket === "closed" || !inTriageScope) {
     clearTriageTimer(repo.name, id);
     triageExpiresAtByCardId.delete(triageCacheKey);
@@ -889,6 +1183,13 @@ async function reconcileBody(
         reconcile: reconcileIssue,
       });
       triageExpiresAtByCardId.set(triageCacheKey, nextTriageExpiresAt);
+      // DX-641 / 3f — emit the scheduler poke when the new value is
+      // empty (the existing arm logic is a no-op on empty, so without
+      // the poke a card whose triage hasn't run yet would sit until
+      // the next 60s audit-pass picked it up).
+      if (nextTriageExpiresAt === "") {
+        triagePokeReason = "triage-empty";
+      }
     }
   }
 
@@ -934,6 +1235,9 @@ async function reconcileBody(
       parentId: parentRecursed,
       dependents,
       dispatchableChanged,
+      ...(triagePokeReason !== null && {
+        schedulerPokeReason: triagePokeReason,
+      }),
     },
   };
 }
