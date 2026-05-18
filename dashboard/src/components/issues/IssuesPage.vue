@@ -13,8 +13,10 @@ import TriageButton from "./TriageButton.vue";
 import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import BlockedReasonDialog from "./BlockedReasonDialog.vue";
 import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
+import EpicMoveCascadeDialog from "./EpicMoveCascadeDialog.vue";
 import { typeToId } from "./issuePalette";
 import { nextPriority } from "../../composables/cardPriority";
+import type { CascadeAction } from "../../api";
 import type { Issue, IssueDetail, IssueListItem, List } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
@@ -59,6 +61,7 @@ const {
   moveIssueList,
   moveIssuePriority,
   applyIssueUpdate,
+  cascadeIssueList,
 } = useIssues(toRef(selectedRepo), includeClosed);
 
 // DX-586 — single per-page `useListColors` instance owns the per-repo
@@ -110,11 +113,99 @@ interface PendingBlockedOut {
   issue: IssueListItem;
   destList: List;
 }
-const pendingMove = ref<PendingBlockedIn | PendingBlockedOut | null>(null);
+// DX-632 (Phase 6) — cascade dialog state. Fires when the operator
+// drags any card whose `children.length > 0`; covers BOTH the
+// into-blocked and out-of-blocked transitions in a single surface
+// (the single-card BlockedReason / Unblock dialogs above keep
+// handling the no-children case).
+interface PendingCascade {
+  kind: "cascade";
+  issue: IssueListItem;
+  destList: List;
+  descendants: IssueListItem[];
+  defaults: Record<string, CascadeAction>;
+}
+const pendingMove = ref<PendingBlockedIn | PendingBlockedOut | PendingCascade | null>(null);
 const moveDialogBusy = ref(false);
 const moveDialogError = ref<string | null>(null);
 
+/**
+ * BFS-flatten every descendant of `epic` from the in-memory `all`
+ * snapshot. The cascade dialog renders rows for every reachable
+ * descendant — recursive children, not just direct ones — and the
+ * server's helper applies the spec table to each. Cards not present in
+ * `all` (closed beyond the recent slice, hidden by filters) are simply
+ * absent — the server is the authoritative writer and will visit them
+ * via its own DB query, so a missing-from-SPA descendant still gets
+ * the right write applied. The dialog's pre-view is operator-facing
+ * transparency, not a write surface.
+ */
+function collectDescendants(
+  epic: IssueListItem,
+  all: IssueListItem[],
+): IssueListItem[] {
+  const byParent = new Map<string, IssueListItem[]>();
+  for (const i of all) {
+    if (i.parent_id === null) continue;
+    if (!byParent.has(i.parent_id)) byParent.set(i.parent_id, []);
+    byParent.get(i.parent_id)!.push(i);
+  }
+  const out: IssueListItem[] = [];
+  const queue: string[] = [epic.id];
+  const seen = new Set<string>([epic.id]);
+  while (queue.length > 0) {
+    const pid = queue.shift()!;
+    const kids = byParent.get(pid) ?? [];
+    for (const kid of kids) {
+      if (seen.has(kid.id)) continue;
+      seen.add(kid.id);
+      out.push(kid);
+      queue.push(kid.id);
+    }
+  }
+  return out;
+}
+
+/**
+ * Pre-view of per-descendant default actions for the cascade dialog.
+ * Mirrors the terminal-source row of the helper's spec table — done
+ * + cancelled descendants never auto-move; every other descendant
+ * defaults to follow the parent (`move_same_type`). The server's
+ * `cascadeEpicMove` is the authoritative source — defaults shown
+ * here are an operator-friendly pre-view; submitting without override
+ * sends an empty `overrides` and lets the helper re-derive.
+ */
+function computeCascadeDefaults(
+  descendants: IssueListItem[],
+): Record<string, CascadeAction> {
+  const out: Record<string, CascadeAction> = {};
+  for (const d of descendants) {
+    if (d.status === "Done" || d.status === "Cancelled") {
+      out[d.id] = { kind: "stay" };
+    } else {
+      out[d.id] = { kind: "move_same_type" };
+    }
+  }
+  return out;
+}
+
 function onMove(issue: IssueListItem, toList: List): void {
+  // DX-632 — children-bearing card → cascade dialog (covers BOTH the
+  // into-blocked and out-of-blocked transitions for epics, since the
+  // dialog merges both gates).
+  if (issue.children.length > 0) {
+    moveDialogError.value = null;
+    const descendants = collectDescendants(issue, issues.value);
+    const defaults = computeCascadeDefaults(descendants);
+    pendingMove.value = {
+      kind: "cascade",
+      issue,
+      destList: toList,
+      descendants,
+      defaults,
+    };
+    return;
+  }
   // Route through dialogs for the two blocked-state transitions; every
   // other move fires the optimistic mutation + PATCH directly. The
   // optimistic update (in `useIssues.moveIssueList`) handles its own
@@ -162,6 +253,30 @@ async function onUnblockDialogConfirm(): Promise<void> {
       { name: p.destList.name, type: p.destList.type },
       { blocked: null },
     );
+    pendingMove.value = null;
+  } catch (err) {
+    moveDialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    moveDialogBusy.value = false;
+  }
+}
+
+async function onCascadeDialogConfirm(payload: {
+  overrides: Record<string, CascadeAction>;
+  unblockConfirmed: boolean;
+  blockedReason?: string;
+}): Promise<void> {
+  const p = pendingMove.value;
+  if (!p || p.kind !== "cascade") return;
+  moveDialogBusy.value = true;
+  moveDialogError.value = null;
+  try {
+    await cascadeIssueList(p.issue.id, {
+      dest_list_name: p.destList.name,
+      unblock_confirmed: payload.unblockConfirmed,
+      ...(payload.blockedReason ? { blocked_reason: payload.blockedReason } : {}),
+      overrides: payload.overrides,
+    });
     pendingMove.value = null;
   } catch (err) {
     moveDialogError.value = err instanceof Error ? err.message : String(err);
@@ -537,6 +652,19 @@ watch(
       :busy="moveDialogBusy"
       :error="moveDialogError"
       @confirm="onUnblockDialogConfirm"
+      @cancel="onMoveDialogCancel"
+    />
+    <EpicMoveCascadeDialog
+      v-if="pendingMove?.kind === 'cascade'"
+      :model-value="true"
+      :parent="pendingMove.issue"
+      :dest-list="pendingMove.destList"
+      :descendants="pendingMove.descendants"
+      :defaults="pendingMove.defaults"
+      :all-lists="boardLists"
+      :busy="moveDialogBusy"
+      :error="moveDialogError"
+      @confirm="onCascadeDialogConfirm"
       @cancel="onMoveDialogCancel"
     />
 
