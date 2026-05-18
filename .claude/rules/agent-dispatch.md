@@ -212,6 +212,10 @@ Contract + invariants:
 
 Re-read those headers before editing — the feature exists because prod burned ~$1K in a day on 40 re-dispatches against a stuck card.
 
+## Event-loop delay monitor (DX-636)
+
+`src/observability/event-loop-monitor.ts` reads a `perf_hooks.monitorEventLoopDelay` histogram every `DANXBOT_LOOP_METRIC_INTERVAL_MS` (default `10000`); when p99 > `DANXBOT_LOOP_STALL_THRESHOLD_MS` (default `500`) it emits a `severity: "warn"` system error with `source: "event-loop-stall"`. Latest sample is exposed on `/health` as `eventLoop: {p50, p99, max, sampledAtMs}`. Tier 3 observability for the DX-633 starvation class — never replaces Tier 1 yields.
+
 ## Dispatch API disabled state
 
 Operator flips `overrides.dispatchApi.enabled = false` on Agents tab → `POST /api/launch` returns `503 {"error":"Dispatch API is disabled for repo <name>"}` before parsing body or any spawn bookkeeping. Dashboard proxy forwards status + body verbatim. Re-enable requires no worker restart.

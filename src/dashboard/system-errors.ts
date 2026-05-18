@@ -33,7 +33,8 @@ export type SystemErrorSource =
   | "orphan-reaper"
   | "audit-drift"
   | "trello-list-mapping"
-  | "stamp-terminal";
+  | "stamp-terminal"
+  | "event-loop-stall";
 
 /**
  * `"info"` is the audit-trail channel: routine, non-actionable events

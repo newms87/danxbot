@@ -72,6 +72,10 @@ import {
   SystemdPreflightError,
 } from "./agent/systemd-preflight.js";
 import { sweepStaleTmpDirs } from "./agent/tmp-dir-sweep.js";
+import {
+  startEventLoopMonitor,
+  type EventLoopMonitorHandle,
+} from "./observability/event-loop-monitor.js";
 import { tmpdir } from "node:os";
 import { runBootMigrationSweep } from "./worker/migrate-on-boot.js";
 import { writeFlag } from "./critical-failure.js";
@@ -713,6 +717,19 @@ async function startWorkerMode(): Promise<void> {
     );
   }
 
+  // DX-636 — start the event-loop delay monitor. Tier 3 observability per
+  // DX-633's quality bar: a starvation regression that re-introduces a
+  // sync burst (causing pg-pool's `Connection terminated` class) now shows
+  // up as a `event-loop-stall` system error on the dashboard's banner
+  // BEFORE the outage manifests. Runs in the worker process only — the
+  // monitor itself uses < 1ms per tick. Defaults: 10s tick interval, 500ms
+  // p99 threshold; both tunable via `DANXBOT_LOOP_METRIC_INTERVAL_MS` /
+  // `DANXBOT_LOOP_STALL_THRESHOLD_MS`. The latest sample is exposed on
+  // `/health` via `eventLoop`.
+  const eventLoopMonitor: EventLoopMonitorHandle = startEventLoopMonitor({
+    repoName: repo.name,
+  });
+
   // Start the worker HTTP server (dispatch API + health)
   await startWorkerServer(repo);
 
@@ -740,7 +757,7 @@ async function startWorkerMode(): Promise<void> {
   // chain).
   await startCronSync();
 
-  initShutdownHandlers({ workerCronLoop });
+  initShutdownHandlers({ workerCronLoop, eventLoopMonitor });
 
   log.info(`Worker mode ready for repo: ${repo.name}`);
 }

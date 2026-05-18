@@ -11,6 +11,7 @@ import { shutdownAllHmr } from "./template-hmr/index.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
 import { createLogger } from "./logger.js";
 import type { WorkerCronLoopHandle } from "./cron/worker-loop.js";
+import type { EventLoopMonitorHandle } from "./observability/event-loop-monitor.js";
 
 const log = createLogger("shutdown");
 
@@ -19,6 +20,7 @@ interface ShutdownOptions {
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
   workerCronLoop?: WorkerCronLoopHandle | null;
+  eventLoopMonitor?: EventLoopMonitorHandle | null;
 }
 
 export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
@@ -27,6 +29,7 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
     threadCleanupInterval,
     retentionInterval,
     workerCronLoop,
+    eventLoopMonitor,
   } = options;
 
   log.info("Shutdown signal received, stopping new message processing...");
@@ -65,6 +68,13 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // mode when the boot pass threw.
   if (workerCronLoop) {
     workerCronLoop.stop();
+  }
+
+  // DX-636 — disable the perf_hooks histogram + clear its tick interval.
+  // Null in dashboard mode (worker-only) and in worker mode when the boot
+  // path threw before the monitor was started.
+  if (eventLoopMonitor) {
+    eventLoopMonitor.stop();
   }
 
   // Clear per-job cleanup intervals from worker dispatch
@@ -110,6 +120,7 @@ export function initShutdownHandlers(options: {
   threadCleanupInterval?: NodeJS.Timeout;
   retentionInterval?: NodeJS.Timeout;
   workerCronLoop?: WorkerCronLoopHandle | null;
+  eventLoopMonitor?: EventLoopMonitorHandle | null;
 }): void {
   const handleShutdown = () => {
     shutdown({
@@ -117,6 +128,7 @@ export function initShutdownHandlers(options: {
       threadCleanupInterval: options.threadCleanupInterval,
       retentionInterval: options.retentionInterval,
       workerCronLoop: options.workerCronLoop,
+      eventLoopMonitor: options.eventLoopMonitor,
     }).catch((error) => {
       log.error("Error during shutdown", error);
       process.exit(1);

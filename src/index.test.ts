@@ -83,6 +83,19 @@ const mockStartWorkerCronLoop = vi
 vi.mock("./cron/worker-loop.js", () => ({
   startWorkerCronLoop: mockStartWorkerCronLoop,
 }));
+
+// DX-636 — stub the event-loop monitor so worker-mode tests can assert
+// the shutdown-handler wiring deterministically without spinning a real
+// perf_hooks histogram.
+const mockEventLoopMonitorStop = vi.fn();
+const mockStartEventLoopMonitor = vi.fn().mockReturnValue({
+  stop: mockEventLoopMonitorStop,
+  tickNow: vi.fn(),
+});
+vi.mock("./observability/event-loop-monitor.js", () => ({
+  startEventLoopMonitor: mockStartEventLoopMonitor,
+  getLatestEventLoopSample: vi.fn().mockReturnValue(null),
+}));
 vi.mock("./inject/sync.js", () => ({
   syncRepoFiles: mockSyncRepoFiles,
 }));
@@ -461,6 +474,10 @@ describe("worker mode startup flow", { timeout: 15_000 }, () => {
     // the shutdown handler so SIGTERM clears the interval.
     expect(mockInitShutdownHandlers).toHaveBeenCalledWith({
       workerCronLoop: { stop: mockWorkerCronLoopStop },
+      eventLoopMonitor: {
+        stop: mockEventLoopMonitorStop,
+        tickNow: expect.any(Function),
+      },
     });
   });
 

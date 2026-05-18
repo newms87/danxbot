@@ -13,6 +13,10 @@ import {
   preflightProjectsDir,
   type ProjectsDirFailureReason,
 } from "../agent/projects-dir-preflight.js";
+import {
+  getLatestEventLoopSample,
+  type EventLoopSample,
+} from "../observability/event-loop-monitor.js";
 
 /**
  * Status is three-valued:
@@ -99,6 +103,15 @@ export interface WorkerHealthResponse {
    * second read from disk. Null when the flag is absent.
    */
   criticalFailure: CriticalFailurePayload | null;
+  /**
+   * Latest sample from {@link startEventLoopMonitor} (DX-636). Null until the
+   * first tick fires (~10s after worker boot under default cadence) and in
+   * dashboard mode (the monitor is worker-only). Exposed so the dashboard
+   * can render an event-loop-delay panel and surface starvation regressions
+   * (DX-633 root cause class) BEFORE they manifest as `Connection terminated`
+   * outages.
+   */
+  eventLoop: EventLoopSample | null;
 }
 
 export async function getHealthStatus(
@@ -156,5 +169,6 @@ export async function getHealthStatus(
     claude_auth,
     projects_dir,
     criticalFailure,
+    eventLoop: getLatestEventLoopSample(),
   };
 }
