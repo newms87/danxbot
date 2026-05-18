@@ -46,7 +46,10 @@ function deliverSse(data: unknown): void {
   for (const h of [...handlers]) h({ topic: "trello-list-map:updated", data });
 }
 
-import { useTrelloListMapping } from "./useTrelloListMapping";
+import {
+  useTrelloListMapping,
+  __resetSharedTrelloListMappingForTesting,
+} from "./useTrelloListMapping";
 
 const SEED_RESPONSE = {
   map: { list_id_to_trello_list_id: { "l-review": "tl1" } },
@@ -68,6 +71,7 @@ const SEED_RESPONSE = {
 
 beforeEach(() => {
   handlers.clear();
+  __resetSharedTrelloListMappingForTesting();
   mockFetchListMapping.mockReset();
   mockFetchBoardLists.mockReset();
   mockPatchListMapping.mockReset();
@@ -214,6 +218,89 @@ describe("useTrelloListMapping", () => {
     expect(error.value).toBe("400 invalid");
     expect(mapping.value?.map).toBe(priorMap);
     destroy();
+  });
+
+  it("DX-688: two facades for the same repo fire ONE fetchTrelloListMapping + ONE fetchTrelloBoardLists call", async () => {
+    mockFetchListMapping.mockResolvedValue(SEED_RESPONSE);
+    mockFetchBoardLists.mockReset();
+    mockFetchBoardLists.mockResolvedValue([
+      { id: "tl1", name: "Review on board" },
+    ]);
+
+    const a = useTrelloListMapping("danxbot");
+    const b = useTrelloListMapping("danxbot");
+    a.init();
+    b.init();
+    await flushPromises();
+    await flushPromises();
+
+    expect(mockFetchListMapping).toHaveBeenCalledTimes(1);
+    expect(mockFetchBoardLists).toHaveBeenCalledTimes(1);
+    // Both facades observe the same data.
+    expect(a.mapping.value?.board_configured).toBe(true);
+    expect(b.mapping.value?.board_configured).toBe(true);
+    expect(a.boardLists.value).toEqual([
+      { id: "tl1", name: "Review on board" },
+    ]);
+    expect(b.boardLists.value).toEqual([
+      { id: "tl1", name: "Review on board" },
+    ]);
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it("DX-688: different repos still get independent fetches + subscriptions", async () => {
+    mockFetchListMapping.mockResolvedValue(SEED_RESPONSE);
+
+    const a = useTrelloListMapping("danxbot");
+    const b = useTrelloListMapping("platform");
+    a.init();
+    b.init();
+    await flushPromises();
+    await flushPromises();
+
+    expect(mockFetchListMapping).toHaveBeenCalledTimes(2);
+    expect(mockFetchListMapping).toHaveBeenCalledWith("danxbot");
+    expect(mockFetchListMapping).toHaveBeenCalledWith("platform");
+    expect(mockFetchBoardLists).toHaveBeenCalledTimes(2);
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it("DX-688: partial destroy keeps shared alive; full destroy + re-init re-fetches", async () => {
+    mockFetchListMapping.mockResolvedValue(SEED_RESPONSE);
+
+    const a = useTrelloListMapping("danxbot");
+    const b = useTrelloListMapping("danxbot");
+    a.init();
+    b.init();
+    await flushPromises();
+    await flushPromises();
+    expect(mockFetchListMapping).toHaveBeenCalledTimes(1);
+
+    // Partial destroy — second facade still alive, no fresh fetch.
+    a.destroy();
+    expect(b.mapping.value?.board_configured).toBe(true);
+
+    // SSE still wired up — b receives the live update.
+    deliverSse({
+      repoName: "danxbot",
+      map: { list_id_to_trello_list_id: { "l-todo": "tl-live" } },
+    });
+    expect(
+      b.mapping.value?.map.list_id_to_trello_list_id["l-todo"],
+    ).toBe("tl-live");
+
+    // Full destroy — fresh init should re-fetch.
+    b.destroy();
+    const c = useTrelloListMapping("danxbot");
+    c.init();
+    await flushPromises();
+    await flushPromises();
+    expect(mockFetchListMapping).toHaveBeenCalledTimes(2);
+    c.destroy();
   });
 
   it("malformed SSE payload is dropped via runtime guard (does NOT clobber mapping)", async () => {

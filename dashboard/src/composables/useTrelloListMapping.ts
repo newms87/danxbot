@@ -14,12 +14,20 @@ import type {
 
 /**
  * DX-611 (Phase 8b.3 of DX-575) — Vue composable that owns the wire
- * state for the Settings UI's Trello list-mapping panel. Mirrors the
- * `useListColors` shape: per-call instance, opt-in `init()` /
- * `destroy()`, SSE-driven re-render via the canonical `useStream`
- * helper. Per `.claude/rules/dashboard.md`, no `setInterval` — every
- * post-mount update arrives on the `trello-list-map:updated` topic
- * the worker publishes after a successful PATCH.
+ * state for the Settings UI's Trello list-mapping panel.
+ *
+ * **Per-repo shared instance with refcount (DX-688).** Every call to
+ * `useTrelloListMapping(repo)` for the same `repo` returns a facade
+ * backed by ONE shared per-repo cache. Two Settings-page components
+ * mount with the SAME repo prop (`TrelloListMapping.vue` +
+ * `BacklogBootstrapBanner.vue`) — pre-DX-688 each instance fired its
+ * own `GET /api/trello/list-mapping` AND `GET /api/trello/board-lists`,
+ * doubling the cold-cache hits to Trello over the wire. The shared
+ * cache fires ONE pair of fetches per repo regardless of how many
+ * components mount, refcounting the underlying SSE subscription so the
+ * connection survives any single component unmounting and only tears
+ * down when the last consumer detaches. Different repos still get
+ * independent fetches + subscriptions.
  *
  * Wire contract:
  *  - `fetchTrelloListMapping(repo)` returns the full
@@ -39,7 +47,7 @@ export interface UseTrelloListMappingReturn {
   loading: Ref<boolean>;
   saving: Ref<boolean>;
   error: Ref<string | null>;
-  /** Hydrate from REST + open the SSE subscription. Idempotent. */
+  /** Hydrate from REST + open the SSE subscription. Idempotent across facades for the same repo (refcount). */
   init: () => void;
   /** Tear down the SSE subscription. Call from `onBeforeUnmount`. */
   destroy: () => void;
@@ -71,15 +79,33 @@ function isMapUpdatedPayload(
   return typeof inner === "object" && inner !== null;
 }
 
-export function useTrelloListMapping(repo: string): UseTrelloListMappingReturn {
+interface SharedTrelloListMappingInstance {
+  mapping: Ref<TrelloListMappingResponse | null>;
+  boardLists: Ref<TrelloListSummary[]>;
+  loading: Ref<boolean>;
+  saving: Ref<boolean>;
+  error: Ref<string | null>;
+  hydrate: () => Promise<void>;
+  refetchBoardLists: () => Promise<void>;
+  save: (next: TrelloListMap) => Promise<void>;
+  /** Number of facades that have called init() and not yet destroy(). */
+  refCount: number;
+  /** Live SSE stream; null when refCount === 0. */
+  stream: UseStreamReturn | null;
+  unsubscribe: (() => void) | null;
+}
+
+const sharedByRepo = new Map<string, SharedTrelloListMappingInstance>();
+
+function getOrCreateShared(repo: string): SharedTrelloListMappingInstance {
+  const cached = sharedByRepo.get(repo);
+  if (cached) return cached;
+
   const mapping = ref<TrelloListMappingResponse | null>(null);
   const boardLists = ref<TrelloListSummary[]>([]);
   const loading = ref<boolean>(false);
   const saving = ref<boolean>(false);
   const error = ref<string | null>(null);
-
-  let stream: UseStreamReturn | null = null;
-  let unsubscribe: (() => void) | null = null;
 
   async function hydrate(): Promise<void> {
     loading.value = true;
@@ -115,33 +141,6 @@ export function useTrelloListMapping(repo: string): UseTrelloListMappingReturn {
     loading.value = false;
   }
 
-  function init(): void {
-    if (stream) return; // idempotent — matches useListColors
-    stream = useStream();
-    unsubscribe = stream.subscribe("trello-list-map:updated", (event) => {
-      if (!isMapUpdatedPayload(event.data)) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "useTrelloListMapping: malformed trello-list-map:updated event",
-          event,
-        );
-        return;
-      }
-      if (event.data.repoName !== repo) return;
-      const prev = mapping.value;
-      if (!prev) return;
-      mapping.value = { ...prev, map: event.data.map };
-    });
-    void hydrate();
-  }
-
-  function destroy(): void {
-    unsubscribe?.();
-    unsubscribe = null;
-    stream?.disconnect();
-    stream = null;
-  }
-
   async function refetchBoardLists(): Promise<void> {
     error.value = null;
     try {
@@ -171,16 +170,94 @@ export function useTrelloListMapping(repo: string): UseTrelloListMappingReturn {
     }
   }
 
-  return {
+  const instance: SharedTrelloListMappingInstance = {
     mapping,
     boardLists,
     loading,
     saving,
     error,
-    init,
-    destroy,
-    refresh: hydrate,
+    hydrate,
     refetchBoardLists,
     save,
+    refCount: 0,
+    stream: null,
+    unsubscribe: null,
+  };
+
+  sharedByRepo.set(repo, instance);
+  return instance;
+}
+
+/**
+ * Test-only: drop every shared per-repo instance. Tests call this in
+ * `beforeEach` so refcount / cached state / streams do not leak across
+ * cases.
+ */
+export function __resetSharedTrelloListMappingForTesting(): void {
+  for (const inst of sharedByRepo.values()) {
+    inst.unsubscribe?.();
+    inst.stream?.disconnect();
+  }
+  sharedByRepo.clear();
+}
+
+export function useTrelloListMapping(repo: string): UseTrelloListMappingReturn {
+  const shared = getOrCreateShared(repo);
+  // Each facade tracks whether IT called init() so destroy() decrements
+  // exactly once even on double-destroy calls.
+  let attached = false;
+
+  function init(): void {
+    if (attached) return; // idempotent per facade
+    attached = true;
+    shared.refCount++;
+    if (shared.refCount === 1) {
+      // First consumer for this repo — open the stream + fire initial hydrate.
+      shared.stream = useStream();
+      shared.unsubscribe = shared.stream.subscribe(
+        "trello-list-map:updated",
+        (event) => {
+          if (!isMapUpdatedPayload(event.data)) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "useTrelloListMapping: malformed trello-list-map:updated event",
+              event,
+            );
+            return;
+          }
+          if (event.data.repoName !== repo) return;
+          const prev = shared.mapping.value;
+          if (!prev) return;
+          shared.mapping.value = { ...prev, map: event.data.map };
+        },
+      );
+      void shared.hydrate();
+    }
+  }
+
+  function destroy(): void {
+    if (!attached) return; // idempotent per facade
+    attached = false;
+    shared.refCount--;
+    if (shared.refCount <= 0) {
+      shared.refCount = 0;
+      shared.unsubscribe?.();
+      shared.unsubscribe = null;
+      shared.stream?.disconnect();
+      shared.stream = null;
+    }
+  }
+
+  return {
+    mapping: shared.mapping,
+    boardLists: shared.boardLists,
+    loading: shared.loading,
+    saving: shared.saving,
+    error: shared.error,
+    init,
+    destroy,
+    refresh: shared.hydrate,
+    refetchBoardLists: shared.refetchBoardLists,
+    save: shared.save,
   };
 }
