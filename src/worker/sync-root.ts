@@ -8,17 +8,21 @@
  *
  * Two-process bridge: the worker owns the in-memory error map (single
  * source of truth for the per-tick retry gate) and mirrors it onto
- * `<repoRoot>/.danxbot/sync-root-state.json` on every transition. The
- * dashboard chokidars that file (`src/dashboard/sync-root-watcher.ts`)
- * and re-publishes `repo-root-sync:error` / `repo-root-sync:clear`
- * onto its own eventBus → SSE. Pattern matches the
- * `<repo>/.danxbot/CRITICAL_FAILURE` flag.
+ * `<runtime-volume>/<repo>/sync-root-state.json` on every transition
+ * (DX-682 relocated this out of `<repoRoot>/.danxbot/` so the consumed
+ * repo's `.danxbot/` stays contract-only; `src/runtime-volume.ts` owns
+ * the path resolution). The dashboard chokidars that file
+ * (`src/dashboard/sync-root-watcher.ts`) and re-publishes
+ * `repo-root-sync:error` / `repo-root-sync:clear` onto its own
+ * eventBus → SSE. Pattern matches the
+ * `<runtime-volume>/<repo>/CRITICAL_FAILURE` flag.
  */
 
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { createLogger } from "../logger.js";
+import { runtimeVolumePath } from "../runtime-volume.js";
 
 const log = createLogger("sync-root");
 
@@ -41,7 +45,17 @@ export interface ExecResult {
  */
 export type ExecGitFn = (args: string[], cwd: string) => Promise<ExecResult>;
 
-const STATE_FILE_NAME = ".danxbot/sync-root-state.json";
+const STATE_FILE_BASENAME = "sync-root-state.json";
+
+/**
+ * DX-682 — resolve the per-repo state-file path under the worker-owned
+ * runtime volume. The repo name is derived as `basename(repoLocalPath)`;
+ * `<root>/repos/<repoName>` makes this trivially correct. Tests pass an
+ * explicit `stateFilePath` to bypass this resolver.
+ */
+function defaultStateFilePath(repoLocalPath: string): string {
+  return runtimeVolumePath(basename(repoLocalPath), STATE_FILE_BASENAME);
+}
 
 /**
  * Single source of truth for per-repo error state on the worker.
@@ -96,7 +110,7 @@ export async function syncRepoRoot(
   const git = input.exec ?? defaultGitExec;
   const clock = input.now ?? (() => new Date().toISOString());
   const stateFile =
-    input.stateFilePath ?? resolve(input.repoLocalPath, STATE_FILE_NAME);
+    input.stateFilePath ?? defaultStateFilePath(input.repoLocalPath);
 
   // Step 1 — fetch. If this fails the rest cannot run.
   const fetched = await git(["fetch", "origin", "main", "--quiet"], input.repoLocalPath);

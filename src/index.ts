@@ -76,6 +76,7 @@ import {
 import { tmpdir } from "node:os";
 import { runBootMigrationSweep } from "./worker/migrate-on-boot.js";
 import { writeFlag } from "./critical-failure.js";
+import { migrateRuntimeVolume } from "./migrations/runtime-volume-migrate.js";
 import { KNOWN_SCHEMA_MAX } from "./issue-tracker/schema-versions.js";
 
 const log = createLogger("startup");
@@ -154,6 +155,15 @@ async function startWorkerMode(): Promise<void> {
 
   // Fail-loud assert canonical path; see src/agent/portable-path.ts.
   ensurePortableRepoPath(repo.localPath, repo.hostPath);
+
+  // DX-682 — one-shot relocation of worker bookkeeping files
+  // (`CRITICAL_FAILURE` today, more in subsequent phases) from
+  // `<repo>/.danxbot/` to the worker-owned runtime volume. Idempotent:
+  // safe to run every boot. Runs BEFORE any reader / writer of the
+  // relocated files so post-migration code paths see the new path
+  // consistently. Throws on FS errors other than expected absence.
+  // See `src/migrations/runtime-volume-migrate.ts`.
+  migrateRuntimeVolume(repo.name, repo.localPath);
 
   // DX-325: host-mode dispatches wrap every claude spawn in a
   // `systemd-run --user --scope` unit (DX-323). Boot fails loud if the

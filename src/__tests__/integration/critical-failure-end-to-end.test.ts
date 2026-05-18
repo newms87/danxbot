@@ -434,6 +434,10 @@ beforeEach(async () => {
   await captureServer.start();
 
   tempDir = mkdtempSync(join(tmpdir(), "danxbot-cf-integ-"));
+  // DX-682 — point the runtime volume at the test's tempDir so
+  // CRITICAL_FAILURE writes land under tempDir/<repoName>/ instead
+  // of the developer's actual ~/.local/share/danxbot.
+  process.env.DANX_RUNTIME_ROOT = tempDir;
   fakeBinDir = join(tempDir, "bin");
   mkdirSync(fakeBinDir);
   createClaudeWrapper(fakeBinDir);

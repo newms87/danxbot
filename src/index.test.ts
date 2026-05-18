@@ -245,6 +245,15 @@ vi.mock("./worker/replay-stop-queue.js", () => ({
     .mockResolvedValue({ scanned: 0, replayed: [], skipped: [], failed: [] }),
   STOP_QUEUE_DIR: ".danxbot/dispatch-stops",
 }));
+// DX-682 — stub the runtime-volume migration so the test doesn't hit
+// the real `~/.local/share/danxbot/<repo>/` filesystem path.
+vi.mock("./migrations/runtime-volume-migrate.js", () => ({
+  migrateRuntimeVolume: vi.fn().mockReturnValue({
+    moved: [],
+    alreadyMigrated: [],
+    skipped: [],
+  }),
+}));
 const mockReattachOrResolveDispatches = vi.fn().mockResolvedValue({
   scanned: 0,
   orphaned: [],

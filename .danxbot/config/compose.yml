@@ -134,6 +134,16 @@ services:
       # installs the docker CLI but no daemon; this mount is what makes
       # `docker` calls resolve to the host daemon.
       - /var/run/docker.sock:/var/run/docker.sock
+      # DX-682 — worker-owned runtime volume (`/var/lib/danxbot/<repo>/`).
+      # Holds the per-repo worker bookkeeping files (CRITICAL_FAILURE
+      # today; sync-root-state.json + settings-runtime.json land here in
+      # subsequent phases of DX-668) so the consumed repo's `.danxbot/`
+      # stays contract-only — clean `git status` after every dispatch.
+      # Survives container recreation; per-host. The `runtime-volume.ts`
+      # module routes every reader / writer through `runtimeVolumePath()`
+      # which resolves to this mount point in docker (and to
+      # `~/.local/share/danxbot/<repo>` on host).
+      - danxbot-runtime-danxbot:/var/lib/danxbot/danxbot
     ports:
       - "${DANXBOT_WORKER_PORT}:${DANXBOT_WORKER_PORT}"
     # In docker runtime, src/worker/url-normalizer.ts rewrites dispatcher
@@ -155,6 +165,12 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  # DX-682 — worker-owned runtime volume backing
+  # `/var/lib/danxbot/<repo>/`. Per-repo, per-host; never bind-mounted
+  # into the consumed repo.
+  danxbot-runtime-danxbot:
 
 networks:
   danxbot-net:

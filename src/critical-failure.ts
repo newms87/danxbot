@@ -1,5 +1,10 @@
 /**
- * Per-repo critical-failure flag at `<repo>/.danxbot/CRITICAL_FAILURE`.
+ * Per-repo critical-failure flag at `<runtime-volume>/<repo>/CRITICAL_FAILURE`
+ * (DX-682). Worker-owned runtime state — does NOT live under the
+ * consumed repo's `.danxbot/` anymore, so a `git status` in the
+ * consumed repo stays clean. The runtime-volume root resolves to
+ * `/var/lib/danxbot` (docker) or `~/.local/share/danxbot` (host),
+ * overridable via `DANX_RUNTIME_ROOT` env. See `src/runtime-volume.ts`.
  *
  * WHY THIS FEATURE EXISTS
  * -----------------------
@@ -98,8 +103,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { basename, dirname } from "node:path";
 import { createLogger } from "./logger.js";
+import { runtimeVolumePath } from "./runtime-volume.js";
 
 const log = createLogger("critical-failure");
 
@@ -156,8 +162,17 @@ const FLAG_FILENAME = "CRITICAL_FAILURE";
 const UNPARSEABLE_REASON =
   "Critical-failure flag file present but unparseable — operator must investigate";
 
+/**
+ * Resolve the flag path for a given repo's local clone path.
+ *
+ * DX-682 — the flag lives under the worker-owned runtime volume, not
+ * inside the consumed repo's `.danxbot/`. The repo name is derived as
+ * `basename(localPath)`; the convention `<root>/repos/<repoName>` makes
+ * this trivially correct. Tests + operators relocate the volume root
+ * via the `DANX_RUNTIME_ROOT` env var (see `src/runtime-volume.ts`).
+ */
 export function flagPath(localPath: string): string {
-  return resolve(localPath, ".danxbot", FLAG_FILENAME);
+  return runtimeVolumePath(basename(localPath), FLAG_FILENAME);
 }
 
 /**

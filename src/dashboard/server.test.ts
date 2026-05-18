@@ -38,6 +38,11 @@ vi.mock("../config.js", () => ({
       workerPort: 5562,
     },
   ],
+  // DX-682 — sync-root-watcher (started in startDashboard) loads
+  // runtime-volume, which reads `config.isHost` to pick the volume
+  // root. Provide a stable mock so the dashboard test doesn't depend
+  // on the actual `/.dockerenv` presence at test time.
+  config: { isHost: true },
 }));
 
 // Stub only the per-request handlers so the router tests don't hit the

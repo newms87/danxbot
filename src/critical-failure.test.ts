@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   flagPath,
   readFlag,
@@ -20,18 +20,32 @@ import {
 
 describe("critical-failure", () => {
   let tmp: string;
+  let savedRoot: string | undefined;
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), "danxbot-critical-"));
+    savedRoot = process.env.DANX_RUNTIME_ROOT;
+    // DX-682 — point the runtime volume at this test's tmp dir so
+    // `flagPath(tmp)` resolves under tmp instead of `/var/lib/danxbot`
+    // or `~/.local/share/danxbot`. Pre-create the per-repo dir so the
+    // raw `writeFileSync(flagPath(tmp), …)` calls in the tests below
+    // do not need to chase mkdir state — `writeFlag` itself still
+    // mkdirs internally.
+    process.env.DANX_RUNTIME_ROOT = tmp;
+    mkdirSync(join(tmp, basename(tmp)), { recursive: true });
   });
 
   afterEach(() => {
+    if (savedRoot === undefined) delete process.env.DANX_RUNTIME_ROOT;
+    else process.env.DANX_RUNTIME_ROOT = savedRoot;
     rmSync(tmp, { recursive: true, force: true });
   });
 
   describe("flagPath", () => {
-    it("resolves to <localPath>/.danxbot/CRITICAL_FAILURE", () => {
-      expect(flagPath(tmp)).toBe(join(tmp, ".danxbot", "CRITICAL_FAILURE"));
+    it("resolves under the runtime volume — <DANX_RUNTIME_ROOT>/<basename(localPath)>/CRITICAL_FAILURE", () => {
+      expect(flagPath(tmp)).toBe(
+        join(tmp, basename(tmp), "CRITICAL_FAILURE"),
+      );
     });
   });
 
@@ -41,7 +55,6 @@ describe("critical-failure", () => {
     });
 
     it("returns a synthetic unparseable payload when the file contains non-JSON (fail-closed)", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(flagPath(tmp), "not json");
       const result = readFlag(tmp);
       expect(result).not.toBeNull();
@@ -50,7 +63,6 @@ describe("critical-failure", () => {
     });
 
     it("returns a synthetic unparseable payload when the source is not one of the accepted values", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({
@@ -66,7 +78,6 @@ describe("critical-failure", () => {
     });
 
     it("returns a synthetic unparseable payload when required fields are missing", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(flagPath(tmp), JSON.stringify({ source: "agent" }));
       const result = readFlag(tmp);
       expect(result).not.toBeNull();
@@ -74,19 +85,16 @@ describe("critical-failure", () => {
     });
 
     it("returns a synthetic unparseable payload when top-level JSON is an array (covers non-object normalize branch)", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(flagPath(tmp), JSON.stringify([1, 2, 3]));
       expect(readFlag(tmp)!.source).toBe("unparseable");
     });
 
     it("returns a synthetic unparseable payload when top-level JSON is a string", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(flagPath(tmp), JSON.stringify("a string"));
       expect(readFlag(tmp)!.source).toBe("unparseable");
     });
 
     it("returns the payload when the file is a valid flag", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       const payload: CriticalFailurePayload = {
         timestamp: "2026-04-21T00:00:00.000Z",
         source: "agent",
@@ -99,7 +107,6 @@ describe("critical-failure", () => {
     });
 
     it("drops empty-string optional fields so callers don't render blanks", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({
@@ -202,7 +209,7 @@ describe("critical-failure", () => {
         dispatchId: "d-1",
         reason: "Test",
       });
-      const entries = readdirSync(join(tmp, ".danxbot"));
+      const entries = readdirSync(join(tmp, basename(tmp)));
       const orphans = entries.filter((e) =>
         e.startsWith("CRITICAL_FAILURE.tmp"),
       );
@@ -308,7 +315,6 @@ describe("critical-failure", () => {
     });
 
     it("readFlag returns unparseable when source=throttle is missing resume_at (fail-closed)", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({
@@ -323,7 +329,6 @@ describe("critical-failure", () => {
     });
 
     it("readFlag returns unparseable when source=throttle has a non-parseable resume_at", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({
@@ -338,7 +343,6 @@ describe("critical-failure", () => {
     });
 
     it("readFlag returns unparseable when a non-throttle source carries resume_at (cross-contamination)", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({
@@ -374,7 +378,6 @@ describe("critical-failure", () => {
     });
 
     it("drops unknown throttle_kind values silently — flag still honored on resume_at", () => {
-      mkdirSync(join(tmp, ".danxbot"));
       writeFileSync(
         flagPath(tmp),
         JSON.stringify({

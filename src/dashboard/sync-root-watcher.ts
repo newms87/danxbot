@@ -16,11 +16,12 @@
  */
 
 import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename } from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 
 import { eventBus } from "./event-bus.js";
 import { createLogger } from "../logger.js";
+import { runtimeVolumePath } from "../runtime-volume.js";
 import type { RepoConfig } from "../types.js";
 import { isRepoRootSyncError, type RepoRootSyncError } from "../worker/sync-root.js";
 
@@ -57,7 +58,10 @@ interface PerRepoState {
 }
 
 function stateFilePath(localPath: string): string {
-  return resolve(localPath, ".danxbot", "sync-root-state.json");
+  // DX-682 — file lives under the worker-owned runtime volume rather
+  // than `<repo>/.danxbot/`. The repo name is derived from
+  // `basename(localPath)` (the `<root>/repos/<repoName>` convention).
+  return runtimeVolumePath(basename(localPath), "sync-root-state.json");
 }
 
 function readStateFile(path: string): RepoRootSyncError | null {
