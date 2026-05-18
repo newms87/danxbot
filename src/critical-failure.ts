@@ -109,6 +109,7 @@ export type CriticalFailureSource =
   | "issues-db-mirror"
   | "boot-migration-sweep"
   | "throttle"
+  | "entrypoint"
   | "unparseable";
 
 /**
@@ -183,6 +184,7 @@ function normalize(raw: unknown): CriticalFailurePayload | null {
     source !== "issues-db-mirror" &&
     source !== "boot-migration-sweep" &&
     source !== "throttle" &&
+    source !== "entrypoint" &&
     source !== "unparseable"
   ) {
     return null;

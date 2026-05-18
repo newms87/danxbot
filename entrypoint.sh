@@ -5,13 +5,25 @@ APP_DIR="/danxbot/app"
 REPOS_DIR="/danxbot/app/repos"
 DANXBOT_HOME="/home/danxbot"
 
-# Configure git identity and GitHub auth
+# DX-647 — validate DANX_GITHUB_TOKEN + render ~/.gitconfig with
+# insteadOf rules BEFORE doing any other setup. The script handles BOTH
+# modes (worker = render, dashboard = silent exit 0); the script writes
+# /root/.gitconfig + /home/danxbot/.gitconfig directly (no shell variable
+# capture — keeps the PAT out of any potential `set -x` echo). On
+# invalid/missing token in worker mode the script writes the
+# .danxbot/CRITICAL_FAILURE flag (same surface the dashboard already
+# renders for env-level halt) and exits non-zero — `set -e` propagates
+# and the container's restart-loop surfaces via `docker ps` as
+# `(unhealthy)`. Bind-mounted repo `.git/config` is NEVER touched —
+# host's interactive SSH workflow stays intact.
+(cd "$APP_DIR" && node_modules/.bin/tsx scripts/render-gitconfig.ts)
+
+# Git identity for both modes. Worker mode's rendered .gitconfig already
+# carries [user]; these `git config --global` calls overlay the same
+# values (idempotent). Dashboard mode needs them for tooling that touches
+# git history without going through the worker entrypoint render.
 git config --global user.email "${DANXBOT_GIT_EMAIL:-danxbot@example.com}"
 git config --global user.name "Danxbot"
-if [ -n "$GITHUB_TOKEN" ]; then
-    echo "https://x-access-token:${GITHUB_TOKEN}@github.com" > ~/.git-credentials
-    git config --global credential.helper store
-fi
 
 # Mark all repo directories as safe (bind-mounted from host)
 if [ -n "$DANXBOT_REPO_NAME" ]; then
@@ -48,14 +60,14 @@ else
     echo "Dashboard mode: shared infrastructure only"
 fi
 
-# Configure git auth for the danxbot user (for runtime git operations)
+# Git identity for the danxbot user. The rendered ~/.gitconfig from the
+# DX-647 step above already carries [user]; this overlays the same values
+# (idempotent) and serves dashboard mode where no render runs. GitHub
+# auth flows through the insteadOf URL-rewrite rules in ~/.gitconfig —
+# the legacy ~/.git-credentials helper was retired (DX-647) because the
+# insteadOf rewrites handle every remote transparently without a
+# credential helper round-trip.
 su -s /bin/bash danxbot -c "git config --global user.email \"${DANXBOT_GIT_EMAIL:-danxbot@example.com}\" && git config --global user.name \"Danxbot\""
-if [ -n "$GITHUB_TOKEN" ]; then
-    su -s /bin/bash danxbot -c "
-        echo 'https://x-access-token:${GITHUB_TOKEN}@github.com' > ~/.git-credentials
-        git config --global credential.helper store
-    "
-fi
 
 # Set up Claude Code auth for the danxbot user.
 # The compose mount is at /danxbot/app/claude-auth (matches
