@@ -351,6 +351,56 @@ describe("EpicMoveCascadeDialog", () => {
     expect(w.emitted("confirm")).toBeFalsy();
   });
 
+  it("dialog mounts at wide width (min(90vw, 1400px)) + 90vh height", async () => {
+    const w = mountDialog();
+    await flushPromises();
+    const dlg = w.findComponent(DanxDialogStub);
+    expect(dlg.exists()).toBe(true);
+    expect(dlg.props("width")).toBe("min(90vw, 1400px)");
+    expect(dlg.props("height")).toBe("90vh");
+  });
+
+  it("each row renders top zone (id chip + title + current list) and bottom zone (select + dest)", async () => {
+    const descendants = [
+      makeIssue({
+        id: "DX-901",
+        parent_id: "DX-900",
+        title: "A really long descendant title that would have ellipsis-truncated in the prior 720px grid layout",
+        status: "Review",
+      }),
+    ];
+    const defaults: Record<string, CascadeAction> = {
+      "DX-901": { kind: "move_same_type" },
+    };
+    const parent = makeIssue({ id: "DX-900", type: "Epic", children: ["DX-901"] });
+    const w = mountDialog({ parent, descendants, defaults });
+    await flushPromises();
+    const row = w.find('[data-test="cascade-row"]');
+    expect(row.exists()).toBe(true);
+    // Two distinct zones (top + bottom) so the title can wrap above the controls.
+    expect(row.find(".row-top").exists()).toBe(true);
+    expect(row.find(".row-bottom").exists()).toBe(true);
+    // Top zone: id chip + full (un-truncated) title + current list.
+    const top = row.find(".row-top");
+    expect(top.find(".id-chip").text()).toBe("DX-901");
+    expect(top.find(".row-title").text()).toContain("A really long descendant title");
+    expect(top.find(".current-list").exists()).toBe(true);
+    // Bottom zone: arrow + select + dest label.
+    const bottom = row.find(".row-bottom");
+    expect(bottom.find(".arrow").exists()).toBe(true);
+    expect(bottom.find('[data-test="cascade-action-select"]').exists()).toBe(true);
+    expect(bottom.find('[data-test="cascade-dest-label"]').exists()).toBe(true);
+  });
+
+  it("summary renders as a banner block (distinct visual surface)", async () => {
+    const w = mountDialog();
+    await flushPromises();
+    const banner = w.find('[data-test="cascade-summary-banner"]');
+    expect(banner.exists()).toBe(true);
+    expect(banner.text()).toContain("Moving");
+    expect(banner.text()).toContain("DX-100");
+  });
+
   it("Confirm with default selections emits payload with empty overrides", async () => {
     const w = mountDialog();
     await flushPromises();

@@ -21,7 +21,7 @@
  * semantic HTML, not branded primitives).
  */
 import { computed, ref, watch } from "vue";
-import { DanxDialog, DanxSelect, DanxTooltip } from "@thehammer/danx-ui";
+import { DanxDialog, DanxSelect } from "@thehammer/danx-ui";
 import type { CascadeAction } from "../../api";
 import type { IssueListItem, List } from "../../types";
 import { deriveListTypeFromStatus } from "../../composables/derive-status";
@@ -238,7 +238,8 @@ function onCancel(): void {
   <DanxDialog
     :model-value="props.modelValue"
     :title="`Move ${props.parent.id} → ${props.destList.name}`"
-    width="720px"
+    width="min(90vw, 1400px)"
+    height="90vh"
     :close-button="'Cancel'"
     :confirm-button="props.busy ? 'Saving…' : `Confirm cascade (${affectedCount} cards)`"
     :is-saving="props.busy"
@@ -249,11 +250,14 @@ function onCancel(): void {
     @update:model-value="(v: boolean) => { if (!v) onCancel(); }"
   >
     <div class="body" data-test="cascade-dialog-body">
-      <p class="summary">
-        Moving <strong>{{ props.parent.id }}</strong> — {{ props.parent.title }}
-        to <strong>{{ props.destList.name }}</strong>. Review per-descendant
-        actions below, then confirm.
-      </p>
+      <div class="summary-banner" data-test="cascade-summary-banner">
+        <div class="summary-line">
+          Moving <strong>{{ props.parent.id }}</strong> — {{ props.parent.title }}
+        </div>
+        <div class="summary-sub">
+          to <strong>{{ props.destList.name }}</strong>. Review per-descendant actions below, then confirm.
+        </div>
+      </div>
 
       <div
         v-for="group in descendantGroups"
@@ -270,36 +274,39 @@ function onCancel(): void {
             group.rows.length === 1 ? "" : "s"
           }}
         </div>
-        <div
-          v-for="row in group.rows"
-          :key="row.id"
-          class="row"
-          data-test="cascade-row"
-          :data-row-id="row.id"
-        >
-          <span class="id-chip">{{ row.id }}</span>
-          <DanxTooltip :tooltip="row.title">
-            <template #trigger>
-              <span class="row-title">{{ row.title }}</span>
-            </template>
-          </DanxTooltip>
-          <span class="current-list">
-            {{ currentListName(row) }}
-            <span class="list-tag">{{ row.status }}</span>
-          </span>
-          <span class="arrow">→</span>
-          <DanxSelect
-            :model-value="selections[row.id]"
-            :options="actionOptions(row.id)"
-            data-test="cascade-action-select"
+        <div class="group-rows">
+          <div
+            v-for="row in group.rows"
+            :key="row.id"
+            class="row"
+            data-test="cascade-row"
             :data-row-id="row.id"
-            @update:model-value="(v: string | number | (string | number)[] | null) => {
-              if (typeof v === 'string') selections[row.id] = v;
-            }"
-          />
-          <span class="dest-label" data-test="cascade-dest-label">
-            {{ destLabel(row.id) }}
-          </span>
+          >
+            <div class="row-top">
+              <span class="id-chip">{{ row.id }}</span>
+              <span class="row-title">{{ row.title }}</span>
+              <span class="current-list">
+                <span class="current-list-label">{{ currentListName(row) }}</span>
+                <span class="list-tag">{{ row.status }}</span>
+              </span>
+            </div>
+            <div class="row-bottom">
+              <span class="arrow">→</span>
+              <DanxSelect
+                class="action-select"
+                :model-value="selections[row.id]"
+                :options="actionOptions(row.id)"
+                data-test="cascade-action-select"
+                :data-row-id="row.id"
+                @update:model-value="(v: string | number | (string | number)[] | null) => {
+                  if (typeof v === 'string') selections[row.id] = v;
+                }"
+              />
+              <span class="dest-label" data-test="cascade-dest-label">
+                {{ destLabel(row.id) }}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -316,50 +323,39 @@ function onCancel(): void {
 .body {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   font-size: 13px;
   color: #cbd5e1;
+  /* Body owns the scroll: anything taller than the dialog's content
+     area scrolls vertically. Dialog shell itself does not scroll. */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 2px;
 }
-.summary {
-  margin: 0;
-  line-height: 1.4;
-}
-.banner {
-  padding: 10px 12px;
+.summary-banner {
+  padding: 12px 14px;
   border-radius: 6px;
-  font-size: 12px;
-}
-.banner-unblock {
-  background: rgb(251 191 36 / 0.08);
-  border: 1px solid rgb(251 191 36 / 0.32);
-  color: #fde68a;
-}
-.banner-blocked-reason {
-  background: rgb(239 68 68 / 0.08);
-  border: 1px solid rgb(239 68 68 / 0.28);
-  color: #fca5a5;
+  background: rgb(99 102 241 / 0.10);
+  border: 1px solid rgb(99 102 241 / 0.30);
+  color: #e2e8f0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
-.banner-text {
-  margin: 0 0 8px;
+.summary-line {
+  font-size: 14px;
+  line-height: 1.4;
 }
-.toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-}
-.field-label {
-  font-weight: 600;
-  color: #fdba74;
+.summary-sub {
+  font-size: 12px;
+  color: #94a3b8;
+  line-height: 1.4;
 }
 .group {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-top: 8px;
+  gap: 8px;
+  padding-top: 12px;
   border-top: 1px solid rgb(51 65 85 / 0.6);
 }
 .group:first-of-type {
@@ -367,64 +363,111 @@ function onCancel(): void {
   padding-top: 0;
 }
 .group-header {
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #94a3b8;
-  margin-bottom: 4px;
+  letter-spacing: 0.05em;
+  color: #cbd5e1;
+  padding: 6px 8px;
+  background: rgb(51 65 85 / 0.35);
+  border-left: 3px solid rgb(99 102 241 / 0.6);
+  border-radius: 3px;
+}
+.group-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-left: 12px;
 }
 .row {
-  display: grid;
-  grid-template-columns: auto 1fr auto auto minmax(180px, 1fr) auto;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
-  padding: 4px 6px;
-  border-radius: 4px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: rgb(30 41 59 / 0.4);
+  border: 1px solid rgb(51 65 85 / 0.5);
 }
 .row:hover {
-  background: rgb(30 41 59 / 0.4);
+  background: rgb(30 41 59 / 0.65);
+  border-color: rgb(71 85 105 / 0.7);
+}
+.row-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.row-bottom {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 .id-chip {
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  padding: 1px 5px;
+  padding: 2px 6px;
   background: rgb(99 102 241 / 0.18);
   border-radius: 3px;
   color: #c7d2fe;
+  flex-shrink: 0;
+  align-self: flex-start;
 }
 .row-title {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Title MUST wrap to multi-line. No ellipsis. Long titles flow to
+     a second / third line; the row grows; the body scrolls. */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: normal;
   color: #e2e8f0;
+  flex: 1 1 280px;
+  min-width: 0;
+  line-height: 1.4;
 }
 .current-list {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   font-size: 11px;
   color: #94a3b8;
+  flex-shrink: 0;
+  align-self: flex-start;
+}
+.current-list-label {
+  white-space: nowrap;
 }
 .list-tag {
-  padding: 0 4px;
+  padding: 1px 6px;
   border-radius: 3px;
   background: rgb(51 65 85 / 0.6);
   color: #cbd5e1;
   font-size: 10px;
+  white-space: nowrap;
 }
 .arrow {
   color: #64748b;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+.action-select {
+  /* Natural width — DanxSelect renders its full option label. Never
+     truncated. Caps at the row width on very narrow viewports. */
+  min-width: 260px;
+  max-width: 100%;
+  flex: 0 1 auto;
 }
 .dest-label {
-  font-size: 11px;
-  color: #94a3b8;
-  white-space: nowrap;
+  font-size: 12px;
+  color: #cbd5e1;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
 }
 .error {
   margin: 0;
-  padding: 6px 8px;
-  font-size: 11px;
+  padding: 8px 10px;
+  font-size: 12px;
   color: #fca5a5;
   background: rgb(239 68 68 / 0.12);
   border: 1px solid rgb(239 68 68 / 0.3);
