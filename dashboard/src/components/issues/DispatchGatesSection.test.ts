@@ -13,10 +13,9 @@ vi.mock("../../api", () => ({
       { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
       { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
       { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
-      { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
-      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
-      { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
-      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 3, is_default_for_type: true, color: "#f59e0b" },
+      { id: "lst-don", name: "Done",        type: "completed",   order: 4, is_default_for_type: true, color: "#22c55e" },
+      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 5, is_default_for_type: true, color: "#71717a" },
     ],
     tombstone_ids: [],
   })),
@@ -157,6 +156,30 @@ describe("DispatchGatesSection", () => {
     expect(patchMock).toHaveBeenCalledWith("danxbot", "DX-1", {
       conflict_on: [],
     });
+  });
+
+  it("renders all four gate banners when every gate is populated (DX-659)", () => {
+    const w = mountSection(
+      makeDetail({
+        requires_human: {
+          reason: "rh reason",
+          steps: ["step a"],
+          set_by: "human",
+          set_at: "2026-05-12T00:00:00Z",
+        },
+        blocked: { reason: "blocked reason", at: "2026-05-12T00:00:00Z" },
+        waiting_on: {
+          reason: "waits on",
+          timestamp: "2026-05-12T00:00:00Z",
+          by: ["DX-7"],
+        },
+        conflict_on: [{ id: "DX-8", reason: "file overlap" }],
+      }),
+    );
+    expect(w.find('[data-test="gate-requires-human"]').exists()).toBe(true);
+    expect(w.find('[data-test="gate-blocked"]').exists()).toBe(true);
+    expect(w.find('[data-test="gate-waiting"]').exists()).toBe(true);
+    expect(w.find('[data-test="gate-conflict"]').exists()).toBe(true);
   });
 
   it("emits open-rh-editor when requires_human banner Edit button is clicked", async () => {

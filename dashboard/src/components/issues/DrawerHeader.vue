@@ -26,6 +26,7 @@ import {
   trashIcon,
 } from "@thehammer/danx-ui";
 import userIcon from "danx-icon/src/fontawesome/regular/user.svg?raw";
+import lockIcon from "danx-icon/src/fontawesome/solid/lock.svg?raw";
 import type {
   Issue,
   IssueDetail,
@@ -40,10 +41,12 @@ import { ISSUE_TYPE_META, typeToId } from "./issuePalette";
 import { useListColors } from "../../composables/useListColors";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
 import PriorityIcon from "../PriorityIcon.vue";
-// DX-658 / Phase 2 — `BlockedReasonDialog` / `UnblockConfirmDialog`
-// imports retired: `"blocked"` is no longer a `ListType`, so list
-// moves never route through the dialogs. Phase 3 of the parent epic
-// (DX-656) reroutes both dialogs into the dispatch-gates badge UI.
+// DX-659 / Phase 3 — Blocked is a dispatch gate, not a list type.
+// `UnblockConfirmDialog` was deleted. `BlockedReasonDialog` is wired
+// below as the operator-facing "Mark Blocked" affordance; its submit
+// PATCHes only `blocked: {at, reason}` and never touches `status` or
+// `dispatch`.
+import BlockedReasonDialog from "./BlockedReasonDialog.vue";
 import {
   priorityTier,
   PRIORITY_TIERS,
@@ -260,17 +263,39 @@ function typeLabel(type: ListType): string {
   return LIST_TYPE_LABELS[type];
 }
 
-// DX-658 / Phase 2 — INTO-blocked / OUT-of-blocked dialogs retired
-// from list-move flow. The gate is now cleared via the dispatch-gates
-// badge (phase 3 owns the badge UI). State left here as a structural
-// stub so refs that still bind to it during the phase-3 rewire have
-// a valid value to read.
-const pendingDialog = ref<null>(null);
-const dialogBusy = ref(false);
-const dialogError = ref<string | null>(null);
-void pendingDialog;
-void dialogBusy;
-void dialogError;
+// DX-659 / Phase 3 — Mark-Blocked affordance. Lives next to the
+// requires-human icon in the meta-row. Clicking opens
+// `BlockedReasonDialog`; submit PATCHes `{blocked: {at, reason}}`
+// directly via the issue write route. Status + dispatch are never
+// part of the patch — the read-side `deriveStatus` rule 3 projects
+// the card to `Blocked` from `blocked.at` alone.
+const blockedDialogOpen = ref(false);
+const blockedDialogBusy = ref(false);
+const blockedDialogError = ref<string | null>(null);
+
+function openBlockedDialog(): void {
+  blockedDialogError.value = null;
+  blockedDialogOpen.value = true;
+}
+
+async function submitBlockedReason(reason: string): Promise<void> {
+  blockedDialogBusy.value = true;
+  blockedDialogError.value = null;
+  try {
+    // Send `{reason}` only — the server's `applyIssuePatch` stamps
+    // `at: <now ISO>` (DX-658 contract). Sending `at` from the client
+    // is rejected by the patch validator's strict shape.
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
+      blocked: { reason },
+    });
+    emit("update:issue", updated);
+    blockedDialogOpen.value = false;
+  } catch (err) {
+    blockedDialogError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    blockedDialogBusy.value = false;
+  }
+}
 
 // Epic-with-children: status is parent-derived. Show inert pill +
 // tooltip explaining why; priority + type stay editable (knob is
@@ -302,9 +327,9 @@ watch(
     typeError.value = null;
     titleSaving.value = false;
     titleError.value = null;
-    pendingDialog.value = null;
-    dialogBusy.value = false;
-    dialogError.value = null;
+    blockedDialogOpen.value = false;
+    blockedDialogBusy.value = false;
+    blockedDialogError.value = null;
   },
 );
 
@@ -552,6 +577,21 @@ const rhVariant = computed(() =>
         @click="emit('open-rh-editor')"
       />
 
+      <!-- Mark Blocked (DX-659) — only when no self-block is set; once
+           stamped, the operator clears it from the DispatchGatesSection
+           "Blocked" banner. -->
+      <DanxButton
+        v-if="!issue.blocked"
+        variant=""
+        size="sm"
+        :icon="lockIcon"
+        class="meta-btn blocked-btn"
+        tooltip="Mark blocked (capture a reason; status derives via the gate)"
+        aria-label="Mark blocked"
+        data-test="drawer-mark-blocked"
+        @click="openBlockedDialog"
+      />
+
       <!-- Copy -->
       <DanxButton
         variant=""
@@ -630,9 +670,19 @@ const rhVariant = computed(() =>
       </div>
     </DanxDialog>
 
-    <!-- DX-658 / Phase 2 — BlockedReasonDialog + UnblockConfirmDialog
-         removed from the drawer's list-move flow. The self-block gate
-         lifecycle is owned by the dispatch-gates badge in phase 3. -->
+    <!-- DX-659 / Phase 3 — Mark-Blocked dialog. Opens from the lock
+         icon in the meta-row above. Submit PATCHes `{blocked: {at,
+         reason}}` only; status + dispatch on the card are untouched
+         (read-side `deriveStatus` rule 3 projects → Blocked). The
+         operator clears the gate from `DispatchGatesSection`. -->
+    <BlockedReasonDialog
+      v-model="blockedDialogOpen"
+      :issue-id="issue.id"
+      dest-list-name="Blocked"
+      :busy="blockedDialogBusy"
+      :error="blockedDialogError"
+      @submit="submitBlockedReason"
+    />
   </div>
 </template>
 

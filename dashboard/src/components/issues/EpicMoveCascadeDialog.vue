@@ -11,16 +11,14 @@
  * builds the cascade PATCH body and calls
  * `useIssues.cascadeIssueList(epicId, body)`.
  *
- * Single-dialog responsibility — the existing `BlockedReasonDialog` and
- * `UnblockConfirmDialog` keep handling the single-card (no children)
- * blocked transitions. The cascade dialog merges both flows into one
- * surface so a children-bearing card moving into / out of Blocked
- * surfaces ONE dialog, not a nested chain.
+ * DX-659 (Phase 3) — Blocked is now a dispatch gate, not a list type.
+ * Cascade routing for blocked transitions retired; this dialog only
+ * fires for children-bearing list moves. Single-card "Mark Blocked"
+ * lives in `BlockedReasonDialog`, wired into `DrawerHeader`.
  *
  * DanxUI mandate: shell is `DanxDialog`, per-row dropdown is
- * `DanxSelect`, the blocked-reason input is `DanxTextarea`, the
- * unblock-confirm toggle is `DanxToggle`. Layout is plain `<div>` /
- * `<label>` (structural / semantic HTML, not branded primitives).
+ * `DanxSelect`. Layout is plain `<div>` / `<label>` (structural /
+ * semantic HTML, not branded primitives).
  */
 import { computed, ref, watch } from "vue";
 import { DanxDialog, DanxSelect, DanxTooltip } from "@thehammer/danx-ui";

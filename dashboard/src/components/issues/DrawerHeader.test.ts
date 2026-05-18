@@ -46,10 +46,9 @@ vi.mock("../../api", () => ({
       { id: "lst-arc", name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
       { id: "lst-rev", name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
       { id: "lst-rdy", name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
-      { id: "lst-blk", name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
-      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
-      { id: "lst-don", name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
-      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+      { id: "lst-wip", name: "In Progress", type: "in_progress", order: 3, is_default_for_type: true, color: "#f59e0b" },
+      { id: "lst-don", name: "Done",        type: "completed",   order: 4, is_default_for_type: true, color: "#22c55e" },
+      { id: "lst-cnl", name: "Cancelled",   type: "cancelled",   order: 5, is_default_for_type: true, color: "#71717a" },
     ],
     tombstone_ids: [],
   })),
@@ -91,6 +90,29 @@ const DanxTooltipStub = defineComponent({
   props: { tooltip: String },
   setup: (p, { slots }) => () =>
     h("div", { class: "stub-tooltip", "data-tooltip": p.tooltip }, slots.trigger?.()),
+});
+
+// BlockedReasonDialog stub — emit `submit(reason)` synthetically so the
+// host (DrawerHeader) can be asserted on its PATCH wiring without the
+// real textarea + DanxDialog plumbing.
+const BlockedReasonDialogStub = defineComponent({
+  name: "BlockedReasonDialog",
+  props: ["modelValue", "issueId", "destListName", "busy", "error"],
+  emits: ["update:modelValue", "submit", "cancel"],
+  setup(p, { emit }) {
+    return () =>
+      h("div", { class: "stub-blocked-dialog", "data-test": "stub-blocked-dialog" }, [
+        h("span", { "data-test": "stub-blocked-open" }, String(p.modelValue)),
+        h(
+          "button",
+          {
+            "data-test": "stub-blocked-submit",
+            onClick: () => emit("submit", "needs creds"),
+          },
+          "submit",
+        ),
+      ]);
+  },
 });
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
@@ -147,6 +169,7 @@ function mountHeader(detail: IssueDetail = makeDetail()) {
         IssueAgeBadge: IssueAgeBadgeStub,
         DanxPopover: DanxPopoverStub,
         DanxTooltip: DanxTooltipStub,
+        BlockedReasonDialog: BlockedReasonDialogStub,
       },
     },
   });
@@ -179,7 +202,7 @@ describe("DrawerHeader — meta row layout", () => {
   it("does NOT render close when showClose=false (dialog mode handles its own)", () => {
     const w = mount(DrawerHeader, {
       props: { issue: makeDetail(), repo: "danxbot", showClose: false },
-      global: { stubs: { IssueAgeBadge: IssueAgeBadgeStub, DanxPopover: DanxPopoverStub, DanxTooltip: DanxTooltipStub } },
+      global: { stubs: { IssueAgeBadge: IssueAgeBadgeStub, DanxPopover: DanxPopoverStub, DanxTooltip: DanxTooltipStub, BlockedReasonDialog: BlockedReasonDialogStub } },
     });
     expect(w.find('[data-test="drawer-close"]').exists()).toBe(false);
   });
@@ -188,6 +211,38 @@ describe("DrawerHeader — meta row layout", () => {
     const w = mountHeader();
     await w.find('[data-test="drawer-rh-flag"]').trigger("click");
     expect(w.emitted("open-rh-editor")).toBeTruthy();
+  });
+
+  it("Mark-Blocked button is visible when blocked is null (DX-659)", () => {
+    const w = mountHeader();
+    expect(w.find('[data-test="drawer-mark-blocked"]').exists()).toBe(true);
+  });
+
+  it("Mark-Blocked button is hidden once blocked is populated (DX-659)", () => {
+    const w = mountHeader(
+      makeDetail({ blocked: { reason: "x", at: "2026-05-12T00:00:00Z" } }),
+    );
+    expect(w.find('[data-test="drawer-mark-blocked"]').exists()).toBe(false);
+  });
+
+  it("Mark-Blocked → BlockedReasonDialog submit PATCHes blocked:{at,reason} only — status/dispatch untouched (DX-659 AC5)", async () => {
+    patchMock.mockResolvedValue({ issue: makeDetail() } as never);
+    const w = mountHeader();
+    await w.find('[data-test="drawer-mark-blocked"]').trigger("click");
+    // Stub emits submit("needs creds")
+    await w.find('[data-test="stub-blocked-submit"]').trigger("click");
+    await flushPromises();
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    const [repo, id, patchBody] = patchMock.mock.calls[0]!;
+    expect(repo).toBe("danxbot");
+    expect(id).toBe("DX-1");
+    // The patch body MUST set ONLY `blocked` — never `status` or
+    // `dispatch`. Status derives via `deriveStatus` rule 3 server-side.
+    // Client sends `{reason}` only; server stamps `at: <now>`.
+    expect(Object.keys(patchBody as object).sort()).toEqual(["blocked"]);
+    const body = patchBody as { blocked: { reason: string } };
+    expect(body.blocked.reason).toBe("needs creds");
+    expect("at" in body.blocked).toBe(false);
   });
 
   it("emits jump-issue when the parent chip is clicked", async () => {

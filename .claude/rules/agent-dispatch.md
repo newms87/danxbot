@@ -145,7 +145,7 @@ Every multi-agent dispatch begins with the `danxbot:danx-prep` skill running on 
 |---|---|
 | `ok` | Combined-mode → keep dispatch running, agent proceeds into `/danx-next`. Separate-mode → stop, poller re-picks next tick for the work pass. |
 | `conflict_on` | Append `{id, reason}` entries to the candidate YAML's `conflict_on[]` for each partner; poller filter skips while any partner is non-terminal. |
-| `blocked` | Stamp `status: "Blocked"` + `blocked: {reason, timestamp}` on the candidate YAML. |
+| `blocked` | Stamp `blocked: {at, reason}` on the candidate YAML (the self-block dispatch gate; status derives → `Blocked` via `deriveStatus` rule 3 — never write `status:` directly). The card's column is untouched; the picker skips dispatch via the gate. |
 | `abort` | Stamp `agents.<name>.broken` on `<repo>/.danxbot/settings.json` so the picker skips this agent until the operator clears the field via the dashboard. |
 
 Mode is per-repo via `agentDefaults.prepMode` in `<repo>/.danxbot/settings.json` (`combined` default, `separate` for dev-loop debugging).

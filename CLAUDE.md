@@ -28,7 +28,7 @@ The lifecycle-trigger contract (DX-584 worker write paths, Phase 4):
 | Ready (Review → ToDo) | Triage Approve / agent / move-to-ready-list → `ready_at = <now ISO>` | rule 5 → `ToDo` |
 | Complete (In Progress → Done) | Worker `stampIssueCompleted` on `danxbot_complete({status: "completed"})` → `completed_at = <now ISO>` + `dispatch: null` | rule 2 → `Done` |
 | Cancel (any → Cancelled) | Worker `stampIssueCancelled` / triage Cancel → `cancelled_at = <now ISO>` + `dispatch: null` | rule 1 → `Cancelled` |
-| Block (any → Blocked) | Agent self-block / worker `stampIssueBlocked` → `blocked: {at: <now ISO>, reason}` + `dispatch: null` | rule 3 → `Blocked` |
+| Block (gate any column) | Agent self-block / worker `stampIssueBlocked` → `blocked: {at: <now ISO>, reason}` + `dispatch: null`. The card's column is **untouched**; Blocked is a dispatch gate, not a column the worker moves the card into. The picker skips dispatch via the gate; the dashboard surfaces the gate via the Blocked chip in `DispatchGatesSection`. | rule 3 → `Blocked` |
 | Park (any → Backlog) | Move-to-archived-list → `archived_at = <now ISO>` (also clear `ready_at`) | rule 6 → `Backlog` |
 
 `list_name` is **display-only** — workers never read it for state-machine decisions. The auto-resolve write path resolves it to the derived semantic type's default list (DX-584); humans may override via dashboard list moves. Backend logic = 100% timestamps + `dispatch` + `blocked.at` + `waiting_on` + `requires_human` + `conflict_on[]`.
@@ -41,7 +41,7 @@ The lifecycle-trigger contract (DX-584 worker write paths, Phase 4):
 | Edit YAML: `status: "ToDo"` (triage Approve) | Stamp `ready_at = <now ISO>` |
 | Edit YAML: `status: "Done"` (complete) | Call `danxbot_complete({status: "completed"})`; worker stamps `completed_at` |
 | Edit YAML: `status: "Cancelled"` (cancel) | Stamp `cancelled_at = <now ISO>` (triage) or call `danxbot_complete({status: "cancelled"})` |
-| Edit YAML: `status: "Blocked"` + `blocked: {reason, timestamp}` (self-block) | Stamp `blocked: {at: <now ISO>, reason}` (single write — derives via rule 3) |
+| Edit YAML: `status: "Blocked"` (self-block) | Stamp `blocked: {at: <now ISO>, reason}` only — single write, derives via rule 3, column unchanged. Blocked is a dispatch gate, never a column move. |
 | `blocked: {reason, timestamp}` (deprecated shape) | `blocked: {at, reason}` (v10 canonical) |
 | `blocked.by[]` (never existed in v10) | `waiting_on.by[]` (the v10 dep-gate primitive) |
 
