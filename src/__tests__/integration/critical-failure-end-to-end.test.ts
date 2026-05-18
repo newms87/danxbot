@@ -310,11 +310,6 @@ vi.mock("../../poller/yaml-lifecycle.js", async () => {
   };
 });
 
-vi.mock("../../poller/epic-status.js", () => ({
-  recomputeParentStatuses: async (): Promise<unknown[]> => [],
-  deriveStatus: () => null,
-}));
-
 // --- Real imports (the pipeline under test) ---
 
 import { startWorkerServer } from "../../worker/server.js";

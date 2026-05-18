@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { RepoContext } from "../types.js";
 import type { Issue, IssueRef, IssueStatus } from "../issue-tracker/interface.js";
 
@@ -387,19 +389,6 @@ vi.mock("../poller/local-issues.js", () => ({
     mockListTriageDueYamls(...(args as [string, number, string?])),
 }));
 
-// epic-status: queries the DB for parents/children since DX-155. The
-// unit-mock suite has no live PG, so stub recompute to a no-op. Spy
-// kept on `mockRecomputeParentStatuses` so DX-217 Phase 2 anti-
-// regression tests can assert `runSync` no longer calls it.
-const mockRecomputeParentStatuses = vi
-  .fn()
-  .mockResolvedValue([] as unknown[]);
-vi.mock("../poller/epic-status.js", () => ({
-  recomputeParentStatuses: (...args: unknown[]) =>
-    mockRecomputeParentStatuses(...args),
-  deriveStatus: () => null,
-}));
-
 const mockClearDispatchAndWrite = vi.fn((...args: unknown[]) => {
   const issue = args[1] as Record<string, unknown>;
   return { ...issue, dispatch: null };
@@ -429,11 +418,9 @@ vi.mock("../poller/yaml-lifecycle.js", () => ({
 const mockHealLocalYamls = vi
   .fn()
   .mockReturnValue({ healed: [], errors: [] });
-const mockRunInvariantHeal = vi.fn().mockResolvedValue(undefined);
 const mockRunOrphanInProgressHeal = vi.fn().mockResolvedValue(undefined);
 vi.mock("../poller/heal.js", () => ({
   healLocalYamls: (...args: unknown[]) => mockHealLocalYamls(...args),
-  runInvariantHeal: (...args: unknown[]) => mockRunInvariantHeal(...args),
   runOrphanInProgressHeal: (...args: unknown[]) =>
     mockRunOrphanInProgressHeal(...args),
 }));
@@ -2304,18 +2291,18 @@ describe("poll — runSync crash isolation (DX-149)", () => {
     expect(mockDispatch).not.toHaveBeenCalled();
   });
 
-  it("survives an early-runSync throw from runInvariantHeal (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
+  it("survives an early-runSync throw from runOrphanInProgressHeal (representative non-tracker path) — no rethrow, dispatch skipped", async () => {
     // Reviewer-recommended representative test for the deeper-in-runSync
-    // throw paths the wrap covers (runInvariantHeal,
-    // runOrphanInProgressHeal, runAuditPass; reapOrphans has its own
-    // inner try/catch and never reaches the outer wrap). Pins the
-    // contract that the catch covers the WHOLE body, not just the
-    // tracker subset.
+    // throw paths the wrap covers (runOrphanInProgressHeal, runAuditPass;
+    // reapOrphans has its own inner try/catch and never reaches the
+    // outer wrap). Pins the contract that the catch covers the WHOLE
+    // body, not just the tracker subset.
     //
-    // `runInvariantHeal` is a representative local-only stage that
-    // reaches the outer catch directly (the prior tracker-gated stage
-    // used here was retired).
-    mockRunInvariantHeal.mockRejectedValueOnce(
+    // `runOrphanInProgressHeal` is a representative local-only stage
+    // that reaches the outer catch directly. DX-663 retired the prior
+    // `runInvariantHeal` stage (folded into the audit-pass per-card
+    // reconcile walk).
+    mockRunOrphanInProgressHeal.mockRejectedValueOnce(
       new Error("disk full during invariant heal pass"),
     );
 
@@ -2329,6 +2316,8 @@ describe("poll — runSync crash isolation (DX-149)", () => {
       "disk full during invariant heal pass",
     );
     expect(mockDispatch).not.toHaveBeenCalled();
+    // Restore default mock for subsequent tests
+    mockRunOrphanInProgressHeal.mockResolvedValue(undefined);
   });
 
   it("DX-329: invokes runOrphanInProgressHeal once per tick with label='per-tick'", async () => {
@@ -2337,14 +2326,9 @@ describe("poll — runSync crash isolation (DX-149)", () => {
     // Pin the call shape so a future regression that drops the pass or
     // swaps label values trips this test.
     mockRunOrphanInProgressHeal.mockClear();
-    mockRunInvariantHeal.mockClear();
 
     await poll(MOCK_REPO_CONTEXT);
 
-    // Defense-in-depth: confirm the prior heal also ran. If
-    // `runInvariantHeal` was called zero times, `_sync` crashed before
-    // reaching either heal; assert both invocations as the diagnostic.
-    expect(mockRunInvariantHeal).toHaveBeenCalledTimes(1);
     expect(mockRunOrphanInProgressHeal).toHaveBeenCalledTimes(1);
     const [repoArg, labelArg, depsArg] =
       mockRunOrphanInProgressHeal.mock.calls[0];
@@ -2711,16 +2695,23 @@ describe("shutdown", () => {
 
 
 
-describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
+describe("poll — DX-217 Phase 2 + DX-663 absorbed-helpers invariant", () => {
   // After Event-Driven Worker Phase 2 (DX-217), `runSync` no longer
-  // calls `healLocalYamls`, `recomputeParentStatuses`, or
-  // `resolveWaitingOnCards` directly. Each helper's logic was absorbed
-  // into `reconcileIssue` step 3 (`src/issue/reconcile.ts`); chokidar
-  // events on YAML mutations propagate the same effects via reconcile
-  // recursion (steps 9 + 10). Behavior parity for the absorbed paths
-  // is exercised by `src/issue/reconcile.test.ts`. This block is the
-  // anti-regression guard: a future edit that re-introduces an in-tick
-  // call to any of the three helpers fails here.
+  // calls `healLocalYamls` or `resolveWaitingOnCards` directly. Each
+  // helper's logic was absorbed into `reconcileIssue` step 3
+  // (`src/issue/reconcile.ts`). DX-641 Phase 3 then folded the
+  // orphan-dispatch heal (`healOrphanInvariantViolations` /
+  // `runInvariantHeal`) into reconcile sub-step 3d, and DX-663 retired
+  // the per-tick + boot wrappers in favor of the audit-pass per-card
+  // walk. `recomputeParentStatuses` was retired the same way — the
+  // bulk audit pass folded into reconcile sub-step 3a.
+  //
+  // Chokidar events on YAML mutations propagate the same effects via
+  // reconcile recursion (steps 9 + 10); the audit-pass walks every
+  // open YAML every tick as the safety net. Behavior parity for the
+  // absorbed paths is exercised by `src/issue/reconcile.test.ts`.
+  // This block is the anti-regression guard: a future edit that
+  // re-introduces an in-tick bulk call fails here.
   beforeEach(() => {
     vi.clearAllMocks();
     _resetForTesting();
@@ -2738,11 +2729,24 @@ describe("poll — DX-217 Phase 2 absorbed-helpers invariant", () => {
     expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
   });
 
-  it("does NOT call recomputeParentStatuses from runSync (Phase 2 — absorbed into reconcile step 3a)", async () => {
-    mockRecomputeParentStatuses.mockClear();
-    await poll(MOCK_REPO_CONTEXT);
-    expect(mockRecomputeParentStatuses).not.toHaveBeenCalled();
-    expect(mockTracker.fetchOpenCards).toHaveBeenCalled();
+  it("does NOT import or call runInvariantHeal in sync-and-audit (DX-663 — folded into reconcile sub-step 3d via audit-pass walk)", async () => {
+    const src = readFileSync(
+      resolve(import.meta.dirname, "sync-and-audit.ts"),
+      "utf-8",
+    );
+    // Match import-from-heal or call/await patterns — NOT historical
+    // comments where the name appears inside backticks/parens prose.
+    expect(src).not.toMatch(/\bimport\b[^;]*\brunInvariantHeal\b[^;]*from\s+["']\.\.\/poller\/heal\.js["']/);
+    expect(src).not.toMatch(/(?:^|[\s;{(])runInvariantHeal\s*\(/m);
+  });
+
+  it("does NOT import or call recomputeParentStatuses in sync-and-audit (DX-663 — folded into reconcile sub-step 3a via audit-pass walk)", async () => {
+    const src = readFileSync(
+      resolve(import.meta.dirname, "sync-and-audit.ts"),
+      "utf-8",
+    );
+    expect(src).not.toMatch(/\bimport\b[^;]*\brecomputeParentStatuses\b/);
+    expect(src).not.toMatch(/(?:^|[\s;{(])recomputeParentStatuses\s*\(/m);
   });
 
   // DX-218 (Event-Driven Worker Phase 3): the per-tick drainRetries

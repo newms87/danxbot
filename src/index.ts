@@ -34,13 +34,8 @@ import { recordSystemError } from "./dashboard/system-errors.js";
 import { setRepoName } from "./poller/repo-name.js";
 import { config, isWorkerMode, workerRepoName } from "./config.js";
 import { repoContexts } from "./repo-context.js";
-import {
-  healOrphanInvariantViolations,
-  runInvariantHeal,
-  runOrphanInProgressHeal,
-} from "./poller/heal.js";
+import { runOrphanInProgressHeal } from "./poller/heal.js";
 import { isPidAlive } from "./agent/host-pid.js";
-import { hostname as osHostname } from "node:os";
 import {
   liveDispatchIssueIds,
   lastTerminalDispatchStatusByIssue,
@@ -509,55 +504,17 @@ async function startWorkerMode(): Promise<void> {
   );
   log.debug(`[${repo.name}] Issues mirror started`);
 
-  // One-shot boot heal: walk every open YAML and clear the `dispatch`
-  // slot on any card whose dispatch is verifiably dead. The
-  // co-ownership invariant `(dispatch != null) ⇔ (assigned_agent != null)`
-  // is retired — `assigned_agent` is durable audit and persists across
-  // dispatch end + terminal save. The only orphan shape this pass
-  // touches is `dispatch != null + dispatch is dead` (the legacy
-  // unscoped pre-stamp path; worker crash mid-spawn). Liveness gate via
-  // `checkYamlDispatchLiveness` skips dispatches caught genuinely
-  // mid-spawn (alive PID, within TTL, on this host). Runs AFTER the
-  // mirror is up (so `writeIssue`'s synchronous DB upsert has a
-  // registered writer DB to target) and BEFORE the first poll tick.
-  // The same scan runs per-tick from
-  // `src/cron/sync-and-audit.ts` for ongoing self-heal.
-  await runInvariantHeal(repo, "boot");
-
-  // Same scan kept under the original wrapper for the structured-log
-  // line consumers downstream rely on. The body is now identical to
-  // the runInvariantHeal call above.
-  try {
-    const invariantHeal = await healOrphanInvariantViolations(
-      repo.localPath,
-      repo.issuePrefix,
-      { currentHost: osHostname(), now: Date.now(), isPidAlive },
-    );
-    if (invariantHeal.healed.length > 0 || invariantHeal.errors.length > 0) {
-      log.info(
-        `[${repo.name}] Orphan invariant heal: scanned=${invariantHeal.scanned} cleared=${invariantHeal.healed.length} errors=${invariantHeal.errors.length}`,
-      );
-      for (const h of invariantHeal.healed) {
-        const verdict = h.verdict ? ` verdict=${h.verdict}` : "";
-        log.warn(
-          `[${repo.name}] heal: cleared invariant violation on ${h.id} (kind=${h.kind}${verdict}, dispatch=${h.staleDispatchId ?? "null"}, agent=${h.staleAgent ?? "null"})`,
-        );
-      }
-      for (const e of invariantHeal.errors) {
-        log.warn(
-          `[${repo.name}] heal: invariant scan error at ${e.path}: ${e.message}`,
-        );
-      }
-    }
-  } catch (err) {
-    log.error(`[${repo.name}] Orphan invariant heal failed`, err);
-  }
-
   // DX-329 — one-shot boot orphan IP heal. Pairs with the per-tick
   // scan in `src/cron/sync-and-audit.ts`: the boot pass closes the
   // gap where the worker is restarted while orphans exist on disk
   // (otherwise the operator has to wait one full poll interval — ~60s
   // — before the cron picks them up).
+  //
+  // The orphan-dispatch slot heal (legacy `runInvariantHeal` /
+  // `healOrphanInvariantViolations` boot pass) folded into reconcile
+  // sub-step 3d via DX-641 Phase 3 — the audit-pass per-card walk in
+  // `src/cron/sync-and-audit.ts` carries that work now, fired on the
+  // first cron tick after boot.
   await runOrphanInProgressHeal(repo, "boot", {
     liveDispatchIssueIds,
     lastTerminalDispatchStatusByIssue,

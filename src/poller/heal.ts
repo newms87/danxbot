@@ -71,8 +71,6 @@ import {
   checkYamlDispatchLiveness,
   type LivenessDeps,
 } from "./dispatch-liveness-yaml.js";
-import { isPidAlive } from "../agent/host-pid.js";
-import { hostname as osHostname } from "node:os";
 import type { RepoContext } from "../types.js";
 import { createLogger } from "../logger.js";
 import { reportSystemError } from "../system-repair/report.js";
@@ -304,9 +302,9 @@ export interface HealOrphanInvariantResult {
 }
 
 /**
- * Per-tick (and one-shot at boot) heal: walk
- * `<repo>/.danxbot/issues/open/` and clear the `dispatch` slot on any
- * card whose dispatch is verifiably dead but still occupies the slot.
+ * Pure-function heal: walk `<repo>/.danxbot/issues/open/` and clear
+ * the `dispatch` slot on any card whose dispatch is verifiably dead
+ * but still occupies the slot.
  *
  * The co-ownership invariant `(dispatch != null) ⇔ (assigned_agent != null)`
  * is RETIRED. `assigned_agent` is durable audit ("who last owned this
@@ -323,7 +321,13 @@ export interface HealOrphanInvariantResult {
  * has not expired, the card is left alone. The in-flight dispatch will
  * reconcile via its own onComplete chain.
  *
- * Runs once at boot and at the top of every `runSync` tick.
+ * DX-641 Phase 3 folded the per-card invocation into `reconcileIssue`
+ * sub-step 3d, and DX-663 retired the bulk per-tick + boot wrappers
+ * in favor of the audit-pass per-card walk
+ * (`src/cron/sync-and-audit.ts` → `runAuditPass` →
+ * `reconcileIssue(card, "audit")`). This function remains as the pure
+ * tested-in-isolation primitive — same logic, kept here so the
+ * audit-pass fold doesn't lose dedicated coverage.
  *
  * Idempotent: `clearDispatchAndWrite` short-circuits when dispatch is
  * already null. Tracker-independent. Tolerates malformed YAMLs.
@@ -387,7 +391,6 @@ export async function healOrphanInvariantViolations(
   return result;
 }
 
-const invariantHealLog = createLogger("invariant-heal");
 const orphanIpHealLog = createLogger("orphan-ip-heal");
 
 /**
@@ -400,10 +403,11 @@ const orphanIpHealLog = createLogger("orphan-ip-heal");
  * (DX-275, DX-279, DX-310, DX-311, DX-313) were stranded at the time
  * the card was filed. The two-query DB read + roster read is cheap
  * (both hit indexed columns, <1ms even on a long-lived dispatches
- * table) and runs on every tick alongside `runInvariantHeal`.
+ * table) and runs on every tick.
  *
- * Errors from the scan are caught + logged; they never propagate.
- * Same failure-isolation contract as `runInvariantHeal`.
+ * Errors from the scan are caught + logged; they never propagate. The
+ * per-tick + boot wrappers in `src/cron/sync-and-audit.ts` +
+ * `src/index.ts` rely on this isolation contract.
  */
 export async function runOrphanInProgressHeal(
   repo: RepoContext,
@@ -473,65 +477,6 @@ export async function runOrphanInProgressHeal(
   }
 }
 
-/**
- * Convenience wrapper that runs `healOrphanInvariantViolations` against
- * the named repo with default liveness deps and emits the log lines both
- * the boot and per-tick callers need. Extracted so the producer + the
- * format live in one file (DX-286 review feedback) — boot in
- * `src/index.ts` and per-tick in `src/cron/sync-and-audit.ts` both call this
- * with a `label` describing the trigger so log readers can tell them
- * apart.
- *
- * Errors from the scan are caught + logged at error level; they never
- * propagate. The boot caller treats heal failure as non-fatal (the
- * worker still starts); the per-tick caller treats heal failure as
- * non-fatal (the tick still proceeds).
- */
-export async function runInvariantHeal(
-  repo: RepoContext,
-  label: "boot" | "per-tick",
-): Promise<void> {
-  try {
-    const result = await healOrphanInvariantViolations(
-      repo.localPath,
-      repo.issuePrefix,
-      { currentHost: osHostname(), now: Date.now(), isPidAlive },
-    );
-    if (result.healed.length === 0 && result.errors.length === 0) return;
-    if (result.healed.length > 0) {
-      invariantHealLog.info(
-        `[${repo.name}] Invariant heal (${label}): scanned=${result.scanned} cleared=${result.healed.length}`,
-      );
-      for (const h of result.healed) {
-        const verdict = h.verdict ? ` verdict=${h.verdict}` : "";
-        invariantHealLog.warn(
-          `[${repo.name}] heal: cleared invariant violation on ${h.id} (kind=${h.kind}${verdict}, dispatch=${h.staleDispatchId ?? "null"}, agent=${h.staleAgent ?? "null"})`,
-        );
-      }
-    }
-    for (const e of result.errors) {
-      invariantHealLog.warn(
-        `[${repo.name}] heal: invariant scan error at ${e.path}: ${e.message}`,
-      );
-      void reportSystemError({
-        repo: repo.name,
-        component: "invariant-heal",
-        err: new Error(e.message),
-        samplePayload: { path: e.path },
-      });
-    }
-  } catch (err) {
-    invariantHealLog.error(
-      `[${repo.name}] Invariant heal (${label}) failed`,
-      err,
-    );
-    void reportSystemError({
-      repo: repo.name,
-      component: "invariant-heal",
-      err,
-    });
-  }
-}
 
 /**
  * Immediate-cascade counterpart to the `healOrphanInvariantViolations`

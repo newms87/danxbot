@@ -121,10 +121,9 @@ export function deriveParentStatus(
  * never modified by the parent-derive path. The previous invariant
  * (`status === "Blocked" ⟺ blocked !== null`) is gone.
  *
- * Both `reconcileIssue` step 3a (the chokepoint) and the legacy
- * `recomputeParentStatuses` audit pass call this helper, so a future
- * refinement to the `worker:auto-derive` shape lands in one place
- * instead of drifting between the two writers.
+ * `reconcileIssue` step 3a is the sole chokepoint — DX-663 retired
+ * the legacy `recomputeParentStatuses` bulk audit pass in favor of
+ * the per-card audit-pass walk that fires this helper.
  *
  * Returns the updated Issue. Pure — does not write to disk; the caller
  * owns the persistence step.

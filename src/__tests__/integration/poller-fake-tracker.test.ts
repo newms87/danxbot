@@ -215,14 +215,6 @@ function refToFakeIssue(ref: TestRef): Issue {
   };
 
 }
-// epic-status: queries the DB for parent + child rows since DX-155.
-// The unit mock-suite has no live PG, so stub the recompute pass to a
-// no-op so it doesn't throw on an unreachable connection.
-vi.mock("../../poller/epic-status.js", () => ({
-  recomputeParentStatuses: async (): Promise<unknown[]> => [],
-  deriveStatus: () => null,
-}));
-
 vi.mock("../../poller/local-issues.js", () => ({
   listDispatchableYamls: async (_repoPath: string): Promise<Issue[]> =>
     lastOpenCards.value

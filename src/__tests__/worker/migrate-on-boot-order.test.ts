@@ -79,11 +79,22 @@ describe("DX-593 — boot order: migration sweep precedes mirror / cron / HTTP",
     expect(sweep).toBeLessThan(reattach);
   });
 
-  it("the sweep call precedes runInvariantHeal (downstream YAML reader)", () => {
-    // Same rationale as the reattach test — the invariant-heal pass reads
-    // every open YAML.
+  it("the sweep call precedes runOrphanInProgressHeal (downstream YAML reader)", () => {
+    // Same rationale as the reattach test — the orphan-IP heal pass
+    // reads every open YAML. DX-663 retired the parallel
+    // `runInvariantHeal` boot call (folded into reconcile sub-step 3d
+    // via the audit-pass walk).
     const sweep = indexOfOrThrow("runBootMigrationSweep(");
-    const heal = indexOfOrThrow("runInvariantHeal(");
+    const heal = indexOfOrThrow("runOrphanInProgressHeal(");
     expect(sweep).toBeLessThan(heal);
+  });
+
+  it("DX-663: src/index.ts does NOT import or call runInvariantHeal at boot (folded into reconcile sub-step 3d via audit-pass walk)", () => {
+    expect(src).not.toMatch(/\bimport\b[^;]*\brunInvariantHeal\b[^;]*from\s+["']\.\/poller\/heal\.js["']/);
+    expect(src).not.toMatch(/(?:^|[\s;{(])runInvariantHeal\s*\(/m);
+  });
+
+  it("DX-663: src/index.ts does NOT call healOrphanInvariantViolations directly at boot (the log-only block was retired alongside runInvariantHeal)", () => {
+    expect(src).not.toMatch(/(?:^|[\s;{(])healOrphanInvariantViolations\s*\(/m);
   });
 });

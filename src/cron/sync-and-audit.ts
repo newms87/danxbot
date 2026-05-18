@@ -15,23 +15,24 @@
  *      agents without a restart.
  *   2. `reapOrphans` — process-table orphan scan; SIGTERMs dispatched
  *      claude processes the DB lost track of.
- *   3. `runInvariantHeal` — clears the `dispatch` slot on cards whose
- *      dispatch is verifiably dead (orphan pre-stamp from legacy
- *      unscoped path / mid-spawn crash). `assigned_agent` is durable
- *      audit and is preserved. Surfaces back to scheduler via the
- *      reconcile-driven `onReconcileResult` event chain on the same
- *      tick.
- *   4. `runOrphanInProgressHeal` (DX-329) — flips cards stuck at
+ *   3. `runOrphanInProgressHeal` (DX-329) — flips cards stuck at
  *      `In Progress` + `dispatch: null` back to `ToDo` so the picker
- *      can re-claim them. Complements `runInvariantHeal` (which
- *      clears `dispatch` blocks but never flips `status`).
- *   5. `runInboundFetch` — Trello inbound: Needs Help comment scan +
+ *      can re-claim them. The per-card orphan-dispatch slot heal
+ *      (legacy `runInvariantHeal` / `healOrphanInvariantViolations`
+ *      scan) folded into reconcile sub-step 3d via DX-641 Phase 3 —
+ *      every audit-pass reconcile per-card invocation below carries
+ *      that work now. This pass remains because flipping `status`
+ *      from `In Progress` → `ToDo` requires DB reads reconcile does
+ *      not currently thread.
+ *   4. `runInboundFetch` — Trello inbound: Needs Help comment scan +
  *      `tracker.fetchOpenCards` + bulk hydrate missing YAMLs. Gated
  *      on `trelloSync` per-repo toggle (DX-302).
- *   6. `runAuditPass` — for each open YAML: `reconcileIssue(card,
+ *   5. `runAuditPass` — for each open YAML: `reconcileIssue(card,
  *      "audit")`. Drift surfaces as `recordSystemError({source:
  *      "audit-drift"})` so the dashboard banner counts divergence.
- *   7. `firePickerWithMutex(repo.name)` — DX-368 convergence safety
+ *      Sub-steps 3a (parent-derive), 3d (orphan-dispatch heal), and 3e
+ *      (blocked-with-assignment shape) all run per-card here.
+ *   6. `firePickerWithMutex(repo.name)` — DX-368 convergence safety
  *      net. Fires the picker unconditionally after audit-pass so a
  *      dropped event-driven poke (reconcile / roster / dispatch
  *      termination) self-heals within ~60s. The scheduler's single-
@@ -58,7 +59,7 @@ import type { RepoContext } from "../types.js";
 import { isFeatureEnabled } from "../settings-file.js";
 import { readFlag } from "../critical-failure.js";
 import { reapOrphans } from "../worker/process-scan.js";
-import { runInvariantHeal, runOrphanInProgressHeal } from "../poller/heal.js";
+import { runOrphanInProgressHeal } from "../poller/heal.js";
 import {
   liveDispatchIssueIds,
   lastTerminalDispatchStatusByIssue,
@@ -314,29 +315,23 @@ async function _sync(repo: RepoContext): Promise<void> {
       await runInboundFetch(repo, tracker);
     }
 
-    // DX-286 — per-tick orphan invariant scan. Walks every open
-    // YAML and clears any card violating
-    // `(dispatch !== null) === (assigned_agent !== null)` when the
-    // underlying dispatch (if any) is verifiably dead. Catches both
-    // XOR directions in one pass; the liveness gate inside the scan
-    // protects in-flight paired-writes. Cleared orphans surface back
-    // to the scheduler's `runPicker` callback in `src/index.ts` via
-    // the chokidar → reconcile → `onReconcileResult` event chain on
-    // the same tick. Same scan runs once at boot (`src/index.ts`)
-    // for pre-fix-bug residue.
-    await runInvariantHeal(repo, "per-tick");
-
-    // DX-329 — per-tick orphan In Progress heal. Complements
-    // `runInvariantHeal` above: that pass clears stale `dispatch`
-    // blocks but never flips `status`. A card whose prior dispatch
-    // ended in any terminal `DispatchStatus`
+    // DX-329 — per-tick orphan In Progress heal. The per-card
+    // orphan-dispatch heal (the legacy `runInvariantHeal` /
+    // `healOrphanInvariantViolations` scan) is folded into reconcile
+    // sub-step 3d (DX-641 Phase 3) and runs per-card via the
+    // audit-pass below. This separate pass remains because it flips
+    // `status` from `In Progress` back to `ToDo` — work the reconcile
+    // sub-step does not yet do (the flip requires DB reads —
+    // `liveDispatchIssueIds`, `lastTerminalDispatchStatusByIssue`,
+    // `knownAgents` — that reconcile doesn't currently thread).
+    //
+    // A card whose prior dispatch ended in any terminal `DispatchStatus`
     // (`completed`/`failed`/`cancelled`/`recovered`/`throttled` per
     // `src/dashboard/dispatches.ts`) ends up at `status: In Progress` +
     // `dispatch: null` — the picker filter requires `status === "ToDo"`
     // and skips the card forever. This pass flips it back so the picker
-    // sees the work on its next tick. Race-guarded against in-flight
-    // paired-writes via `liveDispatchIssueIds` + a 5-minute age
-    // floor. Same scan runs at boot from `src/index.ts`.
+    // sees the work on its next tick. Same scan runs at boot from
+    // `src/index.ts`.
     await runOrphanInProgressHeal(repo, "per-tick", {
       liveDispatchIssueIds,
       lastTerminalDispatchStatusByIssue,
