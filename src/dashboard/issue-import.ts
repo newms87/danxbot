@@ -134,7 +134,7 @@ export function buildIssueSubtreePayload(
       if (!visited.has(childId)) queue.push(childId);
     }
   }
-  return { schema_version: 10, issues: out };
+  return { schema_version: 11, issues: out };
 }
 
 /**
@@ -149,8 +149,6 @@ export function buildIssueSubtreePayload(
  *    duplicated card)
  *  - `assigned_agent` → null (target repo's agent roster is unrelated
  *    to the source's)
- *  - `position` → null (column-local ordering doesn't survive the move;
- *    pasted card lands at the bottom of its column)
  *  - `comments[].id` → absent (tracker-native ids reference the source's
  *    tracker; outbound sync treats id-less comments as new and re-posts
  *    them on the new card)
@@ -174,7 +172,7 @@ export function buildIssueSubtreePayload(
  */
 function stripIssueForCopy(issue: Issue): Issue {
   const stripped: Issue = {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: issue.id,
     external_id: "",
@@ -186,7 +184,6 @@ function stripIssueForCopy(issue: Issue): Issue {
     title: issue.title,
     description: issue.description,
     priority: issue.priority,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -460,7 +457,7 @@ export async function applyIssueImport(
  *    items by hand if needed.)
  *  - Repo-specific bits forcibly reset regardless of source value:
  *    `external_id: ""`, `tracker: "memory"`, `dispatch: null`,
- *    `assigned_agent: null`, `position: null`, `history: []`,
+ *    `assigned_agent: null`, `history: []`,
  *    `triage: emptyTriage`, `ac[].check_item_id: ""`, `comments[].id`
  *    dropped, `labels` undefined.
  */
@@ -505,7 +502,7 @@ function rewriteForImport(
     .filter((id): id is string => id !== null);
 
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: newId,
     external_id: "",
@@ -517,7 +514,6 @@ function rewriteForImport(
     title: src.title,
     description: src.description,
     priority: src.priority,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

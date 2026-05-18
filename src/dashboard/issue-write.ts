@@ -179,15 +179,6 @@ export interface IssuePatch {
    */
   list_name?: string;
   /**
-   * Operator manual ordering knob inside the card's status column
-   * (DX-264). Finite number wins over the canonical priority → ICE →
-   * mtime tier; `null` clears the override. Computed by the dashboard's
-   * fractional-indexing helper on intra-column drop. Schema invariants
-   * are checked by `validatePatchShape` (must be a finite number or
-   * null — anything else is a 400).
-   */
-  position?: number | null;
-  /**
    * Operator priority knob (DX-521). Finite number in the open
    * interval `(0, 6)` — `validatePatchShape` rejects out-of-range,
    * non-finite, and non-numeric values with `400 Invalid priority`.
@@ -232,7 +223,6 @@ const PATCHABLE_FIELDS = new Set<keyof IssuePatch>([
   "comments_append",
   "requires_human",
   "reopen",
-  "position",
   "priority",
   "conflict_on",
   "blocked",
@@ -552,18 +542,6 @@ function validatePatchShape(body: unknown): IssuePatch {
     }
     patch.reopen = true;
   }
-  if ("position" in raw) {
-    const v = raw.position;
-    if (v === null) {
-      patch.position = null;
-    } else if (typeof v !== "number" || !Number.isFinite(v)) {
-      throw new IssuePatchError(400, {
-        error: "position must be a finite number or null",
-      });
-    } else {
-      patch.position = v;
-    }
-  }
   if ("priority" in raw) {
     const v = raw.priority;
     if (typeof v !== "number" || !Number.isFinite(v) || v <= 0 || v >= 6) {
@@ -732,9 +710,6 @@ function applyValidatedPatch(
             set_by: "human",
             set_at: nowIso,
           };
-  }
-  if (patch.position !== undefined) {
-    next.position = patch.position;
   }
   if (patch.priority !== undefined) {
     next.priority = patch.priority;

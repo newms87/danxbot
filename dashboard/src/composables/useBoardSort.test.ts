@@ -18,7 +18,6 @@ function issue(
     status: "ToDo",
     type: "Feature",
     priority: 3,
-    position: null,
     assigned_agent: null,
     parent_id: null,
     children: [],

@@ -30,7 +30,7 @@ import IssueChatTab from "./IssueChatTab.vue";
 
 function makeIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: "DX-352",
     external_id: "",
@@ -42,7 +42,6 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Test",
     description: "Test",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

@@ -21,7 +21,7 @@ function wrap(
 
 function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
   const base: IssueDetail = {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -33,7 +33,6 @@ function makeIssue(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Title",
     description: "",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

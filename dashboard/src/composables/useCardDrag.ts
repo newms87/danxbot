@@ -57,14 +57,17 @@ export interface UseCardDragOptions<TCol = IssueStatus> {
     toCol: TCol,
   ) => Promise<void> | void;
   /**
-   * DX-264 — invoked when a card is released over a drop slot (the
-   * transparent gap between two cards in the same column). The
-   * composable computes nothing; it surfaces the slot's neighbors so
-   * the caller can compute the new `position` via `nextPosition` from
-   * `./cardPosition.ts` and PATCH the card. Either neighbor may be
-   * `null` (top / bottom of column). Same-column drops on the column
-   * background (NOT a slot) are inert (`onDrop` short-circuits on equal
-   * column); intra-column reordering goes exclusively through slots.
+   * Invoked when a card is released over a drop slot (the transparent
+   * gap between two cards in the same column). The composable computes
+   * nothing; it surfaces the slot's neighbors so the caller can
+   * decide how to encode the new ordering (write `priority`'s decimal
+   * portion, write a separate ordering field, etc.) and PATCH the
+   * card. Either neighbor may be `null` (top / bottom of column).
+   * Same-column drops on the column background (NOT a slot) are inert
+   * (`onDrop` short-circuits on equal column); intra-column reordering
+   * goes exclusively through slots. No active caller wires this hook
+   * after DX-628 stripped `position`; Phase 3 of the priority-canon
+   * epic rewires it onto `priority`'s decimal portion.
    */
   onReorder?: (
     issue: IssueListItem,
@@ -275,7 +278,7 @@ export function useCardDrag<TCol = IssueStatus>(
         if (!opts.onReorder) return;
         // No-op when dropping into a slot adjacent to ourselves — the
         // card is already there, so a PATCH would just churn the
-        // position field with no visible effect.
+        // ordering field with no visible effect.
         if (before?.id === issue.id || after?.id === issue.id) return;
         const result = opts.onReorder(issue, before, after);
         if (result && typeof (result as Promise<void>).catch === "function") {

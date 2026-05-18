@@ -15,7 +15,6 @@ const v6Sample = {
   title: "sample",
   description: "body",
   priority: 3,
-  position: null,
   triage: {
     expires_at: "",
     reassess_hint: "",
@@ -170,7 +169,7 @@ describe("migrateLegacyToV10", () => {
 
   it("throws on schema_version 9 (out of scope; v9 has its own migration)", () => {
     expect(() =>
-      migrateLegacyToV10({ ...v8Sample, schema_version: 9 }),
+      migrateLegacyToV10({ ...v8Sample, schema_version: 10 }),
     ).toThrow(MigrationRegistryError);
   });
 
@@ -182,7 +181,7 @@ describe("migrateLegacyToV10", () => {
 
   it("throws on schema_version 10 (already canonical)", () => {
     expect(() =>
-      migrateLegacyToV10({ ...v8Sample, schema_version: 10 }),
+      migrateLegacyToV10({ ...v8Sample, schema_version: 11 }),
     ).toThrow(MigrationRegistryError);
   });
 

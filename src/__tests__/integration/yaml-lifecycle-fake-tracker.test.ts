@@ -311,7 +311,7 @@ async function reservePort(): Promise<number> {
 
 function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: `ISS-${Math.floor(Math.random() * 9000) + 1000}`,
     external_id: externalId,
@@ -323,7 +323,6 @@ function buildSeedIssue(externalId: string, status: Issue["status"]): Issue {
     title: "yaml-lifecycle seed card",
     description: "Drive the Phase 4 YAML round-trip end-to-end.",
     priority: 3.0,
-    position: null,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [
       { check_item_id: "ac-1", title: "First criterion holds", checked: false },

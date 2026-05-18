@@ -26,7 +26,7 @@ import type {
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -38,7 +38,6 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Do the thing",
     description: "body",
     priority: 3.0,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -242,7 +241,7 @@ describe("validateIssue history field", () => {
     // A hand-edited YAML with a stray scalar/object value here must fail
     // loud, not be silently coerced.
     const result = validateIssue({
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-1",
       external_id: "x",
@@ -763,7 +762,7 @@ describe("pre-Phase-1 YAML migration side-effect", () => {
     // sync logs knows to expect a single-line addition on every existing
     // card's first post-Phase-1 save.
     const legacyYaml = [
-      "schema_version: 10",
+      "schema_version: 11",
       "tracker: trello",
       "id: ISS-1",
       "external_id: x",

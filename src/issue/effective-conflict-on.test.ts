@@ -10,7 +10,7 @@ function issue(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: "",
@@ -22,7 +22,6 @@ function issue(
     title: id,
     description: "",
     priority: 3.0,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

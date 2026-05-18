@@ -60,7 +60,7 @@ function writeIssue(
 ): string {
   const path = join(dir, `${issue.id}.yml`);
   const lines: string[] = [
-    "schema_version: 10",
+    "schema_version: 11",
     "tracker: trello",
     `id: ${issue.id}`,
     'external_id: ""',
@@ -169,7 +169,7 @@ describe("rewriteIdFields", () => {
   it("rewrites id, parent_id, children, waiting_on.by, action_item_ids", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 10,
+        schema_version: 11,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -181,7 +181,6 @@ describe("rewriteIdFields", () => {
         title: "fix ISS-7",
         description: "see ISS-1 and ISS-9.",
         priority: 3.0,
-        position: null,
         triage: {
           expires_at: "",
           reassess_hint: "",
@@ -242,7 +241,7 @@ describe("rewriteIdFields", () => {
   it("leaves cross-prefix refs untouched (defensive)", () => {
     const issue = parseIssue(
       serializeIssue({
-        schema_version: 10,
+        schema_version: 11,
         tracker: "memory",
         id: "ISS-7",
         external_id: "",
@@ -254,7 +253,6 @@ describe("rewriteIdFields", () => {
         title: "t",
         description: "see SG-3 in other repo",
         priority: 3.0,
-        position: null,
         triage: {
           expires_at: "",
           reassess_hint: "",
@@ -444,7 +442,7 @@ describe("runMigration — rollback on failure", () => {
     // Inject a malformed YAML — wrong schema_version so parseIssue fails
     writeFileSync(
       join(repo.openDir, "ISS-3.yml"),
-      "schema_version: 99\nid: ISS-3\n",
+      "schema_version: 109\nid: ISS-3\n",
     );
 
     const before = {
@@ -654,7 +652,7 @@ describe("runMigration — multi-repo independence", () => {
     // Inject failure only in repoA
     writeFileSync(
       join(repoA.openDir, "ISS-2.yml"),
-      "schema_version: 99\nid: ISS-2\n",
+      "schema_version: 109\nid: ISS-2\n",
     );
 
     const result = runMigration({

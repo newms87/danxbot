@@ -502,19 +502,6 @@ describe("IssueBoard — per-column sort (DX-625)", () => {
     wrapper.unmount();
   });
 
-  it("drop slots hide on positionable columns when sort is non-default", async () => {
-    const a = makeIssue("DX-1", "ToDo");
-    const { wrapper } = mountBoard([a]);
-
-    expect(wrapper.find(`[data-test^="drop-slot-${tid("To Do")}-"]`).exists()).toBe(true);
-
-    await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
-    await wrapper.find(`[data-test="column-sort-${tid("To Do")}-title-asc"]`).trigger("click");
-    await vi.waitFor(() => {
-      expect(wrapper.find(`[data-test^="drop-slot-${tid("To Do")}-"]`).exists()).toBe(false);
-    });
-    wrapper.unmount();
-  });
 });
 
 describe("IssueBoard — backend sort preserved verbatim (DX-522)", () => {

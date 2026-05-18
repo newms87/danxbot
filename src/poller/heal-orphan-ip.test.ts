@@ -29,7 +29,7 @@ function buildIssue(
   overrides: Partial<Issue> & { id: string; status: IssueStatus },
 ): Issue {
   const merged: Issue = {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     external_id: "",
     parent_id: null,
@@ -39,7 +39,6 @@ function buildIssue(
     title: `Title for ${overrides.id}`,
     description: "Body",
     priority: 3.0,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

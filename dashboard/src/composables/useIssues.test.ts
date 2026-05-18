@@ -95,7 +95,7 @@ function makeIssueSnapshot(
   overrides: Partial<Issue> = {},
 ): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: "",
@@ -107,7 +107,6 @@ function makeIssueSnapshot(
     title: `Card ${id}`,
     description: "",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

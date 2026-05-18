@@ -76,16 +76,6 @@ const emit = defineEmits<{
    * `useIssues.moveIssueList`.
    */
   move: [issue: IssueListItem, toList: List];
-  /**
-   * DX-264 carry-over — intra-column reorder via drop slot. Reorder
-   * only fires inside `position`-honoring columns; the position-tier
-   * sort filter still uses derived status (Review / ToDo / Blocked).
-   */
-  reorder: [
-    issue: IssueListItem,
-    before: IssueListItem | null,
-    after: IssueListItem | null,
-  ];
 }>();
 
 /**
@@ -160,40 +150,11 @@ const cardDrag = useCardDrag<List>({
   onDrop: (issue, _from, to) => {
     emit("move", issue, to);
   },
-  onReorder: (issue, before, after) => {
-    emit("reorder", issue, before, after);
-  },
   // List `id` is the stable identity. The columns[] array is re-derived
   // every time the parent's `lists` prop updates (SSE on lists CRUD), so
   // object identity churns; the `id` survives.
   keyOf: (l) => l.id,
 });
-
-/** Stable key for a drop slot. */
-function slotKey(
-  colName: string,
-  before: IssueListItem | null,
-  after: IssueListItem | null,
-): string {
-  return `${colName}:${before?.id ?? "head"}:${after?.id ?? "tail"}`;
-}
-
-/**
- * Drop slots (intra-column reorder) only render in `position`-honoring
- * types — same set as pre-DX-586 (review / ready / blocked). The
- * dest-side `dispatch != null` columns (in_progress) and the terminal
- * columns (completed / cancelled) sort by `updated_at` and ignore the
- * position tier; drop slots there would look like targets but produce
- * no visible movement.
- */
-const POSITIONABLE_TYPES: ReadonlySet<ListType> = new Set<ListType>([
-  "review",
-  "ready",
-  "blocked",
-]);
-function columnSupportsPosition(col: List): boolean {
-  return POSITIONABLE_TYPES.has(col.type);
-}
 
 /**
  * Show-closed gate — when off, drop the `cancelled` columns entirely
@@ -443,29 +404,11 @@ function testIdFor(name: string): string {
       <DanxScroll v-if="!collapsed[col.name]" class="cards-scroll">
         <div class="cards">
           <div v-if="(grouped[col.name]?.length ?? 0) === 0" class="empty">
-            <!-- DX-264: empty column gets a single drop slot so the
-                 first reorder seeds a position value. DX-625: also
-                 hide drop slots when the column has a non-default
-                 sort so drag affordance never silently no-ops under
-                 a sort that ignores `position`. -->
-            <span v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
-              class="drop-slot drop-slot-empty"
-              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, null)) }"
-              v-bind="cardDrag.bindSlot(slotKey(col.name, null, null), null, null)"
-              :data-test="`drop-slot-${testIdFor(col.name)}-empty`"
-            />
             No items
           </div>
           <template v-else>
-            <span
-              v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
-              class="drop-slot"
-              :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null)) }"
-              v-bind="cardDrag.bindSlot(slotKey(col.name, null, (grouped[col.name] ?? [])[0] ?? null), null, (grouped[col.name] ?? [])[0] ?? null)"
-              :data-test="`drop-slot-${testIdFor(col.name)}-head`"
-            />
             <template
-              v-for="(issue, idx) in grouped[col.name] ?? []"
+              v-for="issue in grouped[col.name] ?? []"
               :key="issue.id"
             >
               <IssueCard
@@ -478,13 +421,6 @@ function testIdFor(name: string): string {
                 :drag-handlers="cardDrag.bindCard(issue, col)"
                 @select="(i) => emit('select', i)"
                 @parent-click="(pid) => emit('parent-click', pid)"
-              />
-              <span
-                v-if="columnSupportsPosition(col) && boardSort.isDefault(col.name)"
-                class="drop-slot"
-                :class="{ 'drop-slot-hover': cardDrag.isHoveringSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null)) }"
-                v-bind="cardDrag.bindSlot(slotKey(col.name, issue, (grouped[col.name] ?? [])[idx + 1] ?? null), issue, (grouped[col.name] ?? [])[idx + 1] ?? null)"
-                :data-test="`drop-slot-${testIdFor(col.name)}-${issue.id}`"
               />
             </template>
           </template>
@@ -696,21 +632,5 @@ function testIdFor(name: string): string {
   outline-offset: -4px;
   background: rgb(99 102 241 / 0.05);
   border-radius: 8px;
-}
-.drop-slot {
-  display: block;
-  height: 6px;
-  margin: -2px 0;
-  border-radius: 4px;
-  transition: background-color 120ms, height 120ms;
-}
-.drop-slot.drop-slot-empty {
-  height: 24px;
-  margin: 6px 0;
-}
-.drop-slot.drop-slot-hover {
-  height: 14px;
-  background: var(--col-accent, #a5b4fc);
-  opacity: 0.6;
 }
 </style>

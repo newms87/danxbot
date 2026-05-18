@@ -64,7 +64,7 @@ function makeIssue(
   waiting_on: WaitingOn | null = null,
 ): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: `ext-${id}`,
@@ -76,7 +76,6 @@ function makeIssue(
     title: `Title ${id}`,
     description: "",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -260,7 +259,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // position, no requires_human, no assigned_agent. Same shape
       // gpt-manager's SG-105 ships on disk.
       const v3 = {
-        schema_version: 10,
+        schema_version: 11,
         tracker: "trello",
         id: "DX-V3",
         external_id: "ext-v3",
@@ -298,7 +297,6 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       expect(loaded!.requires_human).toBeNull();
       expect(loaded!.assigned_agent).toBeNull();
       expect(loaded!.priority).toBe(3);
-      expect(loaded!.position).toBeNull();
       expect(loaded!.retro.action_item_ids).toEqual([]);
       expect(loaded!.retro.commits).toEqual([]);
       expect(loaded!.triage.history).toEqual([]);
@@ -312,7 +310,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // crash listDispatchableYamls (`w.by` undefined → `.map` throws).
       const broken = {
         ...({
-          schema_version: 10,
+          schema_version: 11,
           tracker: "memory",
           id: "DX-W",
           external_id: "",
@@ -324,7 +322,6 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
           title: "w",
           description: "",
           priority: 3,
-          position: null,
           triage: {
             expires_at: "",
             reassess_hint: "",
@@ -373,7 +370,7 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
       // "TypeError: issue.conflict_on is not iterable" on every tick
       // that calls listDispatchableYamls.
       const v6 = {
-        schema_version: 10,
+        schema_version: 11,
         tracker: "memory",
         id: "DX-V6",
         external_id: "",
@@ -385,7 +382,6 @@ describe("normalizeLoadedIssue — v3 row defaults", () => {
         title: "v6",
         description: "",
         priority: 3,
-        position: null,
         triage: {
           expires_at: "",
           reassess_hint: "",

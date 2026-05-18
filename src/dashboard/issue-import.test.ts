@@ -125,7 +125,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
   it("returns a single-issue payload for a leaf card", () => {
     writeIssueFixture(repoLocalPath, makeIssue());
     const payload = buildIssueSubtreePayload(repoLocalPath, "DX-1", "DX");
-    expect(payload.schema_version).toBe(10);
+    expect(payload.schema_version).toBe(11);
     expect(payload.issues).toHaveLength(1);
     expect(payload.issues[0].id).toBe("DX-1");
     expect(payload.issues[0].title).toBe("Root card");
@@ -196,14 +196,13 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
     ]);
   });
 
-  it("strips repo-specific bits — external_id, tracker, dispatch, triage, history, assigned_agent, position, comment ids, ac check_item_ids", () => {
+  it("strips repo-specific bits — external_id, tracker, dispatch, triage, history, assigned_agent, comment ids, ac check_item_ids", () => {
     writeIssueFixture(
       repoLocalPath,
       makeIssue({
         id: "DX-1",
         external_id: "trello-card-xyz",
         tracker: "trello",
-        position: 5.5,
         assigned_agent: "alice",
         ac: [
           { check_item_id: "trello-check-abc", title: "AC1", checked: true },
@@ -224,7 +223,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
     expect(issue.tracker).toBe("memory");
     expect(issue.dispatch).toBeNull();
     expect(issue.assigned_agent).toBeNull();
-    expect(issue.position).toBeNull();
+    expect("position" in issue).toBe(false);
     expect(issue.history).toEqual([]);
     expect(issue.triage.history).toEqual([]);
     expect(issue.triage.last_status).toBe("");
@@ -352,7 +351,7 @@ describe("buildIssueSubtreePayload — walk + strip", () => {
 
 describe("applyIssueImport — happy paths", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 10, issues };
+    return { schema_version: 11, issues };
   }
 
   it("allocates a fresh id and writes the single-card YAML", async () => {
@@ -368,7 +367,6 @@ describe("applyIssueImport — happy paths", () => {
         external_id: "",
         assigned_agent: null,
         history: [],
-        position: null,
       },
     ]);
     const result = await applyIssueImport("danxbot", repoLocalPath, payload);
@@ -608,7 +606,6 @@ describe("applyIssueImport — happy paths", () => {
       external_id: "trello-x",
       tracker: "trello",
       assigned_agent: "phil" as string | null,
-      position: 7.0 as number | null,
     };
     const result = await applyIssueImport(
       "danxbot",
@@ -619,7 +616,6 @@ describe("applyIssueImport — happy paths", () => {
     expect(out.dispatch).toBeNull();
     expect(out.external_id).toBe("");
     expect(out.assigned_agent).toBeNull();
-    expect(out.position).toBeNull();
     expect(out.history).toEqual([]);
     expect(out.triage.history).toEqual([]);
     expect(out.triage.last_status).toBe("");
@@ -652,7 +648,7 @@ describe("applyIssueImport — happy paths", () => {
 
 describe("applyIssueImport — validation failures", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 10, issues };
+    return { schema_version: 11, issues };
   }
 
   it("rejects a non-object body with 400", async () => {
@@ -673,7 +669,7 @@ describe("applyIssueImport — validation failures", () => {
   it("rejects a future schema_version with 400", async () => {
     await expect(
       applyIssueImport("danxbot", repoLocalPath, {
-        schema_version: 99,
+        schema_version: 109,
         issues: [],
       }),
     ).rejects.toMatchObject({ status: 400 });
@@ -706,7 +702,7 @@ describe("applyIssueImport — validation failures", () => {
   it("rejects an issue whose id does not match <PREFIX>-N", async () => {
     await expect(
       applyIssueImport("danxbot", repoLocalPath, {
-        schema_version: 10,
+        schema_version: 11,
         issues: [{ id: "not-an-id" }],
       }),
     ).rejects.toMatchObject({ status: 400 });
@@ -763,7 +759,7 @@ describe("applyIssueImport — validation failures", () => {
 
 describe("handleImportIssues — HTTP route", () => {
   function payloadOf(issues: Issue[]): IssueCopyPayload {
-    return { schema_version: 10, issues };
+    return { schema_version: 11, issues };
   }
 
   function depsForRepo() {
@@ -878,7 +874,7 @@ describe("handleGetIssueSubtree — HTTP route", () => {
     await handleGetIssueSubtree(req, res, "DX-1", "danxbot", depsForRepo());
     expect(res._getStatusCode()).toBe(200);
     const body = JSON.parse(res._getBody()) as IssueCopyPayload;
-    expect(body.schema_version).toBe(10);
+    expect(body.schema_version).toBe(11);
     expect(body.issues).toHaveLength(1);
     expect(body.issues[0].id).toBe("DX-1");
   });

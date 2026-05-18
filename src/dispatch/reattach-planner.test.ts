@@ -24,7 +24,7 @@ function makeIssueWithDispatch(opts: {
   ttlSeconds: number;
 }): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: opts.id,
     external_id: `ext-${opts.id}`,
@@ -43,7 +43,6 @@ function makeIssueWithDispatch(opts: {
     title: opts.id,
     description: "",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

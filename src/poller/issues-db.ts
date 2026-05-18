@@ -72,8 +72,8 @@ function toRow(raw: RawRow): DbIssueRow {
 
 /**
  * Fill schema-default values on rows whose on-disk YAML predates fields
- * that were added in later schema bumps (v4 history, v5 priority, v6
- * position / requires_human / assigned_agent / waiting_on optional).
+ * that were added in later schema bumps (v4 history, v5 priority,
+ * v6 requires_human / assigned_agent / waiting_on optional).
  *
  * The mirror (`src/db/issues-mirror.ts#readAndParse`) intentionally
  * stores the YAML payload verbatim — no `parseIssue` / `validateIssue`
@@ -102,7 +102,6 @@ function normalizeLoadedIssue(raw: unknown): Issue {
   if (obj.requires_human === undefined) obj.requires_human = null;
   if (obj.assigned_agent === undefined) obj.assigned_agent = null;
   if (obj.priority === undefined) obj.priority = 3.0;
-  if (obj.position === undefined) obj.position = null;
   if (obj.dispatch === undefined) obj.dispatch = null;
   if (obj.parent_id === undefined) obj.parent_id = null;
   if (obj.retro === undefined || obj.retro === null) {

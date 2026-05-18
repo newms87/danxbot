@@ -126,7 +126,7 @@ export class TrelloTracker implements IssueTracker {
     // calls `getComments` itself for the merge step).
     const parsed = parseCardTitle(card.name);
     return {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       // Internal id is parsed from the `#<PREFIX>-N: ` title prefix where
       // PREFIX is any 2-4 uppercase letters (Phase 2 of ISS-99 — supports
@@ -152,7 +152,6 @@ export class TrelloTracker implements IssueTracker {
       // it; inbound hydrate emits the schema default. Local YAML is
       // authoritative for `priority` (operator edits it directly).
       priority: 3.0,
-      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",

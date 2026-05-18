@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRef, watch } f
 import { useIssues } from "../../composables/useIssues";
 import { useListColors } from "../../composables/useListColors";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
-import { nextPosition } from "../../composables/cardPosition";
 import { DanxDialog, DanxSplitPanel, DanxTooltip } from "@thehammer/danx-ui";
 import CreateCardButton from "./CreateCardButton.vue";
 import FilterToolbar from "./FilterToolbar.vue";
@@ -57,7 +56,6 @@ const {
   refresh,
   fetchDetail,
   moveIssueList,
-  moveIssuePosition,
   applyIssueUpdate,
 } = useIssues(toRef(selectedRepo), includeClosed);
 
@@ -174,19 +172,6 @@ function onMoveDialogCancel(): void {
   pendingMove.value = null;
   moveDialogError.value = null;
   moveDialogBusy.value = false;
-}
-
-function onReorder(
-  issue: IssueListItem,
-  before: IssueListItem | null,
-  after: IssueListItem | null,
-): void {
-  // Compute the fractional-indexing midpoint from the neighbors'
-  // current positions (null neighbor → ±1 from the single neighbor).
-  // The backend's `position` ASC sort tier ranks the new value into
-  // the dropped slot; the SPA does NOT locally re-sort.
-  const position = nextPosition(before?.position ?? null, after?.position ?? null);
-  void moveIssuePosition(issue.id, position).catch(() => {});
 }
 
 const scopedEpicTitle = computed<string | null>(() => {
@@ -476,7 +461,6 @@ watch(
               @select="onSelect"
               @parent-click="onParentClick"
               @move="onMove"
-              @reorder="onReorder"
             />
           </div>
         </template>
@@ -508,7 +492,6 @@ watch(
           @select="onSelect"
           @parent-click="onParentClick"
           @move="onMove"
-          @reorder="onReorder"
         />
       </div>
     </template>

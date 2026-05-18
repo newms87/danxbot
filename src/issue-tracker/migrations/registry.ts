@@ -35,6 +35,7 @@
 import { KNOWN_SCHEMA_MAX } from "../schema-versions.js";
 import { migrateLegacyToV10 } from "./legacy-to-v10.js";
 import { migrateV9ToV10 } from "./v9-to-v10.js";
+import { migrateV10ToV11 } from "./v10-to-v11.js";
 
 export class MigrationRegistryError extends Error {
   constructor(message: string) {
@@ -55,11 +56,11 @@ export const migrationsByFromVersion: ReadonlyMap<
 > = new Map<number, (prev: unknown) => unknown>([
   // Pre-v9 schemas use the unified `legacy-to-v10` bridge — one
   // additive function with idempotent field defaults for every shape
-  // we ever shipped at v3-v8. Each registration jumps straight to v10
-  // (the registry's loop terminates the moment
-  // schema_version === KNOWN_SCHEMA_MAX). v9 keeps its own dedicated
-  // migration because v9 is the live writer-1 version and may grow
-  // version-specific transforms before the next bump.
+  // we ever shipped at v3-v8. Each registration jumps to v10; the
+  // registry's loop then composes the v10 → v11 hop automatically.
+  // v9 keeps its own dedicated migration because v9 carries the
+  // blocked.timestamp → blocked.at rename that the legacy bridge
+  // does not handle.
   [3, migrateLegacyToV10],
   [4, migrateLegacyToV10],
   [5, migrateLegacyToV10],
@@ -67,6 +68,7 @@ export const migrationsByFromVersion: ReadonlyMap<
   [7, migrateLegacyToV10],
   [8, migrateLegacyToV10],
   [9, migrateV9ToV10],
+  [10, migrateV10ToV11],
 ]);
 
 /**

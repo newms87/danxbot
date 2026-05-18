@@ -326,7 +326,7 @@ export async function createIssue(
  * GET /api/issues/:id/subtree?repo=<name> — DX-519. Reads the root issue
  * plus every descendant in `children[]` recursively, strips repo-specific
  * bits (external_id, tracker, dispatch, triage, history, assigned_agent,
- * position, comment ids, ac check_item_ids), and returns the resulting
+ * comment ids, ac check_item_ids), and returns the resulting
  * `IssueCopyPayload`. The Copy button in the drawer writes the JSON
  * response to the clipboard via `navigator.clipboard.writeText`.
  *

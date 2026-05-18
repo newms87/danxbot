@@ -53,7 +53,7 @@ function makeRepo(): { localPath: string; tmpdir: string } {
 
 function makeIssue(id: string): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: "",
@@ -65,7 +65,6 @@ function makeIssue(id: string): Issue {
     title: `Test ${id}`,
     description: `desc ${id}`,
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

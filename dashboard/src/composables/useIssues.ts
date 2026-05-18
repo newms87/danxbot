@@ -103,15 +103,6 @@ export interface UseIssues {
     options?: MoveIssueListOptions,
   ) => Promise<void>;
   /**
-   * DX-264 — optimistically write a new `position` for a card (intra-
-   * column reorder). The backend sort tier honors position ASC; the
-   * SPA does NOT re-sort locally (the post-write `issue:updated` SSE
-   * event re-affirms the canonically sorted list). On PATCH failure
-   * the local position is reverted and `error` carries the server
-   * message.
-   */
-  moveIssuePosition: (id: string, position: number | null) => Promise<void>;
-  /**
    * Invalidate the cached detail entry for `id`. Called after the drawer's
    * inline edit affordances PATCH the server; the next `fetchDetail(id)`
    * re-fetches the post-mutation YAML. List-row updates flow through the
@@ -167,9 +158,8 @@ export function applyIssueEvent(
  *
  * Concurrency: each REST hydrate captures a monotonic `reqId`; only
  * the latest outstanding request commits results. Optimistic
- * mutations (`moveIssueStatus` / `moveIssuePosition`) replay the
- * pending status onto every fresh hydrate so a SSE upsert mid-flight
- * doesn't snap back.
+ * `moveIssueList` mutations replay the pending status onto every fresh
+ * hydrate so a SSE upsert mid-flight doesn't snap back.
  */
 export function useIssues(
   repo: Ref<string>,
@@ -369,30 +359,6 @@ export function useIssues(
     }
   }
 
-  async function moveIssuePosition(
-    id: string,
-    position: number | null,
-  ): Promise<void> {
-    const requestRepo = repo.value;
-    if (!requestRepo) throw new Error("No repo selected");
-    const idx = issues.value.findIndex((i) => i.id === id);
-    if (idx === -1) throw new Error(`Unknown issue ${id}`);
-    const original = issues.value[idx];
-    if (original.position === position) return;
-    detailCache.delete(`${requestRepo}:${id}`);
-    issues.value = issues.value.map((i, j) =>
-      j === idx ? { ...i, position } : i,
-    );
-    try {
-      await patchIssue(requestRepo, id, { position });
-    } catch (err) {
-      issues.value = issues.value.map((i) => (i.id === id ? original : i));
-      const message = err instanceof Error ? err.message : String(err);
-      error.value = message;
-      throw err;
-    }
-  }
-
   function applyIssueUpdate(id: string): void {
     const requestRepo = repo.value;
     if (!requestRepo) return;
@@ -410,7 +376,6 @@ export function useIssues(
     refresh: hydrate,
     fetchDetail,
     moveIssueList,
-    moveIssuePosition,
     applyIssueUpdate,
   };
 }

@@ -134,7 +134,6 @@ export function projectIssue(
     updated_at: mtimeMs,
     created_at: deriveCreatedAt(issue.external_id, mtimeMs),
     priority: issue.priority,
-    position: issue.position,
     assigned_agent: issue.assigned_agent,
     requires_human: issue.requires_human,
     requires_human_child_count: childrenDetail.filter((c) => c.requires_human)

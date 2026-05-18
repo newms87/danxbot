@@ -61,7 +61,7 @@ function writeYaml(path: string, body: string, mtimeMs?: number): void {
 
 const v9Yaml = (id: string): string =>
   [
-    "schema_version: 9",
+    "schema_version: 10",
     "tracker: trello",
     `id: ${id}`,
     'external_id: ""',

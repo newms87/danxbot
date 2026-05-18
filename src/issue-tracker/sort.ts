@@ -21,12 +21,13 @@
  * parking-lot column most often want to see what was just put there.
  *
  * DX-627 (priority canon, Phase 1) collapsed the priority-bucket
- * comparator down to `priority DESC → id numeric ASC`. The prior
- * `position` (DX-264) / epic phase-order / ICE total DESC tiebreaks
- * were all stripped — priority is now the sole expression of dispatch
- * intent and id-FIFO breaks ties. `position` is dropped entirely in
- * a follow-up phase; `triage.ice.total` survives on the schema for
- * triage history / UI display but no longer participates in ordering.
+ * comparator down to `priority DESC → id numeric ASC`; DX-628
+ * (Phase 2) then dropped the `position` field from the schema
+ * entirely. The prior `position` (DX-264) / epic phase-order /
+ * ICE total DESC tiebreaks are all gone — priority is the sole
+ * expression of dispatch intent and id-FIFO breaks ties.
+ * `triage.ice.total` survives on the schema for triage history /
+ * UI display but no longer participates in ordering.
  *
  * The "tier" check considers BOTH the card's own `waiting_on` /
  * `blocked` fields AND any ancestor's. Ancestor walking re-uses the
@@ -160,10 +161,11 @@ export function sortInputsForStatus<T>(
     const bBlocked = isWaitingOrBlocked(b.issue, byId);
     if (aBlocked !== bBlocked) return aBlocked ? 1 : -1;
 
-    // DX-627 — priority is the sole canonical dispatch signal inside
-    // the priority bucket. Operator's intent (priority DESC) wins; the
-    // prior position / epic phase-order / ICE total tiebreaks were
-    // stripped in Phase 1 of the priority-canon epic.
+    // DX-627 / DX-628 — priority is the sole canonical dispatch signal
+    // inside the priority bucket. Operator's intent (priority DESC)
+    // wins; the prior position / epic phase-order / ICE total
+    // tiebreaks were stripped in Phase 1 + 2 of the priority-canon
+    // epic. Drag-reorder writes priority's decimal portion (Phase 3).
     const priorityDelta = b.issue.priority - a.issue.priority;
     if (priorityDelta !== 0) return priorityDelta;
 

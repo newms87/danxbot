@@ -3,14 +3,14 @@ import { healV10MissingFields } from "./heal-v10.js";
 
 describe("healV10MissingFields", () => {
   it("fills priority with canonical default 3 when missing", () => {
-    const input = { id: "DX-1", schema_version: 10 };
+    const input = { id: "DX-1", schema_version: 11 };
     const r = healV10MissingFields(input);
     expect(r.applied).toContain("priority");
     expect(r.value.priority).toBe(3);
   });
 
   it("fills every required-with-default v10 field when input is minimal", () => {
-    const input = { id: "DX-1", schema_version: 10 };
+    const input = { id: "DX-1", schema_version: 11 };
     const r = healV10MissingFields(input);
     expect(r.applied.sort()).toEqual(
       [
@@ -23,7 +23,6 @@ describe("healV10MissingFields", () => {
         "effort_level",
         "history",
         "list_name",
-        "position",
         "priority",
         "ready_at",
         "requires_human",
@@ -39,9 +38,8 @@ describe("healV10MissingFields", () => {
   it("returns pointer-equal input when nothing needed filling (idempotent)", () => {
     const input: Record<string, unknown> = {
       id: "DX-1",
-      schema_version: 10,
+      schema_version: 11,
       priority: 4.2,
-      position: 7,
       history: [],
       assigned_agent: null,
       waiting_on: null,
@@ -63,9 +61,8 @@ describe("healV10MissingFields", () => {
   it("does NOT overwrite a field that exists with falsy/zero/empty values", () => {
     const input: Record<string, unknown> = {
       id: "DX-1",
-      schema_version: 10,
+      schema_version: 11,
       priority: 0,
-      position: 0,
       history: [],
       conflict_on: [],
       db_updated_at: "",
@@ -73,12 +70,11 @@ describe("healV10MissingFields", () => {
     };
     const r = healV10MissingFields(input);
     expect(r.value.priority).toBe(0);
-    expect(r.value.position).toBe(0);
     expect(r.value.effort_level).toBeNull();
   });
 
   it("does not mutate the input object", () => {
-    const input: Record<string, unknown> = { id: "DX-1", schema_version: 10 };
+    const input: Record<string, unknown> = { id: "DX-1", schema_version: 11 };
     const before = Object.keys(input).slice();
     healV10MissingFields(input);
     expect(Object.keys(input)).toEqual(before);

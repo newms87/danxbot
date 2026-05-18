@@ -59,7 +59,7 @@ let nextHistorySeq = 0;
 
 function emptyIssue(overrides: Partial<Issue> = {}): Issue {
   const merged: Issue = {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: overrides.id ?? "ISS-1",
     external_id: "",
@@ -71,7 +71,6 @@ function emptyIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Title",
     description: "",
     priority: 3.0,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",
@@ -356,7 +355,6 @@ describe("listIssues", () => {
       created_at: 1_700_000_000_000,
       updated_at: 1_700_000_000_000,
       priority: 3,
-      position: null,
       assigned_agent: null,
       requires_human: null,
       requires_human_child_count: 0,
@@ -1400,18 +1398,7 @@ describe("listIssues — triage block projection (DX-516)", () => {
   });
 });
 
-describe("listIssues — position projection + sort tier (DX-264)", () => {
-  it("surfaces issue.position verbatim on each list item", async () => {
-    const repo = setupRepo();
-    writeIssue(repo, "open", emptyIssue({ id: "ISS-1", position: 4.25 }), 1);
-    writeIssue(repo, "open", emptyIssue({ id: "ISS-2", position: null }), 2);
-
-    const items = await listIssues(repo);
-    const byId = Object.fromEntries(items.map((i) => [i.id, i]));
-    expect(byId["ISS-1"].position).toBe(4.25);
-    expect(byId["ISS-2"].position).toBeNull();
-  });
-
+describe("listIssues — sort tier (DX-627 / DX-628 priority canon)", () => {
   it("position + ICE no longer affect ToDo column order — id-numeric ASC FIFO tiebreaks at equal priority (DX-627 canon)", async () => {
     const repo = setupRepo();
     // Pre-DX-627 the high-ICE positioned card would have outranked the
@@ -1423,7 +1410,6 @@ describe("listIssues — position projection + sort tier (DX-264)", () => {
       "open",
       emptyIssue({
         id: "ISS-1",
-        position: null,
         triage: {
           expires_at: "2030-01-01T00:00:00.000Z",
           reassess_hint: "",
@@ -1440,7 +1426,6 @@ describe("listIssues — position projection + sort tier (DX-264)", () => {
       "open",
       emptyIssue({
         id: "ISS-2",
-        position: 1,
         triage: {
           expires_at: "2030-01-01T00:00:00.000Z",
           reassess_hint: "",

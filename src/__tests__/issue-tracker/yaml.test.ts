@@ -26,7 +26,7 @@ import type { Issue } from "../../issue-tracker/interface.js";
 
 function fullIssue(overrides: Partial<Issue> = {}): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "trello",
     id: "ISS-1",
     external_id: "card-1",
@@ -38,7 +38,6 @@ function fullIssue(overrides: Partial<Issue> = {}): Issue {
     title: "Do the thing",
     description: "A longer body",
     priority: 3.0,
-    position: null,
     triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
     ac: [{ check_item_id: "ac-1", title: "Returns 200", checked: false }],
     comments: [
@@ -79,52 +78,29 @@ describe("serializeIssue / parseIssue", () => {
     expect(yaml2).toBe(yaml1);
   });
 
-  describe("position field (DX-264 — operator manual ordering inside a status column)", () => {
-    it("round-trips position: null (default — no operator override)", () => {
-      const issue = fullIssue({ position: null });
-      const yaml = serializeIssue(issue);
-      expect(yaml).toContain("position: null");
-      const parsed = parseIssue(yaml);
-      expect(parsed.position).toBeNull();
+  describe("position field — DROPPED in DX-628 (v10 → v11)", () => {
+    it("serializeIssue never emits a `position:` key on a v11 issue", () => {
+      const yaml = serializeIssue(fullIssue());
+      expect(yaml).not.toMatch(/^position:/m);
     });
 
-    it("round-trips a finite numeric position byte-for-byte", () => {
-      const issue = fullIssue({ position: 1.5 });
-      const yaml = serializeIssue(issue);
-      const parsed = parseIssue(yaml);
-      expect(parsed.position).toBe(1.5);
-      // Byte-stable: re-serializing the parsed issue produces the same YAML.
-      expect(serializeIssue(parsed)).toBe(yaml);
+    it("parseIssue silently tolerates a stray `position:` key (forward-compat with unknown future fields, drop on round-trip)", () => {
+      // After DX-628 ships, no on-disk YAML should carry `position` —
+      // the boot sweep migrates everything forward. Defense-in-depth:
+      // if a hand-edit or stale writer slips a `position` key into a
+      // v11 file, parseIssue accepts it (the validator only rejects
+      // unknown REQUIRED fields, not arbitrary extra keys) and
+      // re-serialize drops it.
+      const yaml = serializeIssue(fullIssue()) + "position: 4.25\n";
+      const parsed = parseIssue(yaml, { expectedPrefix: "ISS" });
+      expect("position" in parsed).toBe(false);
+      const reEmitted = serializeIssue(parsed);
+      expect(reEmitted).not.toMatch(/^position:/m);
     });
 
-    it("treats a missing position field as null on parse (back-compat for legacy YAMLs)", () => {
-      const issue = fullIssue();
-      const yaml = serializeIssue(issue);
-      const yamlNoPosition = yaml.replace(/\nposition:[^\n]*/, "");
-      expect(yamlNoPosition).not.toContain("position:");
-      const parsed = parseIssue(yamlNoPosition);
-      expect(parsed.position).toBeNull();
-    });
-
-    it("rejects position with a non-number, non-null value (string)", () => {
-      const yaml = serializeIssue(fullIssue()).replace(
-        "position: null",
-        'position: "1.5"',
-      );
-      expect(() => parseIssue(yaml)).toThrow(/position must be a finite number/);
-    });
-
-    it("rejects position with a non-finite numeric value (.inf)", () => {
-      const yaml = serializeIssue(fullIssue()).replace(
-        "position: null",
-        "position: .inf",
-      );
-      expect(() => parseIssue(yaml)).toThrow(/position must be a finite number/);
-    });
-
-    it("createEmptyIssue defaults position to null", () => {
+    it("createEmptyIssue never carries a position field on v11", () => {
       const issue = createEmptyIssue();
-      expect(issue.position).toBeNull();
+      expect("position" in issue).toBe(false);
     });
   });
 
@@ -285,18 +261,19 @@ describe("serializeIssue / parseIssue", () => {
       expect(serializeIssue(parsed)).toBe(yaml1);
     });
 
-    it("schema_version: 5 is now rejected — pre-MIN versions belong to the boot sweep, not the validator (DX-592)", () => {
+    it("schema_version: 5 is now rejected — pre-MIN versions belong to the boot sweep, not the validator (DX-628)", () => {
       // Pre-DX-592 the validator silently accepted v3..v9; the single-
-      // version tolerance window (MIN=9, MAX=10) tightens that to the
-      // immediate predecessor + canonical only. Older files are migrated
-      // forward by the boot sweep before they ever reach the validator;
-      // a v5 file arriving in-process is a programming error.
+      // version tolerance window (MIN=10, MAX=11 after DX-628) tightens
+      // that to the immediate predecessor + canonical only. Older
+      // files are migrated forward by the boot sweep before they ever
+      // reach the validator; a v5 file arriving in-process is a
+      // programming error.
       const yaml1 = serializeIssue(fullIssue()).replace(
-        "schema_version: 10",
+        "schema_version: 11",
         "schema_version: 5",
       );
       expect(() => parseIssue(yaml1, { expectedPrefix: "ISS" })).toThrow(
-        /schema_version must be an integer >= 9/,
+        /schema_version must be an integer >= 10/,
       );
     });
 
@@ -467,13 +444,13 @@ describe("serializeIssue / parseIssue", () => {
     // retired the migration scripts themselves.
     const yaml = "schema_version: 1\ntracker: trello\n";
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      /schema_version must be an integer >= 9/,
+      /schema_version must be an integer >= 10/,
     );
   });
 
   it("tolerates a prior `phases: [...]` key on read and drops it on re-serialize (ISS-81)", () => {
     const legacyYaml = [
-      "schema_version: 10",
+      "schema_version: 11",
       "tracker: trello",
       "id: ISS-1",
       'external_id: "ext-1"',
@@ -524,7 +501,7 @@ describe("validateIssue", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-42",
       external_id: "x1",
@@ -758,45 +735,41 @@ describe("validateIssue", () => {
 
   // ---- Test gap E: pin exact validator error wording ----
 
-  it("schema_version: 10 is the canonical version (DX-592 — current writer literal)", () => {
-    const result = validateIssue(valid({ schema_version: 10 }));
+  it("schema_version: 11 is the canonical version (DX-592 — current writer literal)", () => {
+    const result = validateIssue(valid({ schema_version: 11 }));
     expect(result.ok).toBe(true);
   });
 
-  it("schema_version: 9 is the immediate predecessor and migrates forward via the registry (DX-592)", () => {
-    // Single-version tolerance window: MIN=9, MAX=10. The validator
-    // invokes `migrateForward` ahead of per-field validation for v9
-    // inputs; the migration renames `blocked.timestamp` → `blocked.at`
-    // and defaults the five new v10 fields to `null`. The returned
-    // Issue's `schema_version` is the canonical type literal (10), not
-    // the input's 9 — same silent-downgrade discipline DX-280 set for
+  it("schema_version: 10 is the immediate predecessor and migrates forward via the registry (DX-628)", () => {
+    // Single-version tolerance window: MIN=10, MAX=11. The validator
+    // invokes `migrateForward` ahead of per-field validation for v10
+    // inputs; the v10→v11 migration drops the `position` field
+    // (folding any non-integer decimal into `priority`). The returned
+    // Issue's `schema_version` is the canonical type literal (11), not
+    // the input's 10 — same silent-downgrade discipline DX-280 set for
     // forward-compat reads.
-    const result = validateIssue(valid({ schema_version: 9 }));
+    const result = validateIssue(valid({ schema_version: 10, position: null }));
     expect(result.ok).toBe(true);
     if (result.ok) {
-      expect(result.issue.schema_version).toBe(10);
-      expect(result.issue.archived_at).toBeNull();
-      expect(result.issue.ready_at).toBeNull();
-      expect(result.issue.completed_at).toBeNull();
-      expect(result.issue.cancelled_at).toBeNull();
-      expect(result.issue.list_name).toBeNull();
+      expect(result.issue.schema_version).toBe(11);
+      expect("position" in (result.issue as unknown as Record<string, unknown>)).toBe(false);
     }
   });
 
-  it("schema_version: 8 is rejected — pre-MIN versions reach the validator only when boot sweep failed (DX-592)", () => {
-    const result = validateIssue(valid({ schema_version: 8 }));
+  it("schema_version: 9 is rejected — pre-MIN versions reach the validator only when boot sweep failed (DX-592)", () => {
+    const result = validateIssue(valid({ schema_version: 9 }));
     expect(result.ok).toBe(false);
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 9/.test(e),
+          /schema_version must be an integer >= 10/.test(e),
         ),
       ).toBe(true);
     }
   });
 
-  it("schema_version: 7 is rejected for the same reason (DX-592 single-version tolerance)", () => {
-    const result = validateIssue(valid({ schema_version: 7 }));
+  it("schema_version: 8 is rejected for the same reason (DX-592 single-version tolerance)", () => {
+    const result = validateIssue(valid({ schema_version: 8 }));
     expect(result.ok).toBe(false);
   });
 
@@ -816,9 +789,9 @@ describe("validateIssue", () => {
     }
   });
 
-  it("DX-592: validateIssue wraps a registry throw as {ok:false, errors:[\"schema migration failed: ...\"]} (does not let raw throws escape)", async () => {
+  it("DX-628: validateIssue wraps a registry throw as {ok:false, errors:[\"schema migration failed: ...\"]} (does not let raw throws escape)", async () => {
     // Defense-in-depth — `validateIssue` invokes `migrateForward` for
-    // v9 inputs (single-version tolerance) and the wrap-as-errors
+    // v10 inputs (single-version tolerance) and the wrap-as-errors
     // contract is what callers (chokidar mirror, /api/issues, sync.ts)
     // rely on. A future regression that drops the try/catch would let
     // a raw `MigrationRegistryError` escape and bring down every save.
@@ -828,17 +801,17 @@ describe("validateIssue", () => {
       "../../issue-tracker/migrations/registry.js"
     );
     const yamlMod = await import("../../issue-tracker/yaml.js");
-    const original = registry.migrationsByFromVersion.get(9);
+    const original = registry.migrationsByFromVersion.get(10);
     try {
-      // Swap the v9→v10 step for one that throws inside the chain.
+      // Swap the v10→v11 step for one that throws inside the chain.
       (registry.migrationsByFromVersion as Map<number, (prev: unknown) => unknown>).set(
-        9,
+        10,
         () => {
           throw new registry.MigrationRegistryError("synthetic mid-chain failure");
         },
       );
-      const v9Input = valid({ schema_version: 9 });
-      const result = yamlMod.validateIssue(v9Input, { expectedPrefix: "ISS" });
+      const v10Input = valid({ schema_version: 10 });
+      const result = yamlMod.validateIssue(v10Input, { expectedPrefix: "ISS" });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(
@@ -850,32 +823,34 @@ describe("validateIssue", () => {
     } finally {
       if (original) {
         (registry.migrationsByFromVersion as Map<number, (prev: unknown) => unknown>).set(
-          9,
+          10,
           original,
         );
       }
     }
   });
 
-  it("DX-592: a v9 raw YAML text round-trips end-to-end through parseIssue → serializeIssue with blocked.at + null v10 fields", () => {
-    // Operator-facing surface: on-disk v9 YAMLs continue to parse
+  it("DX-628: a v10 raw YAML text round-trips end-to-end through parseIssue → serializeIssue with position dropped + priority folded", () => {
+    // Operator-facing surface: on-disk v10 YAMLs continue to parse
     // (single-version tolerance window) and re-serialize as canonical
-    // v10 — `blocked.timestamp` becomes `blocked.at`, the five new
-    // fields default to `null` at the tail of the document. Locks the
-    // round-trip contract that the boot sweep (P2) will lean on.
-    const v9Yaml = [
-      "schema_version: 9",
+    // v11 — the `position` field is dropped, and any non-integer
+    // `position` decimal is folded into `priority`'s decimal portion
+    // so visible row order survives the bump. Locks the round-trip
+    // contract that the boot sweep relies on.
+    const v10Yaml = [
+      "schema_version: 10",
       "tracker: trello",
       "id: ISS-42",
       'external_id: ""',
       "parent_id: null",
       "children: []",
       "dispatch: null",
-      "status: Blocked",
+      "status: ToDo",
       "type: Feature",
       "title: legacy",
       "description: body",
       "priority: 3.0",
+      "position: 4.25",
       "triage:",
       "  expires_at: ''",
       "  reassess_hint: ''",
@@ -886,36 +861,32 @@ describe("validateIssue", () => {
       "ac: []",
       "comments: []",
       "retro: { good: '', bad: '', action_item_ids: [], commits: [] }",
+      "assigned_agent: null",
       "waiting_on: null",
-      "blocked:",
-      "  reason: legacy reason",
-      "  timestamp: '2026-05-10T00:00:00Z'",
+      "blocked: null",
+      "requires_human: null",
+      "conflict_on: []",
+      "effort_level: null",
       "history: []",
       "db_updated_at: ''",
+      "archived_at: null",
+      "ready_at: null",
+      "completed_at: null",
+      "cancelled_at: null",
+      "list_name: null",
       "",
     ].join("\n");
 
-    const parsed = parseIssue(v9Yaml, { expectedPrefix: "ISS" });
-    expect(parsed.schema_version).toBe(10);
-    expect(parsed.blocked).toEqual({
-      reason: "legacy reason",
-      at: "2026-05-10T00:00:00Z",
-    });
-    expect(parsed.archived_at).toBeNull();
-    expect(parsed.ready_at).toBeNull();
-    expect(parsed.completed_at).toBeNull();
-    expect(parsed.cancelled_at).toBeNull();
-    expect(parsed.list_name).toBeNull();
+    const parsed = parseIssue(v10Yaml, { expectedPrefix: "ISS" });
+    expect(parsed.schema_version).toBe(11);
+    // floor(3.0) + (4.25 - floor(4.25)) = 0.0 + 0.25... wait, floor(3.0) = 3, decimal = 0.25, sum = 3.25
+    expect(parsed.priority).toBe(3.25);
+    expect("position" in (parsed as unknown as Record<string, unknown>)).toBe(false);
 
-    // Re-serialized output emits the canonical v10 shape — blocked.at,
-    // five new fields at tail.
+    // Re-serialized output omits position entirely + stamps v11.
     const reEmitted = serializeIssue(parsed);
-    expect(reEmitted).toMatch(
-      /\nblocked:\n {2}reason: legacy reason\n {2}at: ['"]?2026-05-10T00:00:00Z['"]?/,
-    );
-    expect(reEmitted).toMatch(/^schema_version: 10$/m);
-    expect(reEmitted).toMatch(/^archived_at: null$/m);
-    expect(reEmitted).toMatch(/^list_name: null$/m);
+    expect(reEmitted).not.toMatch(/^position:/m);
+    expect(reEmitted).toMatch(/^schema_version: 11$/m);
   });
 
   it("schema_version above KNOWN_SCHEMA_MAX is forward-compat accepted with a console.warn (DX-280)", () => {
@@ -954,7 +925,7 @@ describe("validateIssue", () => {
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 9/.test(e),
+          /schema_version must be an integer >= 10/.test(e),
         ),
       ).toBe(true);
     }
@@ -966,7 +937,7 @@ describe("validateIssue", () => {
     if (!result.ok) {
       expect(
         result.errors.some((e) =>
-          /schema_version must be an integer >= 9/.test(e),
+          /schema_version must be an integer >= 10/.test(e),
         ),
       ).toBe(true);
     }
@@ -1067,7 +1038,7 @@ describe("validateIssue waiting_on is independent of status", () => {
     blocked: unknown = null,
   ): Record<string, unknown> {
     return {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-42",
       external_id: "",
@@ -1134,7 +1105,7 @@ describe("validateIssue waiting_on is independent of status", () => {
 
   it("parseIssue round-trips a serialized YAML carrying waiting_on + In Progress", () => {
     const yaml = [
-      "schema_version: 10",
+      "schema_version: 11",
       "tracker: trello",
       "id: ISS-42",
       'external_id: ""',
@@ -1178,7 +1149,7 @@ describe("children field (epic → phase linkage)", () => {
     overrides: Record<string, unknown> = {},
   ): Record<string, unknown> {
     return {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-100",
       external_id: "x1",
@@ -1274,7 +1245,7 @@ describe("schema_version < MIN (boot sweep escapes)", () => {
   it("rejects schema_version 2 with the canonical < MIN error", () => {
     const yaml = "schema_version: 2\ntracker: trello\n";
     expect(() => parseIssue(yaml, { expectedPrefix: "ISS" })).toThrow(
-      /schema_version must be an integer >= 9/,
+      /schema_version must be an integer >= 10/,
     );
   });
 });
@@ -1335,7 +1306,7 @@ describe("createEmptyIssue", () => {
 describe("serializeIssue byte-stable snapshot", () => {
   it("produces deterministic YAML for a canonical fixture", () => {
     const fixture: Issue = {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1347,7 +1318,6 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: "Canonical fixture",
       description: "First line of description.\nSecond line, with detail.",
       priority: 3.0,
-      position: null,
       triage: { expires_at: "", reassess_hint: "", last_status: "", last_explain: "", ice: { total: 0, i: 0, c: 0, e: 0 }, history: [] },
       ac: [
         { check_item_id: "ac-1", title: "Returns 200", checked: false },
@@ -1384,7 +1354,7 @@ describe("serializeIssue byte-stable snapshot", () => {
 
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 10
+      "schema_version: 11
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1400,7 +1370,6 @@ describe("serializeIssue byte-stable snapshot", () => {
         First line of description.
         Second line, with detail.
       priority: 3
-      position: null
       triage:
         expires_at: ""
         reassess_hint: ""
@@ -1457,7 +1426,7 @@ describe("serializeIssue byte-stable snapshot", () => {
     // — broken for diffing + git history. The companion test for the
     // `null` shape pins the same field's absence-from-payload contract.
     const fixture: Issue = {
-      schema_version: 10,
+      schema_version: 11,
       tracker: "trello",
       id: "ISS-99",
       external_id: "card-99",
@@ -1469,7 +1438,6 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: "Needs human",
       description: "Body",
       priority: 3.0,
-      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",
@@ -1507,7 +1475,7 @@ describe("serializeIssue byte-stable snapshot", () => {
 
     const serialized = serializeIssue(fixture);
     expect(serialized).toMatchInlineSnapshot(`
-      "schema_version: 10
+      "schema_version: 11
       tracker: trello
       id: ISS-99
       external_id: card-99
@@ -1519,7 +1487,6 @@ describe("serializeIssue byte-stable snapshot", () => {
       title: Needs human
       description: Body
       priority: 3
-      position: null
       triage:
         expires_at: ""
         reassess_hint: ""

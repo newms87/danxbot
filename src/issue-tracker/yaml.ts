@@ -76,6 +76,10 @@ const TRIAGE_HISTORY_CAP = 10;
  *    (`archived_at`, `ready_at`, `completed_at`, `cancelled_at`,
  *    `list_name`) + `blocked` payload's prior `timestamp` key renamed
  *    to `blocked.at` for naming consistency.
+ *  - v11 (DX-628 / parent epic DX-626 priority canon): `position` field
+ *    dropped. Non-integer position decimals are folded into priority's
+ *    decimal portion by the migration so visible row order survives
+ *    the bump; drag-reorder is rewired onto `priority` in Phase 3.
  *
  * The literal values live in `./schema-versions.ts` so the migration
  * registry can import them without creating a yaml.ts ↔ registry.ts
@@ -208,7 +212,7 @@ function emptyTriage(): IssueTriage {
  * fill gaps (the validator is strict and rejects missing fields outright).
  *
  * Defaults:
- *  - schema_version: 10 (v10 — DX-592)
+ *  - schema_version: 11 (v11 — DX-628, position field stripped)
  *  - tracker: "memory"
  *  - id: "" (caller is responsible for assigning via nextIssueId)
  *  - external_id: ""
@@ -242,7 +246,7 @@ export function createEmptyIssue(
   } = {},
 ): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: seed.id ?? "",
     external_id: seed.external_id ?? "",
@@ -255,7 +259,6 @@ export function createEmptyIssue(
     description: seed.description ?? "",
     priority:
       seed.priority !== undefined ? clampPriority(seed.priority) : PRIORITY_DEFAULT,
-    position: null,
     triage: emptyTriage(),
     ac: [],
     comments: [],
@@ -398,7 +401,6 @@ export function serializeIssue(issue: Issue): string {
     title: issue.title,
     description: issue.description,
     priority: issue.priority,
-    position: issue.position,
     triage: {
       expires_at: issue.triage.expires_at,
       reassess_hint: issue.triage.reassess_hint,
@@ -633,7 +635,7 @@ export function buildIssueIdRegex(prefix: string): RegExp {
  */
 export function issueToCreateInput(issue: Issue): CreateCardInput {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: issue.tracker,
     id: issue.id,
     parent_id: issue.parent_id,
@@ -1064,27 +1066,6 @@ export function validateIssue(
     }
   }
 
-  // Position: optional `number | null` (DX-264). Missing → `null`.
-  // Strict shape check at parse-time so a hand-typed garbage value
-  // (string, NaN, Infinity) fails loud instead of silently re-sorting
-  // the column. Finite number or null only — fractional-indexing
-  // midpoints stay representable, and `null` is the canonical "no
-  // operator override" sentinel that the sort tier checks against.
-  // Runs BEFORE the `errors.length > 0` early return so its push counts.
-  let positionValue: number | null = null;
-  if ("position" in v) {
-    const raw = v.position;
-    if (raw === null || raw === undefined) {
-      positionValue = null;
-    } else if (typeof raw !== "number" || !Number.isFinite(raw)) {
-      errors.push(
-        `position must be a finite number or null (got ${JSON.stringify(raw)})`,
-      );
-    } else {
-      positionValue = raw;
-    }
-  }
-
   // priority — REQUIRED. Strict canonical reader (DX-594): every v10
   // YAML on disk has been stamped by the boot sweep, so a missing key
   // here means a pre-sweep file slipped through. Out-of-range finite
@@ -1123,7 +1104,7 @@ export function validateIssue(
     // disk. Lockstep contract: when the writer bumps, bump this literal
     // AND KNOWN_SCHEMA_MAX above in the same commit (the `lockstep
     // invariant` test pins both directions).
-    schema_version: 10,
+    schema_version: 11,
     tracker: v.tracker as string,
     id: v.id as string,
     external_id: v.external_id as string,
@@ -1135,7 +1116,6 @@ export function validateIssue(
     title: v.title as string,
     description: description as string,
     priority: priorityValue,
-    position: positionValue,
     triage: triageResult as IssueTriage,
     ac: acResult as IssueAcItem[],
     comments: commentsResult as IssueComment[],

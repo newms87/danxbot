@@ -13,5 +13,5 @@
  *     `yaml.ts` AND publishing `@thehammer/danx-issue-mcp` in the
  *     SAME commit (see `<repo>/CLAUDE.md` § danx-issue-mcp lockstep).
  */
-export const KNOWN_SCHEMA_MIN = 9;
-export const KNOWN_SCHEMA_MAX = 10;
+export const KNOWN_SCHEMA_MIN = 10;
+export const KNOWN_SCHEMA_MAX = 11;

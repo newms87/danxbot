@@ -137,7 +137,6 @@ describe("EventBus — typed issue:updated topic", () => {
           updated_at: 0,
           created_at: 0,
           priority: 3,
-          position: null,
           assigned_agent: null,
           requires_human: null,
           requires_human_child_count: 0,

@@ -47,7 +47,7 @@ function buildIssueYaml(overrides: IssueOverrides = {}): string {
   // watcher invokes — keeps the fixture byte-identical to production
   // writes.
   return serializeIssue({
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: "",
@@ -59,7 +59,6 @@ function buildIssueYaml(overrides: IssueOverrides = {}): string {
     title: overrides.title ?? `Card ${id}`,
     description: "",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

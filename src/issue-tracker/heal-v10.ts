@@ -14,7 +14,7 @@
  *     migration with the field still absent. The strict v10 validator then
  *     rejects it fail-loud at read time.
  *   - A writer regression (hand-edit, buggy MCP write path, partial save)
- *     can produce a `schema_version: 10` file that lacks one of the
+ *     can produce a `schema_version: 11` file that lacks one of the
  *     required-with-default fields. Boot sweep currently sees the version
  *     at MAX and short-circuits to `unchanged++`, masking the writer bug
  *     until first read.
@@ -41,7 +41,6 @@
  */
 const V10_DEFAULTS: Record<string, () => unknown> = {
   priority: () => 3,
-  position: () => null,
   history: () => [],
   assigned_agent: () => null,
   waiting_on: () => null,

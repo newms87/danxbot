@@ -41,7 +41,7 @@ const MarkdownEditorStub = defineComponent({
 
 function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id: "DX-1",
     external_id: "",
@@ -53,7 +53,6 @@ function makeDetail(overrides: Partial<IssueDetail> = {}): IssueDetail {
     title: "Card",
     description: "Original description body",
     priority: 3,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

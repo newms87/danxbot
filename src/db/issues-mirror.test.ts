@@ -1027,7 +1027,7 @@ describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () =
     );
     const id = "DX-5483";
     const issue = {
-      schema_version: 10 as const,
+      schema_version: 11 as const,
       tracker: "memory" as const,
       id,
       external_id: "",
@@ -1039,7 +1039,6 @@ describe("DX-548 — watcher debug log distinguishes skip-match vs upsert", () =
       title: `Title for ${id}`,
       description: "Body",
       priority: 3.0,
-      position: null,
       triage: {
         expires_at: "",
         reassess_hint: "",

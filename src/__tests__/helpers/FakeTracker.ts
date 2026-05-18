@@ -389,7 +389,7 @@ export class FakeTracker implements IssueTracker {
 
   private toIssue(card: StoredCard): Issue {
     return {
-      schema_version: 10,
+      schema_version: 11,
       tracker: card.tracker,
       id: card.id,
       external_id: card.external_id,
@@ -401,7 +401,6 @@ export class FakeTracker implements IssueTracker {
       title: card.title,
       description: card.description,
       priority: card.priority,
-      position: null,
       triage: cloneTriage(card.triage),
       ac: card.ac.map((a) => ({ ...a })),
       comments: card.comments.map((c) => ({

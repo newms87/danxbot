@@ -50,7 +50,7 @@ import { ReconcileValidationError, type ReconcileResult } from "./reconcile-type
 
 function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
   return {
-    schema_version: 10,
+    schema_version: 11,
     tracker: "memory",
     id,
     external_id: "",
@@ -62,7 +62,6 @@ function makeIssue(id: string, status: IssueStatus = "ToDo"): Issue {
     title: `Title for ${id}`,
     description: "Body",
     priority: 3.0,
-    position: null,
     triage: {
       expires_at: "",
       reassess_hint: "",

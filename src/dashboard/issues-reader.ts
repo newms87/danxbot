@@ -120,16 +120,6 @@ export interface IssueListItem {
    */
   priority: number;
   /**
-   * Operator manual ordering knob inside a status column (DX-264). No
-   * longer affects the priority-bucket sort (DX-627 — priority canon,
-   * Phase 1 stripped position from the comparator); dropped from the
-   * schema entirely in a follow-up phase. Retained on the list item
-   * for the drag affordance: the SPA computes a neighbor midpoint on
-   * intra-column drop and PATCHes `/api/issues/:id` with the new value
-   * for display compatibility until the drop ships.
-   */
-  position: number | null;
-  /**
    * Resolved persona name (`AGENT_NAME_SHAPE`) when the multi-worker pick
    * algorithm has claimed this card for a specific agent (DX-200 / DX-164).
    * `null` when no agent owns the card. Surfaced on the list item so the
