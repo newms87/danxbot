@@ -117,16 +117,12 @@ describe("ListsManager", () => {
   });
 
   it("color input change triggers patchList with the new color", async () => {
-    // Per fc90faa (DX-617 follow-up): ListsManager renders a native
-    // `<input type="color">` until DanxColorPicker ships in
-    // `@thehammer/danx-ui`. Native picker enforces hex format at the
-    // browser layer — invalid-hex submission is unreachable, so only
-    // the happy path is covered here.
+    // DanxColorPicker commits on blur when the hex draft is valid + changed.
     mockPatchList.mockResolvedValueOnce({});
     const w = mountManager();
-    const colorInput = w.get(`[data-test="lists-color-u-review"]`);
+    const colorInput = w.get(`[data-test="lists-color-u-review-input"]`);
     await colorInput.setValue("#abcdef");
-    await colorInput.trigger("change");
+    await colorInput.trigger("blur");
     await vi.waitFor(() => {
       expect(mockPatchList).toHaveBeenCalledWith("danxbot", "u-review", { color: "#abcdef" });
     });
