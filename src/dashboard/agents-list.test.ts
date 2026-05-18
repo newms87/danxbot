@@ -51,6 +51,12 @@ vi.mock("../issue-tracker/load-issue-prefix.js", () => ({
   loadIssuePrefix: (...args: unknown[]) => mockLoadIssuePrefix(...args),
 }));
 
+const mockReadGithubCredentialsSnapshot = vi.fn();
+vi.mock("./agents-github.js", () => ({
+  readGithubCredentialsSnapshot: (...args: unknown[]) =>
+    mockReadGithubCredentialsSnapshot(...args),
+}));
+
 import {
   handleGetAgent,
   handleListAgents,
@@ -59,12 +65,20 @@ import {
 } from "./agents-list.js";
 import { deps, EMPTY_REPO_COUNTS, settings } from "./agents-test-fixtures.js";
 
+const GITHUB_UNREGISTERED = {
+  registered: false,
+  token_shape_valid: false,
+  last_validated_at: null,
+  last_validation_error: null,
+};
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockReadSettings.mockReturnValue(settings());
   mockCountDispatchesByRepo.mockResolvedValue({});
   mockReadFlag.mockReturnValue(null);
   mockLoadIssuePrefix.mockReturnValue("ISS");
+  mockReadGithubCredentialsSnapshot.mockResolvedValue(GITHUB_UNREGISTERED);
 });
 
 // ============================================================
@@ -312,6 +326,38 @@ describe("handleGetAgent", () => {
 
     expect(res._getStatusCode()).toBe(404);
     expect(JSON.parse(res._getBody()).error).toContain("nonexistent");
+  });
+
+  it("includes githubCredentials snapshot from readGithubCredentialsSnapshot (probe:false — DX-648)", async () => {
+    const githubSnap = {
+      registered: true,
+      token_shape_valid: true,
+      last_validated_at: "2026-05-18T08:30:00.000Z",
+      last_validation_error: null,
+    };
+    mockReadGithubCredentialsSnapshot.mockResolvedValue(githubSnap);
+    const res = createMockRes();
+    await handleGetAgent(res, "danxbot", deps());
+    const body = JSON.parse(res._getBody());
+    expect(body.githubCredentials).toEqual(githubSnap);
+    expect(mockReadGithubCredentialsSnapshot).toHaveBeenCalledWith(
+      "/repos/danxbot",
+      { probe: false },
+    );
+  });
+
+  it("degrades githubCredentials to registered=false when the reader throws", async () => {
+    mockReadGithubCredentialsSnapshot.mockRejectedValue(new Error("oops"));
+    const res = createMockRes();
+    await handleGetAgent(res, "danxbot", deps());
+    expect(res._getStatusCode()).toBe(200);
+    const body = JSON.parse(res._getBody());
+    expect(body.githubCredentials).toEqual({
+      registered: false,
+      token_shape_valid: false,
+      last_validated_at: null,
+      last_validation_error: null,
+    });
   });
 });
 

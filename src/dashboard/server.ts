@@ -50,6 +50,10 @@ import {
 } from "./playwright-proxy.js";
 import { handleGetAgent, handleListAgents } from "./agents-list.js";
 import {
+  handleGetGithubCredentials,
+  handlePatchGithubCredentials,
+} from "./agents-github.js";
+import {
   handleClearAgentBroken,
   handleClearAgentCriticalFailure,
   handleGetRoster,
@@ -350,6 +354,35 @@ async function route(
       req,
       res,
       decodeURIComponent(agentTrelloCredentialsMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // GET + PATCH /api/agents/:repo/github-credentials — user bearer
+  // required. DX-648 (Phase 2 of DX-646). GET returns the credential
+  // health snapshot (token shape + last probe result, NEVER the token
+  // value); PATCH rotates DANX_GITHUB_TOKEN in the repo's `.danxbot/.env`
+  // after probing api.github.com/user. Same auth band as the trello-
+  // credentials route — the handler's own `requireUser` produces 401;
+  // the dispatch token is rejected.
+  const agentGithubCredentialsMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/github-credentials$/,
+  );
+  if (method === "GET" && agentGithubCredentialsMatch) {
+    await handleGetGithubCredentials(
+      req,
+      res,
+      decodeURIComponent(agentGithubCredentialsMatch[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+  if (method === "PATCH" && agentGithubCredentialsMatch) {
+    await handlePatchGithubCredentials(
+      req,
+      res,
+      decodeURIComponent(agentGithubCredentialsMatch[1]),
       dispatchDeps,
     );
     return true;

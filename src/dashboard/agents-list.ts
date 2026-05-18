@@ -32,6 +32,10 @@ import { readSettings, type Settings } from "../settings-file.js";
 import { readFlag, type CriticalFailurePayload } from "../critical-failure.js";
 import { eventBus } from "./event-bus.js";
 import { loadIssuePrefix } from "../issue-tracker/load-issue-prefix.js";
+import {
+  readGithubCredentialsSnapshot,
+  type GithubCredentialsSnapshot,
+} from "./agents-github.js";
 
 const log = createLogger("agents-list");
 
@@ -84,6 +88,17 @@ export interface AgentSnapshot {
    * rather than failing the entire snapshot.
    */
   issuePrefix: string | null;
+  /**
+   * GitHub credential health snapshot — DX-648 (Phase 2 of DX-646). The
+   * dashboard SPA reads this to render the "GitHub token" sub-card next
+   * to the Trello credentials panel. Token VALUE is never included —
+   * only `{registered, token_shape_valid, last_validated_at,
+   * last_validation_error}`. `last_validated_at` is `null` when the
+   * shape check rejected the token (probe skipped). The probe result is
+   * cached in-process for 5 minutes per repo so a busy `/api/agents`
+   * poll doesn't hammer `api.github.com/user`.
+   */
+  githubCredentials: GithubCredentialsSnapshot;
 }
 
 const EMPTY_COUNTS: RepoDispatchCounts = {
@@ -179,6 +194,30 @@ export async function buildSnapshot(
     );
   }
 
+  // DX-648: GitHub credentials health for the Agents tab sub-card.
+  // Snapshot path is `probe: false` — NEVER touches the network. The
+  // SPA renders `last_validated_at: null` until a GET / PATCH against
+  // the github-credentials route populates the in-process probe cache.
+  // Errors degrade to the `registered: false` shape so a misconfigured
+  // repo still renders the rest of the snapshot.
+  let githubCredentials: GithubCredentialsSnapshot;
+  try {
+    githubCredentials = await readGithubCredentialsSnapshot(repo.localPath, {
+      probe: false,
+    });
+  } catch (err) {
+    log.warn(
+      `readGithubCredentialsSnapshot(${repo.name}) failed; rendering snapshot with registered=false`,
+      err,
+    );
+    githubCredentials = {
+      registered: false,
+      token_shape_valid: false,
+      last_validated_at: null,
+      last_validation_error: null,
+    };
+  }
+
   return {
     name: repo.name,
     repoName: repo.name,
@@ -188,6 +227,7 @@ export async function buildSnapshot(
     worker,
     criticalFailure,
     issuePrefix,
+    githubCredentials,
   };
 }
 

@@ -104,6 +104,12 @@ function snap(
     worker: { reachable: true, lastSeenMs: Date.now() },
     criticalFailure: null,
     issuePrefix: "ISS",
+    githubCredentials: {
+      registered: false,
+      token_shape_valid: false,
+      last_validated_at: null,
+      last_validation_error: null,
+    },
   } as AgentSnapshot;
 }
 

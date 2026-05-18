@@ -34,6 +34,12 @@ function snapshot(over: Partial<AgentSnapshot> = {}): AgentSnapshot {
     worker: { reachable: true, lastSeenMs: 1 },
     criticalFailure: null,
     issuePrefix: "DX",
+    githubCredentials: {
+      registered: false,
+      token_shape_valid: false,
+      last_validated_at: null,
+      last_validation_error: null,
+    },
     ...over,
   };
 }
