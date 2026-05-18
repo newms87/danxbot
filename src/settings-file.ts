@@ -40,6 +40,8 @@ import { dirname, resolve } from "node:path";
 import chokidar from "chokidar";
 import { createLogger } from "./logger.js";
 import type { RepoContext } from "./types.js";
+import { bumpEnvGen } from "./issue/env-generation.js";
+import { repoNameFromPath } from "./poller/repo-name.js";
 
 const log = createLogger("settings-file");
 
@@ -1268,10 +1270,43 @@ async function runWrite(
     const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
     writeFileSync(tmp, body, "utf-8");
     renameSync(tmp, path);
+    // DX-640 — agent-roster change is environment input for the picker
+    // and for conflict_on / waiting_on partner resolution. Bump envGen
+    // so the next reconcile re-derives per card. Gated on actual agents
+    // mutation so unrelated patches (overrides, display) don't churn.
+    if (agentsMapMutated(existing.agents ?? {}, merged.agents ?? {})) {
+      bumpEnvGen(repoNameFromPath(localPath), "settings.json agents{} mutated");
+    }
     return merged;
   } finally {
     await release();
   }
+}
+
+/**
+ * Shallow key-set comparison of the agents map. Returns true when:
+ *   - the set of keys differs, OR
+ *   - any per-key record's JSON shape differs.
+ *
+ * Used by `writeSettings` + `mutateAgents` to decide whether to call
+ * `bumpEnvGen` after a successful write. Stable-stringify is good
+ * enough here — the agents-map shape is mostly enum-flat and the
+ * comparison fires once per write, not in any hot path.
+ */
+function agentsMapMutated(
+  prev: Record<string, AgentRecord>,
+  next: Record<string, AgentRecord>,
+): boolean {
+  const prevKeys = Object.keys(prev).sort();
+  const nextKeys = Object.keys(next).sort();
+  if (prevKeys.length !== nextKeys.length) return true;
+  for (let i = 0; i < prevKeys.length; i++) {
+    if (prevKeys[i] !== nextKeys[i]) return true;
+  }
+  for (const k of nextKeys) {
+    if (JSON.stringify(prev[k]) !== JSON.stringify(next[k])) return true;
+  }
+  return false;
 }
 
 function safeParse(path: string): Settings {
@@ -1490,6 +1525,15 @@ export async function mutateAgents(
       const tmp = `${path}.tmp.${process.pid}.${Date.now()}`;
       writeFileSync(tmp, body, "utf-8");
       renameSync(tmp, path);
+      // DX-640 — agents-map mutated → bump envGen. `mutateAgents` is the
+      // only API that can DROP on-disk entries, so the key-set comparison
+      // is the load-bearing detector here.
+      if (agentsMapMutated(existing.agents ?? {}, merged.agents ?? {})) {
+        bumpEnvGen(
+          repoNameFromPath(localPath),
+          "settings.json agents{} mutated (mutateAgents)",
+        );
+      }
       return merged;
     } finally {
       await release();

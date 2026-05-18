@@ -34,10 +34,12 @@ import {
   _resetReconcileMutexes,
   _resetDispatchableCache,
   _resetTriageExpiresCache,
+  _resetSkipCache,
   setReconcileSchedulerHookForRepo,
   clearReconcileSchedulerHookForRepo,
   type ReconcileRepoContext,
 } from "./reconcile.js";
+import { _resetEnvGen } from "./env-generation.js";
 import {
   registerWriterDb,
   unregisterWriterDb,
@@ -118,6 +120,8 @@ beforeEach(async () => {
   _resetReconcileMutexes();
   _resetDispatchableCache();
   _resetTriageExpiresCache();
+  _resetSkipCache();
+  _resetEnvGen();
   // Drain any triage timers armed by prior tests in this file. Without
   // this, a Review/Blocked card from one describe block can leave a
   // setTimeout in the global module map that fires `reconcileIssue(...,
@@ -1092,6 +1096,60 @@ describe("reconcileIssue — Phase 2 step 9 + 10 recursion (DX-217)", () => {
       expect(depErrors).toHaveLength(1);
       expect(depErrors[0].fatal).toBe(false);
       expect(depErrors[0].message).toContain("DX-941");
+    },
+  );
+
+  it.skipIf(!dbHandle)(
+    "skip-cache is BYPASSED on recursion (DX-640) — parent re-derives via step 9 fanout",
+    async () => {
+      // Parent's own YAML hash + envGen will be unchanged when step 9
+      // fires its reconcile (its own children[] / parent_id don't move
+      // when a child's status flips). Pre-DX-640 the skip-cache would
+      // short-circuit the recursion and the parent's derived status
+      // would go stale. The `rec.depth > 0` bypass restores correctness.
+      const parent: Issue = {
+        ...makeIssue("DX-950", "In Progress"),
+        type: "Epic",
+        children: ["DX-951"],
+      };
+      const child: Issue = {
+        ...makeIssue("DX-951", "In Progress"),
+        parent_id: "DX-950",
+      };
+      writeYaml(dbCtx.openDir, "DX-950", parent);
+      writeYaml(dbCtx.openDir, "DX-951", child);
+      await seedDb(REPO, parent);
+      await seedDb(REPO, child);
+
+      // Warm the parent's skip-cache by reconciling it directly first.
+      // After this run, parent's (hash, envGen) is cached as
+      // "no-action steady-state".
+      await reconcileIssue(dbCtx.repo, "DX-950", "audit");
+
+      // Flip the child to Done in BOTH the DB and the YAML so step 9's
+      // recursion sees an all-Done children union and parent-derive
+      // fires Done. Parent's own hash + envGen are UNCHANGED — only
+      // the child moved.
+      const childDone: Issue = { ...child, status: "Done" };
+      writeYaml(dbCtx.openDir, "DX-951", childDone);
+      await dbHandle!.pool.query(
+        `UPDATE issues SET data = $1::jsonb WHERE repo_name = $2 AND id = $3`,
+        [JSON.stringify(childDone), REPO, "DX-951"],
+      );
+
+      // Reconciling the child fires step 9 → parent reconcile at
+      // depth=1. With recursion bypass, parent re-derives → flips to
+      // Done → file moves to closed/.
+      const result = await reconcileIssue(dbCtx.repo, "DX-951", "watcher");
+
+      expect(result.fanout.parentId).toBe("DX-950");
+      // Parent flipped to Done despite an unchanged cache entry.
+      expect(existsSync(resolve(dbCtx.closedDir, "DX-950.yml"))).toBe(true);
+      const reread = parseIssue(
+        readFileSync(resolve(dbCtx.closedDir, "DX-950.yml"), "utf-8"),
+        { expectedPrefix: "DX" },
+      );
+      expect(reread.status).toBe("Done");
     },
   );
 

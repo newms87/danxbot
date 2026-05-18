@@ -50,6 +50,10 @@ import { createLogger } from "../logger.js";
 import { setRepoName, clearRepoName } from "../poller/repo-name.js";
 import { runWithYields } from "../util/yield-loop.js";
 import { runCanonicalHash, runParseYamlBatch } from "../threadpool/pool.js";
+import {
+  bumpEnvGen,
+  graphFieldsChanged,
+} from "../issue/env-generation.js";
 
 const log = createLogger("issues-mirror");
 
@@ -305,6 +309,16 @@ export async function upsertIssueRowNow(
       err,
     );
     throw err;
+  }
+  // DX-640 — bump envGen when the children-graph mutated. The skip-cache
+  // in `reconcile.ts` uses `(hash, envGen)` as the cache key; without this
+  // bump a sibling card's reconcile could skip even though its parent's
+  // children[] just changed underneath it.
+  if (graphFieldsChanged(existing?.data ?? null, args.data)) {
+    bumpEnvGen(
+      args.repoName,
+      `writer:${args.id} children/parent_id mutated`,
+    );
   }
 }
 
@@ -734,6 +748,12 @@ export async function startIssuesMirror(
       // row before the file write — so for own-writes this branch is
       // the dominant case. The skip-match log lets the operator confirm
       // the external-vs-own write distribution from a worker log scan.
+      //
+      // DX-640 invariant: this skip-match branch MUST stay BEFORE the
+      // `bumpEnvGen` site below. The writer path (`upsertIssueRowNow`)
+      // already bumped on its own pre-write pass; if the watcher's own
+      // post-write fire also bumped, the same logical mutation would
+      // count twice and over-invalidate the per-card skip-cache.
       log.debug(
         `[${repoName}] mirrored ${parsed.id} (source=${source}, action=skip-match)`,
       );
@@ -762,6 +782,17 @@ export async function startIssuesMirror(
     log.debug(
       `[${repoName}] mirrored ${parsed.id} (source=${source}, action=upsert)`,
     );
+    // DX-640 — bump envGen when an external write (agent Edit, operator
+    // hand-edit, `git pull`) mutated children/parent_id. The writer path
+    // (`upsertIssueRowNow`) bumps too; chokidar's skip-match branch above
+    // returns before reaching here so the bump fires at most once per
+    // logical mutation (the writer-then-watcher overlap hits skip-match).
+    if (graphFieldsChanged(existing?.data ?? null, parsed.data)) {
+      bumpEnvGen(
+        repoName,
+        `${source}:${parsed.id} children/parent_id mutated`,
+      );
+    }
     await fireOnWatcherUpsert(parsed.id, source);
     return parsed.id;
   }
@@ -839,6 +870,10 @@ export async function startIssuesMirror(
       return;
     }
     log.debug(`[${repoName}] tombstoned ${id} (source=${source})`);
+    // DX-640 — a tombstoned card is a graph mutation. The card may have
+    // been someone's parent or someone's child; either way every sibling
+    // reconcile must re-derive on its next fire.
+    bumpEnvGen(repoName, `${source}:${id} tombstoned`);
   }
 
   async function processFileEvent(

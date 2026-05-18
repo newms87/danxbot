@@ -68,6 +68,7 @@ import {
   serializeIssue,
   IssueParseError,
 } from "../issue-tracker/yaml.js";
+import { getEnvGen } from "./env-generation.js";
 import { issuePath } from "../issue-tracker/paths.js";
 import {
   writeIssue,
@@ -326,6 +327,63 @@ export function _resetLastPushedHashes(): void {
 }
 
 /**
+ * Per-card `(hash, envGen)` skip-cache — `<repoName>-<id>` →
+ * `{lastReconciledHash, lastReconciledEnvGen}` (DX-640 / Phase 2 of
+ * the Computed Card State epic, DX-638).
+ *
+ * The pure-projection reconcile body produces `desired =
+ * deriveAll(observed, env)`. When both inputs are unchanged since
+ * the previous reconcile, `desired === observed`, the action set is
+ * empty, and the body is a no-op modulo cache bookkeeping.
+ *
+ * Hash = `sha256(canonicalize(parseYamlText(text)))` — the same recipe
+ * the chokidar mirror uses, so a YAML byte-stable re-write does NOT
+ * invalidate the cache.
+ *
+ * envGen = per-repo monotonic counter (see `env-generation.ts`).
+ * Bumped on every environment-level write that can move `desired`:
+ * `lists.yaml`, `children[]` / `parent_id` of OTHER cards (via the
+ * `writeIssue` path), the `agents{}` map in `settings.json`. Bumping
+ * invalidates EVERY card's skip-cache entry on its next reconcile —
+ * cheap, since cards whose `desired` truly didn't move will re-derive
+ * once and re-cache.
+ *
+ * Recursion bypass: when a reconcile fires via step 9/10 recursion
+ * (rec.depth > 0), the cache is BYPASSED on entry. The whole point of
+ * the recursion is "downstream state changed"; the parent's own hash
+ * may be unchanged but its derived state needs re-evaluation against
+ * the freshly-mutated child. The cache update at end-of-body still
+ * stamps the latest (hash, envGen) so a subsequent top-level reconcile
+ * can short-circuit if no environment input has moved.
+ *
+ * Tombstone clears the cache entry (mirrors the dispatchability +
+ * triage caches).
+ */
+interface SkipCacheEntry {
+  hash: string;
+  envGen: number;
+}
+
+const skipCacheByCardId = new Map<string, SkipCacheEntry>();
+
+function skipCacheKey(repoName: string, id: string): string {
+  return `${repoName}-${id}`;
+}
+
+/** Visible for tests — read the cache. */
+export function _getSkipCacheEntry(
+  repoName: string,
+  id: string,
+): SkipCacheEntry | undefined {
+  return skipCacheByCardId.get(skipCacheKey(repoName, id));
+}
+
+/** Visible for tests — drain the cache between cases. */
+export function _resetSkipCache(): void {
+  skipCacheByCardId.clear();
+}
+
+/**
  * Run `fn` while holding the per-key mutex. Concurrent calls for the
  * same key queue. A rejected `fn` does NOT block the next caller — the
  * map tail catches and swallows the rejection so the chain stays alive.
@@ -468,6 +526,10 @@ async function reconcileBody(
     // observation arm via the cache-miss branch in step 7b below.
     clearTriageTimer(repo.name, id);
     triageExpiresAtByCardId.delete(triageExpiresAtKey(repo.name, id));
+    // DX-640 — tombstone clears the skip-cache so a future re-creation
+    // of this id triggers a full re-derive (the body should not skip
+    // against a hash from before the file disappeared).
+    skipCacheByCardId.delete(skipCacheKey(repo.name, id));
     return tombstoneResult();
   }
 
@@ -491,7 +553,63 @@ async function reconcileBody(
   const repoName = repoNameFromPath(repo.localPath);
   const errors: ReconcileError[] = [];
 
-  // ---- Step 3: compute derived state ----
+  // ---- Step 2b: skip-cache fast-path (DX-640) ----
+  // Pure-projection invariant: `desired = deriveAll(observed, env)`.
+  // When `observed` (= prevHash) AND `env` (= envGen) are both unchanged
+  // since the last reconcile of this card, the body would re-derive the
+  // same `desired` and produce zero actions. Short-circuit.
+  //
+  // Recursion bypass: step 9/10 recursion fires precisely when downstream
+  // state changed (a child / dependent's reconcile mutated something).
+  // The parent / dependent's own hash may not have moved, but its
+  // derived-from-children state needs re-evaluation. Force the body
+  // to run by skipping the cache check on rec.depth > 0.
+  const currentEnvGen = getEnvGen(repoName);
+  if (rec.depth === 0) {
+    const cacheKey = skipCacheKey(repo.name, id);
+    const cached = skipCacheByCardId.get(cacheKey);
+    if (
+      cached !== undefined &&
+      cached.hash === prevHash &&
+      cached.envGen === currentEnvGen
+    ) {
+      log.debug(
+        `[${repo.name}] ${id}: skip-cache hit (hash=${prevHash.slice(0, 8)}, envGen=${currentEnvGen}, trigger=${trigger})`,
+      );
+      // Zero actions = zero side effects. The dispatchability +
+      // triage caches are already stamped from the previous reconcile
+      // that populated this skip-cache entry; they hold the correct
+      // values for the unchanged inputs.
+      //
+      // fanout.parentId intentionally `null` here even though the
+      // card may have a non-null `parent_id` — fanout describes the
+      // ACTIONS this reconcile would take, and a skip emits zero
+      // recursion. The only current consumer of `fanout.parentId`
+      // is the observability surface (logs / metrics); the picker
+      // reads `dispatchableChanged` only. Revisit if a downstream
+      // grows a cache-keyed lookup off `parentId`.
+      return {
+        changed: false,
+        prevHash,
+        nextHash: prevHash,
+        errors: [],
+        fanout: {
+          parentId: null,
+          dependents: [],
+          dispatchableChanged: false,
+        },
+      };
+    }
+  }
+
+  // ---- Step 3: derive desired state from (observed, env) ----
+  // Pure-projection seam — every step that produces an `actions` entry
+  // gates its mutation on a strict (observed != desired) check, so a
+  // steady-state re-derive emits ZERO history entries / writes /
+  // recursion. Phase 3 / DX-641 extends this slot with new heal steps;
+  // the contract that `applyHealHistory` only fires on real semantic
+  // deltas (not steady-state projection re-affirm) is enforced inside
+  // each gate below.
   let mutated: Issue = issue;
   let mutatedFlag = false;
   const now = new Date().toISOString();
@@ -500,6 +618,12 @@ async function reconcileBody(
   // itself queued behind other work. The waiting_on guard mirrors the
   // legacy `recomputeParentStatuses` skip (worker forces waiting-on
   // parents to ToDo, deriving over them would churn IO).
+  //
+  // History-gating: `applyParentDeriveMutation` fires the
+  // `worker:auto-derive` history entry only when the derived status
+  // ACTUALLY differs from observed (gated below on `derived.status !==
+  // mutated.status`). A re-derive that lands the same status —
+  // steady-state projection re-affirm — emits zero history.
   if (mutated.children.length > 0 && mutated.waiting_on === null) {
     const children = await dbListChildrenByParent(repoName, mutated.id);
     if (children.length > 0) {
@@ -514,6 +638,13 @@ async function reconcileBody(
   // 3b. File location heal — terminal status in `open/` moves to
   // `closed/`; non-terminal status in `closed/` moves to `open/` AND
   // appends a `worker:heal` history entry (real state delta).
+  //
+  // History-gating: `decideFileMove` returns a `healEntry` ONLY on the
+  // closed→open direction (real semantic delta — non-terminal status
+  // restored). The open→closed direction returns `targetDir: "closed",
+  // healEntry: null` — a janitorial fix that does NOT mint a history
+  // entry. Either branch lands in the no-history side when the file is
+  // already in the correct bucket (`decideFileMove` returns null).
   const fileMove = decideFileMove(mutated, loaded.bucket);
   if (fileMove !== null && fileMove.healEntry !== null) {
     mutated = applyHealHistory(mutated, fileMove.healEntry, now);
@@ -780,6 +911,19 @@ async function reconcileBody(
       ? currentDispatchable
       : currentDispatchable !== priorDispatchable;
   dispatchableByCardId.set(cacheKey, currentDispatchable);
+
+  // ---- Step 8b: skip-cache stamp (DX-640) ----
+  // Stamp the post-reconcile (hash, envGen) so the next top-level
+  // reconcile on this card can short-circuit if neither input has
+  // moved. Stamped at end-of-body so a partial body (thrown error
+  // before this point) does NOT leave the cache claiming "no work
+  // needed" — the next reconcile will then re-attempt every step,
+  // matching the trace + retry contract reconcile already provides
+  // through the catch/recordSystemError chain.
+  skipCacheByCardId.set(skipCacheKey(repo.name, id), {
+    hash: nextHash,
+    envGen: currentEnvGen,
+  });
 
   return {
     changed: reconcileMutated,

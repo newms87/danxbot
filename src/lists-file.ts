@@ -47,6 +47,8 @@ import { randomUUID } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { createLogger } from "./logger.js";
+import { bumpEnvGen } from "./issue/env-generation.js";
+import { repoNameFromPath } from "./poller/repo-name.js";
 
 const log = createLogger("lists-file");
 
@@ -423,6 +425,10 @@ export async function writeLists(
     try {
       validateLists(file);
       await writeListsRawUnsafe(localPath, file);
+      // DX-640 — lists.yaml is environment input for every card's
+      // `list_name` derivation. Bump envGen so the next reconcile of
+      // every card re-derives instead of skip-caching.
+      bumpEnvGen(repoNameFromPath(localPath), "lists.yaml mutated");
       return file;
     } finally {
       await release();
