@@ -324,6 +324,46 @@ describe("useCardDrag — bindColumn handler memoization", () => {
   });
 });
 
+describe("useCardDrag — onBeforeDragStart (DX-629)", () => {
+  it("invokes the caller-supplied hook BEFORE dragging.value is set", () => {
+    const onDrop = vi.fn().mockResolvedValue(undefined);
+    const order: string[] = [];
+    const drag = useCardDrag({
+      onDrop,
+      onBeforeDragStart: () => {
+        // At the moment the hook fires, `dragging.value` must still be null —
+        // the hook owns the "before the drag begins" window.
+        order.push(drag.dragging.value === null ? "hook-pre" : "hook-post");
+      },
+    });
+
+    const cardHandlers = drag.bindCard(fakeIssue("DX-H"));
+    cardHandlers.onDragstart(makeDragEvent("dragstart"));
+
+    expect(order).toEqual(["hook-pre"]);
+    expect(drag.dragging.value).not.toBeNull();
+  });
+
+  it("hook is optional — omitting it does not throw on dragstart", () => {
+    const drag = useCardDrag({ onDrop: vi.fn() });
+    const cardHandlers = drag.bindCard(fakeIssue("DX-O"));
+    expect(() => cardHandlers.onDragstart(makeDragEvent("dragstart"))).not.toThrow();
+    expect(drag.dragging.value).not.toBeNull();
+  });
+
+  it("repeated dragstarts re-fire the hook (idempotent — caller must be safe)", () => {
+    const hook = vi.fn();
+    const drag = useCardDrag({ onDrop: vi.fn(), onBeforeDragStart: hook });
+
+    const cardHandlers = drag.bindCard(fakeIssue("DX-R"));
+    cardHandlers.onDragstart(makeDragEvent("dragstart"));
+    cardHandlers.onDragend(makeDragEvent("dragend"));
+    cardHandlers.onDragstart(makeDragEvent("dragstart"));
+
+    expect(hook).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("useCardDrag — failed onDrop is awaited", () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {

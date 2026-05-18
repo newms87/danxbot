@@ -42,25 +42,37 @@ describe("useBoardSort — defaults + persistence", () => {
     localStorage.clear();
   });
 
-  it("defaults to dispatch/asc when localStorage is empty", () => {
+  it("defaults to priority/desc when localStorage is empty", () => {
     const sort = useBoardSort();
     expect(sort.getSort("todo")).toEqual(DEFAULT_BOARD_SORT);
+    expect(DEFAULT_BOARD_SORT).toEqual({ key: "priority", direction: "desc" });
     expect(sort.isDefault("todo")).toBe(true);
   });
 
-  it("setSort persists to localStorage under the versioned key", async () => {
+  it("setSort persists to localStorage under the v2 versioned key", async () => {
     const sort = useBoardSort();
     sort.setSort("review", { key: "created", direction: "desc" });
     await nextTick();
-    const raw = localStorage.getItem("danxbot.issueBoard.sort.v1");
+    const raw = localStorage.getItem("danxbot.issueBoard.sort.v2");
     expect(raw).toBeTruthy();
     const parsed = JSON.parse(raw!);
     expect(parsed.review).toEqual({ key: "created", direction: "desc" });
   });
 
-  it("hydrates per-column sort from localStorage on construction", () => {
+  it("v1 storage is ignored (key bumped to v2 in DX-629); column resets to default", () => {
+    // Old key still on disk from a pre-DX-629 session.
     localStorage.setItem(
       "danxbot.issueBoard.sort.v1",
+      JSON.stringify({ todo: { key: "dispatch", direction: "asc" } }),
+    );
+    const sort = useBoardSort();
+    expect(sort.isDefault("todo")).toBe(true);
+    expect(sort.getSort("todo")).toEqual(DEFAULT_BOARD_SORT);
+  });
+
+  it("hydrates per-column sort from v2 localStorage on construction", () => {
+    localStorage.setItem(
+      "danxbot.issueBoard.sort.v2",
       JSON.stringify({ todo: { key: "title", direction: "asc" } }),
     );
     const sort = useBoardSort();
@@ -70,15 +82,18 @@ describe("useBoardSort — defaults + persistence", () => {
 
   it("ignores garbage / invalid sort entries in localStorage", () => {
     localStorage.setItem(
-      "danxbot.issueBoard.sort.v1",
+      "danxbot.issueBoard.sort.v2",
       JSON.stringify({
         todo: { key: "wat", direction: "asc" },
         review: { key: "title", direction: "sideways" },
+        legacy: { key: "dispatch", direction: "asc" },
       }),
     );
     const sort = useBoardSort();
     expect(sort.isDefault("todo")).toBe(true);
     expect(sort.isDefault("review")).toBe(true);
+    // Renamed `dispatch` no longer validates → entry dropped → defaults restored.
+    expect(sort.isDefault("legacy")).toBe(true);
   });
 
   it("resetSort removes the column entry and reverts to default", async () => {
@@ -88,6 +103,28 @@ describe("useBoardSort — defaults + persistence", () => {
     await nextTick();
     expect(sort.isDefault("todo")).toBe(true);
     expect(sort.getSort("todo")).toEqual(DEFAULT_BOARD_SORT);
+  });
+
+  it("resetAllColumns clears every column (drag-start hook gate)", async () => {
+    const sort = useBoardSort();
+    sort.setSort("todo", { key: "id", direction: "desc" });
+    sort.setSort("review", { key: "title", direction: "asc" });
+    sort.setSort("done", { key: "updated", direction: "desc" });
+    sort.resetAllColumns();
+    await nextTick();
+    expect(sort.isDefault("todo")).toBe(true);
+    expect(sort.isDefault("review")).toBe(true);
+    expect(sort.isDefault("done")).toBe(true);
+    // Persisted state mirrors the in-memory reset.
+    const raw = localStorage.getItem("danxbot.issueBoard.sort.v2");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw!)).toEqual({});
+  });
+
+  it("resetAllColumns is idempotent on an already-default board", () => {
+    const sort = useBoardSort();
+    expect(() => sort.resetAllColumns()).not.toThrow();
+    expect(sort.isDefault("todo")).toBe(true);
   });
 });
 
@@ -104,10 +141,10 @@ describe("useBoardSort — independent columns", () => {
 });
 
 describe("sortIssuesBy", () => {
-  it("dispatch returns the input order verbatim", () => {
+  it("priority returns the input order verbatim (no client-side sort)", () => {
     const a = issue("DX-5");
     const b = issue("DX-1");
-    expect(sortIssuesBy([a, b], { key: "dispatch", direction: "asc" })).toEqual(
+    expect(sortIssuesBy([a, b], { key: "priority", direction: "desc" })).toEqual(
       [a, b],
     );
   });

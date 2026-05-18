@@ -14,6 +14,7 @@ import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import BlockedReasonDialog from "./BlockedReasonDialog.vue";
 import UnblockConfirmDialog from "./UnblockConfirmDialog.vue";
 import { typeToId } from "./issuePalette";
+import { nextPriority } from "../../composables/cardPriority";
 import type { Issue, IssueDetail, IssueListItem, List } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
@@ -56,6 +57,7 @@ const {
   refresh,
   fetchDetail,
   moveIssueList,
+  moveIssuePriority,
   applyIssueUpdate,
 } = useIssues(toRef(selectedRepo), includeClosed);
 
@@ -172,6 +174,24 @@ function onMoveDialogCancel(): void {
   pendingMove.value = null;
   moveDialogError.value = null;
   moveDialogBusy.value = false;
+}
+
+/**
+ * DX-629 — drag-reorder slot drop. The board emits the (before, after)
+ * neighbor pair; we compute the new priority decimal via `nextPriority`
+ * and PATCH `{priority}`. The optimistic update inside
+ * `moveIssuePriority` re-sorts the column within the same tick; SSE
+ * re-affirms within ~50ms.
+ */
+function onReorder(
+  issue: IssueListItem,
+  before: IssueListItem | null,
+  after: IssueListItem | null,
+): void {
+  const beforeP = before?.priority ?? null;
+  const afterP = after?.priority ?? null;
+  const priority = nextPriority(beforeP, afterP);
+  void moveIssuePriority(issue.id, priority).catch(() => {});
 }
 
 const scopedEpicTitle = computed<string | null>(() => {
@@ -461,6 +481,7 @@ watch(
               @select="onSelect"
               @parent-click="onParentClick"
               @move="onMove"
+              @reorder="onReorder"
             />
           </div>
         </template>
@@ -492,6 +513,7 @@ watch(
           @select="onSelect"
           @parent-click="onParentClick"
           @move="onMove"
+          @reorder="onReorder"
         />
       </div>
     </template>

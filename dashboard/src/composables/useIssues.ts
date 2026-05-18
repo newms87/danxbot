@@ -103,6 +103,16 @@ export interface UseIssues {
     options?: MoveIssueListOptions,
   ) => Promise<void>;
   /**
+   * DX-629 — write a new `priority` decimal for a drag-reorder. The
+   * caller (typically `IssuesPage.onReorder`) has already computed the
+   * value via `cardPriority.nextPriority(before, after)`. Mutates the
+   * local row optimistically so the column re-sorts by `priority DESC`
+   * within the same tick, then PATCHes `{priority}`. On failure the
+   * row reverts to its pre-move snapshot and the error surfaces via
+   * the `error` ref (same shape as `moveIssueList`).
+   */
+  moveIssuePriority: (id: string, priority: number) => Promise<void>;
+  /**
    * Invalidate the cached detail entry for `id`. Called after the drawer's
    * inline edit affordances PATCH the server; the next `fetchDetail(id)`
    * re-fetches the post-mutation YAML. List-row updates flow through the
@@ -359,6 +369,27 @@ export function useIssues(
     }
   }
 
+  async function moveIssuePriority(id: string, priority: number): Promise<void> {
+    const requestRepo = repo.value;
+    if (!requestRepo) throw new Error("No repo selected");
+    const idx = issues.value.findIndex((i) => i.id === id);
+    if (idx === -1) throw new Error(`Unknown issue ${id}`);
+    const original = issues.value[idx];
+    if (original.priority === priority) return;
+    detailCache.delete(`${requestRepo}:${id}`);
+    issues.value = issues.value.map((i, j) =>
+      j === idx ? { ...i, priority } : i,
+    );
+    try {
+      await patchIssue(requestRepo, id, { priority });
+    } catch (err) {
+      issues.value = issues.value.map((i) => (i.id === id ? original : i));
+      const message = err instanceof Error ? err.message : String(err);
+      error.value = message;
+      throw err;
+    }
+  }
+
   function applyIssueUpdate(id: string): void {
     const requestRepo = repo.value;
     if (!requestRepo) return;
@@ -376,6 +407,7 @@ export function useIssues(
     refresh: hydrate,
     fetchDetail,
     moveIssueList,
+    moveIssuePriority,
     applyIssueUpdate,
   };
 }

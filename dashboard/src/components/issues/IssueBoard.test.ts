@@ -442,8 +442,11 @@ describe("IssueBoard — per-column sort (DX-625)", () => {
     });
     expect(wrapper.find(`[data-test="column-sort-active-${reviewTid}"]`).exists()).toBe(false);
 
+    // DX-629 — canonical sort key renamed `dispatch` → `priority`, default
+    // direction `desc`. Selecting the default key+direction clears the
+    // active-label badge.
     await wrapper.find(`[data-test="column-sort-${todoTid}"]`).trigger("click");
-    await wrapper.find(`[data-test="column-sort-${todoTid}-dispatch-asc"]`).trigger("click");
+    await wrapper.find(`[data-test="column-sort-${todoTid}-priority-desc"]`).trigger("click");
     await vi.waitFor(() => {
       expect(wrapper.find(`[data-test="column-sort-active-${todoTid}"]`).exists()).toBe(false);
     });
@@ -479,7 +482,7 @@ describe("IssueBoard — per-column sort (DX-625)", () => {
     await wrapper.find(`[data-test="column-sort-${tid("To Do")}"]`).trigger("click");
     await wrapper.find(`[data-test="column-sort-${tid("To Do")}-created-desc"]`).trigger("click");
     await vi.waitFor(() => {
-      const raw = localStorage.getItem("danxbot.issueBoard.sort.v1");
+      const raw = localStorage.getItem("danxbot.issueBoard.sort.v2");
       expect(raw).toBeTruthy();
       expect(JSON.parse(raw!)["To Do"]).toEqual({ key: "created", direction: "desc" });
     });
@@ -488,7 +491,7 @@ describe("IssueBoard — per-column sort (DX-625)", () => {
 
   it("hydrates from localStorage on mount", () => {
     localStorage.setItem(
-      "danxbot.issueBoard.sort.v1",
+      "danxbot.issueBoard.sort.v2",
       JSON.stringify({ "To Do": { key: "id", direction: "asc" } }),
     );
     const a = makeIssue("DX-10", "ToDo");

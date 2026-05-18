@@ -2,7 +2,7 @@ import { reactive, watch } from "vue";
 import type { IssueListItem } from "../types";
 
 export type BoardSortKey =
-  | "dispatch"
+  | "priority"
   | "created"
   | "updated"
   | "type"
@@ -17,7 +17,7 @@ export interface BoardColumnSort {
 }
 
 export const BOARD_SORT_OPTIONS: { key: BoardSortKey; label: string }[] = [
-  { key: "dispatch", label: "Priority order" },
+  { key: "priority", label: "Priority" },
   { key: "created", label: "Created at" },
   { key: "updated", label: "Updated at" },
   { key: "type", label: "Type" },
@@ -26,11 +26,18 @@ export const BOARD_SORT_OPTIONS: { key: BoardSortKey; label: string }[] = [
 ];
 
 export const DEFAULT_BOARD_SORT: BoardColumnSort = {
-  key: "dispatch",
-  direction: "asc",
+  key: "priority",
+  direction: "desc",
 };
 
-const STORAGE_KEY = "danxbot.issueBoard.sort.v1";
+// Bumped to v2 in DX-629 when the canonical sort key was renamed from
+// `dispatch` to `priority`. v1 storage is silently dropped via the key
+// bump — `localStorage.getItem("v2")` returns null when only v1 exists,
+// so v2 readers start fresh (no read-time tolerance per the
+// "Single Canonical Schema — Fail Loud, No Legacy" rule). The
+// validator's unknown-key rejection inside `readStored` covers the
+// distinct case of a hand-edited v2 entry referencing a retired key.
+const STORAGE_KEY = "danxbot.issueBoard.sort.v2";
 
 function readStored(): Record<string, BoardColumnSort> {
   if (typeof localStorage === "undefined") return {};
@@ -80,7 +87,7 @@ function compare(a: IssueListItem, b: IssueListItem, key: BoardSortKey): number 
     }
     case "title":
       return a.title.localeCompare(b.title);
-    case "dispatch":
+    case "priority":
       return 0;
   }
 }
@@ -89,7 +96,7 @@ export function sortIssuesBy(
   issues: IssueListItem[],
   sort: BoardColumnSort,
 ): IssueListItem[] {
-  if (sort.key === "dispatch") return issues;
+  if (sort.key === "priority") return issues;
   const sign = sort.direction === "desc" ? -1 : 1;
   const indexed = issues.map((iss, idx) => ({ iss, idx }));
   indexed.sort((a, b) => {
@@ -105,6 +112,13 @@ export interface BoardSortApi {
   getSort(columnKey: string): BoardColumnSort;
   setSort(columnKey: string, sort: BoardColumnSort): void;
   resetSort(columnKey: string): void;
+  /**
+   * Reset every column known to the composable back to the default
+   * sort. Used by the drag-start hook so neighbor ordering reflects
+   * the canonical `priority DESC` view before a reorder PATCH writes
+   * a new decimal — see DX-629 Phase 3 spec for the rationale.
+   */
+  resetAllColumns(): void;
   isDefault(columnKey: string): boolean;
   sortedIssues(columnKey: string, issues: IssueListItem[]): IssueListItem[];
 }
@@ -133,9 +147,13 @@ export function useBoardSort(): BoardSortApi {
     delete state[columnKey];
   }
 
+  function resetAllColumns(): void {
+    for (const k of Object.keys(state)) delete state[k];
+  }
+
   function isDefault(columnKey: string): boolean {
     const s = state[columnKey];
-    return !s || s.key === "dispatch";
+    return !s || s.key === "priority";
   }
 
   function sortedIssues(
@@ -145,5 +163,13 @@ export function useBoardSort(): BoardSortApi {
     return sortIssuesBy(issues, getSort(columnKey));
   }
 
-  return { state, getSort, setSort, resetSort, isDefault, sortedIssues };
+  return {
+    state,
+    getSort,
+    setSort,
+    resetSort,
+    resetAllColumns,
+    isDefault,
+    sortedIssues,
+  };
 }

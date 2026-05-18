@@ -82,6 +82,17 @@ export interface UseCardDragOptions<TCol = IssueStatus> {
    * column references but with the same logical identity.
    */
   keyOf?: (col: TCol) => string | number;
+  /**
+   * DX-629 — fires synchronously inside `dragstart` BEFORE
+   * `dragging.value` is populated. The board uses it to reset every
+   * column's sort to default so drop-slot neighbor ordering reflects
+   * the canonical priority view (drag-reorder semantics need neighbors
+   * in priority order; dragging while a column is sorted by
+   * `updated_at` would compute meaningless priority decimals).
+   * Idempotent — repeated drag-starts must not flicker the UI; the
+   * board's `resetAllColumns` no-ops cleanly when already default.
+   */
+  onBeforeDragStart?: () => void;
 }
 
 export interface UseCardDragReturn<TCol = IssueStatus> {
@@ -167,6 +178,11 @@ export function useCardDrag<TCol = IssueStatus>(
   function bindCard(issue: IssueListItem, sourceCol?: TCol): CardDragHandlers {
     return {
       onDragstart(e: DragEvent): void {
+        // DX-629 — fire the caller-supplied pre-start hook BEFORE we
+        // populate `dragging.value`. The board uses this to reset every
+        // column's sort to default so drop-slot neighbor ordering
+        // reflects the canonical priority view before the drag begins.
+        opts.onBeforeDragStart?.();
         // `fromCol` snapshot: caller-supplied `sourceCol` wins (DX-586
         // list-driven board passes the actual List object); legacy
         // callers fall back to `issue.status` so the IssueStatus-typed

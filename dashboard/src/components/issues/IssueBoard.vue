@@ -10,6 +10,7 @@ import {
 import sortIcon from "danx-icon/src/fontawesome/solid/sort.svg?raw";
 import arrowUp from "danx-icon/src/fontawesome/solid/arrow-up.svg?raw";
 import arrowDown from "danx-icon/src/fontawesome/solid/arrow-down.svg?raw";
+import xmarkIcon from "danx-icon/src/fontawesome/solid/xmark.svg?raw";
 import type { IssueListItem, List, ListType } from "../../types";
 import { LIST_TYPE_LADDER } from "../../types";
 import IssueCard from "./IssueCard.vue";
@@ -76,6 +77,18 @@ const emit = defineEmits<{
    * `useIssues.moveIssueList`.
    */
   move: [issue: IssueListItem, toList: List];
+  /**
+   * DX-629 — drag-reorder within the same column. Parent computes the
+   * new priority decimal via `cardPriority.nextPriority(before, after)`
+   * and PATCHes `{priority}`. Either neighbor may be `null` (top /
+   * bottom of column). Same-card drops are short-circuited inside
+   * `useCardDrag.bindSlot` before this fires.
+   */
+  reorder: [
+    issue: IssueListItem,
+    before: IssueListItem | null,
+    after: IssueListItem | null,
+  ];
 }>();
 
 /**
@@ -146,10 +159,21 @@ function listForIssue(issue: IssueListItem): List | null {
   return defaultByType.value.get(type) ?? null;
 }
 
+const boardSort = useBoardSort();
+
 const cardDrag = useCardDrag<List>({
   onDrop: (issue, _from, to) => {
     emit("move", issue, to);
   },
+  onReorder: (issue, before, after) => {
+    emit("reorder", issue, before, after);
+  },
+  // DX-629 — reset every column's sort to default BEFORE the drag begins
+  // so drop-slot neighbors are in canonical priority order (a column
+  // sorted by `updated_at` would compute meaningless priority decimals
+  // for the dropped card). Idempotent — calling on an already-default
+  // board is a no-op (no UI flicker on repeat dragstarts).
+  onBeforeDragStart: () => boardSort.resetAllColumns(),
   // List `id` is the stable identity. The columns[] array is re-derived
   // every time the parent's `lists` prop updates (SSE on lists CRUD), so
   // object identity churns; the `id` survives.
@@ -217,8 +241,6 @@ watch(
   },
   { immediate: true },
 );
-
-const boardSort = useBoardSort();
 
 const sortMenuOpen = ref<Record<string, boolean>>({});
 
@@ -289,6 +311,51 @@ function cardAccent(issue: IssueListItem): string {
 /** Stable per-column test id (kebab-case, alphanumeric only). */
 function testIdFor(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+}
+
+/**
+ * Build the column's render list as alternating drop-slot / card items.
+ * Slots carry the (`before`, `after`) neighbor pair `useCardDrag.bindSlot`
+ * needs to compute drop semantics; cards carry the issue itself.
+ *
+ * Card keys (`card:<id>`) are stable across re-renders so Vue's
+ * TransitionGroup tracks each card and animates `move` as a reorder
+ * lands (DX-629 — adjacent cards slide rather than snap).
+ *
+ * Slot keys (`slot:<colId>:<beforeId>:<afterId>`) are INTENTIONALLY
+ * unstable-by-neighbor — when a reorder shifts cards around, the slot
+ * between cards N and N+1 effectively becomes "between Nx and Nx+1"
+ * with a new key. TransitionGroup fires enter/leave on those instead
+ * of move. Visible effect is nil (slots are 6px transparent strips)
+ * so this is the cheapest correct encoding of "slot identity ≡ its
+ * neighbor pair".
+ */
+type ColumnRow =
+  | { kind: "slot"; key: string; before: IssueListItem | null; after: IssueListItem | null }
+  | { kind: "card"; key: string; issue: IssueListItem };
+
+function buildColumnRows(colKey: string, list: IssueListItem[]): ColumnRow[] {
+  const rows: ColumnRow[] = [];
+  // Head slot — between top of column and first card.
+  rows.push({
+    kind: "slot",
+    key: `slot:${colKey}:head:${list[0]?.id ?? "tail"}`,
+    before: null,
+    after: list[0] ?? null,
+  });
+  for (let i = 0; i < list.length; i++) {
+    const issue = list[i];
+    rows.push({ kind: "card", key: `card:${issue.id}`, issue });
+    // Slot after this card → before next (or tail of column).
+    const next = list[i + 1] ?? null;
+    rows.push({
+      kind: "slot",
+      key: `slot:${colKey}:${issue.id}:${next?.id ?? "tail"}`,
+      before: issue,
+      after: next,
+    });
+  }
+  return rows;
 }
 </script>
 
@@ -393,6 +460,20 @@ function testIdFor(name: string): string {
             </div>
           </div>
         </DanxPopover>
+        <DanxButton
+          v-if="!boardSort.isDefault(col.name)"
+          variant=""
+          size="sm"
+          class="sort-clear-btn"
+          :tooltip="`Clear ${col.name} sort (reset to default Priority)`"
+          :aria-label="`Clear ${col.name} sort`"
+          :data-test="`column-sort-clear-${testIdFor(col.name)}`"
+          @click="boardSort.resetSort(col.name)"
+        >
+          <template #icon>
+            <DanxIcon :icon="xmarkIcon" />
+          </template>
+        </DanxButton>
         <button
           class="header-glyph"
           type="button"
@@ -402,29 +483,47 @@ function testIdFor(name: string): string {
       </div>
 
       <DanxScroll v-if="!collapsed[col.name]" class="cards-scroll">
-        <div class="cards">
-          <div v-if="(grouped[col.name]?.length ?? 0) === 0" class="empty">
-            No items
-          </div>
-          <template v-else>
-            <template
-              v-for="issue in grouped[col.name] ?? []"
-              :key="issue.id"
-            >
-              <IssueCard
-                :issue="issue"
-                :repo="props.repo"
-                :accent="cardAccent(issue)"
-                :dimmed="dimmedFor(issue)"
-                :scoped="scopedFor(issue)"
-                :dragging="cardDrag.isDragging(issue)"
-                :drag-handlers="cardDrag.bindCard(issue, col)"
-                @select="(i) => emit('select', i)"
-                @parent-click="(pid) => emit('parent-click', pid)"
-              />
-            </template>
-          </template>
+        <div v-if="(grouped[col.name]?.length ?? 0) === 0" class="empty-wrap">
+          <div
+            class="drop-slot drop-slot-empty"
+            v-bind="cardDrag.bindSlot(`slot:${col.id}:head:tail`, null, null)"
+            :class="{ 'slot-hover': cardDrag.isHoveringSlot(`slot:${col.id}:head:tail`) }"
+            :data-test="`column-slot-empty-${testIdFor(col.name)}`"
+          />
+          <div class="empty">No items</div>
         </div>
+        <TransitionGroup
+          v-else
+          tag="div"
+          name="card-reorder"
+          class="cards"
+          :data-test="`column-cards-${testIdFor(col.name)}`"
+        >
+          <template
+            v-for="row in buildColumnRows(col.id, grouped[col.name] ?? [])"
+            :key="row.key"
+          >
+            <div
+              v-if="row.kind === 'slot'"
+              class="drop-slot"
+              :class="{ 'slot-hover': cardDrag.isHoveringSlot(row.key) }"
+              v-bind="cardDrag.bindSlot(row.key, row.before, row.after)"
+              :data-test="`column-slot-${testIdFor(col.name)}-${row.before?.id ?? 'head'}-${row.after?.id ?? 'tail'}`"
+            />
+            <IssueCard
+              v-else
+              :issue="row.issue"
+              :repo="props.repo"
+              :accent="cardAccent(row.issue)"
+              :dimmed="dimmedFor(row.issue)"
+              :scoped="scopedFor(row.issue)"
+              :dragging="cardDrag.isDragging(row.issue)"
+              :drag-handlers="cardDrag.bindCard(row.issue, col)"
+              @select="(i) => emit('select', i)"
+              @parent-click="(pid) => emit('parent-click', pid)"
+            />
+          </template>
+        </TransitionGroup>
       </DanxScroll>
 
       <div v-else-if="(grouped[col.name]?.length ?? 0) > 0" class="collapsed-summary">
@@ -509,6 +608,19 @@ function testIdFor(name: string): string {
 .sort-btn :deep(.danx-icon) {
   width: 12px;
   height: 12px;
+}
+.sort-clear-btn {
+  padding: 2px 6px !important;
+  opacity: 0.55;
+  color: #94a3b8;
+}
+.sort-clear-btn:hover {
+  opacity: 1;
+  color: #f87171;
+}
+.sort-clear-btn :deep(.danx-icon) {
+  width: 10px;
+  height: 10px;
 }
 .sort-active-label {
   font-size: 10px;
@@ -608,6 +720,11 @@ function testIdFor(name: string): string {
 .cards {
   display: flex;
   flex-direction: column;
+  padding-right: 4px;
+}
+.empty-wrap {
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   padding-right: 4px;
 }
@@ -618,6 +735,51 @@ function testIdFor(name: string): string {
   color: #475569;
   border: 1px dashed #1e293b;
   border-radius: 8px;
+}
+.drop-slot {
+  height: 6px;
+  margin: 1px 0;
+  border-radius: 4px;
+  background: transparent;
+  transition: background-color 120ms ease, height 120ms ease;
+}
+.drop-slot.slot-hover {
+  height: 14px;
+  background: rgb(99 102 241 / 0.35);
+  outline: 2px dashed var(--col-accent, #a5b4fc);
+  outline-offset: -2px;
+}
+.drop-slot-empty {
+  height: 60px;
+  margin: 0;
+  border: 1px dashed #1e293b;
+  border-radius: 8px;
+}
+.drop-slot-empty.slot-hover {
+  height: 60px;
+  background: rgb(99 102 241 / 0.1);
+  border-color: var(--col-accent, #a5b4fc);
+}
+/* ListTransition — move animates the FLIP of reflowing cards as a
+   drag-reorder lands. Scoped to transform only (per DX-629 spec) so the
+   `.is-dragging` opacity hook on the drag source is not double-animated.
+   Enter/leave are subtle opacity-only fades for cross-column moves and
+   list-row removes. */
+.card-reorder-move {
+  transition: transform 220ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.card-reorder-enter-active,
+.card-reorder-leave-active {
+  transition: opacity 160ms ease;
+}
+.card-reorder-enter-from,
+.card-reorder-leave-to {
+  opacity: 0;
+}
+/* `position: absolute` is required during leave so the displaced card
+   doesn't occupy layout space while the rest reflow underneath. */
+.card-reorder-leave-active {
+  position: absolute;
 }
 .collapsed-summary {
   padding: 8px 10px;
