@@ -49,6 +49,7 @@ import { reportSystemError } from "../system-repair/report.js";
 import { createLogger } from "../logger.js";
 import { setRepoName, clearRepoName } from "../poller/repo-name.js";
 import { runWithYields } from "../util/yield-loop.js";
+import { runCanonicalHash, runParseYamlBatch } from "../threadpool/pool.js";
 
 const log = createLogger("issues-mirror");
 
@@ -368,25 +369,43 @@ function readAndParse(path: string, repoName: string): ReadResult | null {
   try {
     parsed = parseYamlText(text);
   } catch (err) {
-    log.warn(
-      `Parse error in ${path}: ${(err as Error).message} — storing as malformed`,
-    );
-    const stem = deriveIdFromPath(path);
-    void reportSystemError({
-      repo: repoName,
-      component: "issues-mirror",
-      err: err as Error,
-      samplePayload: { path, issue_id: stem },
-    });
-    return {
-      id: stem,
-      // Stamp `id` into the jsonb so the generated column on the `issues`
-      // table picks up a value — the (repo_name, id) PK rejects NULL ids,
-      // and an unparseable YAML otherwise has no `id` field. The stem is
-      // the only signal we have for which card the file represents.
-      data: { id: stem, _malformed: true, raw: text },
-    };
+    return malformedReadResult(path, text, repoName, err as Error);
   }
+  return finalizeParsed(path, text, repoName, parsed);
+}
+
+function malformedReadResult(
+  path: string,
+  text: string,
+  repoName: string,
+  err: Error,
+): ReadResult {
+  log.warn(
+    `Parse error in ${path}: ${err.message} — storing as malformed`,
+  );
+  const stem = deriveIdFromPath(path);
+  void reportSystemError({
+    repo: repoName,
+    component: "issues-mirror",
+    err,
+    samplePayload: { path, issue_id: stem },
+  });
+  return {
+    id: stem,
+    // Stamp `id` into the jsonb so the generated column on the `issues`
+    // table picks up a value — the (repo_name, id) PK rejects NULL ids,
+    // and an unparseable YAML otherwise has no `id` field. The stem is
+    // the only signal we have for which card the file represents.
+    data: { id: stem, _malformed: true, raw: text },
+  };
+}
+
+function finalizeParsed(
+  path: string,
+  text: string,
+  repoName: string,
+  parsed: unknown,
+): ReadResult {
   if (
     parsed === null ||
     parsed === undefined ||
@@ -420,6 +439,32 @@ function readAndParse(path: string, repoName: string): ReadResult | null {
     obj.id = resolvedId;
   }
   return { id: resolvedId, data: obj };
+}
+
+/**
+ * DX-635: read text + parse via threadpool. Used by `bootScan` +
+ * `periodicReconcile` where a 100+-card walk would otherwise hog the
+ * event loop on the sync `parseYamlText` burst. Returns `null` only
+ * for the ENOENT race (file unlinked between scan + read) — malformed
+ * YAMLs fold into the `_malformed: true` ReadResult exactly like
+ * `readAndParse` does.
+ */
+async function readAndParseViaPool(
+  path: string,
+  repoName: string,
+): Promise<ReadResult | null> {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  const [entry] = await runParseYamlBatch([text]);
+  if (!entry.ok) {
+    return malformedReadResult(path, text, repoName, new Error(entry.error));
+  }
+  return finalizeParsed(path, text, repoName, entry.data);
 }
 
 /**
@@ -637,12 +682,23 @@ export async function startIssuesMirror(
    * that order. Returns the parsed id on success (so the boot scan can
    * mark it as "seen on disk") or null when the file was missing / a DB
    * read failed (already routed through CRITICAL_FAILURE).
+   *
+   * `usePool: true` (DX-635) routes the parse + canonical-hash steps
+   * through the worker_threads pool. Used by `bootScan` +
+   * `periodicReconcile` where a 100+-card burst would otherwise hog
+   * the event loop (DX-633 root cause class). Watcher / writer
+   * callers keep `usePool: false` — single-event work has no burst
+   * cost to offload and the postMessage roundtrip would only add
+   * latency.
    */
   async function mirrorOne(
     path: string,
     source: EventSource,
+    opts: { usePool?: boolean } = {},
   ): Promise<string | null> {
-    const parsed = readAndParse(path, repoName);
+    const parsed = opts.usePool
+      ? await readAndParseViaPool(path, repoName)
+      : readAndParse(path, repoName);
     if (!parsed) return null; // ENOENT race — unlink will catch up
     // Skip non-canonical-id YAMLs silently. Agents routinely `Write` a
     // draft YAML with a descriptive filename, then call `danx_issue_create`
@@ -658,7 +714,9 @@ export async function startIssuesMirror(
       );
       return null;
     }
-    const contentHash = sha256(canonicalize(parsed.data));
+    const contentHash = opts.usePool
+      ? (await runCanonicalHash(parsed.data)).hash
+      : sha256(canonicalize(parsed.data));
     let existing:
       | { data: Record<string, unknown>; content_hash: string }
       | null;
@@ -838,7 +896,7 @@ export async function startIssuesMirror(
     const seenIds = new Set<string>();
     const settled = await runWithYields(
       paths,
-      (path) => mirrorOne(path, "boot-scan"),
+      (path) => mirrorOne(path, "boot-scan", { usePool: true }),
       { concurrency: 1 },
     );
     for (const entry of settled) {
@@ -879,7 +937,7 @@ export async function startIssuesMirror(
     // is safer under sequential cadence.
     await runWithYields(
       paths,
-      (path) => mirrorOne(path, "reconcile"),
+      (path) => mirrorOne(path, "reconcile", { usePool: true }),
       { concurrency: 1 },
     );
   }

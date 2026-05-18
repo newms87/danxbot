@@ -17,6 +17,10 @@ import {
   getLatestEventLoopSample,
   type EventLoopSample,
 } from "../observability/event-loop-monitor.js";
+import {
+  getThreadPoolStats,
+  type ThreadPoolStats,
+} from "../threadpool/pool.js";
 
 /**
  * Status is three-valued:
@@ -112,6 +116,14 @@ export interface WorkerHealthResponse {
    * outages.
    */
   eventLoop: EventLoopSample | null;
+  /**
+   * DX-635 worker_threads pool counters — `size` is the configured worker
+   * cap, `active` is currently-executing tasks, `queued` is waiting tasks.
+   * Surfaced on `/health` so the dashboard can render pool saturation
+   * alongside `eventLoop` (the two are correlated — sustained queued > 0
+   * with elevated p99 indicates the pool is the chokepoint).
+   */
+  threadpool: ThreadPoolStats;
 }
 
 export async function getHealthStatus(
@@ -170,5 +182,6 @@ export async function getHealthStatus(
     projects_dir,
     criticalFailure,
     eventLoop: getLatestEventLoopSample(),
+    threadpool: getThreadPoolStats(),
   };
 }

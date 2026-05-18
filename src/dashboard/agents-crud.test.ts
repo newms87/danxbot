@@ -649,6 +649,10 @@ describe("handlePatchAgent", () => {
       expect(patch.agents.alice.effortLevel).toBe("high");
     });
 
+    // Wall-clock-bound (per-iteration ~2s from `mkdtempSync` + settings
+    // chain × 7 names). Pre-existing pattern; the 14s isolated runtime
+    // sat right at the vitest default 15s ceiling and flaked under
+    // full-suite scheduling. Bumping to 30s removes the brittle edge.
     it("accepts every canonical effort level name", async () => {
       const names = [
         "min",
@@ -672,7 +676,7 @@ describe("handlePatchAgent", () => {
         const body = JSON.parse(res._getBody());
         expect(body.effortLevel).toBe(name);
       }
-    });
+    }, 30_000);
 
     it("returns 400 when effortLevel is not one of the canonical names", async () => {
       const req = authReqJSON("PATCH", { effortLevel: "extreme" });

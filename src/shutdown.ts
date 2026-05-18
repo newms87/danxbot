@@ -9,6 +9,7 @@ import { stopAllIssuesWatchers } from "./dashboard/issues-watcher.js";
 import { stopAllAgentsWatchers } from "./dashboard/agents-watcher.js";
 import { shutdownAllHmr } from "./template-hmr/index.js";
 import { closePool, closePlatformPool } from "./db/connection.js";
+import { destroyPool as destroyThreadPool } from "./threadpool/pool.js";
 import { createLogger } from "./logger.js";
 import type { WorkerCronLoopHandle } from "./cron/worker-loop.js";
 import type { EventLoopMonitorHandle } from "./observability/event-loop-monitor.js";
@@ -104,6 +105,16 @@ export async function shutdown(options: ShutdownOptions = {}): Promise<void> {
   // operator's box. Worker restart re-acquires HMR per live dispatch on
   // the next dispatch reattach pass.
   await shutdownAllHmr();
+
+  // DX-635 — drain the worker_threads pool BEFORE closing pg pools.
+  // Pool tasks may be mid-stringify of a system-error payload that
+  // hits pg on return; flushing them first keeps the dispatch
+  // post-completion path clean. `closeTimeout: 5000` (set at
+  // construction) caps the grace period; piscina then force-
+  // terminates remaining workers. Idempotent — no-op when no pool
+  // was ever created (dashboard-mode boot path that never hit the
+  // mirror).
+  await destroyThreadPool();
 
   // Close database connection pools
   await closePool();

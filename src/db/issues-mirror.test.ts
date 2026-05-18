@@ -406,6 +406,42 @@ describe("issues-mirror — boot scan", () => {
       rmSync(repo.tmpdir, { recursive: true, force: true });
     }
   });
+
+  it("DX-635 — malformed YAML at boot-scan time folds through the pool-routed parse into _malformed:true", async () => {
+    // Pre-DX-635 the malformed path went sync through `readAndParse`.
+    // Phase 2 routes boot-scan parse through the threadpool — when
+    // `runParseYamlBatch` returns `{ok: false, error}`, `readAndParseViaPool`
+    // folds it through `malformedReadResult` which mirrors the same
+    // `{_malformed: true, raw: <text>}` shape so the downstream
+    // dashboard reader contract is preserved.
+    const repo = makeRepo();
+    const db = createFakeDb();
+    const malformed = "id: DX-77\n  invalid yaml :::\n  - [";
+    writeYaml(repo.localPath, "open", "DX-77", malformed);
+
+    const mirror = await startIssuesMirror(repo, {
+      db,
+      disableWatcher: true,
+      reconcileIntervalMs: 0,
+    });
+    try {
+      const row = db.rows.get(rowKey("test-repo", "DX-77"));
+      expect(row).toBeDefined();
+      expect(row!.data).toMatchObject({
+        id: "DX-77",
+        _malformed: true,
+        raw: malformed,
+      });
+      // history row tagged with boot-scan source
+      const bootScanHistory = db.history.filter(
+        (h) => h.source === "boot-scan",
+      );
+      expect(bootScanHistory.some((h) => h.id === "DX-77")).toBe(true);
+    } finally {
+      await mirror.stop();
+      rmSync(repo.tmpdir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("issues-mirror — DEFAULT_RECONCILE_MS constant", () => {

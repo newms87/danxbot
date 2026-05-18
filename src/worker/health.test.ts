@@ -115,6 +115,29 @@ describe("getHealthStatus", () => {
     expect(result.queue_by_thread).toEqual({ "t1": 2, "t2": 1 });
   });
 
+  it("DX-635 — includes threadpool {size, active, queued} counters", async () => {
+    // Pool is lazy — before any task runs, `getThreadPoolStats` returns
+    // default-size/0/0. The /health response MUST carry the field so
+    // the dashboard can render pool saturation alongside `eventLoop`
+    // (the two are correlated — sustained queued > 0 with elevated
+    // p99 indicates the pool is the chokepoint).
+    mockCheckDbConnection.mockResolvedValue(true);
+    mockIsSlackConnected.mockReturnValue(true);
+    mockGetTotalQueuedCount.mockReturnValue(0);
+    mockGetQueueStats.mockReturnValue({});
+
+    const repo = makeRepoContext();
+    const result = await getHealthStatus(repo);
+
+    expect(result.threadpool).toBeDefined();
+    expect(typeof result.threadpool.size).toBe("number");
+    expect(typeof result.threadpool.active).toBe("number");
+    expect(typeof result.threadpool.queued).toBe("number");
+    // Lazy pool — no task has run, so active + queued are 0; size is
+    // the configured cap (default 2).
+    expect(result.threadpool.queued).toBe(0);
+  });
+
   it("returns 'halted' when the critical-failure flag is set, regardless of DB/Slack health", async () => {
     // Halt takes precedence over degraded/ok — operator must investigate.
     // Everything else is intentionally healthy to prove halt wins.

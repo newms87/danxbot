@@ -54,6 +54,17 @@ vi.mock("./db/connection.js", () => ({
   query: vi.fn().mockResolvedValue([]),
 }));
 
+const mockDestroyThreadPool = vi.fn();
+vi.mock("./threadpool/pool.js", () => ({
+  destroyPool: (...args: unknown[]) => mockDestroyThreadPool(...args),
+  getPool: vi.fn(),
+  getThreadPoolStats: () => ({ size: 0, active: 0, queued: 0 }),
+  runCanonicalHash: vi.fn(),
+  runJsonStringify: vi.fn(),
+  runParseYamlBatch: vi.fn(),
+  _resetPoolForTests: vi.fn(),
+}));
+
 vi.mock("./logger.js", () => ({
   createLogger: () => ({
     debug: vi.fn(),
@@ -110,6 +121,34 @@ describe("shutdown", () => {
     await shutdown({ exitProcess: false });
 
     expect(mockStopSlackListener).toHaveBeenCalledOnce();
+  });
+
+  it("DX-635 — drains the worker_threads pool before closing pg pools", async () => {
+    // Pool tasks may be mid-stringify of a system-error payload that
+    // hits pg on return; flushing the threadpool FIRST keeps the
+    // dispatch post-completion path clean.
+    const callOrder: string[] = [];
+    mockDestroyThreadPool.mockImplementation(async () => {
+      callOrder.push("destroyThreadPool");
+    });
+    mockClosePool.mockImplementation(async () => {
+      callOrder.push("closePool");
+    });
+    mockClosePlatformPool.mockImplementation(async () => {
+      callOrder.push("closePlatformPool");
+    });
+
+    await shutdown({ exitProcess: false });
+
+    expect(mockDestroyThreadPool).toHaveBeenCalledOnce();
+    expect(mockClosePool).toHaveBeenCalledOnce();
+    // destroyThreadPool MUST run BEFORE closePool — the ordering is
+    // load-bearing per the comment at `shutdown.ts` (pool drain first
+    // so in-flight stringify tasks can complete their pg writes
+    // before the pg pool dies).
+    const destroyIdx = callOrder.indexOf("destroyThreadPool");
+    const closeIdx = callOrder.indexOf("closePool");
+    expect(destroyIdx).toBeLessThan(closeIdx);
   });
 
   it("calls job.stop() on every running active job before exiting", async () => {

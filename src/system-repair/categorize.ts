@@ -7,6 +7,7 @@ import {
   type SystemErrorStatus,
 } from "./types.js";
 import { publishRepairErrorUpdated } from "./publish.js";
+import { runJsonStringify } from "../threadpool/pool.js";
 
 const VALID_STATUSES: ReadonlySet<SystemErrorStatus> = new Set([
   "open",
@@ -145,6 +146,17 @@ export async function recordError(
   const sigHash = signatureHash({ component, errClass, normalizedMsg });
   const categoryKey = `${component}:${errClass}`;
 
+  // DX-635: offload `JSON.stringify` of the sample payload to the
+  // worker_threads pool. SystemErrorSamplePayload carries a 5-frame
+  // stack + raw message + caller-supplied context (path / issue_id /
+  // patch arrays in the audit-drift path) — multi-KB on a deep
+  // reconcile error. Audit pass + reconcile audit-error funnel every
+  // report through here, so the off-thread stringify covers both
+  // call sites in one wiring point. Fire-and-forget callers
+  // (`void reportSystemError(...)`) absorb the postMessage roundtrip
+  // latency without affecting the main loop's response budget.
+  const samplePayloadJson = await runJsonStringify(samplePayload);
+
   const { rows } = await db.query<SystemErrorRowFromDb>(
     `
     INSERT INTO system_errors (
@@ -182,7 +194,7 @@ export async function recordError(
       component,
       errClass,
       normalizedMsg,
-      JSON.stringify(samplePayload),
+      samplePayloadJson,
       repo,
       REPAIR_CAP,
     ],
