@@ -57,6 +57,7 @@ const VALID_STATIC_TOPICS = new Set([
   "dispatch:updated",
   "agent:updated",
   "issue:updated",
+  "lists:updated",
   "system-errors",
   "system-repair-error:updated",
 ]);
