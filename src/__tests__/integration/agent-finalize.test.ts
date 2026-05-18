@@ -229,6 +229,19 @@ D("agent-finalize.sh (integration, real git)", () => {
     expect(distance).toBe("1");
   });
 
+  it("DX-644: after success origin/<agent> is fast-forwarded to match origin/main (remote agent branch never lags its own pushes)", () => {
+    writeFileSync(join(worktreePath, "feature.ts"), "export const x = 1;\n");
+    const result = runScript(AGENT, CARD, "Add feature x", "Added feature.ts");
+    expect(result.code).toBe(0);
+
+    // The origin bare repo now carries a `<agent>` ref AND it points at
+    // the same sha as `main`. The next prep-skill `git push` of the
+    // agent branch can therefore fast-forward without --force.
+    const originMainSha = git(originDir, "rev-parse", "main").trim();
+    const originAgentSha = git(originDir, "rev-parse", AGENT).trim();
+    expect(originAgentSha).toBe(originMainSha);
+  });
+
   // ============================================================
   // Sanity check (wrong branch)
   // ============================================================

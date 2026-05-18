@@ -150,4 +150,13 @@ done
 git fetch origin
 git reset --hard origin/main
 
+# 6. Fast-forward `origin/<agent>` to match `origin/main` so the remote
+#    agent branch never lags its own pushes (DX-644). The previous
+#    dispatch left `origin/<agent>` pointing at WIP commits the squash
+#    reset away locally; without this step those refs accumulate every
+#    dispatch and a future prep-skill `git push` of the agent branch
+#    fails non-fast-forward. `--force-with-lease` refuses to stomp a
+#    concurrent push (rare on agent-owned branches but possible).
+git push --force-with-lease origin "HEAD:refs/heads/$agent"
+
 echo "PUSHED $(git rev-parse origin/main)"
