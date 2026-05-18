@@ -164,6 +164,106 @@ describe("useListColors", () => {
     destroy();
   });
 
+  it("DX-682: three useListColors(repo) facades for the same repo fire ONE fetchLists call", async () => {
+    const { useListColors } = await import("./useListColors");
+    const apiMod = await import("../api");
+    const fetchMock = apiMod.fetchLists as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+
+    const a = useListColors("danxbot");
+    const b = useListColors("danxbot");
+    const c = useListColors("danxbot");
+    a.init();
+    b.init();
+    c.init();
+    await flushHydration();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith("danxbot");
+
+    // All facades observe the same data.
+    expect(a.colorFor("Review")).toBe("#3b82f6");
+    expect(b.colorFor("Review")).toBe("#3b82f6");
+    expect(c.colorFor("Review")).toBe("#3b82f6");
+
+    a.destroy();
+    b.destroy();
+    c.destroy();
+  });
+
+  it("DX-682: different repos still get independent fetches + subscriptions", async () => {
+    const { useListColors } = await import("./useListColors");
+    const apiMod = await import("../api");
+    const fetchMock = apiMod.fetchLists as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+
+    const a = useListColors("danxbot");
+    const b = useListColors("platform");
+    a.init();
+    b.init();
+    await flushHydration();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledWith("danxbot");
+    expect(fetchMock).toHaveBeenCalledWith("platform");
+
+    a.destroy();
+    b.destroy();
+  });
+
+  it("DX-682: one facade unmounting does NOT tear down the shared instance while others remain", async () => {
+    const { useListColors } = await import("./useListColors");
+    const apiMod = await import("../api");
+    const fetchMock = apiMod.fetchLists as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+
+    const a = useListColors("danxbot");
+    const b = useListColors("danxbot");
+    a.init();
+    b.init();
+    await flushHydration();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // First facade unmounts — second still attached, no fresh fetch.
+    a.destroy();
+    expect(b.lists.value.length).toBe(6);
+
+    // SSE still wired up — b receives the live update.
+    const recolored: ListsFile = {
+      ...fakeListsFile,
+      lists: fakeListsFile.lists.map((l) =>
+        l.name === "Review" ? { ...l, color: "#feedfa" } : l,
+      ),
+    };
+    emitListsUpdated("danxbot", recolored);
+    await nextTick();
+    expect(b.colorFor("Review")).toBe("#feedfa");
+
+    b.destroy();
+  });
+
+  it("DX-682: last facade destroy tears down — fresh init re-fetches", async () => {
+    const { useListColors } = await import("./useListColors");
+    const apiMod = await import("../api");
+    const fetchMock = apiMod.fetchLists as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+
+    const a = useListColors("danxbot");
+    a.init();
+    await flushHydration();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    a.destroy();
+
+    // Re-attach — fresh fetch.
+    const b = useListColors("danxbot");
+    b.init();
+    await flushHydration();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    b.destroy();
+  });
+
   it("does not call setInterval (no polling — SSE only)", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");

@@ -1,5 +1,5 @@
 import { ref, computed } from "vue";
-import type { Ref } from "vue";
+import type { ComputedRef, Ref } from "vue";
 import { fetchLists } from "../api";
 import {
   createHydrationBuffer,
@@ -21,23 +21,25 @@ import type { List, ListsFile } from "../types";
  * per-file source check in `useListColors.test.ts` is the tighter
  * fast-fail.
  *
- * One composable instance per (`useListColors` call), keyed by `repo`.
- * Multiple components in the same page share the same instance ONLY when
- * they import + call together — there is no module-scoped singleton
- * because the dashboard is multi-repo and the taxonomy diverges per repo
- * (operator-customizable). Tests cover the hydrate-then-patch race via
- * the `createHydrationBuffer` helper used by `useDispatches` / `useAgents`.
+ * **Per-repo shared instance with refcount (DX-682).** Every call to
+ * `useListColors(repo)` for the same `repo` returns a facade backed by
+ * ONE shared per-repo cache. The card-detail drawer mounts three
+ * components that each call `useListColors(repo)` (CardTimeline,
+ * DrawerHeader, DispatchGatesSection) — pre-DX-682 each instance fired
+ * its own `GET /api/lists?repo=...`. The shared cache fires ONE fetch
+ * per repo regardless of how many components mount, refcounting the
+ * underlying SSE subscription so the connection survives any single
+ * component unmounting and only tears down when the last consumer
+ * detaches. The dashboard is multi-repo, so the cache is keyed by repo
+ * — different repos still get independent fetches + subscriptions.
  *
  * Wire contract:
  * - `GET /api/lists?repo=` returns `{file: ListsFile}` (see `fetchLists`
  *   in `api.ts`). Composable extracts `file.lists` and stores it on
  *   `lists.value`.
  * - SSE topic `lists:updated` carries `{repoName, file}` (see
- *   `lists-routes.ts#publishUpdate`). Composable ignores events for
- *   other repos so a multi-repo SPA pulling `useListColors("danxbot")`
- *   and `useListColors("platform")` in different mounted views does not
- *   smear taxonomies. (The platform branch would create its own instance
- *   anyway — this is defense in depth.)
+ *   `lists-routes.ts#publishUpdate`). The shared instance ignores events
+ *   for other repos so cross-repo SPA panes don't smear taxonomies.
  */
 
 /**
@@ -60,9 +62,10 @@ export interface UseListColorsReturn {
   /** Manual re-hydrate; the DanxToggle on the Settings page reuses this for "retry on error". */
   refresh: () => Promise<void>;
   /**
-   * Open the SSE subscription + fire the initial hydrate. Idempotent across
-   * repeated calls (matches `useDispatches.init`). Component mounts call
-   * this from `onMounted` (or any equivalent lifecycle hook).
+   * Open the SSE subscription + fire the initial hydrate. Idempotent
+   * across repeated calls AND across multiple facades for the same repo
+   * (refcount). Component mounts call this from `onMounted` (or any
+   * equivalent lifecycle hook).
    */
   init: () => void;
   /** Tear down the SSE subscription. Components MUST call this from `onBeforeUnmount`. */
@@ -88,33 +91,36 @@ function isListsUpdatedPayload(
   return Array.isArray(file.lists);
 }
 
-export function useListColors(repo: string): UseListColorsReturn {
+interface SharedListColorsInstance {
+  lists: Ref<List[]>;
+  loading: Ref<boolean>;
+  error: Ref<string | null>;
+  indexByName: ComputedRef<Map<string, string>>;
+  refresh: () => Promise<void>;
+  applyOne: (state: List[], event: StreamEvent) => List[];
+  /** Number of facades that have called init() and not yet destroy(). */
+  refCount: number;
+  /** Live SSE stream + hydration buffer; null when refCount === 0. */
+  stream: UseStreamReturn | null;
+  buffer: HydrationBuffer<List[]> | null;
+}
+
+const sharedByRepo = new Map<string, SharedListColorsInstance>();
+
+function getOrCreateShared(repo: string): SharedListColorsInstance {
+  const cached = sharedByRepo.get(repo);
+  if (cached) return cached;
+
   const lists = ref<List[]>([]);
   const loading = ref<boolean>(false);
   const error = ref<string | null>(null);
 
-  let stream: UseStreamReturn | null = null;
-  let buffer: HydrationBuffer<List[]> | null = null;
-
-  /** Index for synchronous lookup. Recomputed whenever `lists.value` changes. */
   const indexByName = computed<Map<string, string>>(() => {
     const map = new Map<string, string>();
     for (const l of lists.value) map.set(l.name, l.color);
     return map;
   });
 
-  function colorFor(listName: string): string {
-    return indexByName.value.get(listName) ?? NEUTRAL_LIST_COLOR;
-  }
-
-  /**
-   * Apply one SSE event to a snapshot. Drops events for OTHER repos
-   * (defense in depth — the composable is per-repo and the typical caller
-   * picks one repo, but the SSE topic is global). Replaces the whole list
-   * for THIS repo because the producer always publishes the full file on
-   * every write (`lists-routes.ts#publishUpdate`). Cheaper than a per-list
-   * diff and avoids ordering bugs.
-   */
   function applyOne(state: List[], event: StreamEvent): List[] {
     if (event.topic !== "lists:updated") return state;
     if (!isListsUpdatedPayload(event.data)) {
@@ -126,39 +132,97 @@ export function useListColors(repo: string): UseListColorsReturn {
     return event.data.file.lists;
   }
 
-  async function hydrate(): Promise<void> {
-    if (!buffer) return;
-    loading.value = true;
-    error.value = null;
-    try {
-      const next = await buffer.hydrate(
-        async () => (await fetchLists(repo)).lists,
-        applyOne,
-      );
-      lists.value = next;
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err);
-    } finally {
-      loading.value = false;
-    }
+  const instance: SharedListColorsInstance = {
+    lists,
+    loading,
+    error,
+    indexByName,
+    applyOne,
+    refresh: async () => {
+      if (!instance.buffer) return;
+      loading.value = true;
+      error.value = null;
+      try {
+        const next = await instance.buffer.hydrate(
+          async () => (await fetchLists(repo)).lists,
+          applyOne,
+        );
+        lists.value = next;
+      } catch (err) {
+        error.value = err instanceof Error ? err.message : String(err);
+      } finally {
+        loading.value = false;
+      }
+    },
+    refCount: 0,
+    stream: null,
+    buffer: null,
+  };
+
+  sharedByRepo.set(repo, instance);
+  return instance;
+}
+
+/**
+ * Test-only: drop every shared per-repo instance. Tests call this in
+ * `beforeEach` so refcount / cached lists / streams do not leak across
+ * cases.
+ */
+export function __resetSharedListColorsForTesting(): void {
+  for (const inst of sharedByRepo.values()) {
+    inst.buffer?.close();
+    inst.stream?.disconnect();
+  }
+  sharedByRepo.clear();
+}
+
+export function useListColors(repo: string): UseListColorsReturn {
+  const shared = getOrCreateShared(repo);
+  // Each facade tracks whether IT called init() so destroy() decrements
+  // exactly once even on double-destroy calls.
+  let attached = false;
+
+  function colorFor(listName: string): string {
+    return shared.indexByName.value.get(listName) ?? NEUTRAL_LIST_COLOR;
   }
 
   function init(): void {
-    if (stream) return; // idempotent
-    stream = useStream();
-    buffer = createHydrationBuffer<List[]>(stream, ["lists:updated"]);
-    buffer.onLiveEvent((event) => {
-      lists.value = applyOne(lists.value, event);
-    });
-    void hydrate();
+    if (attached) return; // idempotent per facade
+    attached = true;
+    shared.refCount++;
+    if (shared.refCount === 1) {
+      // First consumer for this repo — open the stream + fire initial hydrate.
+      shared.stream = useStream();
+      shared.buffer = createHydrationBuffer<List[]>(shared.stream, [
+        "lists:updated",
+      ]);
+      shared.buffer.onLiveEvent((event) => {
+        shared.lists.value = shared.applyOne(shared.lists.value, event);
+      });
+      void shared.refresh();
+    }
   }
 
   function destroy(): void {
-    buffer?.close();
-    buffer = null;
-    stream?.disconnect();
-    stream = null;
+    if (!attached) return; // idempotent per facade
+    attached = false;
+    shared.refCount--;
+    if (shared.refCount <= 0) {
+      shared.refCount = 0;
+      shared.buffer?.close();
+      shared.buffer = null;
+      shared.stream?.disconnect();
+      shared.stream = null;
+    }
   }
 
-  return { lists, loading, error, colorFor, refresh: hydrate, init, destroy };
+  return {
+    lists: shared.lists,
+    loading: shared.loading,
+    error: shared.error,
+    colorFor,
+    refresh: shared.refresh,
+    init,
+    destroy,
+  };
 }
