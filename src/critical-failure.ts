@@ -172,7 +172,18 @@ const UNPARSEABLE_REASON =
  * via the `DANX_RUNTIME_ROOT` env var (see `src/runtime-volume.ts`).
  */
 export function flagPath(localPath: string): string {
-  return runtimeVolumePath(basename(localPath), FLAG_FILENAME);
+  return flagPathFromRepoName(basename(localPath));
+}
+
+/**
+ * Resolve the flag path keyed on the repo name directly. The worker
+ * call sites pass `localPath` because they already have it; the
+ * dashboard `agents-state.ts` route only knows the repo name and SHOULD
+ * NOT have to synthesize a fake `localPath` whose basename happens to
+ * equal it. ISP — both inputs map to the same runtime-volume file.
+ */
+export function flagPathFromRepoName(repoName: string): string {
+  return runtimeVolumePath(repoName, FLAG_FILENAME);
 }
 
 /**
@@ -278,7 +289,26 @@ export function readFlag(
   localPath: string,
   nowFn: () => number = Date.now,
 ): CriticalFailurePayload | null {
-  const path = flagPath(localPath);
+  return readFlagAtPath(flagPath(localPath), nowFn);
+}
+
+/**
+ * Read the flag keyed on the repo name directly — for the dashboard
+ * runtime-state route that does not have a `localPath` and SHOULD NOT
+ * synthesize one. Same fail-CLOSED / throttle-auto-clear contract as
+ * `readFlag(localPath)` — both delegate to `readFlagAtPath`.
+ */
+export function readFlagFromRepoName(
+  repoName: string,
+  nowFn: () => number = Date.now,
+): CriticalFailurePayload | null {
+  return readFlagAtPath(flagPathFromRepoName(repoName), nowFn);
+}
+
+function readFlagAtPath(
+  path: string,
+  nowFn: () => number = Date.now,
+): CriticalFailurePayload | null {
   if (!existsSync(path)) return null;
   try {
     const raw = readFileSync(path, "utf-8");

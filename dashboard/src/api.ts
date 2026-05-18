@@ -2,6 +2,7 @@ import { watch } from "vue";
 import type {
   AgentRecordWithName,
   AgentRosterResponse,
+  AgentRuntimeState,
   AgentSchedule,
   AgentSnapshot,
   ClassifiedTrelloMapping,
@@ -525,6 +526,23 @@ export async function fleshOutIssue(
 export async function fetchAgent(repo: string): Promise<AgentSnapshot> {
   const res = await fetchWithAuth(`/api/agents/${encodeURIComponent(repo)}`);
   if (!res.ok) throw new Error(`fetchAgent failed: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * GET /api/agents/:repo/state — DX-684 runtime-state read. Aggregates
+ * the three worker-owned runtime files (CRITICAL_FAILURE, sync-root-
+ * state.json, settings-runtime.json) so the SPA can render the per-repo
+ * runtime panel without N round-trips. See `src/dashboard/agents-state.ts`
+ * for the response shape (`AgentRuntimeState` re-exported via `types.ts`).
+ */
+export async function fetchAgentRuntimeState(
+  repo: string,
+): Promise<AgentRuntimeState> {
+  const res = await fetchWithAuth(
+    `/api/agents/${encodeURIComponent(repo)}/state`,
+  );
+  if (!res.ok) throw new Error(`fetchAgentRuntimeState failed: ${res.status}`);
   return res.json();
 }
 

@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import type { AgentSnapshot, Feature } from "../../types";
 import { envDefaultForFeature } from "../../featureDefaults";
+import { useAgentRuntimeState } from "../../composables/useAgentRuntimeState";
 import FeatureToggle from "./FeatureToggle.vue";
 import ConfigTable from "./ConfigTable.vue";
 import CriticalFailureBanner from "./CriticalFailureBanner.vue";
@@ -80,6 +81,21 @@ const lastSeen = computed(() => {
 });
 
 const links = computed(() => props.agent.settings.display.links ?? {});
+
+// DX-684 — read `critical_failure` from the new aggregated runtime-state
+// endpoint (`GET /api/agents/:repo/state`). The composable subscribes to
+// `agent:updated` / `repo-root-sync:*` SSE topics for live patches; the
+// snapshot's `agent.criticalFailure` is the hydration fallback for the
+// brief window before the composable's first fetch resolves AND for the
+// network-error path (the composable nulls its state on error so the
+// fallback takes over). Both reads pull from the same on-disk file
+// (`<runtime-volume>/<repo>/CRITICAL_FAILURE`).
+const repoNameRef = toRef(() => props.agent.name);
+const { state: runtimeState } = useAgentRuntimeState(repoNameRef);
+
+const effectiveCriticalFailure = computed(
+  () => runtimeState.value?.critical_failure ?? props.agent.criticalFailure,
+);
 </script>
 
 <template>
@@ -134,8 +150,8 @@ const links = computed(() => props.agent.settings.display.links ?? {});
     </header>
 
     <CriticalFailureBanner
-      v-if="agent.criticalFailure"
-      :flag="agent.criticalFailure"
+      v-if="effectiveCriticalFailure"
+      :flag="effectiveCriticalFailure"
       :repo-name="agent.name"
       :busy="clearingCriticalFailure"
       @clear="(r) => $emit('clearCriticalFailure', r)"

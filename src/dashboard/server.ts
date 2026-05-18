@@ -57,6 +57,7 @@ import {
 import { resolveReachableHost, workerHost } from "./dispatch-proxy.js";
 import { getDispatchById } from "./dispatches-db.js";
 import { handleGetAgent, handleListAgents } from "./agents-list.js";
+import { handleGetAgentRuntimeState } from "./agents-state.js";
 import {
   handleGetGithubCredentials,
   handlePatchGithubCredentials,
@@ -873,6 +874,23 @@ async function route(
       res,
       url.searchParams.get("repo"),
       decodeURIComponent(agentAvatarGet[1]),
+      dispatchDeps,
+    );
+    return true;
+  }
+
+  // GET /api/agents/:repo/state — DX-684. Aggregates the three worker-
+  // owned runtime files (CRITICAL_FAILURE, sync-root-state.json,
+  // settings-runtime.json) into one read response. Matched BEFORE the
+  // bare `/api/agents/:repo` snapshot route so the `/state` tail is
+  // not swallowed.
+  const agentStateMatch = url.pathname.match(
+    /^\/api\/agents\/([^/]+)\/state$/,
+  );
+  if (method === "GET" && agentStateMatch) {
+    await handleGetAgentRuntimeState(
+      res,
+      decodeURIComponent(agentStateMatch[1]),
       dispatchDeps,
     );
     return true;

@@ -39,6 +39,10 @@ export interface DispatchDetail {
 
 export type { AgentSnapshot, WorkerHealth } from "@backend/dashboard/agents-list.js";
 export type {
+  AgentRuntimeState,
+  DriftSnapshot,
+} from "@backend/dashboard/agents-state.js";
+export type {
   RepoRootSyncError,
   RepoRootSyncReason,
 } from "@backend/worker/sync-root-types.js";
