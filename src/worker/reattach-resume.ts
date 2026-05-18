@@ -46,15 +46,19 @@
 
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { createLogger } from "../logger.js";
 import { updateDispatch } from "../dashboard/dispatches-db.js";
 import { dispatch } from "../dispatch/core.js";
 import { findInProgressIssueByDispatchId } from "../poller/local-issues.js";
 import {
   clearDispatchAndWrite,
+  issuePath,
   loadLocal,
   stampDispatchAndWrite,
 } from "../poller/yaml-lifecycle.js";
+import { parseIssue } from "../issue-tracker/yaml.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import { readSettings } from "../settings-file.js";
 import type { Dispatch } from "../dashboard/dispatches.js";
 import type { Issue, IssueDispatch } from "../issue-tracker/interface.js";
@@ -75,6 +79,7 @@ export interface AutoResumeOutcome {
     | "no-jsonl-path"
     | "no-workspace"
     | "no-matching-yaml"
+    | "card-not-in-progress-on-disk"
     | "dispatch-threw";
 }
 
@@ -144,6 +149,50 @@ export async function attemptAutoResume(
   const issue = await findInProgressIssueByDispatchId(repo.localPath, row.id);
   if (!issue) {
     return { resumed: false, refusalReason: "no-matching-yaml" };
+  }
+
+  // DX-655 — disk re-verify gate. `findInProgressIssueByDispatchId`
+  // reads `dbListOpenIssues`, which lags the on-disk truth by up to
+  // the chokidar 5s mirror debounce. Within that window an agent that
+  // has already stamped `blocked.at` / `completed_at` / `cancelled_at`
+  // / `requires_human` on disk still appears In Progress in the DB,
+  // and the legacy gate would re-launch the terminal card on every
+  // worker restart — producing the DX-655 dispatch loop. Reading the
+  // YAML directly off disk and re-deriving the semantic status is the
+  // authoritative check; the DB-backed `findInProgressIssueByDispatchId`
+  // call above is kept as the cheap pre-filter for the common case
+  // (most rows the boot scan walks are not loop-class). Refuse on:
+  //   - derived status != In Progress (rules 1/2/3/6/7 → terminal-ish)
+  //   - requires_human != null (orthogonal dispatch gate; auto-resume
+  //     would defeat the human-gate by re-launching the card the
+  //     operator just parked)
+  const openYamlPath = issuePath(repo.localPath, issue.id, "open");
+  if (existsSync(openYamlPath)) {
+    try {
+      const onDisk = parseIssue(readFileSync(openYamlPath, "utf-8"), {
+        expectedPrefix: repo.issuePrefix,
+      });
+      const derived = deriveStatus(onDisk);
+      if (derived !== "In Progress" || onDisk.requires_human !== null) {
+        log.info(
+          `[Dispatch ${row.id}] auto-resume: refused — on-disk derived=${derived}, requires_human=${onDisk.requires_human !== null} (DB mirror was stale)`,
+        );
+        return {
+          resumed: false,
+          refusalReason: "card-not-in-progress-on-disk",
+        };
+      }
+    } catch (err) {
+      // YAML missing / unparseable on disk is itself a refusal — the
+      // dispatch can't proceed without a card. Fall through to the
+      // existing no-matching-yaml semantics; caller still falls back
+      // to markOrphaned and the operator sees the row as failed.
+      log.warn(
+        `[Dispatch ${row.id}] auto-resume: disk re-verify threw — refusing resume`,
+        err,
+      );
+      return { resumed: false, refusalReason: "card-not-in-progress-on-disk" };
+    }
   }
 
   const agent = (() => {
