@@ -22,6 +22,8 @@ import {
   type InsertRepairInput,
   type CompensateInput,
 } from "../../cron/jobs/self-repair-dispatch.js";
+import { finalizeRepairByDispatchId } from "../../system-repair/finalize-by-dispatch-id.js";
+import { REPAIR_CAP } from "../../system-repair/types.js";
 import { makeRepoContext } from "../helpers/fixtures.js";
 import type { CronJobContext } from "../../cron/types.js";
 
@@ -220,6 +222,149 @@ describe("self-repair-dispatch integration", () => {
         verdict: null,
         report_md: null,
       });
+    },
+  );
+
+  // DX-652 (Phase 3) — end-to-end finalize hook loop. Each test
+  // seeds a worker-fault row → runs the dispatcher → simulates
+  // `handleStop` calling `finalizeRepairByDispatchId` with one of
+  // the four verdict shapes → asserts the post-finalize state on
+  // `system_errors` + `system_error_repairs`.
+  async function runDispatchAndFinalize(opts: {
+    seed: { attemptN: number; status?: "open" | "repairing" };
+    summary: string;
+    terminalStatus: "completed" | "failed";
+  }): Promise<{ errorId: number }> {
+    await clearRepairTables();
+    const errorId = await seedWorkerFaultRow();
+    // Bump count so the dispatcher's threshold filter accepts it
+    // even at higher attempt counts (REPAIR_CAP scenarios).
+    if (opts.seed.attemptN > 1) {
+      await handle!.pool.query(
+        `INSERT INTO system_error_repairs
+           (error_id, attempt_n, card_id, dispatch_id, started_at,
+            ended_at, verdict, report_md)
+         SELECT $1, n, NULL, 'past-attempt-' || n, NOW(),
+                NOW(), 'failed', 'prior attempt'
+         FROM generate_series(1, $2) AS n`,
+        [errorId, opts.seed.attemptN - 1],
+      );
+    }
+    const dispatchId = `dispatch-uuid-finalize-${opts.seed.attemptN}`;
+    await runSelfRepairDispatch(ctx(), {
+      queryCandidates: realQueryCandidates,
+      insertRepairAndFlipStatus: realInsertRepairAndFlipStatus,
+      compensateFailedDispatch: realCompensate,
+      getRepoContext: () => fakeRepo(),
+      uuid: () => dispatchId,
+      dispatchFn: async () => ({ dispatchId, job: {} as never }),
+      log: () => {},
+    });
+    // Now simulate the worker's handleStop call.
+    const result = await finalizeRepairByDispatchId({
+      db: handle!.pool,
+      dispatchId,
+      summary: opts.summary,
+      terminalStatus: opts.terminalStatus,
+    });
+    expect(result.finalized).toBe(true);
+    return { errorId };
+  }
+
+  it.skipIf(!handle)(
+    "DX-652 finalize hook: `fixed:` summary → system_errors.status='fixed', repair row stamped",
+    async () => {
+      const { errorId } = await runDispatchAndFinalize({
+        seed: { attemptN: 1 },
+        summary: "fixed: applied the schema bump",
+        terminalStatus: "completed",
+      });
+      const err = await handle!.pool.query<{ status: string }>(
+        "SELECT status FROM system_errors WHERE id = $1",
+        [errorId],
+      );
+      expect(err.rows[0].status).toBe("fixed");
+      const repair = await handle!.pool.query<{
+        verdict: string | null;
+        ended_at: Date | null;
+        report_md: string | null;
+      }>(
+        `SELECT verdict, ended_at, report_md FROM system_error_repairs
+           WHERE error_id = $1 AND attempt_n = 1`,
+        [errorId],
+      );
+      expect(repair.rows[0].verdict).toBe("fixed");
+      expect(repair.rows[0].ended_at).not.toBeNull();
+      expect(repair.rows[0].report_md).toBe("fixed: applied the schema bump");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-652 finalize hook: `unfixable:` summary → system_errors.status='unfixable'",
+    async () => {
+      const { errorId } = await runDispatchAndFinalize({
+        seed: { attemptN: 1 },
+        summary: "unfixable: requires manual migration",
+        terminalStatus: "completed",
+      });
+      const err = await handle!.pool.query<{ status: string }>(
+        "SELECT status FROM system_errors WHERE id = $1",
+        [errorId],
+      );
+      expect(err.rows[0].status).toBe("unfixable");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-652 finalize hook: `failed:` below cap → system_errors.status back to 'open' (next tick may retry)",
+    async () => {
+      const { errorId } = await runDispatchAndFinalize({
+        seed: { attemptN: 1 },
+        summary: "failed: stack still throws",
+        terminalStatus: "failed",
+      });
+      const err = await handle!.pool.query<{ status: string }>(
+        "SELECT status FROM system_errors WHERE id = $1",
+        [errorId],
+      );
+      expect(err.rows[0].status).toBe("open");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-652 finalize hook: `failed:` at REPAIR_CAP → system_errors.status='unfixable' (cap exhausted)",
+    async () => {
+      const { errorId } = await runDispatchAndFinalize({
+        seed: { attemptN: REPAIR_CAP },
+        summary: "failed: exhausted attempts",
+        terminalStatus: "failed",
+      });
+      const err = await handle!.pool.query<{ status: string }>(
+        "SELECT status FROM system_errors WHERE id = $1",
+        [errorId],
+      );
+      expect(err.rows[0].status).toBe("unfixable");
+    },
+  );
+
+  it.skipIf(!handle)(
+    "DX-652 finalize hook: no matching dispatch_id → no-op, no DB writes",
+    async () => {
+      await clearRepairTables();
+      const errorId = await seedWorkerFaultRow();
+      const result = await finalizeRepairByDispatchId({
+        db: handle!.pool,
+        dispatchId: "no-such-dispatch",
+        summary: "fixed: doesn't matter",
+        terminalStatus: "completed",
+      });
+      expect(result.finalized).toBe(false);
+      // system_errors row untouched.
+      const err = await handle!.pool.query<{ status: string }>(
+        "SELECT status FROM system_errors WHERE id = $1",
+        [errorId],
+      );
+      expect(err.rows[0].status).toBe("open");
     },
   );
 

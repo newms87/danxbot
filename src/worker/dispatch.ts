@@ -43,6 +43,8 @@ import {
 import { getDispatchById, updateDispatch } from "../dashboard/dispatches-db.js";
 import { applyStrike } from "../dashboard/dispatch-tracker.js";
 import { recordSystemError } from "../dashboard/system-errors.js";
+import { getPool } from "../db/connection.js";
+import { finalizeRepairByDispatchId } from "../system-repair/finalize-by-dispatch-id.js";
 import { stampIssueBlocked } from "../issue/stamp-blocked.js";
 import {
   stampIssueCancelled,
@@ -1517,6 +1519,60 @@ async function applyCommitsShippedGate(args: {
 }
 
 /**
+ * DX-652 (Phase 3 of DX-580) — fire the Self-Repair finalize hook
+ * BEFORE writing the dispatch row's terminal state.
+ *
+ * `finalizeRepairByDispatchId` is keyed on the dispatch row UUID:
+ *
+ *   - Self-repair dispatch → looks up the matching
+ *     `system_error_repairs` row, parses the agent's summary verdict
+ *     (`fixed:` / `unfixable:` / `failed:` / default-failed), stamps
+ *     `{ended_at, verdict, report_md}` on the repair row, and flips
+ *     `system_errors.status` per the verdict + cap rules. All inside
+ *     one tx; SSE publish fires after commit.
+ *   - Every other dispatch (issue-worker, slack, API) → no matching
+ *     repair row → cheap no-op `{finalized: false}`.
+ *
+ * Wrapped here so both `handleStop` (in-memory) and `handleStopFromDb`
+ * (DB-fallback) get identical behavior with one fail-safe code path.
+ * Failures inside the hook are logged via `log.error` — they NEVER
+ * abort the dispatch teardown (the agent has already passed
+ * `danxbot_complete`; a finalize-side blip cannot turn a terminal
+ * dispatch into a stall). The next operator-visible signal for a
+ * persistent finalize failure is the `system_errors` row staying at
+ * `'repairing'` past one tick.
+ *
+ * `terminalStatus` is only consulted by the parser when the summary
+ * has no recognized prefix — the default is `failed` regardless. We
+ * pass `completed` for clean success terminations and `failed` for
+ * everything else so the parser sees the agent's actual intent
+ * (success-with-no-prefix vs. failure-with-no-prefix), even though
+ * both branches map to the same default verdict today.
+ */
+async function maybeFinalizeRepair(
+  jobId: string,
+  summary: string | null | undefined,
+  status: CompleteStatus,
+): Promise<void> {
+  try {
+    const db = getPool();
+    const terminalStatus: "completed" | "failed" =
+      status === "completed" ? "completed" : "failed";
+    await finalizeRepairByDispatchId({
+      db,
+      dispatchId: jobId,
+      summary,
+      terminalStatus,
+    });
+  } catch (err) {
+    log.error(
+      `[Dispatch ${jobId}] finalizeRepairByDispatchId failed (non-fatal)`,
+      err,
+    );
+  }
+}
+
+/**
  * ISS-68: DB-fallback path for `/api/stop/:jobId` when `activeJobs` has no
  * record of the dispatch (e.g. worker restart between spawn and the
  * agent's `danxbot_complete` call). The in-process `job.stop` lifecycle
@@ -1570,6 +1626,10 @@ async function handleStopFromDb(
   // reason before the dispatch row's terminal update lands.
   let status = gated.status;
   let summary = gated.summary;
+
+  // DX-652 — finalize any matching Self-Repair row BEFORE the dispatch
+  // row's terminal update. No-op for non-self-repair dispatches.
+  await maybeFinalizeRepair(jobId, summary, status);
 
   if (status === "critical_failure") {
     if (!summary) {
@@ -1793,6 +1853,12 @@ export async function handleStop(
     // reason before `job.stop` records the terminal state.
     let status = gated.status;
     let summary = gated.summary;
+
+    // DX-652 — finalize any matching Self-Repair row BEFORE `job.stop`
+    // records the dispatch's terminal state. No-op for non-self-repair
+    // dispatches (every issue-worker / slack / API dispatch lands here
+    // too and the keyed lookup returns no rows).
+    await maybeFinalizeRepair(jobId, summary, status);
 
     if (status === "critical_failure") {
       // The flag file is the operator's sole source of truth for what

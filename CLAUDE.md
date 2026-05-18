@@ -168,13 +168,23 @@ Five runtime toggles per repo (Slack / Issue poller / Dispatch API / Ideator / A
 
 ## Self-Repair — WORKER FAULTS ONLY
 
-Self-repair concept is valid **only for broken workers** — worker boot failure, MCP server load failure, unexpected exception in dispatch/poller code, anything where the worker itself is broken and a fresh agent dispatched against the worker codebase can plausibly fix it. The previous card-creating implementation (DX-560 epic) was retired — it conflated agent-domain YAML errors (`audit-pass:ReconcileValidationError`, `orphan-ip-heal`, `invariant-heal`) with worker faults and spawned card-based repairs that looped because the YAML status never flipped terminal.
+Self-repair is valid **only for broken workers** — worker boot failure, MCP server load failure, unexpected exception in dispatch/poller code, anything where the worker itself is broken and a fresh agent dispatched against the worker codebase can plausibly fix it. The previous card-creating implementation (DX-560 epic) was retired — it conflated agent-domain YAML errors (`audit-pass:ReconcileValidationError`, `orphan-ip-heal`, `invariant-heal`) with worker faults and spawned card-based repairs that looped because the YAML status never flipped terminal.
+
+**Live implementation (DX-580 rebuild — Phases 1/2/3):**
+
+| Layer | Path | Role |
+|---|---|---|
+| Whitelist | `src/system-repair/dispatch-pick.ts` (`isWorkerFaultCategory`) | App-side category gate. Only `worker-boot:` / `dispatch-spawn:` / `mcp-load:` / `claude-auth:` / `cron-job:` / `dashboard-route:` / `reconcile-internal:` prefixes pass; agent-domain rows skip. |
+| Cron dispatcher | `src/cron/jobs/self-repair-dispatch.ts` | Fires every 60s via `src/cron/worker-loop.ts`. Joins `system_errors` + `system_error_repairs`, picks ONE candidate per tick, fires a card-LESS `dispatch()` against the `worker-repair` workspace with `issueId: null`. |
+| Finalize hook | `src/system-repair/finalize-by-dispatch-id.ts` | Keyed on the dispatch row UUID (NOT `issueId`). Invoked by the worker's `handleStop` BEFORE writing the dispatch row's terminal state. Parses summary verdict (`fixed:` / `unfixable:` / `failed:` / default-failed), maps to `system_errors.status` per cap rules, stamps `system_error_repairs.{ended_at, verdict, report_md}`. Single transaction; no-op for non-self-repair dispatches. |
+| Picker invariant | `src/poller/multi-agent-pick.ts` Pass-A | Walks `openIssues` YAMLs filtered by `assigned_agent`. A `dispatches` row with `issue_id: null, status: 'in_progress'` has no YAML and therefore no `assigned_agent` stamp — Pass-A cannot select it. Pinned by `src/poller/multi-agent-pick.test.ts` (DX-652 regression). |
 
 **Hard rules:**
 - Agent failures (mid-dispatch crash, timeout, can't complete a card) do NOT trigger self-repair. They use the existing strike→Blocked-agent flow (`agents.<name>.broken` after 3 strikes, surfaced in the dashboard Agents tab).
 - An agent that can't complete its card stamps the card itself (`status: Blocked` + `blocked.reason` OR `requires_human` OR `conflict_on[]`). The card carries the failure mode; no second agent is dispatched to "fix" the first agent's card.
-- Self-repair, when rebuilt, will be card-LESS — `dispatch()` fires with an inline task body (worker repair instructions + signature + sample payload), no YAML, no issueId, lifecycle keyed on the dispatch row.
-- `recordSystemError` / `reportSystemError` keep recording errors to `system_errors` for operator visibility on the Self-Repair dashboard tab. No auto-dispatch fires off that table today.
+- Self-repair is card-LESS — `dispatch()` fires with an inline task body (worker repair instructions + signature + sample payload), no YAML, no `issueId`. Lifecycle is keyed on the dispatch row UUID via the finalize hook.
+- Card-less dispatches CANNOT create a resume loop. The picker's Pass-A walks YAMLs only; a null-`issueId` dispatch has no YAML to attach to and is therefore unreachable from the owned-card branch.
+- `recordSystemError` / `reportSystemError` keep recording errors to `system_errors` for operator visibility on the Self-Repair dashboard tab. Auto-dispatch fires off the rebuilt pipeline above when the category clears the whitelist.
 
 ## External Dispatch API + Deployment
 

@@ -2463,4 +2463,79 @@ describe("tryMultiAgentDispatch", () => {
     });
   });
 
+  // DX-652 (Phase 3 of DX-580) — null-issueId dispatch invariant.
+  // The Self-Repair Phase 2 cron dispatcher fires card-LESS dispatches
+  // (`issueId: null`). Pass-A (owned-card resume) walks the openIssues
+  // YAML set + filters by `assigned_agent`; a card-less dispatch row
+  // has no YAML and therefore no `assigned_agent` stamp, so it CANNOT
+  // make any agent "owned" via Pass-A. This is the load-bearing
+  // safety property that prevents the DX-560 redispatch loop where
+  // the picker would re-fire a card-based repair forever because the
+  // YAML status never flipped terminal. The test pins the invariant:
+  // even with a synthetic in-flight self-repair dispatch shape in
+  // play, the picker dispatches the free agent onto an unrelated
+  // fresh ToDo card — it does NOT try to "resume" the null-issueId
+  // dispatch.
+  describe("DX-652: null-issueId dispatch ignored by Pass-A", () => {
+    it("Pass-A skips a card-less self-repair dispatch (issue_id: null, status: 'in_progress') — picker walks YAMLs, not the dispatches table", async () => {
+      writeSettings({ murphy: agentRecord("murphy") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did-fresh-todo",
+        job: {} as never,
+      });
+
+      // No YAML carries assigned_agent: "murphy" — murphy is free.
+      // A self-repair-style dispatch row exists in the wider system
+      // (issue_id: null, status: 'in_progress') but it is NOT reachable
+      // from any agent's openIssues view — `findOwnedCard` filters by
+      // assigned_agent on the YAML, and no YAML carries the agent name
+      // because the repair dispatch has no card.
+      const freshTodo = issue("DX-700", {
+        assigned_agent: null,
+        status: "ToDo",
+      });
+
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [freshTodo],
+        openIssues: [freshTodo],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      expect(result.dispatched).toBe(1);
+      const dispatchInput = mockedDispatchWithRecovery.mock.calls[0][0];
+      // Picker dispatched the FRESH ToDo, NOT the null-issueId repair.
+      expect(dispatchInput.issueId).toBe("DX-700");
+      expect(dispatchInput.agent!.name).toBe("murphy");
+    });
+
+    it("findOwnedCard cannot select an agent based on dispatches alone — even when the dispatches table is exercised (listDispatchesByIssueId), Pass-A walks openIssues YAMLs only", async () => {
+      writeSettings({ murphy: agentRecord("murphy") });
+      mockedDispatchWithRecovery.mockResolvedValue({
+        dispatchId: "did",
+        job: {} as never,
+      });
+
+      // Simulate the dispatches table being non-empty for some unrelated
+      // card. listDispatchesByIssueId is only consulted for a card-id
+      // (resume sessionUuid lookup); a null issueId cannot land here.
+      const db = await import("../dashboard/dispatches-db.js");
+      vi.mocked(db.listDispatchesByIssueId).mockResolvedValue([]);
+
+      // No YAML claims murphy. No fresh ToDo either. → no dispatch.
+      const result = await tryMultiAgentDispatch({
+        repo: fakeRepo(),
+        cards: [],
+        openIssues: [],
+        tracker: fakeTracker(),
+        now: NOW,
+      });
+
+      // Picker exits with 0 dispatches — the null-issueId in_progress
+      // dispatch row never surfaces as an owned card via Pass-A.
+      expect(result.dispatched).toBe(0);
+      expect(mockedDispatchWithRecovery).not.toHaveBeenCalled();
+    });
+  });
 });

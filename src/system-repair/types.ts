@@ -4,9 +4,11 @@
  * migration 021. Used by `recordError` in `categorize.ts` (write path)
  * + the dashboard read surface (`db-reads.ts`, `self-repair-routes.ts`).
  *
- * NOTE: the card-creating dispatcher (DX-560) was retired; the
- * `"repairing"` status + `SystemErrorRepairVerdict` are reserved for
- * the DX-580 worker-fault rebuild and no current code writes them.
+ * The card-creating dispatcher (DX-560) was retired; the rebuilt
+ * card-LESS pipeline (DX-580 Phases 1/2/3) writes `"repairing"` on
+ * dispatcher pick (Phase 2 — `src/cron/jobs/self-repair-dispatch.ts`)
+ * and flips it forward via the dispatch_id-keyed finalize hook
+ * (Phase 3 — `src/system-repair/finalize-by-dispatch-id.ts`).
  */
 
 export type SystemErrorStatus = "open" | "repairing" | "fixed" | "unfixable";
@@ -17,12 +19,12 @@ export type SystemErrorStatus = "open" | "repairing" | "fixed" | "unfixable";
  * Live consumers:
  *   - `categorize.ts` — recurrence transition at
  *     `recurrence_count + 1 >= REPAIR_CAP` flips straight to
- *     `unfixable` instead of `open` (the only path that fires today).
- *
- * Reserved for DX-580 rebuild:
- *   - dispatcher pick query — refuse rows with `>= REPAIR_CAP` attempts.
- *   - finalize hook — `failed` verdict at `attempt_n >= REPAIR_CAP`
- *     flips the row to `unfixable`.
+ *     `unfixable` instead of `open`.
+ *   - `cron/jobs/self-repair-dispatch.ts#pickCandidate` (DX-651 — Phase 2)
+ *     — refuses rows with `max_attempt_n >= REPAIR_CAP`.
+ *   - `system-repair/finalize-by-dispatch-id.ts` (DX-652 — Phase 3) —
+ *     `failed` verdict at `attempt_n >= REPAIR_CAP` flips the row
+ *     straight to `unfixable` (cap exhausted) instead of back to `open`.
  *
  * The dashboard mirrors the literal via `recurrence_count >= REPAIR_CAP`
  * in `SelfRepairTab.vue`; keep the SPA-side literal in sync by hand if
