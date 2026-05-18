@@ -1,0 +1,9 @@
+name: worker-repair
+description: Worker-repair dispatch — autonomous fix attempt against a worker-fault system_errors row (DX-580 epic, DX-650 Phase 1)
+required-placeholders:
+  - DANXBOT_STOP_URL
+  - DANXBOT_WORKER_PORT
+  - DANX_REPO_ROOT
+optional-placeholders: []
+required-gates: []
+staging-paths: []
