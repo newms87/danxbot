@@ -88,6 +88,13 @@ const ALLOWLIST: ReadonlySet<string> = new Set([
   // Pre-existing allowlist entries cover the writers / serializers; this
   // entry pins the new inbound writer location.
   "cron/inbound-fetch.ts",
+  // DX-630 — `cascade-move.ts` reads `parent.list_name` and
+  // `child.list_name` ONLY to classify the SAME-TYPE-LATERAL spec cell
+  // (does the descendant currently sit in the parent's source list
+  // name?). Same trust boundary as `issue/list-move.ts` — the helper is
+  // invoked by the dashboard's cascade PATCH endpoint (Phase 5), not a
+  // worker dispatch decision path.
+  "issue/cascade-move.ts",
 ]);
 
 function walkTs(dir: string, out: string[]): void {
