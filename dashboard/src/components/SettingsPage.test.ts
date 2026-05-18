@@ -3,8 +3,24 @@ import { flushPromises, mount } from "@vue/test-utils";
 import type { RepoInfo } from "../api";
 
 const mockResetAllData = vi.fn();
+// DX-623 — TrelloListMapping (embedded under TrelloConfigPanel via
+// ListsManager) mounts useTrelloListMapping which reaches three
+// `../api` exports: fetchTrelloListMapping, fetchTrelloBoardLists,
+// patchTrelloListMapping. Stub them so the composable's hydrate() +
+// save() do not throw unhandled rejections under the test mock.
+const mockFetchTrelloListMapping = vi.fn(async (..._args: unknown[]) => ({
+  map: { list_id_to_trello_list_id: {} },
+  classification: {},
+  trello_available: false,
+  board_configured: false,
+}));
+const mockFetchTrelloBoardLists = vi.fn(async (..._args: unknown[]) => []);
+const mockPatchTrelloListMapping = vi.fn(async (..._args: unknown[]) => ({} as unknown));
 vi.mock("../api", () => ({
   resetAllData: (...args: unknown[]) => mockResetAllData(...args),
+  fetchTrelloListMapping: (...args: unknown[]) => mockFetchTrelloListMapping(...args),
+  fetchTrelloBoardLists: (...args: unknown[]) => mockFetchTrelloBoardLists(...args),
+  patchTrelloListMapping: (...args: unknown[]) => mockPatchTrelloListMapping(...args),
 }));
 
 // DX-159 Phase 1: SettingsPage now imports `useAgents` (SSE-backed).
