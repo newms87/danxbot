@@ -20,6 +20,7 @@ import {
 import { repoNameFromPath } from "../poller/repo-name.js";
 import { createLogger } from "../logger.js";
 import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
+import { deriveStatus } from "../issue/derive-status.js";
 import { projectIssue } from "./project-issue.js";
 
 const log = createLogger("issues-reader");
@@ -318,7 +319,20 @@ export function toRawIssue(row: DbIssueRow): RawIssue {
       `issues-reader: rogue id "${id}" in DB row — id must match ${STEM_SHAPE}.`,
     );
   }
-  return { issue: row.issue, mtimeMs: row.mirrorUpdatedAtMs };
+  // DX-575 / CLAUDE.md "Status is Derived" — the dashboard read path
+  // is a business-logic surface (column-grouping in IssueBoard, child
+  // assignment rollup in projectIssue, isClosed slicing in listIssues).
+  // The DB JSONB stores raw `status` for round-trip-stability (DX-582);
+  // every consumer downstream must see the DERIVED value. parseIssue
+  // applies the same override on the YAML→Issue read path (see
+  // yaml.ts:613). Apply it here so the wire shape, child-detail map,
+  // and assignment rollup all carry the derived semantic status —
+  // matching the worker path and the SPA's deriveStatus mirror.
+  const derived = deriveStatus(row.issue);
+  const issue: Issue = derived === row.issue.status
+    ? row.issue
+    : { ...row.issue, status: derived };
+  return { issue, mtimeMs: row.mirrorUpdatedAtMs };
 }
 
 function toListItem(
