@@ -65,6 +65,11 @@ import {
   writeStagedFiles,
   type StagedFileInput,
 } from "./staged-files.js";
+import {
+  AppUrlPullError,
+  DEFAULT_APP_URL_MAX_BYTES,
+  pullAppUrl,
+} from "./app-url-pull.js";
 import { prependPersona, type PersonaContext } from "../agent/persona.js";
 import { agentWorktreePath } from "../agent/worktree-manager.js";
 import { releaseLock } from "../issue-tracker/lock.js";
@@ -412,6 +417,27 @@ export interface DispatchInput {
    * `StagedFilesError("write")` — neither path leaves files on disk.
    */
   stagedFiles?: readonly StagedFileInput[];
+  /**
+   * Optional URL to a gzipped tarball the worker GETs (with the dispatch
+   * bearer) and extracts into the sandbox cwd BEFORE spawning the agent
+   * (DX-714 / parent epic DX-712). Mutually exclusive with `stagedFiles`
+   * at the HTTP boundary; the dispatch core enforces this in addition to
+   * the handler's pre-check. Pull failures throw `AppUrlPullError` which
+   * the handler maps to 502 (downstream failed).
+   */
+  appUrl?: string;
+  /**
+   * Override the size cap for `appUrl` pulls. Defaults to
+   * {@link DEFAULT_APP_URL_MAX_BYTES} (200 MB). Test hook — production
+   * callers leave this undefined.
+   */
+  appUrlMaxBytes?: number;
+  /**
+   * When true, `pullAppUrl` accepts `http://localhost` / `http://127.0.0.1`
+   * URLs (system tests serve tarballs from a local capture server). Off
+   * in production — https only.
+   */
+  appUrlAllowHttpLocalhost?: boolean;
   /**
    * YAML write/clear pair for the paired host_pid stamp (DX-140). Set
    * only by the poller path — it's the only caller that owns a
@@ -1314,6 +1340,30 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
     requiresStagedFiles: workspace.requiresStagedFiles,
   });
   const stagedFilePaths = await writeStagedFiles(prepared);
+
+  // App-URL pull (DX-714). When the caller supplied `appUrl`, fetch the
+  // tarball and extract into the workspace cwd before spawn. The
+  // coexistence mutex with `stagedFiles` is enforced at the HTTP
+  // boundary (`dispatch.ts > parseDispatchRequest`); on `AppUrlPullError`
+  // any staged files written above are rolled back so the spawn-failure
+  // contract (no residue on disk) stays intact.
+  if (input.appUrl) {
+    try {
+      const pulled = await pullAppUrl({
+        url: input.appUrl,
+        token: input.apiToken ?? "",
+        sandboxCwd: workspace.cwd,
+        maxBytes: input.appUrlMaxBytes ?? DEFAULT_APP_URL_MAX_BYTES,
+        allowHttpLocalhost: input.appUrlAllowHttpLocalhost ?? false,
+      });
+      log.info(
+        `app-url-pull dispatch=${dispatchId} host=${pulled.host} bytes=${pulled.bytes} duration_ms=${pulled.durationMs}`,
+      );
+    } catch (err) {
+      cleanupStagedFiles(stagedFilePaths);
+      throw err;
+    }
+  }
 
   // Persona prepend (DX-162). When the caller resolved an agent, we
   // prepend a `You are <name>. <bio>. Your worktree: ... Your branch:

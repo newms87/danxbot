@@ -2004,6 +2004,153 @@ staging-paths:
   });
 });
 
+describe("dispatch() — app_url pull (DX-714)", () => {
+  let tmpRepoDir: string;
+  let testRepo: ReturnType<typeof makeRepoContext>;
+  let tarball: Buffer;
+  let server: import("http").Server;
+  let serverPort: number;
+  let serverBody: Buffer | "401" | "html" | "garbage";
+
+  beforeEach(async () => {
+    tmpRepoDir = mkdtempSync(resolve(tmpdir(), "danxbot-app-url-test-"));
+    const slackWorkerSrc = resolve(
+      __dirname,
+      "..",
+      "inject",
+      "workspaces",
+      "slack-worker",
+    );
+    const dest = resolve(tmpRepoDir, ".danxbot", "workspaces", "slack-worker");
+    mkdirSync(resolve(tmpRepoDir, ".danxbot", "workspaces"), {
+      recursive: true,
+    });
+    cpSync(slackWorkerSrc, dest, { recursive: true });
+    testRepo = makeRepoContext({ localPath: tmpRepoDir });
+
+    const { createTarballBuffer } = await import(
+      "../template-build/tarball.js"
+    );
+    const srcDir = resolve(tmpRepoDir, "src-fixture");
+    mkdirSync(resolve(srcDir, "nested"), { recursive: true });
+    writeFileSync(resolve(srcDir, "a.txt"), "alpha");
+    writeFileSync(resolve(srcDir, "nested", "b.txt"), "beta");
+    tarball = await createTarballBuffer(srcDir);
+    serverBody = tarball;
+
+    const { createServer } = await import("http");
+    server = createServer((req, res) => {
+      if (serverBody === "401") {
+        res.writeHead(401, { "content-type": "text/plain" });
+        res.end("Unauthorized");
+        return;
+      }
+      if (serverBody === "html") {
+        res.writeHead(200, { "content-type": "text/html" });
+        res.end("<html>oops</html>");
+        return;
+      }
+      if (serverBody === "garbage") {
+        res.writeHead(200, { "content-type": "application/gzip" });
+        res.end(Buffer.from("not actually gzipped"));
+        return;
+      }
+      res.writeHead(200, {
+        "content-type": "application/gzip",
+        "content-length": String(serverBody.length),
+      });
+      res.end(serverBody);
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    serverPort = (server.address() as import("net").AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    rmSync(tmpRepoDir, { recursive: true, force: true });
+  });
+
+  it("pulls the tarball + extracts into workspace cwd BEFORE spawn", async () => {
+    let extracted: { a?: boolean; b?: boolean } = {};
+    mockSpawnAgent.mockImplementationOnce(async (opts: unknown) => {
+      const cwd = (opts as { cwd: string }).cwd;
+      extracted = {
+        a: existsSync(resolve(cwd, "a.txt")),
+        b: existsSync(resolve(cwd, "nested", "b.txt")),
+      };
+      return makeRunningJob();
+    });
+
+    await dispatch({
+      repo: testRepo,
+      task: "task",
+      workspace: "slack-worker",
+      overlay: {},
+      apiDispatchMeta: DEFAULT_DISPATCH_META,
+      apiToken: "secret",
+      appUrl: `http://127.0.0.1:${serverPort}/bundle.tgz`,
+      appUrlAllowHttpLocalhost: true,
+    });
+
+    expect(extracted).toEqual({ a: true, b: true });
+  });
+
+  it("does not spawn the agent when the upstream returns 401", async () => {
+    serverBody = "401";
+    const { AppUrlPullError } = await import("./app-url-pull.js");
+    await expect(
+      dispatch({
+        repo: testRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        apiToken: "secret",
+        appUrl: `http://127.0.0.1:${serverPort}/bundle.tgz`,
+        appUrlAllowHttpLocalhost: true,
+      }),
+    ).rejects.toBeInstanceOf(AppUrlPullError);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not spawn when content-type is not gzip", async () => {
+    serverBody = "html";
+    const { AppUrlPullError } = await import("./app-url-pull.js");
+    await expect(
+      dispatch({
+        repo: testRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        apiToken: "secret",
+        appUrl: `http://127.0.0.1:${serverPort}/x`,
+        appUrlAllowHttpLocalhost: true,
+      }),
+    ).rejects.toBeInstanceOf(AppUrlPullError);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+  it("does not spawn when the tarball is corrupt", async () => {
+    serverBody = "garbage";
+    const { AppUrlPullError } = await import("./app-url-pull.js");
+    await expect(
+      dispatch({
+        repo: testRepo,
+        task: "task",
+        workspace: "slack-worker",
+        overlay: {},
+        apiDispatchMeta: DEFAULT_DISPATCH_META,
+        apiToken: "secret",
+        appUrl: `http://127.0.0.1:${serverPort}/x`,
+        appUrlAllowHttpLocalhost: true,
+      }),
+    ).rejects.toBeInstanceOf(AppUrlPullError);
+    expect(mockSpawnAgent).not.toHaveBeenCalled();
+  });
+
+});
+
 describe("dispatch() — lockRelease wiring (DX-241)", () => {
   // Uses the slack-worker fixture (no staging-paths) — the workspace
   // shape is irrelevant to lockRelease behavior, the contract is purely

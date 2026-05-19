@@ -3720,3 +3720,132 @@ describe("handleChat — body validation + fresh/resume routing", () => {
     expect(mockWriteChatSession).not.toHaveBeenCalled();
   });
 });
+
+describe("handleLaunch — app_url coexistence (DX-714)", () => {
+  beforeEach(() => {
+    mockIsFeatureEnabled.mockReturnValue(true);
+    mockDispatchFn.mockReset().mockResolvedValue({ dispatchId: "d-1" });
+  });
+
+  it("accepts app_url alone and threads it into the dispatch input", async () => {
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "https://example.com/bundle.tgz",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    const call = mockDispatchFn.mock.calls[0][0];
+    expect(call.appUrl).toBe("https://example.com/bundle.tgz");
+  });
+
+  it("400s when app_url and staged_files are both supplied", async () => {
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "https://example.com/bundle.tgz",
+      staged_files: [{ path: "/tmp/x", content: "hi" }],
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "app_url and staged_files are mutually exclusive",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("400s when app_url is an empty string", async () => {
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(400);
+    expect(JSON.parse(res._getBody())).toEqual({
+      error: "app_url must be a non-empty string",
+    });
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("400s when app_url is not a string", async () => {
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: 42,
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(400);
+    expect(mockDispatchFn).not.toHaveBeenCalled();
+  });
+
+  it("accepts staged_files alone (no regression)", async () => {
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      staged_files: [{ path: "/tmp/x", content: "hi" }],
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(200);
+    expect(mockDispatchFn).toHaveBeenCalledTimes(1);
+    const call = mockDispatchFn.mock.calls[0][0];
+    expect(call.appUrl).toBeUndefined();
+    expect(call.stagedFiles).toHaveLength(1);
+  });
+
+  it("maps an AppUrlPullError (fetch kind) from dispatch() to 502", async () => {
+    const { AppUrlPullError } = await import("../dispatch/app-url-pull.js");
+    mockDispatchFn.mockRejectedValueOnce(
+      new AppUrlPullError("fetch", "upstream 401: bad token", {
+        upstreamStatus: 401,
+      }),
+    );
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "https://example.com/bundle.tgz",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(502);
+    const body = JSON.parse(res._getBody());
+    expect(body.error).toContain("upstream 401");
+    expect(body.upstream_status).toBe(401);
+  });
+
+  it("maps an AppUrlPullError (extract kind) to 502", async () => {
+    const { AppUrlPullError } = await import("../dispatch/app-url-pull.js");
+    mockDispatchFn.mockRejectedValueOnce(
+      new AppUrlPullError("extract", "tar -xz exited with code 2"),
+    );
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "https://example.com/bundle.tgz",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(502);
+  });
+
+  it("maps an AppUrlPullError (validation kind) to 400", async () => {
+    const { AppUrlPullError } = await import("../dispatch/app-url-pull.js");
+    mockDispatchFn.mockRejectedValueOnce(
+      new AppUrlPullError("validation", "app_url scheme not allowed: file:"),
+    );
+    const req = createMockReqWithBody("POST", {
+      workspace: "issue-worker",
+      task: "do work",
+      app_url: "file:///etc/passwd",
+    });
+    const res = createMockRes();
+    await handleLaunch(req, res, MOCK_REPO);
+    expect(res._getStatusCode()).toBe(400);
+  });
+});

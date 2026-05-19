@@ -18,6 +18,7 @@ import {
   validateStagedFilesShape,
   type StagedFileInput,
 } from "../dispatch/staged-files.js";
+import { AppUrlPullError } from "../dispatch/app-url-pull.js";
 import { WorkspaceManifestError } from "../workspace/manifest.js";
 import type { DispatchTriggerMetadata } from "../dashboard/dispatches.js";
 import {
@@ -271,6 +272,7 @@ interface ParsedDispatchRequest {
   title: string | undefined;
   maxRuntimeMs: number | undefined;
   stagedFiles: readonly StagedFileInput[];
+  appUrl: string | undefined;
 }
 
 /**
@@ -402,6 +404,25 @@ function parseDispatchRequest(
   const stagedFiles = validateStagedFilesBody(body.staged_files, res);
   if (stagedFiles === null) return null;
 
+  // DX-714 — app_url is the new URL-pull bundle channel (parent epic
+  // DX-712). Coexistence rules with the inline staged_files[] payload:
+  // both fields supplied → 400. Scheme + size validation runs later
+  // inside `pullAppUrl`; this gate is the body-shape mutex only.
+  let appUrl: string | undefined;
+  if (body.app_url !== undefined) {
+    if (typeof body.app_url !== "string" || body.app_url.length === 0) {
+      json(res, 400, { error: "app_url must be a non-empty string" });
+      return null;
+    }
+    if (stagedFiles.length > 0) {
+      json(res, 400, {
+        error: "app_url and staged_files are mutually exclusive",
+      });
+      return null;
+    }
+    appUrl = body.app_url;
+  }
+
   return {
     workspace,
     task,
@@ -413,6 +434,7 @@ function parseDispatchRequest(
     maxRuntimeMs:
       typeof body.max_runtime_ms === "number" ? body.max_runtime_ms : undefined,
     stagedFiles,
+    appUrl,
   };
 }
 
@@ -457,6 +479,7 @@ function buildDispatchInput(
     resumeSessionId: extras.resumeSessionId,
     parentJobId: extras.parentJobId,
     stagedFiles: parsed.stagedFiles,
+    appUrl: parsed.appUrl,
     recoverCount: extras.recoverCount,
     parentRecoverId: extras.parentRecoverId ?? null,
   };
@@ -590,6 +613,18 @@ export async function handleLaunch(
       json(res, err.kind === "validation" ? 400 : 500, {
         error: err.message,
       });
+      return;
+    }
+    if (err instanceof AppUrlPullError) {
+      // validation = caller body shape bug → 400. fetch/extract =
+      // downstream failed (consumer host unreachable, wrong content
+      // type, oversize body, corrupt tarball) → 502.
+      const status = err.kind === "validation" ? 400 : 502;
+      const payload: Record<string, unknown> = { error: err.message };
+      if (err.upstreamStatus !== undefined) {
+        payload.upstream_status = err.upstreamStatus;
+      }
+      json(res, status, payload);
       return;
     }
     log.error("Launch failed", err);
