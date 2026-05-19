@@ -383,6 +383,31 @@ export function _resetLastPushedHashes(): void {
 interface SkipCacheEntry {
   hash: string;
   envGen: number;
+  /**
+   * Deterministic digest of this card's children's derive-relevant
+   * fields (DX-703). Empty string when the card has no children — the
+   * skip-cache check then compares "" === "" and behaves identically
+   * to the pre-DX-703 entry shape for leaf cards.
+   *
+   * The digest folds (id, completed_at, cancelled_at, blocked.at,
+   * dispatch.id, ready_at, archived_at, raw status) for every child,
+   * sorted by id, sha256-hashed. ANY child write that moves a derive-
+   * relevant field changes the digest, which invalidates the parent's
+   * skip-cache entry on the next reconcile — so the 10-min audit-pass
+   * walk over open YAMLs is now correctness-sufficient for parents
+   * regardless of whether the child→parent recursion path (step 9 fan-
+   * out) was taken on the child's own reconcile.
+   *
+   * Pre-DX-703 bug: the skip-cache compared only the parent's own
+   * (hash, envGen). A parent's own bytes don't change when a child
+   * completes — own-hash equality says nothing about whether the
+   * rollup needs re-derive. envGen only bumps on graph-shape changes
+   * (parent_id / children[] mutations), not on lifecycle fields like
+   * completed_at. Result: the audit-pass body short-circuited at the
+   * skip-cache and never ran step 3a parent-derive on cards with
+   * all-Done children when the child→parent recursion had also missed.
+   */
+  childrenDigest: string;
 }
 
 const skipCacheByCardId = new Map<string, SkipCacheEntry>();
@@ -402,6 +427,35 @@ export function _getSkipCacheEntry(
 /** Visible for tests — drain the cache between cases. */
 export function _resetSkipCache(): void {
   skipCacheByCardId.clear();
+}
+
+/**
+ * Deterministic digest of a parent's children for the DX-703 extension
+ * of the skip-cache key. Empty children → empty string (no-op, leaf
+ * cards skip the children fetch and digest computation).
+ *
+ * The tuple folded per child is the set of fields `deriveStatus` reads:
+ *   - id (key)
+ *   - status (raw)
+ *   - completed_at, cancelled_at, ready_at, archived_at (ladder)
+ *   - blocked.at (dispatch gate)
+ *   - dispatch.id (pickup flip)
+ *
+ * Sorted by id so the digest is stable across DB row ordering. sha256'd
+ * so the cache entry holds a fixed-size 64-char hex string regardless
+ * of children count. Equality says "every child's derive-relevant
+ * fields match what was observed at the prior reconcile" — sufficient
+ * to skip the body when the parent's own bytes also haven't moved.
+ */
+function computeChildrenDigest(children: Issue[]): string {
+  if (children.length === 0) return "";
+  const tuples = children
+    .map(
+      (c) =>
+        `${c.id}|${c.status}|${c.completed_at ?? ""}|${c.cancelled_at ?? ""}|${c.ready_at ?? ""}|${c.archived_at ?? ""}|${c.blocked?.at ?? ""}|${c.dispatch?.id ?? ""}`,
+    )
+    .sort();
+  return sha256(canonicalize({ children: tuples }));
 }
 
 /**
@@ -574,11 +628,23 @@ async function reconcileBody(
   const repoName = repoNameFromPath(repo.localPath);
   const errors: ReconcileError[] = [];
 
-  // ---- Step 2b: skip-cache fast-path (DX-640) ----
+  // ---- Step 2b: skip-cache fast-path (DX-640 + DX-703) ----
   // Pure-projection invariant: `desired = deriveAll(observed, env)`.
   // When `observed` (= prevHash) AND `env` (= envGen) are both unchanged
   // since the last reconcile of this card, the body would re-derive the
   // same `desired` and produce zero actions. Short-circuit.
+  //
+  // DX-703 extension — children digest: a parent's `desired` is also a
+  // function of its CHILDREN'S derive-relevant fields. The parent's
+  // own bytes don't change when a child completes — own-hash equality
+  // says nothing about whether the rollup needs re-derive. envGen
+  // doesn't help either: it bumps only on graph-shape changes
+  // (parent_id / children[]), not on lifecycle timestamps. We fetch
+  // the children early and fold them into the cache key so any child
+  // write invalidates the parent's skip-cache on the next reconcile.
+  // Leaf cards (children.length === 0) skip the fetch entirely; the
+  // digest is "" and the check collapses to the pre-DX-703 (hash,
+  // envGen) shape.
   //
   // Recursion bypass: step 9/10 recursion fires precisely when downstream
   // state changed (a child / dependent's reconcile mutated something).
@@ -586,13 +652,22 @@ async function reconcileBody(
   // derived-from-children state needs re-evaluation. Force the body
   // to run by skipping the cache check on rec.depth > 0.
   const currentEnvGen = getEnvGen(repoName);
+  // Hoist children fetch above the skip-cache check so we can fold the
+  // digest into the comparison. Step 3a + 3g re-use this same set, so
+  // the cost is one DB round-trip even on the rare hash-only re-derive.
+  let childrenForDerive: Issue[] | null = null;
+  if (issue.children.length > 0) {
+    childrenForDerive = await dbListChildrenByParent(repoName, issue.id);
+  }
+  const currentChildrenDigest = computeChildrenDigest(childrenForDerive ?? []);
   if (rec.depth === 0) {
     const cacheKey = skipCacheKey(repo.name, id);
     const cached = skipCacheByCardId.get(cacheKey);
     if (
       cached !== undefined &&
       cached.hash === prevHash &&
-      cached.envGen === currentEnvGen
+      cached.envGen === currentEnvGen &&
+      cached.childrenDigest === currentChildrenDigest
     ) {
       log.debug(
         `[${repo.name}] ${id}: skip-cache hit (hash=${prevHash.slice(0, 8)}, envGen=${currentEnvGen}, trigger=${trigger})`,
@@ -658,15 +733,11 @@ async function reconcileBody(
 
   // Shared children lookup — 3g (Epic-lifecycle reset gate) AND 3a
   // (parent-derive) both read the same row set keyed by `(repoName,
-  // mutated.id)`. Hoisting the fetch above 3g halves the DB round-trip
-  // count for every Epic with children that fires the audit pass.
-  // Fetched ONLY when this card has children (the only sub-steps that
-  // consume the result both gate on children.length > 0 — see 3g + 3a
-  // bodies below). Cards with empty children skip the query.
-  let childrenForDerive: Issue[] | null = null;
-  if (mutated.children.length > 0) {
-    childrenForDerive = await dbListChildrenByParent(repoName, mutated.id);
-  }
+  // mutated.id)`. The fetch was hoisted further up in DX-703 (above
+  // the skip-cache check at step 2b) so the children's derive-relevant
+  // fields can be folded into the cache key. `childrenForDerive` is
+  // already populated by the time control reaches here; 3g + 3a re-use
+  // the same array.
 
   // 3g. Epic-lifecycle reset (DX-641).
   //
@@ -857,6 +928,74 @@ async function reconcileBody(
       if (derived !== null && derived.status !== mutated.status) {
         mutated = applyParentDeriveMutation(mutated, derived, now);
         mutatedFlag = true;
+      }
+    }
+  }
+
+  // 3a.heal — parent_id ⇄ children[] drift audit (DX-703 AC #2).
+  //
+  // `children[]` is the forward link; each child YAML's `parent_id` is
+  // the reverse. `dbListChildrenByParent` reads the reverse link — when
+  // the two disagree, the reverse-link query returns a card that the
+  // parent's forward list does NOT name, and `deriveParentStatus`
+  // observes a children union the parent's metadata didn't anticipate.
+  // DX-668 burned ~40 minutes of agent time on this exact drift (two
+  // action-item cards stamped `parent_id: DX-668` without the
+  // `children[]` append, derive returned null on the mixed union).
+  //
+  // The create-time gate at `src/worker/issue-route.ts` closes the
+  // happy-path. This audit catches drift that landed pre-fix or via
+  // direct `Edit`/`Write` paths that bypass the create handler. Surface
+  // as a non-fatal system_error so the operator can decide reparent vs
+  // add-to-children — no auto-fix (the right move depends on what the
+  // human intended at the original write).
+  //
+  // Read-only: the audit NEVER mutates the parent's `children[]` or
+  // any child's `parent_id`. Both forward + reverse-only drift is
+  // surfaced so operators can correlate them in the dashboard banner.
+  //
+  // **Scope limitation.** The audit gates on this card having at least
+  // one side of the link non-empty. A parent with `children: []` AND a
+  // floating child somewhere that points at it via `parent_id` is NOT
+  // detected here — `childrenForDerive` is only fetched when
+  // `issue.children.length > 0` (the step-2b hoist gate). The
+  // create-time gate prevents this class from being formed via the
+  // happy path; direct `Edit`/`Write` paths can still produce it, but
+  // the cost of an unconditional `dbListChildrenByParent` on every
+  // reconcile of a leaf card is too high for this rare class. Accepted
+  // gap — operator-driven repair via the dashboard remains the safety
+  // net for legacy drift.
+  if (mutated.children.length > 0 || (childrenForDerive?.length ?? 0) > 0) {
+    const reverseLinked = (childrenForDerive ?? []).map((c) => c.id);
+    const forwardLinked = mutated.children;
+    const reverseOnly = reverseLinked.filter((id) => !forwardLinked.includes(id));
+    const forwardOnly = forwardLinked.filter((id) => !reverseLinked.includes(id));
+    if (reverseOnly.length > 0 || forwardOnly.length > 0) {
+      const recordSystemError = systemErrorHooksByRepo.get(repo.name);
+      if (recordSystemError) {
+        const parts: string[] = [];
+        if (reverseOnly.length > 0) {
+          parts.push(
+            `reverse-only (child.parent_id=${mutated.id}, not in children[]): ${reverseOnly.join(", ")}`,
+          );
+        }
+        if (forwardOnly.length > 0) {
+          parts.push(
+            `forward-only (children[] lists, no matching child.parent_id): ${forwardOnly.join(", ")}`,
+          );
+        }
+        const msg = `DX-703 parent_id ⇄ children[] drift on ${mutated.id}: ${parts.join("; ")}`;
+        // Fire-and-forget — the hook is `void | Promise<void>`. Don't
+        // block reconcile on the dashboard write; rejection surfaces
+        // via the hook's own logging path.
+        try {
+          const out = recordSystemError(msg);
+          if (out && typeof (out as Promise<void>).catch === "function") {
+            (out as Promise<void>).catch(() => undefined);
+          }
+        } catch {
+          // Hook threw synchronously — swallow per the contract.
+        }
       }
     }
   }
@@ -1228,17 +1367,27 @@ async function reconcileBody(
       : currentDispatchable !== priorDispatchable;
   dispatchableByCardId.set(cacheKey, currentDispatchable);
 
-  // ---- Step 8b: skip-cache stamp (DX-640) ----
-  // Stamp the post-reconcile (hash, envGen) so the next top-level
-  // reconcile on this card can short-circuit if neither input has
-  // moved. Stamped at end-of-body so a partial body (thrown error
-  // before this point) does NOT leave the cache claiming "no work
-  // needed" — the next reconcile will then re-attempt every step,
-  // matching the trace + retry contract reconcile already provides
-  // through the catch/recordSystemError chain.
+  // ---- Step 8b: skip-cache stamp (DX-640 + DX-703) ----
+  // Stamp the post-reconcile (hash, envGen, childrenDigest) so the
+  // next top-level reconcile on this card can short-circuit if none
+  // of the inputs has moved. Stamped at end-of-body so a partial body
+  // (thrown error before this point) does NOT leave the cache claiming
+  // "no work needed" — the next reconcile will then re-attempt every
+  // step, matching the trace + retry contract reconcile already
+  // provides through the catch/recordSystemError chain.
+  //
+  // The stamped `childrenDigest` is the one computed from the snapshot
+  // observed at step 2b, NOT a re-read after step 3a's parent-derive
+  // wrote to disk. The next reconcile of THIS card cares whether the
+  // children moved since this reconcile started; if 3a moved this
+  // parent's own status (mutatedFlag=true), that's reflected in
+  // `nextHash` — the digest stays anchored on the children union as
+  // of step 2b, which is exactly the snapshot a fresh skip-cache check
+  // would compare against on the next tick.
   skipCacheByCardId.set(skipCacheKey(repo.name, id), {
     hash: nextHash,
     envGen: currentEnvGen,
+    childrenDigest: currentChildrenDigest,
   });
 
   return {

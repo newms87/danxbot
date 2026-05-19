@@ -27,7 +27,11 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { issuePath, writeIssue } from "../poller/yaml-lifecycle.js";
+import {
+  issuePath,
+  triggerReconcileForId,
+  writeIssue,
+} from "../poller/yaml-lifecycle.js";
 import { parseIssue } from "../issue-tracker/yaml.js";
 import {
   deriveListTypeFromSemanticStatus,
@@ -149,6 +153,26 @@ async function stampTerminal(
     // because deriveStatus now returns `Done` / `Cancelled` via the
     // freshly-stamped timestamp.
     await writeIssue(input.repoLocalPath, next);
+    // DX-703 — co-fire parent reconcile when this child has a parent.
+    // The chokidar mirror fires reconcile on the CHILD, but the
+    // child's reconcile body may short-circuit step 9 fan-out (no
+    // mutation observed, file already in correct bucket). On the
+    // parent's next reconcile, the skip-cache (DX-640) would HIT on
+    // the parent's own (hash, envGen) and skip the body — except the
+    // DX-703 children-digest extension also invalidates on this very
+    // change, so the audit-pass eventually catches up. This explicit
+    // enqueue is the IMMEDIATE-path closer: it skips the wait for the
+    // next 10-min audit tick by re-deriving the parent right now.
+    //
+    // Swallow reconcile errors — the child stamp has already landed,
+    // and the audit-pass is the safety net. Throwing here would
+    // poison the worker's `handleStop` path and trigger a strike
+    // against the agent for an unrelated parent-reconcile failure.
+    if (next.parent_id !== null) {
+      await triggerReconcileForId(input.repoLocalPath, next.parent_id).catch(
+        () => undefined,
+      );
+    }
     return;
   }
   // Closed bucket: the file is already moved. Re-serialize in-place
@@ -177,4 +201,13 @@ async function stampTerminal(
     source: "writer",
   });
   writeFileSync(closedPath, serialized);
+  // DX-703 — co-fire parent reconcile for the closed-bucket case too.
+  // Same robustness contract as the open-bucket branch above: swallow
+  // reconcile errors so a downstream parent-reconcile failure cannot
+  // poison the terminal child stamp the worker just landed.
+  if (stamped.parent_id !== null) {
+    await triggerReconcileForId(input.repoLocalPath, stamped.parent_id).catch(
+      () => undefined,
+    );
+  }
 }

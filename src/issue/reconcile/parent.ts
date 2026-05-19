@@ -161,13 +161,39 @@ export function applyParentDeriveMutation(
     to: derived.status,
     note: derived.rule,
   });
-  const completedAt =
-    derived.status === "Done" && issue.completed_at === null
-      ? now
+  // Forward stamps (rule 5 / rule 6) are idempotent — preserve the prior
+  // value when already populated so duplicate signals (re-derive on
+  // unchanged inputs) do not slide the timestamp forward.
+  //
+  // Off-terminal CLEAR (DX-703): when the rollup transitions off
+  // Done/Cancelled (a previously-Done child was re-opened, a new
+  // non-terminal child was added, an action item was reparented in),
+  // CLEAR the prior `completed_at` / `cancelled_at`. This is a backward
+  // ladder move per CLAUDE.md "Computed Card State — Ladder timestamps":
+  // moving from later rung to earlier MUST clear forward-of-current
+  // timestamps, else `deriveStatus`'s precedence (cancelled_at →
+  // completed_at → … → raw) locks the card at the stale terminal state
+  // despite the rule that just fired saying In Progress / ToDo / Review
+  // / Backlog. Forward stamps still NEVER clear earlier ladder marks
+  // (ready_at preserved on Done; ready_at preserved on Cancelled).
+  //
+  // Done → Cancelled and Cancelled → Done are sideways within terminal;
+  // each side stamps its own marker on the fresh transition and leaves
+  // the sibling terminal stamp alone for audit (deriveStatus picks the
+  // higher-precedence one). Idempotent re-derives on the same terminal
+  // status preserve everything.
+  const goingDone = derived.status === "Done";
+  const goingCancelled = derived.status === "Cancelled";
+  const offTerminal = !goingDone && !goingCancelled;
+  const completedAt = goingDone
+    ? (issue.completed_at ?? now)
+    : offTerminal
+      ? null
       : issue.completed_at;
-  const cancelledAt =
-    derived.status === "Cancelled" && issue.cancelled_at === null
-      ? now
+  const cancelledAt = goingCancelled
+    ? (issue.cancelled_at ?? now)
+    : offTerminal
+      ? null
       : issue.cancelled_at;
   return {
     ...issue,

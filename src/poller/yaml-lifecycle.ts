@@ -130,6 +130,51 @@ export function setWriteIssueReconcileHook(
 }
 
 /**
+ * Fire the registered reconcile hook for an arbitrary id (DX-703).
+ *
+ * Stamp paths (`stamp-terminal.ts`, `stamp-blocked.ts`) need to enqueue
+ * a parent reconcile after a child terminal write — the chokidar mirror
+ * fires reconcile on the CHILD, but the child's reconcile body
+ * short-circuits step 9 fan-out when `mutatedFlag === false` (file
+ * already in correct bucket, child has no children, no derive movement).
+ * Result: parent never gets re-derived from the new child union until
+ * the next audit-pass tick. Calling this helper after the child write
+ * closes the gap regardless of the child reconcile's mutation path.
+ *
+ * No-op when no hook is registered. Two contexts where this happens:
+ *
+ *   - **Unit tests** that exercise stamp-terminal without spinning up
+ *     a worker. The reconcile-hook registration lives in
+ *     `src/worker/index.ts` boot; tests that don't import that path
+ *     get a silent no-op. Tests asserting the parent-fire pin the
+ *     hook explicitly via `setWriteIssueReconcileHook`.
+ *   - **Dashboard-mode boot** before the worker has wired reconcile.
+ *     Dashboard mode never spawns claude, so stamp-terminal is never
+ *     called from this surface. The no-op is dead in practice.
+ *
+ * **Production boot ordering invariant** (DX-703): the worker's
+ * `bindReconcileHook` runs BEFORE the dispatch HTTP listener starts
+ * accepting `/api/stop` traffic. By the time any in-process
+ * `danxbot_complete` reaches `stampIssueCompleted` / `stampIssueCancelled`,
+ * the hook is registered. A regression that flips that ordering would
+ * SILENTLY drop parent-reconcile co-fires — the cost is parent
+ * rollups lagging by one audit-pass tick (~10 min). Worth a comment
+ * + a boot-ordering test if a future refactor reshuffles the boot
+ * sequence.
+ *
+ * Exposed here so stamp paths can fire reconcile without importing
+ * reconcile.ts (which would create the cycle this hook registry
+ * exists to avoid).
+ */
+export async function triggerReconcileForId(
+  repoLocalPath: string,
+  id: string,
+): Promise<void> {
+  if (writeIssueReconcileHook === null) return;
+  await writeIssueReconcileHook(repoLocalPath, id, "lifecycle");
+}
+
+/**
  * Write the issue to `<repo>/.danxbot/issues/open/<id>.yml`. Always writes
  * to `open/` — the move to `closed/` happens via `moveToClosedIfTerminal`
  * (called by `persistAfterSync` in the worker's auto-sync path) when the

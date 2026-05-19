@@ -21,6 +21,7 @@ import {
 } from "./stamp-terminal.js";
 import { createEmptyIssue, parseIssue, serializeIssue } from "../issue-tracker/yaml.js";
 import type { Issue } from "../issue-tracker/interface.js";
+import { setWriteIssueReconcileHook } from "../poller/yaml-lifecycle.js";
 
 describe("stampIssueCompleted / stampIssueCancelled", () => {
   let root: string;
@@ -148,6 +149,136 @@ describe("stampIssueCompleted / stampIssueCancelled", () => {
     expect(
       existsSync(join(root, ".danxbot/issues/open/DX-99.yml")),
     ).toBe(false);
+  });
+
+  describe("DX-703 — parent reconcile co-fire on terminal stamp", () => {
+    afterEach(() => {
+      setWriteIssueReconcileHook(null);
+    });
+
+    it("stampIssueCompleted enqueues reconcileIssue(parent_id, 'lifecycle') for an open-bucket child", async () => {
+      const calls: Array<{ id: string; trigger: string }> = [];
+      setWriteIssueReconcileHook(async (_repoLocalPath, id, trigger) => {
+        calls.push({ id, trigger });
+      });
+
+      seed("DX-5", { parent_id: "DX-50" });
+      await stampIssueCompleted({
+        repoLocalPath: root,
+        candidateId: "DX-5",
+        expectedPrefix: "DX",
+        at: "2026-05-14T12:00:00.000Z",
+        dispatchId: "dispatch-5",
+      });
+
+      // First call comes from writeIssue's own reconcileAfter chain (if
+      // invoked) — but in this test only the explicit co-fire is wired.
+      // The parent id MUST appear in the calls list.
+      const parentCalls = calls.filter((c) => c.id === "DX-50");
+      expect(parentCalls.length).toBeGreaterThan(0);
+      expect(parentCalls[0].trigger).toBe("lifecycle");
+    });
+
+    it("stampIssueCancelled enqueues reconcileIssue(parent_id, 'lifecycle')", async () => {
+      const calls: Array<{ id: string; trigger: string }> = [];
+      setWriteIssueReconcileHook(async (_repoLocalPath, id, trigger) => {
+        calls.push({ id, trigger });
+      });
+
+      seed("DX-6", { parent_id: "DX-60" });
+      await stampIssueCancelled({
+        repoLocalPath: root,
+        candidateId: "DX-6",
+        expectedPrefix: "DX",
+        at: "2026-05-14T12:00:00.000Z",
+        dispatchId: "dispatch-6",
+      });
+
+      const parentCalls = calls.filter((c) => c.id === "DX-60");
+      expect(parentCalls.length).toBeGreaterThan(0);
+    });
+
+    it("no parent_id on child → no co-fire", async () => {
+      const calls: Array<{ id: string; trigger: string }> = [];
+      setWriteIssueReconcileHook(async (_repoLocalPath, id, trigger) => {
+        calls.push({ id, trigger });
+      });
+
+      seed("DX-7", { parent_id: null });
+      await stampIssueCompleted({
+        repoLocalPath: root,
+        candidateId: "DX-7",
+        expectedPrefix: "DX",
+        at: "2026-05-14T12:00:00.000Z",
+        dispatchId: "dispatch-7",
+      });
+
+      // The writeIssue path itself does NOT pass reconcileAfter: true
+      // for stamp-terminal's call, so no spurious self-fires either.
+      expect(calls.filter((c) => c.id === "DX-7")).toHaveLength(0);
+    });
+
+    it("co-fire reconcile rejection does NOT propagate out of stampIssueCompleted (handleStop robustness)", async () => {
+      // A parent reconcile that throws mid-stop-handler MUST NOT
+      // corrupt the terminal child stamp. The child YAML must still
+      // carry completed_at + dispatch:null after stamp returns, AND
+      // stamp must resolve normally — throwing here would poison the
+      // worker's handleStop path + trigger an unwarranted strike.
+      setWriteIssueReconcileHook(async () => {
+        throw new Error("reconcile blew up");
+      });
+
+      seed("DX-9", { parent_id: "DX-99" });
+      // Resolves cleanly despite hook throw.
+      await expect(
+        stampIssueCompleted({
+          repoLocalPath: root,
+          candidateId: "DX-9",
+          expectedPrefix: "DX",
+          at: "2026-05-14T12:00:00.000Z",
+          dispatchId: "dispatch-9",
+        }),
+      ).resolves.toBeUndefined();
+      const raw = readRaw("DX-9");
+      expect(raw.completed_at).toBe("2026-05-14T12:00:00.000Z");
+      expect(raw.dispatch).toBeNull();
+    });
+
+    it("closed-bucket stamp (agent's Edit moved the file first) also enqueues parent reconcile", async () => {
+      const calls: Array<{ id: string; trigger: string }> = [];
+      setWriteIssueReconcileHook(async (_repoLocalPath, id, trigger) => {
+        calls.push({ id, trigger });
+      });
+
+      // Seed the file in closed/ to mirror the production race.
+      mkdirSync(join(root, ".danxbot/issues/closed"), { recursive: true });
+      const closedPath = join(root, ".danxbot/issues/closed/DX-8.yml");
+      const base = createEmptyIssue({
+        id: "DX-8",
+        status: "Done",
+        title: "DX-8 title",
+        description: "fixture",
+      });
+      writeFileSync(
+        closedPath,
+        serializeIssue({
+          ...base,
+          parent_id: "DX-80",
+          ready_at: "2026-05-14T00:00:00.000Z",
+        } as Issue),
+      );
+
+      await stampIssueCompleted({
+        repoLocalPath: root,
+        candidateId: "DX-8",
+        expectedPrefix: "DX",
+        at: "2026-05-14T12:00:00.000Z",
+        dispatchId: "dispatch-8",
+      });
+
+      const parentCalls = calls.filter((c) => c.id === "DX-80");
+      expect(parentCalls.length).toBeGreaterThan(0);
+    });
   });
 
   it("stamps the closed/ copy when the agent's prior status:Done write already moved the file", async () => {

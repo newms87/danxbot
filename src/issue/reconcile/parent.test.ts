@@ -387,4 +387,82 @@ describe("applyParentDeriveMutation — shared mutation helper (DX-217)", () => 
       expect(updated.ready_at).toBe(READY_AT);
     });
   });
+
+  // DX-703 AC #4 — when the rollup moves OFF terminal (a previously-Done
+  // child got re-opened, a new non-terminal child was reparented in),
+  // the parent's prior `completed_at` / `cancelled_at` MUST CLEAR — else
+  // `deriveStatus` precedence locks the parent at the stale terminal
+  // despite the rule fire returning In Progress / ToDo / Review /
+  // Backlog. This is a BACKWARD ladder move per CLAUDE.md.
+  describe("off-terminal CLEAR (DX-703 AC #4)", () => {
+    const EARLIER = "2026-05-17T00:00:00.000Z";
+
+    it("Done → In Progress clears completed_at (re-opened child)", () => {
+      const issue: Issue = { ...makeParent("Done"), completed_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "In Progress", rule: "Any child In Progress — parent In Progress" },
+        NOW,
+      );
+      expect(updated.completed_at).toBeNull();
+      expect(updated.cancelled_at).toBeNull();
+    });
+
+    it("Done → ToDo clears completed_at", () => {
+      const issue: Issue = { ...makeParent("Done"), completed_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "ToDo", rule: "Any child ToDo — parent ToDo" },
+        NOW,
+      );
+      expect(updated.completed_at).toBeNull();
+    });
+
+    it("Cancelled → ToDo clears cancelled_at", () => {
+      const issue: Issue = { ...makeParent("Cancelled"), cancelled_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "ToDo", rule: "Any child ToDo — parent ToDo" },
+        NOW,
+      );
+      expect(updated.cancelled_at).toBeNull();
+    });
+
+    it("Done → Review clears completed_at, preserves ready_at (timeline)", () => {
+      const READY_AT = "2026-05-18T06:29:49.000Z";
+      const issue: Issue = {
+        ...makeParent("Done"),
+        completed_at: EARLIER,
+        ready_at: READY_AT,
+      };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Review", rule: "All non-cancelled children Review — parent Review" },
+        NOW,
+      );
+      expect(updated.completed_at).toBeNull();
+      expect(updated.ready_at).toBe(READY_AT);
+    });
+
+    it("Done → Done (idempotent re-derive on terminal) PRESERVES completed_at", () => {
+      const issue: Issue = { ...makeParent("Done"), completed_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Done", rule: "All non-cancelled children Done — parent Done" },
+        NOW,
+      );
+      expect(updated.completed_at).toBe(EARLIER);
+    });
+
+    it("Done → Cancelled (sideways within terminal) stamps cancelled_at, leaves completed_at intact for audit", () => {
+      const issue: Issue = { ...makeParent("Done"), completed_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Cancelled", rule: "All children Cancelled — parent Cancelled" },
+        NOW,
+      );
+      expect(updated.cancelled_at).toBe(NOW);
+      expect(updated.completed_at).toBe(EARLIER);
+    });
+  });
 });

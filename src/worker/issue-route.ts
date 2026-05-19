@@ -801,6 +801,62 @@ export async function handleIssueCreate(
     return;
   }
 
+  // DX-703 — enforce `parent_id ⇄ children[]` invariant at create time.
+  // Any draft with a non-null `parent_id` MUST resolve to an existing
+  // parent YAML on disk; otherwise the new card lands as an orphan that
+  // points at nothing, and the parent's rollup is unaware of the new
+  // child. Both branches of the bug DX-668 saw burned through this
+  // gap — two action-item cards stamped `parent_id: DX-668` mid-Phase-
+  // 3b retro without the corresponding `children[]` append, the parent
+  // rollup query `dbListChildrenByParent` returned the stamped-but-
+  // unlisted cards, and `deriveParentStatus` correctly returned null
+  // (mixed Review+Done). Refusing the create at the entry point closes
+  // the bigger half of the gap; the audit-pass heal (DX-703 AC #2)
+  // catches drift that landed pre-fix or via direct Edit/Write paths
+  // that bypass this handler.
+  //
+  // Resolution rule: parent YAML must exist in either `open/` OR
+  // `closed/`. A closed parent gaining a new child is legal — the
+  // parent-derive will subsequently observe the new union and flip the
+  // parent back to non-terminal via the off-terminal CLEAR (DX-703 B2)
+  // in `applyParentDeriveMutation`. The audit pass will then move the
+  // parent file back to `open/` via reconcile's step 3b heal.
+  //
+  // EXISTENCE pre-check only — we re-resolve the path + re-read the
+  // parent YAML INSIDE `chainOnIssueLock(parent_id, ...)` after the
+  // child write completes (see below) to close the read-modify-write
+  // race between concurrent creates against the same parent. Without
+  // the lock, two parallel creates both reading the parent's prior
+  // children[] before either wrote would clobber each other's append.
+  if (draft.parent_id !== null) {
+    const parentLocatedPath = locateIssueFile(repo.localPath, draft.parent_id);
+    if (parentLocatedPath === null) {
+      json(res, 200, {
+        created: false,
+        errors: [
+          `parent_id "${draft.parent_id}" does not resolve to an existing YAML at .danxbot/issues/{open,closed}/${draft.parent_id}.yml — refuse to create an orphan (DX-703)`,
+        ],
+      });
+      return;
+    }
+    try {
+      // Single validation parse, then discard — the authoritative
+      // read happens inside the lock below.
+      parseIssue(readFileSync(parentLocatedPath, "utf-8"), {
+        expectedPrefix: repo.issuePrefix,
+      });
+    } catch (err) {
+      const msg = err instanceof IssueParseError ? err.message : String(err);
+      json(res, 200, {
+        created: false,
+        errors: [
+          `parent_id "${draft.parent_id}" YAML failed strict validation: ${msg}`,
+        ],
+      });
+      return;
+    }
+  }
+
   const input: CreateCardInput = issueToCreateInput(draft);
 
   let result: {
@@ -865,6 +921,62 @@ export async function handleIssueCreate(
     unlinkSync(sourcePath);
   }
 
+  // DX-703 — same-write parent `children[]` append, serialized via
+  // `chainOnIssueLock` on the PARENT's id. The lock fences concurrent
+  // creates against the same parent so the read-modify-write of the
+  // parent's `children[]` doesn't clobber a sibling create's append.
+  //
+  // Inside the lock: re-resolve the parent path (the bucket may have
+  // moved between the pre-check and now via a concurrent reconcile),
+  // re-parse the YAML (authoritative read), append if missing, write.
+  //
+  // Failure here surfaces TWO ways: (a) `recordSystemError` so the
+  // dashboard banner flags the drift; (b) a `warnings[]` entry on the
+  // response body so the calling agent's `danx_issue_create` sees the
+  // problem inline. The child YAML stays on disk — refusing the
+  // response after a successful child write would leave an orphan
+  // tracker card; the audit-pass heal (AC #2) catches what slips
+  // through.
+  const warnings: string[] = [];
+  if (draft.parent_id !== null) {
+    const parentId = draft.parent_id;
+    const childId = stamped.id;
+    await chainOnIssueLock(parentId, async () => {
+      const parentPath = locateIssueFile(repo.localPath, parentId);
+      if (parentPath === null) {
+        const msg = `parent ${parentId} disappeared between pre-check and post-write — child ${childId} stamped but not linked`;
+        fireAndForgetSystemError(deps, `DX-703 ${msg}`);
+        warnings.push(msg);
+        return;
+      }
+      let parentNow: Issue;
+      try {
+        parentNow = parseIssue(readFileSync(parentPath, "utf-8"), {
+          expectedPrefix: repo.issuePrefix,
+        });
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        const msg = `parent ${parentId} YAML re-parse failed mid-lock: ${m} — child ${childId} stamped but not linked`;
+        fireAndForgetSystemError(deps, `DX-703 ${msg}`);
+        warnings.push(msg);
+        return;
+      }
+      if (parentNow.children.includes(childId)) return; // idempotent
+      const updatedParent: Issue = {
+        ...parentNow,
+        children: [...parentNow.children, childId],
+      };
+      try {
+        writeFileSync(parentPath, serializeIssue(updatedParent));
+      } catch (err) {
+        const m = err instanceof Error ? err.message : String(err);
+        const msg = `parent ${parentId} children[] append write failed for ${childId}: ${m}`;
+        fireAndForgetSystemError(deps, `DX-703 ${msg}`);
+        warnings.push(msg);
+      }
+    });
+  }
+
   // Seed the diff cache AFTER `writeFileSync` so a failed persist does
   // not leave the cache holding a snapshot of an issue that does not
   // exist on disk. The cache is the next save's reference state — any
@@ -878,6 +990,7 @@ export async function handleIssueCreate(
     created: true,
     id: draft.id,
     external_id: result.external_id,
+    ...(warnings.length > 0 && { warnings }),
   });
 }
 

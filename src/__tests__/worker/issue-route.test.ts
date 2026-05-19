@@ -587,6 +587,209 @@ describe("handleIssueCreate (POST /api/issue-create/:dispatchId)", () => {
       rmSync(repoLocalPath, { recursive: true, force: true });
     }
   });
+
+  // DX-703 — danx_issue_create MUST refuse a draft whose parent_id does
+  // not resolve to an existing YAML AND MUST atomically append the new
+  // child's id to the parent's children[] when parent does exist. This
+  // closes the orphan-parent_id class that DX-668 burned ~40 minutes on.
+  describe("DX-703 — parent_id ⇄ children[] enforcement", () => {
+    it("appends new id to parent's children[] on successful create", async () => {
+      // Seed the parent epic on disk.
+      const epic: Issue = {
+        ...createEmptyIssue({ id: "ISS-99", external_id: "ext-epic", title: "Epic" }),
+        tracker: "memory",
+        type: "Epic",
+        children: [],
+      };
+      writeYaml(h.repo.localPath, epic);
+
+      // Draft phase card with parent_id pointing at the epic.
+      const draft: Issue = {
+        ...createEmptyIssue({ id: "", external_id: "", title: "phase 1" }),
+        tracker: "memory",
+        parent_id: "ISS-99",
+      };
+      const draftPath = issuePath(h.repo.localPath, "phase-1-draft", "open");
+      ensureIssuesDirs(h.repo.localPath);
+      writeFileSync(draftPath, serializeIssue(draft));
+
+      const res = await fetch(`${h.url}/api/issue-create/dispatch-link`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "phase-1-draft" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(true);
+      const childId = body.id as string;
+
+      // Parent YAML now lists the new child.
+      const parentText = readYaml(h.repo.localPath, "ISS-99");
+      expect(parentText).toContain(`- ${childId}`);
+    });
+
+    it("refuses to create a child when parent_id does not resolve to a YAML on disk", async () => {
+      const draft: Issue = {
+        ...createEmptyIssue({ id: "", external_id: "", title: "orphan phase" }),
+        tracker: "memory",
+        // Validly shaped id (`ISS-<integer>`) so the schema validator
+        // passes; the on-disk-existence check is what must refuse.
+        parent_id: "ISS-9999",
+      };
+      const draftPath = issuePath(h.repo.localPath, "orphan-phase", "open");
+      ensureIssuesDirs(h.repo.localPath);
+      writeFileSync(draftPath, serializeIssue(draft));
+
+      const res = await fetch(`${h.url}/api/issue-create/dispatch-orphan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "orphan-phase" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(false);
+      expect(body.errors.join("\n")).toMatch(/parent_id "ISS-9999"/);
+      expect(body.errors.join("\n")).toMatch(/does not resolve/);
+      // No orphan YAML written.
+      expect(existsSync(issuePath(h.repo.localPath, "ISS-1", "open"))).toBe(false);
+    });
+
+    it("parent in closed/ bucket resolves correctly (phase added to a completed epic)", async () => {
+      // A closed parent gaining a new child is legal — the parent-derive
+      // will subsequently observe the new union via the off-terminal
+      // CLEAR + step 3b heal. The create handler MUST resolve the parent
+      // from closed/ as well as open/.
+      const closedEpic: Issue = {
+        ...createEmptyIssue({
+          id: "ISS-200",
+          external_id: "ext-closed-epic",
+          title: "Closed epic",
+        }),
+        tracker: "memory",
+        type: "Epic",
+        status: "Done",
+        completed_at: "2026-05-19T00:00:00.000Z",
+        children: [],
+      };
+      writeYaml(h.repo.localPath, closedEpic, "closed");
+
+      const draft: Issue = {
+        ...createEmptyIssue({ id: "", external_id: "", title: "new phase" }),
+        tracker: "memory",
+        parent_id: "ISS-200",
+      };
+      writeFileSync(
+        issuePath(h.repo.localPath, "new-phase", "open"),
+        serializeIssue(draft),
+      );
+
+      const res = await fetch(`${h.url}/api/issue-create/dispatch-closed`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "new-phase" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(true);
+      const childId = body.id as string;
+
+      // Closed parent's children[] now lists the new child.
+      const parentText = readYaml(h.repo.localPath, "ISS-200", "closed");
+      expect(parentText).toContain(`- ${childId}`);
+    });
+
+    it("sequential creates against the same parent accumulate in children[] (lock re-reads parent each time)", async () => {
+      // Two sequential create requests with the same parent_id MUST
+      // both land in the parent's children[]. The second call must
+      // re-read the parent's just-updated children[] under the lock
+      // and append to it (not to a stale snapshot from the first
+      // call's pre-check).
+      //
+      // Concurrent-create correctness depends on `chainOnIssueLock`
+      // serializing the read-modify-write — but pre-create id
+      // allocation (`nextIssueId`) has its own serialization concern
+      // that is NOT in DX-703 scope. We exercise sequential here to
+      // pin the append-no-clobber semantics independently.
+      const epic: Issue = {
+        ...createEmptyIssue({
+          id: "ISS-300",
+          external_id: "ext-seq-epic",
+          title: "Seq epic",
+        }),
+        tracker: "memory",
+        type: "Epic",
+        children: [],
+      };
+      writeYaml(h.repo.localPath, epic);
+
+      async function createPhase(filename: string, title: string): Promise<string> {
+        const draft: Issue = {
+          ...createEmptyIssue({ id: "", external_id: "", title }),
+          tracker: "memory",
+          parent_id: "ISS-300",
+        };
+        writeFileSync(
+          issuePath(h.repo.localPath, filename, "open"),
+          serializeIssue(draft),
+        );
+        const res = await fetch(`${h.url}/api/issue-create/dispatch-${filename}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename }),
+        });
+        const body = await res.json();
+        expect(body.created).toBe(true);
+        return body.id as string;
+      }
+
+      const idA = await createPhase("phase-a", "phase A");
+      const idB = await createPhase("phase-b", "phase B");
+      expect(idA).not.toBe(idB);
+
+      // BOTH ids appear in parent's children[] — the second append
+      // re-read the parent (which now lists idA) and appended idB.
+      const parentText = readYaml(h.repo.localPath, "ISS-300");
+      expect(parentText).toContain(`- ${idA}`);
+      expect(parentText).toContain(`- ${idB}`);
+    });
+
+    it("is idempotent on the children[] append — re-running an existing-id flow does not double-list", async () => {
+      // Setup: parent already lists the child id we're about to create.
+      // This shouldn't normally happen (children[] is populated AFTER
+      // create), but the append guard must be safe regardless.
+      const epic: Issue = {
+        ...createEmptyIssue({ id: "ISS-100", external_id: "ext-epic-2", title: "Epic 2" }),
+        tracker: "memory",
+        type: "Epic",
+        children: ["ISS-1"], // already lists the next-allocated id
+      };
+      writeYaml(h.repo.localPath, epic);
+
+      const draft: Issue = {
+        ...createEmptyIssue({ id: "", external_id: "", title: "phase 2" }),
+        tracker: "memory",
+        parent_id: "ISS-100",
+      };
+      writeFileSync(
+        issuePath(h.repo.localPath, "phase-2-draft", "open"),
+        serializeIssue(draft),
+      );
+
+      const res = await fetch(`${h.url}/api/issue-create/dispatch-idem`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: "phase-2-draft" }),
+      });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.created).toBe(true);
+
+      // Parent's children[] still lists ISS-1 exactly once.
+      const parentText = readYaml(h.repo.localPath, "ISS-100");
+      const matches = parentText.match(/- ISS-1\b/g) ?? [];
+      expect(matches.length).toBe(1);
+    });
+  });
 });
 
 describe("runSync (local-first persist)", () => {
