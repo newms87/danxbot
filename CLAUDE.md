@@ -49,6 +49,12 @@ The only legitimate `status:` literal at write time is `Review` on a freshly cre
 
 `status` remains a writable serializer field for round-trip stability (DX-582 description rule 7 fallthrough), but the canonical read path is `parseIssue` → `deriveStatus`. Direct on-disk drift never leaks into business logic.
 
+**Ladder timestamps preserve the timeline — never clear forward when moving forward.** `ready_at` / `completed_at` / `cancelled_at` / `archived_at` / `blocked.at` are the card's history. Moving FORWARD on the ladder (e.g. Review → ToDo, ToDo/InProgress → Done, any → Cancelled) STAMPS the new timestamp and LEAVES every earlier timestamp intact — `deriveStatus` precedence (cancelled_at → completed_at → dispatch → ready_at → archived_at → raw) handles which one wins. Stamping `completed_at` while `ready_at` stays set is correct + required; clearing `ready_at` destroys "when did this card become dispatch-eligible" from the timeline for zero behavioral gain.
+
+The ONLY legitimate clear is BACKWARD movement on the ladder — moving from a later rung to an earlier one MUST clear every forward-of-current timestamp, else the deriver locks the card at the stale forward state. Examples: 3g epic-lifecycle reset (`src/issue/reconcile.ts`) clears `completed_at` + `cancelled_at` + `ready_at` when a stale-terminal Epic gets pulled back behind non-terminal children; `archived_at`-stamp clears `ready_at` because parking strictly retreats from "ready". Forward stamps NEVER clear.
+
+The forbidden token here is "clear `ready_at` on terminal stamp" — appears in this codebase ONLY in the 3g backward-heal path. Any forward write path (parent-derive rollup, agent terminal stamp, dispatch lifecycle) that clears a ladder timestamp it didn't just supersede is a bug.
+
 ## CRITICAL Pointers Before Touching Sensitive Areas
 
 Auto-loaded rules + skills. Trigger the right one BEFORE editing.

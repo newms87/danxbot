@@ -308,4 +308,83 @@ describe("applyParentDeriveMutation — shared mutation helper (DX-217)", () => 
     );
     expect(JSON.stringify(issue)).toBe(before);
   });
+
+  // Terminal rollup must stamp the lifecycle timestamp so `deriveStatus`
+  // (which reads `completed_at` / `cancelled_at` BEFORE falling through
+  // to raw `status`) actually returns Done / Cancelled. Without the
+  // stamp, an epic with `ready_at` populated stays derived as ToDo even
+  // after raw status flips to Done — the bug seen on DX-638 (parent of
+  // DX-639/640/641/642). Ladder timestamps are timeline; prior
+  // timestamps (`ready_at`) are NEVER cleared on a forward move.
+  describe("terminal rollup stamps lifecycle timestamp (DX-638 class fix)", () => {
+    const READY_AT = "2026-05-18T06:29:49.000Z";
+
+    function epicWithReady(rawStatus: IssueStatus): Issue {
+      const base = makeParent(rawStatus);
+      return { ...base, ready_at: READY_AT };
+    }
+
+    it("Done rollup → stamps completed_at = now, preserves ready_at", () => {
+      const issue = epicWithReady("ToDo");
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Done", rule: "All non-cancelled children Done — parent Done" },
+        NOW,
+      );
+      expect(updated.completed_at).toBe(NOW);
+      expect(updated.ready_at).toBe(READY_AT);
+      expect(updated.cancelled_at).toBeNull();
+      expect(updated.status).toBe("Done");
+    });
+
+    it("Cancelled rollup → stamps cancelled_at = now, preserves ready_at", () => {
+      const issue = epicWithReady("ToDo");
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Cancelled", rule: "All children Cancelled — parent Cancelled" },
+        NOW,
+      );
+      expect(updated.cancelled_at).toBe(NOW);
+      expect(updated.ready_at).toBe(READY_AT);
+      expect(updated.completed_at).toBeNull();
+      expect(updated.status).toBe("Cancelled");
+    });
+
+    it("Done rollup is idempotent — does not re-stamp completed_at when already set", () => {
+      const EARLIER = "2026-05-17T00:00:00.000Z";
+      const issue: Issue = { ...epicWithReady("Done"), completed_at: EARLIER };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Done", rule: "All non-cancelled children Done — parent Done" },
+        NOW,
+      );
+      expect(updated.completed_at).toBe(EARLIER);
+    });
+
+    it("Cancelled rollup is idempotent — does not re-stamp cancelled_at when already set", () => {
+      const EARLIER = "2026-05-17T00:00:00.000Z";
+      const issue: Issue = {
+        ...epicWithReady("Cancelled"),
+        cancelled_at: EARLIER,
+      };
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "Cancelled", rule: "All children Cancelled — parent Cancelled" },
+        NOW,
+      );
+      expect(updated.cancelled_at).toBe(EARLIER);
+    });
+
+    it("non-terminal rollup (In Progress / ToDo / Review / Backlog) does NOT stamp lifecycle timestamps", () => {
+      const issue = epicWithReady("Done");
+      const updated = applyParentDeriveMutation(
+        issue,
+        { status: "In Progress", rule: "Any child In Progress — parent In Progress" },
+        NOW,
+      );
+      expect(updated.completed_at).toBeNull();
+      expect(updated.cancelled_at).toBeNull();
+      expect(updated.ready_at).toBe(READY_AT);
+    });
+  });
 });

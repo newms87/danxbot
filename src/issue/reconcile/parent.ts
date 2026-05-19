@@ -116,6 +116,25 @@ export function deriveParentStatus(
  * `worker:auto-derive` `status_change` entry to `history[]` with the
  * priority-rule string as `note` (DX-147 AC #1).
  *
+ * Terminal rollup stamps the matching lifecycle timestamp (DX-638
+ * class fix). Per CLAUDE.md "Computed Card State" §"Ladder timestamps
+ * preserve the timeline", `deriveStatus` precedence reads
+ * `cancelled_at` / `completed_at` BEFORE `ready_at` BEFORE raw status.
+ * Without stamping, a parent-derive that flips raw status to `Done` on
+ * an epic carrying `ready_at` from its original readying derives back
+ * to `ToDo` (rule 4 wins over rule 6 fallthrough) — the card sticks in
+ * the ToDo column forever despite every child being Done. The stamp is
+ * forward-only on the ladder: `ready_at` and other prior timestamps
+ * are preserved (clearing them destroys the timeline for zero gain;
+ * the higher-precedence terminal timestamp wins in `deriveStatus`).
+ *
+ * Idempotent: when the lifecycle timestamp is already populated the
+ * existing value is preserved (no re-stamp on every reconcile tick).
+ *
+ * Direct stamps on `type: Epic` are still refused by `stamp-terminal.ts`
+ * (DX-654 write-side guard) — epic terminal state derives from children.
+ * This path IS the derived stamp, so it does not conflict.
+ *
  * DX-658 / Phase 2 retired the auto-stamp-clear of `Issue.blocked` —
  * the gate is now independent of the parent's derived status and
  * never modified by the parent-derive path. The previous invariant
@@ -142,9 +161,19 @@ export function applyParentDeriveMutation(
     to: derived.status,
     note: derived.rule,
   });
+  const completedAt =
+    derived.status === "Done" && issue.completed_at === null
+      ? now
+      : issue.completed_at;
+  const cancelledAt =
+    derived.status === "Cancelled" && issue.cancelled_at === null
+      ? now
+      : issue.cancelled_at;
   return {
     ...issue,
     status: derived.status,
     history: updatedHistory,
+    completed_at: completedAt,
+    cancelled_at: cancelledAt,
   };
 }
