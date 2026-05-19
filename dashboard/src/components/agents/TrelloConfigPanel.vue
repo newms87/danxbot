@@ -7,6 +7,7 @@ import {
   type TrelloCredentialPatch,
 } from "../../api";
 import { envDefaultForFeature } from "../../featureDefaults";
+import { useTransientStatus } from "../../composables/useTransientStatus";
 import FeatureToggle from "./FeatureToggle.vue";
 
 // DX-304 — dedicated Trello settings panel: trelloSync toggle (single
@@ -57,8 +58,11 @@ const restartRequired = ref<boolean>(false);
 // "idle" | "copied" | "failed" — surfaces the clipboard outcome inline
 // for ~2s so the operator gets feedback on insecure-context / permission
 // failures instead of a silent click. Resets back to idle automatically.
-const copyState = ref<"idle" | "copied" | "failed">("idle");
-let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+const copy = useTransientStatus<"idle" | "copied" | "failed">({
+  idleMs: 2000,
+  idleValue: "idle",
+});
+const copyState = copy.status;
 
 // Vite injects DEV=true under `vitest run`/`npm run dev`, false in
 // `npm run build`. Operators in prod must NEVER see a button that
@@ -157,26 +161,16 @@ async function onSave(): Promise<void> {
   }
 }
 
-function scheduleCopyReset(): void {
-  if (copyResetTimer) clearTimeout(copyResetTimer);
-  copyResetTimer = setTimeout(() => {
-    copyState.value = "idle";
-    copyResetTimer = null;
-  }, 2000);
-}
-
 async function onCopyBoardId(): Promise<void> {
   const value = display.value["boardId"];
   if (typeof value !== "string" || value.length === 0) return;
   try {
     await navigator.clipboard.writeText(value);
-    copyState.value = "copied";
+    copy.set("copied");
   } catch {
     // Insecure contexts (HTTP) + permission-denied don't crash —
     // surface the failure inline so the operator can manually select.
-    copyState.value = "failed";
-  } finally {
-    scheduleCopyReset();
+    copy.set("failed");
   }
 }
 </script>

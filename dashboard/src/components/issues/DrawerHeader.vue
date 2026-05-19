@@ -15,6 +15,7 @@
  * banner + clear/edit flow lives in the gates section.
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { useTransientStatus } from "../../composables/useTransientStatus";
 import {
   DanxButton,
   DanxDialog,
@@ -108,23 +109,20 @@ async function onTitleCommit(next: string): Promise<void> {
 }
 
 // ── copy + delete ──────────────────────────────────────────────────────
-const copyState = ref<"idle" | "copying" | "copied" | "error">("idle");
+const copy = useTransientStatus<"idle" | "copying" | "copied" | "error">({
+  idleMs: 2500,
+  idleValue: "idle",
+});
+const copyState = copy.status;
 const copyMessage = ref<string | null>(null);
-let copyResetTimer: number | null = null;
 
-function clearCopyResetTimer(): void {
-  if (copyResetTimer !== null) {
-    window.clearTimeout(copyResetTimer);
-    copyResetTimer = null;
-  }
-}
-
-onBeforeUnmount(clearCopyResetTimer);
+watch(copyState, (s) => {
+  if (s === "idle") copyMessage.value = null;
+});
 
 async function onCopy(): Promise<void> {
   if (copyState.value === "copying") return;
-  clearCopyResetTimer();
-  copyState.value = "copying";
+  copy.set("copying", { autoReset: false });
   copyMessage.value = null;
   try {
     const payload = await getIssueSubtree(props.repo, props.issue.id);
@@ -136,17 +134,11 @@ async function onCopy(): Promise<void> {
     }
     await navigator.clipboard.writeText(text);
     const n = payload.issues.length;
-    copyState.value = "copied";
     copyMessage.value = `Copied ${n} ${n === 1 ? "card" : "cards"}`;
+    copy.set("copied");
   } catch (err) {
-    copyState.value = "error";
     copyMessage.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    copyResetTimer = window.setTimeout(() => {
-      copyState.value = "idle";
-      copyMessage.value = null;
-      copyResetTimer = null;
-    }, 2500);
+    copy.set("error");
   }
 }
 
@@ -313,8 +305,7 @@ const currentTypeMeta = computed(() => ISSUE_TYPE_META[typeToId(props.issue.type
 watch(
   () => props.issue.id,
   () => {
-    clearCopyResetTimer();
-    copyState.value = "idle";
+    copy.clear();
     copyMessage.value = null;
     listMenuOpen.value = false;
     priorityMenuOpen.value = false;

@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import { ISSUE_TYPE_META } from "./issuePalette";
 import type { IssueTypeFilter, ScopeMode } from "../../composables/useIssueFilters";
+import { useDebouncedFn } from "../../composables/useDebouncedFn";
 
 const props = defineProps<{
   q: string;
@@ -39,7 +40,7 @@ const TYPE_ORDER: ReadonlyArray<IssueTypeFilter> = ["epic", "bug", "feature", "c
 // Local mirror of `q` so typing stays buttery; debounce 200ms before
 // pushing upstream (which mirrors to URL).
 const localQ = ref<string>(props.q);
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+const debounced = useDebouncedFn(() => emit("update:q", localQ.value), 200);
 
 watch(
   () => props.q,
@@ -51,15 +52,12 @@ watch(
 function onInput(e: Event): void {
   const target = e.target as HTMLInputElement;
   localQ.value = target.value;
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    emit("update:q", localQ.value);
-  }, 200);
+  debounced.trigger();
 }
 
 function clearSearch(): void {
   localQ.value = "";
-  if (debounceTimer) clearTimeout(debounceTimer);
+  debounced.cancel();
   emit("update:q", "");
 }
 </script>

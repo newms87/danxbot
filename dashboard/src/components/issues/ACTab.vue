@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, ref, watch } from "vue";
 import type { Issue, IssueAcItem, IssueDetail } from "../../types";
 import { patchIssue } from "../../api";
+import { useDebouncedFn } from "../../composables/useDebouncedFn";
 import ACBar from "./ACBar.vue";
 import { acCounts } from "./acCounts";
 
@@ -31,11 +32,34 @@ const counts = computed(() => acCounts(localAc.value));
 const saving = ref(false);
 const errorMsg = ref<string | null>(null);
 
-let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-let abort: AbortController | null = null;
+async function doSave(signal: AbortSignal): Promise<void> {
+  const snapshot = cloneAc(localAc.value);
+  saving.value = true;
+  errorMsg.value = null;
+  try {
+    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
+      ac: snapshot,
+    });
+    if (signal.aborted) return;
+    emit("update:issue", updated);
+  } catch (err) {
+    if (signal.aborted) return;
+    // Revert optimistic local state to the canonical server state. The
+    // watcher's `inFlight()` guard kept `props.issue.ac` from being
+    // overwritten by any poll tick that landed while this PATCH was
+    // pending — so reverting from props gets the user back to the
+    // last known-good state, not a half-applied poll snapshot.
+    localAc.value = cloneAc(props.issue.ac);
+    errorMsg.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    if (!signal.aborted) saving.value = false;
+  }
+}
+
+const debouncedSave = useDebouncedFn(doSave, DEBOUNCE_MS, { abortPrevious: true });
 
 function inFlight(): boolean {
-  return saving.value || debounceTimer !== null;
+  return saving.value || debouncedSave.pending.value;
 }
 
 watch(
@@ -47,60 +71,13 @@ watch(
   { deep: true },
 );
 
-function scheduleSave(): void {
-  if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(() => {
-    debounceTimer = null;
-    void doSave();
-  }, DEBOUNCE_MS);
-}
-
-async function doSave(): Promise<void> {
-  // Cancel any in-flight PATCH — the latest local state supersedes.
-  if (abort) abort.abort();
-  const controller = new AbortController();
-  abort = controller;
-  const snapshot = cloneAc(localAc.value);
-  saving.value = true;
-  errorMsg.value = null;
-  try {
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
-      ac: snapshot,
-    });
-    if (controller.signal.aborted) return;
-    emit("update:issue", updated);
-  } catch (err) {
-    if (controller.signal.aborted) return;
-    // Revert optimistic local state to the canonical server state. The
-    // watcher's `inFlight()` guard kept `props.issue.ac` from being
-    // overwritten by any poll tick that landed while this PATCH was
-    // pending — so reverting from props gets the user back to the
-    // last known-good state, not a half-applied poll snapshot.
-    localAc.value = cloneAc(props.issue.ac);
-    errorMsg.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    if (!controller.signal.aborted) {
-      saving.value = false;
-      abort = null;
-    }
-  }
-}
-
 function onToggle(i: number): void {
   if (i < 0 || i >= localAc.value.length) return;
   localAc.value = localAc.value.map((a, j) =>
     j === i ? { ...a, checked: !a.checked } : a,
   );
-  scheduleSave();
+  debouncedSave.trigger();
 }
-
-onBeforeUnmount(() => {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
-  }
-  if (abort) abort.abort();
-});
 </script>
 
 <template>
