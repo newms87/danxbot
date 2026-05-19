@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, readdirSync, readFileSync, statSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { parse as parseYamlText } from "yaml";
 import { KNOWN_SCHEMA_MAX } from "../../issue-tracker/schema-versions.js";
+import {
+  discoverConnectedRepos,
+  type ConnectedRepo,
+} from "../../repo-discovery.js";
 
 /**
  * DX-597 Phase 6 — schema-uniformity invariant.
@@ -21,59 +25,6 @@ import { KNOWN_SCHEMA_MAX } from "../../issue-tracker/schema-versions.js";
  * state, not to fail when run in an isolated container.
  */
 
-function findDanxbotRoot(): string | null {
-  // Walk up from this test file looking for a `repos/` dir that
-  // sits next to a `package.json` naming `danxbot`. Resolves both
-  // the worktree path AND the canonical danxbot path.
-  let cur = realpathSync(resolve(__dirname, "..", "..", ".."));
-  for (let i = 0; i < 8; i++) {
-    const pkgPath = resolve(cur, "package.json");
-    if (existsSync(pkgPath)) {
-      try {
-        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as {
-          name?: string;
-        };
-        if (pkg.name === "danxbot" && existsSync(resolve(cur, "repos"))) {
-          return cur;
-        }
-      } catch {
-        // ignore unreadable package.json
-      }
-    }
-    const parent = resolve(cur, "..");
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return null;
-}
-
-interface ConnectedRepo {
-  name: string;
-  localPath: string;
-}
-
-function discoverConnectedRepos(): ConnectedRepo[] {
-  const root = findDanxbotRoot();
-  if (!root) return [];
-  const reposDir = resolve(root, "repos");
-  if (!existsSync(reposDir)) return [];
-  const entries = readdirSync(reposDir);
-  const out: ConnectedRepo[] = [];
-  for (const name of entries) {
-    if (name.startsWith(".")) continue;
-    const linkPath = resolve(reposDir, name);
-    let resolved: string;
-    try {
-      resolved = realpathSync(linkPath);
-    } catch {
-      continue;
-    }
-    if (!existsSync(resolve(resolved, ".danxbot"))) continue;
-    out.push({ name, localPath: resolved });
-  }
-  return out;
-}
-
 const CLOSED_MAX_AGE_MS = 48 * 60 * 60 * 1000;
 
 interface YamlCheck {
@@ -82,11 +33,22 @@ interface YamlCheck {
   actualVersion: unknown;
 }
 
+interface BlockedCheck {
+  repo: string;
+  path: string;
+  field: string;
+}
+
 function walkRepoYamls(
   repo: ConnectedRepo,
   nowMs: number,
-): { failures: YamlCheck[]; scanned: number } {
+): {
+  failures: YamlCheck[];
+  blockedFailures: BlockedCheck[];
+  scanned: number;
+} {
   const failures: YamlCheck[] = [];
+  const blockedFailures: BlockedCheck[] = [];
   let scanned = 0;
   const openDir = resolve(repo.localPath, ".danxbot", "issues", "open");
   const closedDir = resolve(repo.localPath, ".danxbot", "issues", "closed");
@@ -116,20 +78,49 @@ function walkRepoYamls(
         failures.push({ repo: repo.name, path, actualVersion: "<not-object>" });
         continue;
       }
-      const version = (parsed as Record<string, unknown>).schema_version;
+      const obj = parsed as Record<string, unknown>;
+      const version = obj.schema_version;
       if (version !== KNOWN_SCHEMA_MAX) {
         failures.push({ repo: repo.name, path, actualVersion: version });
+      }
+      // DX-700: raw `"Blocked"` on either top-level `status` or any
+      // `history[].from/to` is a stale-v11 drift that the v12 validator
+      // rejects. The boot sweep's heal pass (DX-700) MUST have already
+      // canonicalized these — any survivor is a real drift bug.
+      if (obj.status === "Blocked") {
+        blockedFailures.push({ repo: repo.name, path, field: "status" });
+      }
+      if (Array.isArray(obj.history)) {
+        for (let i = 0; i < obj.history.length; i++) {
+          const entry = obj.history[i];
+          if (typeof entry !== "object" || entry === null) continue;
+          const e = entry as Record<string, unknown>;
+          if (e.from === "Blocked") {
+            blockedFailures.push({
+              repo: repo.name,
+              path,
+              field: `history[${i}].from`,
+            });
+          }
+          if (e.to === "Blocked") {
+            blockedFailures.push({
+              repo: repo.name,
+              path,
+              field: `history[${i}].to`,
+            });
+          }
+        }
       }
     }
   };
 
   scan(openDir, "open");
   scan(closedDir, "closed");
-  return { failures, scanned };
+  return { failures, blockedFailures, scanned };
 }
 
 describe("schema-uniformity invariant (DX-597)", () => {
-  const repos = discoverConnectedRepos();
+  const repos = discoverConnectedRepos(resolve(__dirname, "..", "..", ".."));
   const nowMs = Date.now();
 
   it("repos discovery is internally consistent (no-op when no repos symlinked)", () => {
@@ -168,6 +159,27 @@ describe("schema-uniformity invariant (DX-597)", () => {
         expect(totalScanned).toBeGreaterThan(0);
       }
       expect(allFailures).toEqual([]);
+    },
+  );
+
+  it(
+    `no YAML carries raw "Blocked" on status or history[].from/to (DX-700, repos.length=${repos.length})`,
+    () => {
+      const allBlocked: BlockedCheck[] = [];
+      for (const repo of repos) {
+        const { blockedFailures } = walkRepoYamls(repo, nowMs);
+        allBlocked.push(...blockedFailures);
+      }
+      if (allBlocked.length > 0) {
+        const msg = allBlocked
+          .map((f) => `  [${f.repo}] ${f.path} — ${f.field} === "Blocked"`)
+          .join("\n");
+        throw new Error(
+          `${allBlocked.length} stale "Blocked" reference(s) survived the boot-sweep heal pass; ` +
+            `v12 dropped "Blocked" from the IssueStatus enum so the validator rejects these on read:\n${msg}`,
+        );
+      }
+      expect(allBlocked).toEqual([]);
     },
   );
 });

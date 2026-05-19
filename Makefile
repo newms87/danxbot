@@ -234,6 +234,9 @@ launch-dashboard-host: ## Start the dashboard on the host
 #                       Requires: make launch-infra + make launch-worker
 #
 
+migrate-all-issues: ## DX-700 — one-shot YAML migration sweep across every connected repo (idempotent)
+	@npx tsx scripts/migrate-all-issues.ts
+
 test: ## Run all unit + integration tests (Layer 1 — free, no external deps)
 	@npx vitest run
 

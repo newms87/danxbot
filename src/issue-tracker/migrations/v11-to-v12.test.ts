@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { migrateV11ToV12 } from "./v11-to-v12.js";
+import { healBlockedReferences, migrateV11ToV12 } from "./v11-to-v12.js";
 
 describe("migrateV11ToV12", () => {
   it("stamps schema_version: 12 and remaps status: Blocked -> Cancelled when cancelled_at is populated", () => {
@@ -305,5 +305,237 @@ describe("migrateV11ToV12", () => {
     const v12 = migrateV11ToV12(v11) as Record<string, unknown>;
     expect(v12.status).toBe("Review");
     expect(v12.schema_version).toBe(12);
+  });
+
+  it("remaps history[].to: Blocked and history[].from: Blocked using the same projection (DX-700)", () => {
+    // Pre-DX-657 `status_change` history entries carry "Blocked" in
+    // `to` / `from`. v12 dropped "Blocked" from the IssueStatus enum,
+    // so the validator (yaml.ts:1296/1305) rejects on read. The
+    // migration MUST rewrite those entries using the same
+    // deriveStatus-without-rule-3 projection it uses for top-level
+    // status.
+    const v11 = {
+      schema_version: 11,
+      status: "Blocked",
+      cancelled_at: null,
+      completed_at: null,
+      ready_at: "2026-05-01T00:00:00Z",
+      archived_at: null,
+      dispatch: null,
+      blocked: { reason: "r", at: "2026-05-05T00:00:00Z" },
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "In Progress",
+          to: "Blocked",
+        },
+        {
+          timestamp: "2026-05-06T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "Blocked",
+          to: "ToDo",
+        },
+      ],
+    };
+    const v12 = migrateV11ToV12(v11) as Record<string, unknown>;
+    expect(v12.status).toBe("ToDo");
+    const history = v12.history as Array<Record<string, unknown>>;
+    // Top-level projects to ToDo via ready_at → both Blocked appearances
+    // remap to ToDo. The rest of the entry is preserved verbatim.
+    expect(history[0].from).toBe("In Progress");
+    expect(history[0].to).toBe("ToDo");
+    expect(history[0].timestamp).toBe("2026-05-05T00:00:00Z");
+    expect(history[0].actor).toBe("worker:auto-derive");
+    expect(history[0].event).toBe("status_change");
+    expect(history[1].from).toBe("ToDo");
+    expect(history[1].to).toBe("ToDo");
+  });
+
+  it("history remap leaves non-Blocked entries untouched", () => {
+    const v11 = {
+      schema_version: 11,
+      status: "ToDo",
+      cancelled_at: null,
+      completed_at: null,
+      ready_at: "2026-05-01T00:00:00Z",
+      archived_at: null,
+      dispatch: null,
+      blocked: null,
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "Review",
+          to: "ToDo",
+        },
+      ],
+    };
+    const v12 = migrateV11ToV12(v11) as Record<string, unknown>;
+    const history = v12.history as Array<Record<string, unknown>>;
+    expect(history[0].from).toBe("Review");
+    expect(history[0].to).toBe("ToDo");
+  });
+
+  it("history remap is a no-op when history is missing / null / empty", () => {
+    for (const hist of [undefined, null, []]) {
+      const v11 = {
+        schema_version: 11,
+        status: "Review",
+        cancelled_at: null,
+        completed_at: null,
+        ready_at: null,
+        archived_at: null,
+        dispatch: null,
+        blocked: null,
+        ...(hist === undefined ? {} : { history: hist }),
+      };
+      const v12 = migrateV11ToV12(v11) as Record<string, unknown>;
+      expect(v12.schema_version).toBe(12);
+    }
+  });
+
+  it("history remap never mutates input history entries", () => {
+    const v11 = {
+      schema_version: 11,
+      status: "ToDo",
+      ready_at: "2026-05-01T00:00:00Z",
+      cancelled_at: null,
+      completed_at: null,
+      archived_at: null,
+      dispatch: null,
+      blocked: null,
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "In Progress",
+          to: "Blocked",
+        },
+      ],
+    };
+    const snapshot = JSON.parse(JSON.stringify(v11));
+    migrateV11ToV12(v11);
+    expect(v11).toEqual(snapshot);
+  });
+
+  it("healBlockedReferences: returns input by reference on a clean v12 file (no-op contract)", () => {
+    // The boot sweep's at-MAX branch uses `blockedHealed === heal.value`
+    // to detect "no change" and increment unchanged++ instead of
+    // healed++. A clone-on-no-op would silently break that branch.
+    const clean = {
+      schema_version: 12,
+      status: "ToDo",
+      cancelled_at: null,
+      completed_at: null,
+      ready_at: "2026-05-01T00:00:00Z",
+      archived_at: null,
+      dispatch: null,
+      blocked: null,
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "Review",
+          to: "ToDo",
+        },
+      ],
+    };
+    const out = healBlockedReferences(clean);
+    expect(out).toBe(clean);
+  });
+
+  it("healBlockedReferences: heals an at-MAX v12 input with stale history (status untouched)", () => {
+    const stale = {
+      schema_version: 12,
+      status: "Done",
+      cancelled_at: null,
+      completed_at: "2026-05-10T00:00:00Z",
+      ready_at: "2026-05-01T00:00:00Z",
+      archived_at: null,
+      dispatch: null,
+      blocked: null,
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "ToDo",
+          to: "Blocked",
+        },
+      ],
+    };
+    const out = healBlockedReferences(stale);
+    expect(out).not.toBe(stale);
+    expect(out.status).toBe("Done"); // unchanged — was already valid
+    expect(out.schema_version).toBe(12); // never bumped — version-agnostic
+    const history = out.history as Array<Record<string, unknown>>;
+    expect(history[0].to).toBe("Done");
+  });
+
+  it("healBlockedReferences: walks history entries regardless of event type (defensive)", () => {
+    // The helper checks `e.from === "Blocked"` / `e.to === "Blocked"`
+    // unconditionally — a hand-crafted entry with a non-canonical
+    // event still gets remapped if its from/to carry the legacy value.
+    const stale = {
+      schema_version: 12,
+      status: "Review",
+      cancelled_at: null,
+      completed_at: null,
+      ready_at: null,
+      archived_at: null,
+      dispatch: null,
+      blocked: null,
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "operator",
+          event: "comment",
+          from: "Blocked",
+          to: "ToDo",
+        },
+      ],
+    };
+    const out = healBlockedReferences(stale);
+    const history = out.history as Array<Record<string, unknown>>;
+    // Top-level projects to Review (no triggers) → Blocked remaps to Review
+    expect(history[0].from).toBe("Review");
+    expect(history[0].to).toBe("ToDo");
+  });
+
+  it("round-trips byte-stable on a v12 file with already-remapped history", () => {
+    // After the first migration pass the resulting v12 object should be
+    // a fixed point under any future repeat of the same logic: every
+    // status value (top-level + history) is now a valid IssueStatus.
+    const v11 = {
+      schema_version: 11,
+      status: "Blocked",
+      cancelled_at: null,
+      completed_at: null,
+      ready_at: "2026-05-01T00:00:00Z",
+      archived_at: null,
+      dispatch: null,
+      blocked: { reason: "r", at: "2026-05-05T00:00:00Z" },
+      history: [
+        {
+          timestamp: "2026-05-05T00:00:00Z",
+          actor: "worker:auto-derive",
+          event: "status_change",
+          from: "In Progress",
+          to: "Blocked",
+        },
+      ],
+    };
+    const once = migrateV11ToV12(v11) as Record<string, unknown>;
+    expect(once.status).toBe("ToDo");
+    const history = once.history as Array<Record<string, unknown>>;
+    expect(history[0].to).toBe("ToDo");
+    // Stable JSON-shape under the projection
+    expect(JSON.parse(JSON.stringify(once))).toEqual(once);
   });
 });

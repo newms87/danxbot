@@ -14,6 +14,14 @@ import { MigrationRegistryError } from "./registry.js";
  *    `deriveStatus` rule 3 + drops `"Blocked"` from the `IssueStatus`
  *    union). `blocked.at` and `blocked.reason` survive verbatim so
  *    the Phase-2 gate logic still has the data it needs.
+ *  - `history[].from` / `history[].to` carrying `"Blocked"` (pre-v12
+ *    `status_change` entries) are remapped to the same projection.
+ *    The v12 validator (yaml.ts validateHistory) rejects any non-
+ *    canonical IssueStatus value in those fields; a v11 history
+ *    written before the enum drop would otherwise fail every read.
+ *    The projection is computed ONCE from the top-level fields and
+ *    applied uniformly — per-entry timestamps don't carry enough
+ *    state to reconstruct an at-the-time projection (DX-700).
  *  - Bumps `schema_version` to `12`.
  *
  * Remap rule for `status: "Blocked"` — pick the projection that
@@ -52,11 +60,76 @@ export function migrateV11ToV12(prev: unknown): unknown {
     schema_version: 12,
   };
 
-  if (v.status === "Blocked") {
-    next.status = remapBlockedStatus(v);
-  }
+  return healBlockedReferences(next);
+}
 
+/**
+ * Heal pass — remap every `"Blocked"` literal (top-level `status` +
+ * `history[].from` / `history[].to`) to the deriveStatus-without-rule-3
+ * projection. Pure: never mutates the input; returns a fresh object
+ * sharing references for unchanged subtrees.
+ *
+ * Used both by `migrateV11ToV12` (forward migration of v11 files) AND
+ * by `migrate-on-boot.ts`'s at-MAX branch (to heal v12 files already
+ * on disk whose history was not remapped by the v1 of the v11→v12
+ * migration — DX-700). Schema-version-agnostic: it ONLY touches the
+ * status fields, never the version field.
+ *
+ * Idempotent at v12: a file whose top-level + history are already
+ * valid IssueStatus values is returned without modification.
+ */
+export function healBlockedReferences(
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  const projection = remapBlockedStatus(raw);
+  const statusBad = raw.status === "Blocked";
+  const historyHasBlocked =
+    Array.isArray(raw.history) && historyCarriesBlocked(raw.history);
+  if (!statusBad && !historyHasBlocked) return raw;
+  const next: Record<string, unknown> = { ...raw };
+  if (statusBad) next.status = projection;
+  if (historyHasBlocked) {
+    next.history = remapBlockedHistory(raw.history as unknown[], projection);
+  }
   return next;
+}
+
+function historyCarriesBlocked(history: unknown[]): boolean {
+  for (const entry of history) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      continue;
+    }
+    const e = entry as Record<string, unknown>;
+    if (e.from === "Blocked" || e.to === "Blocked") return true;
+  }
+  return false;
+}
+
+/**
+ * Walk a v11 `history[]` array and clone any entry whose `from` or
+ * `to` carries `"Blocked"`, replacing the offending value with the
+ * supplied projection. Non-Blocked entries pass through by reference
+ * (still safe — the parent shallow-clone in `migrateV11ToV12` already
+ * produced a fresh `next` object, and v11→v12 never mutates entry
+ * internals). Returns a fresh array.
+ */
+function remapBlockedHistory(
+  history: unknown[],
+  projection: string,
+): unknown[] {
+  return history.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return entry;
+    }
+    const e = entry as Record<string, unknown>;
+    const fromBad = e.from === "Blocked";
+    const toBad = e.to === "Blocked";
+    if (!fromBad && !toBad) return entry;
+    const cloned: Record<string, unknown> = { ...e };
+    if (fromBad) cloned.from = projection;
+    if (toBad) cloned.to = projection;
+    return cloned;
+  });
 }
 
 function remapBlockedStatus(v: Record<string, unknown>): string {

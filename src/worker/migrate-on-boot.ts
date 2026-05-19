@@ -34,6 +34,7 @@ import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:
 import { dirname, join, resolve } from "node:path";
 import { parse as parseYamlText, stringify as stringifyYaml } from "yaml";
 import { healV10MissingFields } from "../issue-tracker/heal-v10.js";
+import { healBlockedReferences } from "../issue-tracker/migrations/v11-to-v12.js";
 import { migrateForward } from "../issue-tracker/migrations/registry.js";
 import { KNOWN_SCHEMA_MAX } from "../issue-tracker/schema-versions.js";
 import { createLogger } from "../logger.js";
@@ -157,22 +158,40 @@ async function migrateOne(path: string, result: BootSweepResult): Promise<void> 
     );
   }
   // At-MAX path: file already on canonical version; only thing left to
-  // do is heal missing required-with-default fields. The heal is
-  // idempotent — a canonical file produces zero applied[] entries and
-  // we exit through unchanged++ without writing.
+  // do is heal missing required-with-default fields + remap any stale
+  // `"Blocked"` references on top-level `status` or `history[].from/to`
+  // (DX-700 — the v1 of the v11→v12 migration only remapped top-level
+  // `status`; history entries with `to: "Blocked"` survived into v12
+  // and now fail the strict-enum validator on every read). Both heals
+  // are idempotent — a clean canonical file returns identical
+  // references and we exit through unchanged++ without writing.
   if (version === KNOWN_SCHEMA_MAX) {
     const obj = raw as Record<string, unknown>;
     const heal = healV10MissingFields(obj);
-    if (heal.applied.length === 0) {
+    const blockedHealed = healBlockedReferences(heal.value);
+    // Reference-equality is the no-op signal both helpers guarantee:
+    // `healV10MissingFields` returns `value === obj` when `applied`
+    // is empty, and `healBlockedReferences` returns its input by
+    // reference when no `"Blocked"` literal needs remapping. A future
+    // heal helper that clones-on-no-op would silently break the
+    // unchanged++ branch — keep the no-op fast-path contract.
+    if (heal.applied.length === 0 && blockedHealed === heal.value) {
       result.unchanged++;
       return;
     }
-    const body = stringifyYaml(heal.value, { lineWidth: 0 });
+    const body = stringifyYaml(blockedHealed, { lineWidth: 0 });
     await atomicWriteYaml(path, body);
     result.healed++;
-    log.warn(
-      `[boot-sweep] healed ${path}: filled missing required field(s) [${heal.applied.join(", ")}] with canonical defaults`,
-    );
+    const fieldsNote =
+      heal.applied.length > 0
+        ? `filled missing required field(s) [${heal.applied.join(", ")}]`
+        : "";
+    const blockedNote =
+      blockedHealed === heal.value
+        ? ""
+        : "remapped stale \"Blocked\" references on status/history";
+    const parts = [fieldsNote, blockedNote].filter(Boolean).join("; ");
+    log.warn(`[boot-sweep] healed ${path}: ${parts}`);
     return;
   }
   // Below-MAX path: registry migrates → heal pass catches any field the
