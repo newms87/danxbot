@@ -30,6 +30,16 @@ services:
       # by `renderProdCompose` from the deploy config's repo list — same
       # layout as `docker-compose.override.yml` in dev.
 ${CLAUDE_PROJECTS_MOUNTS}
+      # DX-697 — per-repo worker-owned runtime volumes. The worker
+      # writes CRITICAL_FAILURE + sync-root-state.json here (resolved by
+      # `runtimeVolumeRoot()` to `/var/lib/danxbot/<name>/` in docker
+      # runtime); the dashboard mounts the same named volume so
+      # `agents-list.ts#buildSnapshot` (readFlag) and
+      # `sync-root-watcher.ts` chokidar see what the worker stamped.
+      # Each line rendered by `renderProdCompose` from the deploy
+      # config's repo list; matching `external: true` declarations
+      # live in the top-level `volumes:` block below.
+${RUNTIME_VOLUME_MOUNTS}
       - /var/run/docker.sock:/var/run/docker.sock
     # DX-262 — per-repo host-path env consumed by `src/target.ts#loadTarget`
     # to populate `RepoConfig.hostPath`. Rendered per-repo by
@@ -103,3 +113,4 @@ networks:
   danxbot-net:
     name: danxbot-net
     driver: bridge
+${RUNTIME_VOLUMES_BLOCK}

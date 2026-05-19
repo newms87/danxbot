@@ -180,6 +180,45 @@ describe("buildOverride", () => {
     );
   });
 
+  it("DX-697 — emits per-repo `danxbot-runtime-<name>:/var/lib/danxbot/<name>` mount on dashboard so it sees the worker-owned volume (CRITICAL_FAILURE / sync-root-state)", () => {
+    // The worker's compose declares the named volume; the dashboard
+    // (separate compose project) attaches by name via top-level
+    // `external: true`. Both compose projects then mount the SAME
+    // underlying docker volume at `/var/lib/danxbot/<name>/`, which is
+    // the path `runtimeVolumeRoot()` resolves to in docker runtime.
+    const out = buildOverride(["danxbot", "gpt-manager"]);
+    expect(out).toContain(
+      "      - danxbot-runtime-danxbot:/var/lib/danxbot/danxbot",
+    );
+    expect(out).toContain(
+      "      - danxbot-runtime-gpt-manager:/var/lib/danxbot/gpt-manager",
+    );
+  });
+
+  it("DX-697 — declares each `danxbot-runtime-<name>` as a top-level external volume so it resolves to the worker-created docker volume", () => {
+    // Docker compose mounts a named volume only when it appears in the
+    // top-level `volumes:` block. `external: true` + matching `name:`
+    // tells compose to attach to a pre-existing volume created by the
+    // worker compose (project `danxbot-worker-<name>`) instead of
+    // creating a new one prefixed by THIS project's name. Without the
+    // external declaration the dashboard would silently create a fresh
+    // empty volume — exactly the regression this card exists to dodge.
+    const out = buildOverride(["danxbot", "gpt-manager"]);
+    expect(out).toMatch(/^volumes:$/m);
+    expect(out).toMatch(
+      /^  danxbot-runtime-danxbot:\n    name: danxbot-runtime-danxbot\n    external: true$/m,
+    );
+    expect(out).toMatch(
+      /^  danxbot-runtime-gpt-manager:\n    name: danxbot-runtime-gpt-manager\n    external: true$/m,
+    );
+  });
+
+  it("DX-697 — emits no top-level `volumes:` block when repo list is empty", () => {
+    const out = buildOverride([]);
+    expect(out).not.toMatch(/^volumes:$/m);
+    expect(out).not.toContain("danxbot-runtime-");
+  });
+
   it("produces the expected structural shape (guards against indent regressions)", () => {
     const out = buildOverride(["danxbot"]);
     // Compose is whitespace-sensitive: `services:` top-level, 2-space service

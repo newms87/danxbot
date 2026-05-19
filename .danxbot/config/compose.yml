@@ -170,7 +170,17 @@ volumes:
   # DX-682 — worker-owned runtime volume backing
   # `/var/lib/danxbot/<repo>/`. Per-repo, per-host; never bind-mounted
   # into the consumed repo.
+  #
+  # DX-697 — pinned `name:` (un-prefixes the project name) so the
+  # dashboard's separate compose project can attach to the same
+  # underlying docker volume via `external: true`. Without the pin,
+  # the actual docker volume name would be
+  # `danxbot-worker-<repo>_danxbot-runtime-<repo>` and the dashboard's
+  # `external: true` reference to `danxbot-runtime-<repo>` would fail
+  # to resolve. The fixed name also survives `docker compose down`
+  # cleanly because both projects see the same identity.
   danxbot-runtime-danxbot:
+    name: danxbot-runtime-danxbot
 
 networks:
   danxbot-net:

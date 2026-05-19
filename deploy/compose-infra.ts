@@ -12,6 +12,10 @@ import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { applyTemplateVars, type RemoteHost } from "./remote.js";
 import { isDryRun } from "./exec.js";
+import {
+  runtimeVolumeMountLine,
+  runtimeVolumeExternalDeclLines,
+} from "../src/runtime-volume.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATE = resolve(__dirname, "templates/docker-compose.prod.yml");
@@ -47,11 +51,26 @@ export function renderProdCompose(
       return `      ${key}: /danxbot/repos/${name}`;
     })
     .join("\n");
+  // DX-697 — per-repo runtime-volume mount + top-level external decl.
+  // Naming + mount-path strings come from `src/runtime-volume.ts` so
+  // this file, `src/cli/dev-compose-override.ts`, and the per-repo
+  // worker compose stay in lockstep.
+  const runtimeVolumeMounts = repoNames
+    .map((name) => runtimeVolumeMountLine(name))
+    .join("\n");
+  const runtimeVolumesBlock =
+    repoNames.length === 0
+      ? ""
+      : ["", "volumes:", ...runtimeVolumeExternalDeclLines(repoNames)].join(
+          "\n",
+        );
   return applyTemplateVars(readFileSync(TEMPLATE, "utf-8"), {
     "${ECR_IMAGE}": ecrImage,
     "${DASHBOARD_PORT}": String(dashboardPort),
     "${CLAUDE_PROJECTS_MOUNTS}": claudeProjectsMounts,
     "${DASHBOARD_REPO_HOST_PATH_ENVS}": hostPathEnvs,
+    "${RUNTIME_VOLUME_MOUNTS}": runtimeVolumeMounts,
+    "${RUNTIME_VOLUMES_BLOCK}": runtimeVolumesBlock,
   });
 }
 

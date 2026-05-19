@@ -258,6 +258,37 @@ describe.each(discoverConnectedRepoComposes())(
   },
 );
 
+// DX-697 — worker compose declares a runtime-volume with a pinned
+// `name:` so the dashboard's separate compose project can attach via
+// `external: true`. Without the pin, docker prefixes the project name
+// (`danxbot-worker-<repo>_danxbot-runtime-<repo>`) and the dashboard's
+// external attach silently creates a fresh empty volume — readFlag()
+// returns null even when the worker has stamped CRITICAL_FAILURE.
+describe.each([
+  { name: "danxbot", path: COMPOSE_PATH },
+  ...discoverConnectedRepoComposes(),
+])(
+  "$name worker compose.yml pins the runtime-volume `name:` so dashboard can attach via external (DX-697)",
+  ({ name: repoName, path }) => {
+    const text = readFileSync(path, "utf-8");
+
+    it("declares `danxbot-runtime-<repo>:` with explicit `name: danxbot-runtime-<repo>` in the top-level volumes block", () => {
+      // Match the volume entry + its `name:` child. Indentation:
+      // 2-space volume key, 4-space child.
+      const re = new RegExp(
+        `^  danxbot-runtime-${repoName}:\\n\\s+name:\\s+danxbot-runtime-${repoName}\\b`,
+        "m",
+      );
+      expect(
+        re.test(text),
+        `${path} must declare danxbot-runtime-${repoName} with pinned 'name:' (DX-697). ` +
+          `The dashboard compose's external attach resolves the volume by its docker name; ` +
+          `without the pin, docker prefixes the project name and the attach silently creates a fresh empty volume.`,
+      ).toBe(true);
+    });
+  },
+);
+
 // Regression test for Trello auX4nTRk — getDanxbotCommit() reads
 // `process.env.DANXBOT_COMMIT` baked into the image at build time
 // (Dockerfile ARG/ENV). A `DANXBOT_COMMIT: ${DANXBOT_COMMIT:-}` line in

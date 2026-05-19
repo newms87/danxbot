@@ -15,8 +15,16 @@ import {
   symlinkSync,
 } from "node:fs";
 import { resolve, dirname } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+
+// Hook allows `/tmp/*` paths unconditionally (commit a379c86 — dispatched
+// agents legitimately read/write under /tmp via stdlib tools). Therefore
+// the "outside the worktree" test fixtures MUST NOT live under /tmp,
+// otherwise the deny tests below assert against the wrong branch of the
+// hook and fail. Use a sibling scratch dir under HOME instead — outside
+// the test worktreeDir + outside the /tmp allowlist.
+import { homedir } from "node:os";
+const TEST_SCRATCH_ROOT = resolve(homedir(), ".danxbot-test-tmp");
 
 const HOOK = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -60,7 +68,8 @@ describe("worktree-guard hook (DX-309)", () => {
   let issuesLink: string;
 
   beforeEach(() => {
-    const root = mkdtempSync(resolve(tmpdir(), "wt-guard-"));
+    mkdirSync(TEST_SCRATCH_ROOT, { recursive: true });
+    const root = mkdtempSync(resolve(TEST_SCRATCH_ROOT, "wt-guard-"));
     worktreeDir = resolve(root, "worktree");
     outsideDir = resolve(root, "outside");
     mkdirSync(worktreeDir, { recursive: true });
@@ -75,7 +84,13 @@ describe("worktree-guard hook (DX-309)", () => {
   });
 
   afterEach(() => {
+    // Clean the per-test mkdtemp dir AND the parent scratch root —
+    // the scratch root would otherwise accumulate across test runs
+    // (`mkdtempSync` keeps the parent forever even when the child is
+    // removed). `force: true` ignores ENOENT if a prior test already
+    // removed it.
     rmSync(dirname(worktreeDir), { recursive: true, force: true });
+    rmSync(TEST_SCRATCH_ROOT, { recursive: true, force: true });
   });
 
   it("no-ops when DANX_AGENT_WORKTREE unset (non-agent dispatch)", () => {

@@ -70,3 +70,50 @@ export function runtimeVolumePath(
 export function ensureRepoRuntimeDir(repoName: string): void {
   mkdirSync(repoRuntimeDir(repoName), { recursive: true });
 }
+
+/**
+ * DX-697 — canonical naming + compose-shape helpers for the per-repo
+ * worker-owned runtime volume. Three call sites must agree on the
+ * volume's docker name AND the container-side mount path:
+ *
+ *   1. Per-repo worker `<repo>/.danxbot/config/compose.yml` — declares
+ *      the volume with a pinned `name:` so docker doesn't project-
+ *      prefix it.
+ *   2. Dev `docker-compose.override.yml` — emitted by
+ *      `src/cli/dev-compose-override.ts`; mounts the same name on the
+ *      dashboard service + declares it `external: true` at top-level.
+ *   3. Prod `docker-compose.prod.yml` — emitted by
+ *      `deploy/compose-infra.ts#renderProdCompose`; same shape.
+ *
+ * One drift between any pair = dashboard attaches to a fresh empty
+ * volume instead of the worker's, and `readFlag` silently returns null
+ * even after the worker has stamped CRITICAL_FAILURE. Centralizing the
+ * strings here so a future rename touches one site, not three.
+ *
+ * Container mount path matches `runtimeVolumeRoot()` in docker runtime
+ * (`/var/lib/danxbot/<repo>`) so `runtimeVolumePath(repoName, ...)`
+ * resolves to the mounted dir from inside either container.
+ */
+export function runtimeVolumeName(repoName: string): string {
+  return `danxbot-runtime-${repoName}`;
+}
+
+export function runtimeVolumeContainerPath(repoName: string): string {
+  return `/var/lib/danxbot/${repoName}`;
+}
+
+export function runtimeVolumeMountLine(repoName: string): string {
+  return `      - ${runtimeVolumeName(repoName)}:${runtimeVolumeContainerPath(repoName)}`;
+}
+
+/**
+ * Top-level `volumes:` external declaration block lines for the given
+ * repo names. Returns an empty array on empty input so callers can
+ * cleanly skip emitting the `volumes:` key when there are no repos.
+ */
+export function runtimeVolumeExternalDeclLines(repoNames: string[]): string[] {
+  return repoNames.flatMap((name) => {
+    const n = runtimeVolumeName(name);
+    return [`  ${n}:`, `    name: ${n}`, `    external: true`];
+  });
+}

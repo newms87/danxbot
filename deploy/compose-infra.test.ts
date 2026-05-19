@@ -128,6 +128,42 @@ describe("renderProdCompose", () => {
   });
 });
 
+describe("renderProdCompose — runtime volume (DX-697)", () => {
+  it("emits per-repo `danxbot-runtime-<name>:/var/lib/danxbot/<name>` mount on the dashboard so it sees the worker-owned runtime volume", () => {
+    const out = renderProdCompose("img", 5555, ["danxbot", "gpt-manager"]);
+    expect(out).toContain(
+      "- danxbot-runtime-danxbot:/var/lib/danxbot/danxbot",
+    );
+    expect(out).toContain(
+      "- danxbot-runtime-gpt-manager:/var/lib/danxbot/gpt-manager",
+    );
+  });
+
+  it("declares each `danxbot-runtime-<name>` as top-level `external: true` so it attaches to the worker-created docker volume", () => {
+    const out = renderProdCompose("img", 5555, ["danxbot", "gpt-manager"]);
+    expect(out).toMatch(/^volumes:$/m);
+    expect(out).toMatch(
+      /^  danxbot-runtime-danxbot:\n    name: danxbot-runtime-danxbot\n    external: true$/m,
+    );
+    expect(out).toMatch(
+      /^  danxbot-runtime-gpt-manager:\n    name: danxbot-runtime-gpt-manager\n    external: true$/m,
+    );
+  });
+
+  it("leaves no unsubstituted ${RUNTIME_VOLUME_MOUNTS} or ${RUNTIME_VOLUMES_BLOCK} tokens", () => {
+    const out = renderProdCompose("img", 5555, ["danxbot"]);
+    expect(out).not.toMatch(/\$\{RUNTIME_VOLUME_MOUNTS\}/);
+    expect(out).not.toMatch(/\$\{RUNTIME_VOLUMES_BLOCK\}/);
+  });
+
+  it("emits no runtime-volume mounts or top-level block when repo list is empty", () => {
+    const out = renderProdCompose("img", 5555, []);
+    // No mount lines (no top-level volumes block, no `- danxbot-runtime-…` mount entries).
+    expect(out).not.toMatch(/^      - danxbot-runtime-/m);
+    expect(out).not.toMatch(/^volumes:$/m);
+  });
+});
+
 describe("uploadAndRestartInfra", () => {
   // Stub RemoteHost — `uploadAndRestartInfra` orchestrates SCP + several
   // sshRun/sshRunStreaming calls. We capture them in arrays and assert

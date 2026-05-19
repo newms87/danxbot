@@ -43,6 +43,10 @@
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadTarget } from "../target.js";
+import {
+  runtimeVolumeMountLine,
+  runtimeVolumeExternalDeclLines,
+} from "../runtime-volume.js";
 
 export const OVERRIDE_FILENAME = "docker-compose.override.yml";
 const CONTAINER_REPOS_BASE = "/danxbot/app/repos";
@@ -187,6 +191,15 @@ export function buildOverride(repoNames: string[]): string {
   const hostProjectsBind =
     `      - \${HOME}/.claude/projects:${CONTAINER_HOST_CLAUDE_PROJECTS_BASE}:ro`;
 
+  // DX-697 — per-repo runtime-volume mount on dashboard. Naming +
+  // mount-path strings come from `src/runtime-volume.ts` so this file,
+  // `deploy/compose-infra.ts`, and the per-repo worker compose stay in
+  // lockstep. Without lockstep the dashboard would silently attach to
+  // a fresh empty volume instead of the worker's — `readFlag` returns
+  // null even after the worker stamps CRITICAL_FAILURE.
+  const runtimeBinds = repoNames.map((name) => runtimeVolumeMountLine(name));
+  const runtimeExternalDecls = runtimeVolumeExternalDeclLines(repoNames);
+
   return [
     ...header,
     "services:",
@@ -196,8 +209,11 @@ export function buildOverride(repoNames: string[]): string {
     ...repoMirrorBinds,
     ...projectsBinds,
     hostProjectsBind,
+    ...runtimeBinds,
     "    environment:",
     ...hostPathEnvs,
+    "volumes:",
+    ...runtimeExternalDecls,
     "",
   ].join("\n");
 }

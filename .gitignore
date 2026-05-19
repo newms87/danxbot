@@ -88,3 +88,4 @@ deploy/targets/.cache/
 .danxbot/sync-root-state.json
 # DX-667 — agent-local scratch (vitest logs, ad-hoc captures). Never committed.
 .danxbot/tmp/
+.vitest.log
