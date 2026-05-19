@@ -3,8 +3,8 @@
  * 2-line drawer / dialog header.
  *
  * Line 1 (meta row) — left: [priority menu][id][parent link][type menu]
- *   [status menu]; right: [age badge][requires-human icon btn]
- *   [copy btn][delete btn][close btn].
+ *   [list menu]; right: [age badge][requires-human icon btn]
+ *   [mark-blocked btn][copy btn][delete btn][close btn].
  *
  * Line 2 — inline editable title via `DanxEditableDiv`.
  *
@@ -14,45 +14,25 @@
  * icon button in the meta row is a quick-edit affordance; the full
  * banner + clear/edit flow lives in the gates section.
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useTransientStatus } from "../../composables/useTransientStatus";
+import { computed, ref, watch } from "vue";
 import {
   DanxButton,
-  DanxDialog,
   DanxEditableDiv,
-  DanxPopover,
   DanxTooltip,
   closeIcon,
-  copyIcon,
-  trashIcon,
 } from "@thehammer/danx-ui";
 import userIcon from "danx-icon/src/fontawesome/regular/user.svg?raw";
 import lockIcon from "danx-icon/src/fontawesome/solid/lock.svg?raw";
-import type {
-  Issue,
-  IssueDetail,
-  IssueListItem,
-  IssueType,
-  List,
-  ListType,
-} from "../../types";
-import { ISSUE_TYPES, LIST_TYPE_LADDER, LIST_TYPE_LABELS } from "../../types";
-import { deleteIssue, getIssueSubtree, patchIssue } from "../../api";
+import type { Issue, IssueDetail, IssueListItem } from "../../types";
+import { patchIssue } from "../../api";
 import { ISSUE_TYPE_META, typeToId } from "./issuePalette";
-import { useListColors } from "../../composables/useListColors";
 import IssueAgeBadge from "../IssueAgeBadge.vue";
-import PriorityIcon from "../PriorityIcon.vue";
-// DX-659 / Phase 3 — Blocked is a dispatch gate, not a list type.
-// `UnblockConfirmDialog` was deleted. `BlockedReasonDialog` is wired
-// below as the operator-facing "Mark Blocked" affordance; its submit
-// PATCHes only `blocked: {at, reason}` and never touches `status` or
-// `dispatch`.
+import IssueCopyButton from "./IssueCopyButton.vue";
+import IssueDeleteButton from "./IssueDeleteButton.vue";
+import IssueListMenu from "./IssueListMenu.vue";
+import IssuePriorityMenu from "./IssuePriorityMenu.vue";
+import IssueTypeMenu from "./IssueTypeMenu.vue";
 import BlockedReasonDialog from "./BlockedReasonDialog.vue";
-import {
-  priorityTier,
-  PRIORITY_TIERS,
-  type PriorityTier,
-} from "../../lib/priorityTier";
 
 const props = withDefaults(
   defineProps<{
@@ -64,13 +44,6 @@ const props = withDefaults(
   { showClose: true, allIssues: () => [] },
 );
 
-const parentMeta = computed(() => {
-  if (!props.issue.parent_id) return null;
-  const parent = props.allIssues.find((i) => i.id === props.issue.parent_id);
-  if (!parent) return null;
-  return ISSUE_TYPE_META[typeToId(parent.type)];
-});
-
 const emit = defineEmits<{
   close: [];
   "jump-issue": [id: string];
@@ -79,6 +52,13 @@ const emit = defineEmits<{
   "open-rh-editor": [];
   "update:issue": [issue: Issue];
 }>();
+
+const parentMeta = computed(() => {
+  if (!props.issue.parent_id) return null;
+  const parent = props.allIssues.find((i) => i.id === props.issue.parent_id);
+  if (!parent) return null;
+  return ISSUE_TYPE_META[typeToId(parent.type)];
+});
 
 // ── title editor ───────────────────────────────────────────────────────
 const titleSaving = ref(false);
@@ -108,159 +88,7 @@ async function onTitleCommit(next: string): Promise<void> {
   }
 }
 
-// ── copy + delete ──────────────────────────────────────────────────────
-const copy = useTransientStatus<"idle" | "copying" | "copied" | "error">({
-  idleMs: 2500,
-  idleValue: "idle",
-});
-const copyState = copy.status;
-const copyMessage = ref<string | null>(null);
-
-watch(copyState, (s) => {
-  if (s === "idle") copyMessage.value = null;
-});
-
-async function onCopy(): Promise<void> {
-  if (copyState.value === "copying") return;
-  copy.set("copying", { autoReset: false });
-  copyMessage.value = null;
-  try {
-    const payload = await getIssueSubtree(props.repo, props.issue.id);
-    const text = JSON.stringify(payload);
-    if (!navigator.clipboard?.writeText) {
-      throw new Error(
-        "Clipboard API not available — open the dashboard over HTTPS or localhost",
-      );
-    }
-    await navigator.clipboard.writeText(text);
-    const n = payload.issues.length;
-    copyMessage.value = `Copied ${n} ${n === 1 ? "card" : "cards"}`;
-    copy.set("copied");
-  } catch (err) {
-    copyMessage.value = err instanceof Error ? err.message : String(err);
-    copy.set("error");
-  }
-}
-
-const copyTooltip = computed(
-  () => copyMessage.value ?? "Copy this card and all descendants to clipboard",
-);
-
-const deleteOpen = ref(false);
-const deleteBusy = ref(false);
-const deleteError = ref<string | null>(null);
-const hasChildren = computed(() => props.issue.children.length > 0);
-const deleteBodyText = computed(() => {
-  if (hasChildren.value) {
-    const n = props.issue.children.length;
-    return `Move ${props.issue.id} and its ${n} ${n === 1 ? "child" : "descendants"} (recursive) to /tmp/danxbot/${props.repo}/issues/. The YAML survives on disk until the OS clears /tmp — no in-dashboard undo.`;
-  }
-  return `Move ${props.issue.id} to /tmp/danxbot/${props.repo}/issues/. The YAML survives on disk until the OS clears /tmp — no in-dashboard undo.`;
-});
-
-function openDelete(): void {
-  deleteError.value = null;
-  deleteOpen.value = true;
-}
-
-function closeDelete(): void {
-  if (deleteBusy.value) return;
-  deleteOpen.value = false;
-  deleteError.value = null;
-}
-
-async function confirmDelete(): Promise<void> {
-  if (deleteBusy.value) return;
-  deleteBusy.value = true;
-  deleteError.value = null;
-  try {
-    await deleteIssue(props.repo, props.issue.id);
-    deleteOpen.value = false;
-    emit("close");
-  } catch (err) {
-    deleteError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    deleteBusy.value = false;
-  }
-}
-
-// ── list / priority / type menus ───────────────────────────────────────
-// DX-586 — status menu retired in favor of a List dropdown driven by
-// `lists.yaml`. The dropdown groups list options by `ListType` (post-DX-658
-// 6-tier ladder: archived → review → ready → in_progress → completed →
-// cancelled). Selecting a list PATCHes `list_name`; the server applies
-// the ladder semantics + auto-stamps timestamps/dispatch. DX-658 / Phase
-// 2 retired the INTO-blocked / OUT-of-blocked dialog routing from this
-// flow — the self-block gate (`Issue.blocked`) is now owned by the
-// dispatch-gates badge (Phase 3 of the parent epic DX-656).
-const listMenuOpen = ref(false);
-const priorityMenuOpen = ref(false);
-const typeMenuOpen = ref(false);
-const listSaving = ref(false);
-const prioritySaving = ref(false);
-const typeSaving = ref(false);
-const listError = ref<string | null>(null);
-const priorityError = ref<string | null>(null);
-const typeError = ref<string | null>(null);
-
-// Per-drawer useListColors instance for the dropdown's option list.
-// init/destroy on mount / unmount; the SSE feed re-renders the menu
-// transparently when the operator updates lists.yaml from the
-// Settings page.
-const listsApi = useListColors(props.repo);
-onMounted(() => listsApi.init());
-onBeforeUnmount(() => listsApi.destroy());
-
-function ladderIdx(type: ListType): number {
-  const idx = LIST_TYPE_LADDER.indexOf(type);
-  return idx < 0 ? LIST_TYPE_LADDER.length : idx;
-}
-
-const sortedLists = computed<List[]>(() => {
-  const all = [...listsApi.lists.value];
-  all.sort((a, b) => {
-    const la = ladderIdx(a.type);
-    const lb = ladderIdx(b.type);
-    if (la !== lb) return la - lb;
-    if (a.order !== b.order) return a.order - b.order;
-    return a.name.localeCompare(b.name);
-  });
-  return all;
-});
-
-const listsByType = computed<{ type: ListType; lists: List[] }[]>(() => {
-  const groups = new Map<ListType, List[]>();
-  for (const l of sortedLists.value) {
-    let bucket = groups.get(l.type);
-    if (!bucket) {
-      bucket = [];
-      groups.set(l.type, bucket);
-    }
-    bucket.push(l);
-  }
-  // Re-emit in ladder order.
-  const out: { type: ListType; lists: List[] }[] = [];
-  for (const t of LIST_TYPE_LADDER) {
-    const bucket = groups.get(t);
-    if (bucket && bucket.length > 0) out.push({ type: t, lists: bucket });
-  }
-  return out;
-});
-
-const currentListName = computed<string | null>(() => props.issue.list_name);
-const currentListColor = computed<string | null>(() =>
-  currentListName.value ? listsApi.colorFor(currentListName.value) : null,
-);
-function typeLabel(type: ListType): string {
-  return LIST_TYPE_LABELS[type];
-}
-
-// DX-659 / Phase 3 — Mark-Blocked affordance. Lives next to the
-// requires-human icon in the meta-row. Clicking opens
-// `BlockedReasonDialog`; submit PATCHes `{blocked: {at, reason}}`
-// directly via the issue write route. Status + dispatch are never
-// part of the patch — the read-side `deriveStatus` rule 3 projects
-// the card to `Blocked` from `blocked.at` alone.
+// ── DX-659 / Phase 3 — Mark-Blocked affordance ─────────────────────────
 const blockedDialogOpen = ref(false);
 const blockedDialogBusy = ref(false);
 const blockedDialogError = ref<string | null>(null);
@@ -274,9 +102,7 @@ async function submitBlockedReason(reason: string): Promise<void> {
   blockedDialogBusy.value = true;
   blockedDialogError.value = null;
   try {
-    // Send `{reason}` only — the server's `applyIssuePatch` stamps
-    // `at: <now ISO>` (DX-658 contract). Sending `at` from the client
-    // is rejected by the patch validator's strict shape.
+    // Server's `applyIssuePatch` stamps `at: <now ISO>`; client sends `{reason}` only.
     const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
       blocked: { reason },
     });
@@ -290,32 +116,14 @@ async function submitBlockedReason(reason: string): Promise<void> {
 }
 
 // Epic-with-children: status is parent-derived. Show inert pill +
-// tooltip explaining why; priority + type stay editable (knob is
-// meaningful on epics; type-flip is the operator's call).
+// tooltip explaining why; priority + type stay editable.
 const statusInert = computed(
   () => props.issue.type === "Epic" && props.issue.children.length > 0,
 );
-const currentPriorityTier = computed(() => priorityTier(props.issue.priority));
-const currentPriorityTierMeta = computed<PriorityTier>(() => {
-  const found = PRIORITY_TIERS.find((t) => t.key === currentPriorityTier.value);
-  return found ?? PRIORITY_TIERS[2];
-});
-const currentTypeMeta = computed(() => ISSUE_TYPE_META[typeToId(props.issue.type)]);
 
 watch(
   () => props.issue.id,
   () => {
-    copy.clear();
-    copyMessage.value = null;
-    listMenuOpen.value = false;
-    priorityMenuOpen.value = false;
-    typeMenuOpen.value = false;
-    listSaving.value = false;
-    prioritySaving.value = false;
-    typeSaving.value = false;
-    listError.value = null;
-    priorityError.value = null;
-    typeError.value = null;
     titleSaving.value = false;
     titleError.value = null;
     blockedDialogOpen.value = false;
@@ -323,78 +131,6 @@ watch(
     blockedDialogError.value = null;
   },
 );
-
-async function patchListNameDirect(list: List): Promise<void> {
-  listSaving.value = true;
-  listError.value = null;
-  try {
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
-      list_name: list.name,
-    });
-    emit("update:issue", updated);
-  } finally {
-    listSaving.value = false;
-  }
-}
-
-async function selectList(list: List): Promise<void> {
-  if (listSaving.value) return;
-  if (list.name === currentListName.value) {
-    listMenuOpen.value = false;
-    return;
-  }
-  // DX-658 / Phase 2 — list moves never route through the blocked
-  // dialogs anymore. The self-block gate is cleared via the
-  // dispatch-gates badge (phase 3).
-  try {
-    await patchListNameDirect(list);
-    listMenuOpen.value = false;
-  } catch (err) {
-    listError.value = err instanceof Error ? err.message : String(err);
-  }
-}
-
-async function selectPriority(tier: PriorityTier): Promise<void> {
-  if (prioritySaving.value) return;
-  if (tier.key === currentPriorityTier.value) {
-    priorityMenuOpen.value = false;
-    return;
-  }
-  prioritySaving.value = true;
-  priorityError.value = null;
-  try {
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
-      priority: tier.defaultValue,
-    });
-    emit("update:issue", updated);
-    priorityMenuOpen.value = false;
-  } catch (err) {
-    priorityError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    prioritySaving.value = false;
-  }
-}
-
-async function selectType(t: IssueType): Promise<void> {
-  if (typeSaving.value) return;
-  if (t === props.issue.type) {
-    typeMenuOpen.value = false;
-    return;
-  }
-  typeSaving.value = true;
-  typeError.value = null;
-  try {
-    const { issue: updated } = await patchIssue(props.repo, props.issue.id, {
-      type: t,
-    });
-    emit("update:issue", updated);
-    typeMenuOpen.value = false;
-  } catch (err) {
-    typeError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    typeSaving.value = false;
-  }
-}
 
 const rhTooltip = computed(() =>
   props.issue.requires_human
@@ -404,51 +140,25 @@ const rhTooltip = computed(() =>
 const rhVariant = computed(() =>
   props.issue.requires_human ? "warning" : "muted",
 );
+
+function onChildUpdate(updated: Issue): void {
+  emit("update:issue", updated);
+}
 </script>
 
 <template>
   <div class="header" data-test="drawer-header">
     <!-- Line 1: meta row ──────────────────────────────────────────── -->
     <div class="meta-row">
-      <!-- Priority -->
-      <DanxPopover v-model="priorityMenuOpen" trigger="click" placement="bottom">
-        <template #trigger>
-          <DanxButton
-            variant=""
-            size="sm"
-            class="meta-btn priority-btn"
-            :disabled="prioritySaving"
-            :aria-label="`Priority: ${currentPriorityTierMeta.label} — click to change`"
-            data-test="drawer-priority-pill"
-          >
-            <template #icon>
-              <PriorityIcon :priority="issue.priority" size="sm" />
-            </template>
-          </DanxButton>
-        </template>
-        <div class="menu" data-test="drawer-priority-menu">
-          <button
-            v-for="t in PRIORITY_TIERS"
-            :key="t.key"
-            type="button"
-            class="menu-item priority-menu-item"
-            :class="{ active: t.key === currentPriorityTier }"
-            :disabled="prioritySaving"
-            :data-test="`drawer-priority-option-${t.key}`"
-            @click="selectPriority(t)"
-          >
-            <PriorityIcon :priority="t.defaultValue" size="sm" />
-            <span class="menu-label">{{ t.label }}</span>
-            <span class="menu-suffix">{{ t.defaultValue }}</span>
-          </button>
-          <div v-if="priorityError" class="menu-error" data-test="drawer-priority-error">{{ priorityError }}</div>
-        </div>
-      </DanxPopover>
+      <IssuePriorityMenu
+        :repo="repo"
+        :issue-id="issue.id"
+        :priority="issue.priority"
+        @update:issue="onChildUpdate"
+      />
 
-      <!-- ID -->
       <span class="id" data-test="drawer-id">{{ issue.id }}</span>
 
-      <!-- Parent link -->
       <DanxButton
         v-if="issue.parent_id"
         variant=""
@@ -460,46 +170,14 @@ const rhVariant = computed(() =>
         @click="emit('jump-issue', issue.parent_id!)"
       >↑ {{ issue.parent_id }}</DanxButton>
 
-      <!-- Type -->
-      <DanxPopover v-model="typeMenuOpen" trigger="click" placement="bottom">
-        <template #trigger>
-          <DanxButton
-            variant=""
-            size="sm"
-            class="meta-btn type-btn"
-            :disabled="typeSaving"
-            :tooltip="`Type: ${currentTypeMeta.label} — click to change`"
-            :aria-label="`Type: ${currentTypeMeta.label} — click to change`"
-            data-test="drawer-type-pill"
-            :style="{ color: currentTypeMeta.fg, background: currentTypeMeta.bg, borderColor: currentTypeMeta.border }"
-          >{{ currentTypeMeta.label }}</DanxButton>
-        </template>
-        <div class="menu" data-test="drawer-type-menu">
-          <button
-            v-for="t in ISSUE_TYPES"
-            :key="t"
-            type="button"
-            class="menu-item"
-            :class="{ active: t === issue.type }"
-            :disabled="typeSaving"
-            :data-test="`drawer-type-option-${t.toLowerCase()}`"
-            @click="selectType(t)"
-          >
-            <span
-              class="type-swatch"
-              :style="{ background: ISSUE_TYPE_META[typeToId(t)].bg, borderColor: ISSUE_TYPE_META[typeToId(t)].border }"
-            />
-            <span class="menu-label" :style="{ color: ISSUE_TYPE_META[typeToId(t)].fg }">{{ t }}</span>
-          </button>
-          <div class="menu-hint">
-            Epic flip stops dispatch; non-Epic resumes it.
-          </div>
-          <div v-if="typeError" class="menu-error" data-test="drawer-type-error">{{ typeError }}</div>
-        </div>
-      </DanxPopover>
+      <IssueTypeMenu
+        :repo="repo"
+        :issue-id="issue.id"
+        :type="issue.type"
+        @update:issue="onChildUpdate"
+      />
 
-      <!-- List (DX-586) — replaces the legacy status menu. Inert pill
-           for epic-with-children (status is parent-derived). -->
+      <!-- List (DX-586) — inert pill for epic-with-children. -->
       <DanxTooltip
         v-if="statusInert"
         tooltip="Epic status is computed from phase statuses — edit a child phase to change this."
@@ -511,52 +189,23 @@ const rhVariant = computed(() =>
           >{{ issue.status }}</span>
         </template>
       </DanxTooltip>
-      <DanxPopover v-else v-model="listMenuOpen" trigger="click" placement="bottom">
-        <template #trigger>
-          <DanxButton
-            variant=""
-            size="sm"
-            class="meta-btn list-btn"
-            :disabled="listSaving"
-            :aria-label="`List: ${currentListName ?? issue.status} — click to change`"
-            data-test="drawer-list-pill"
-            :style="currentListColor ? { color: currentListColor, borderColor: currentListColor } : undefined"
-          >
-            <span v-if="currentListColor" class="list-dot" :style="{ background: currentListColor }" />
-            {{ currentListName ?? issue.status }}
-          </DanxButton>
-        </template>
-        <div class="menu" data-test="drawer-list-menu">
-          <template v-for="group in listsByType" :key="group.type">
-            <div class="menu-group-label">{{ typeLabel(group.type) }}</div>
-            <button
-              v-for="l in group.lists"
-              :key="l.id"
-              type="button"
-              class="menu-item"
-              :class="{ active: l.name === currentListName }"
-              :disabled="listSaving"
-              :data-test="`drawer-list-option-${l.id}`"
-              @click="selectList(l)"
-            >
-              <span class="list-dot" :style="{ background: l.color }" />
-              <span class="menu-label">{{ l.name }}</span>
-            </button>
-          </template>
-          <div v-if="listError" class="menu-error" data-test="drawer-list-error">{{ listError }}</div>
-        </div>
-      </DanxPopover>
+      <IssueListMenu
+        v-else
+        :repo="repo"
+        :issue-id="issue.id"
+        :current-list-name="issue.list_name"
+        :status-fallback="issue.status"
+        @update:issue="onChildUpdate"
+      />
 
       <span class="spacer" />
 
-      <!-- Age -->
       <IssueAgeBadge
         class="age-badge"
         :updated-at="issue.updated_at"
         :created-at="issue.created_at"
       />
 
-      <!-- Requires-human flag -->
       <DanxButton
         :variant="rhVariant"
         size="sm"
@@ -568,9 +217,6 @@ const rhVariant = computed(() =>
         @click="emit('open-rh-editor')"
       />
 
-      <!-- Mark Blocked (DX-659) — only when no self-block is set; once
-           stamped, the operator clears it from the DispatchGatesSection
-           "Blocked" banner. -->
       <DanxButton
         v-if="!issue.blocked"
         variant=""
@@ -583,33 +229,15 @@ const rhVariant = computed(() =>
         @click="openBlockedDialog"
       />
 
-      <!-- Copy -->
-      <DanxButton
-        variant=""
-        size="sm"
-        :icon="copyIcon"
-        class="meta-btn"
-        :disabled="copyState === 'copying'"
-        :loading="copyState === 'copying'"
-        :tooltip="copyTooltip"
-        :aria-label="copyTooltip"
-        :data-test="copyState === 'copied' ? 'drawer-copy-success' : copyState === 'error' ? 'drawer-copy-error' : 'drawer-copy'"
-        @click="onCopy"
+      <IssueCopyButton :repo="repo" :issue-id="issue.id" />
+
+      <IssueDeleteButton
+        :repo="repo"
+        :issue-id="issue.id"
+        :child-count="issue.children.length"
+        @deleted="emit('close')"
       />
 
-      <!-- Delete -->
-      <DanxButton
-        variant="danger"
-        size="sm"
-        :icon="trashIcon"
-        class="meta-btn"
-        tooltip="Delete this card (moves YAML to /tmp)"
-        aria-label="Delete card"
-        data-test="drawer-delete"
-        @click="openDelete"
-      />
-
-      <!-- Close -->
       <DanxButton
         v-if="props.showClose"
         variant=""
@@ -639,33 +267,6 @@ const rhVariant = computed(() =>
       <div v-if="titleError" class="title-error" data-test="drawer-title-error">{{ titleError }}</div>
     </div>
 
-    <DanxDialog
-      :model-value="deleteOpen"
-      :title="`Delete ${issue.id}?`"
-      :close-button="'Cancel'"
-      :confirm-button="deleteBusy ? 'Deleting…' : 'Delete'"
-      :is-saving="deleteBusy"
-      :disabled="deleteBusy"
-      variant="danger"
-      persistent
-      @close="closeDelete"
-      @confirm="confirmDelete"
-    >
-      <div class="delete-dialog-body" data-test="drawer-delete-dialog-body">
-        <p>{{ deleteBodyText }}</p>
-        <p
-          v-if="deleteError"
-          class="delete-dialog-error"
-          data-test="drawer-delete-error"
-        >{{ deleteError }}</p>
-      </div>
-    </DanxDialog>
-
-    <!-- DX-659 / Phase 3 — Mark-Blocked dialog. Opens from the lock
-         icon in the meta-row above. Submit PATCHes `{blocked: {at,
-         reason}}` only; status + dispatch on the card are untouched
-         (read-side `deriveStatus` rule 3 projects → Blocked). The
-         operator clears the gate from `DispatchGatesSection`. -->
     <BlockedReasonDialog
       v-model="blockedDialogOpen"
       :issue-id="issue.id"
@@ -708,15 +309,6 @@ const rhVariant = computed(() =>
   font-size: 11px;
   font-weight: 600;
 }
-.type-btn :deep(button) {
-  font-weight: 600;
-}
-.meta-btn {
-  --dx-bg: transparent;
-  --dx-bg-hover: rgb(51 65 85 / 0.5);
-  --dx-border: transparent;
-  --dx-border-hover: rgb(99 102 241 / 0.4);
-}
 .meta-btn:deep(button),
 .meta-btn :deep(button) {
   background: transparent;
@@ -754,122 +346,5 @@ const rhVariant = computed(() =>
 .title-error {
   font-size: 11px;
   color: #fca5a5;
-}
-.menu {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 4px;
-  background: #0f172a;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  min-width: 160px;
-  box-shadow: 0 4px 12px rgb(0 0 0 / 0.4);
-}
-.menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-weight: 500;
-  color: #cbd5e1;
-  background: transparent;
-  border: 1px solid transparent;
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
-}
-.menu-item:hover:not(:disabled) {
-  background: rgb(99 102 241 / 0.18);
-  border-color: rgb(99 102 241 / 0.35);
-  color: #f1f5f9;
-}
-.menu-item:disabled {
-  opacity: 0.55;
-  cursor: progress;
-}
-.menu-item.active {
-  background: rgb(99 102 241 / 0.12);
-  color: #a5b4fc;
-}
-.priority-menu-item {
-  justify-content: space-between;
-}
-.menu-label {
-  flex: 1;
-  text-align: left;
-}
-.menu-suffix {
-  font-size: 10px;
-  color: #64748b;
-  font-variant-numeric: tabular-nums;
-}
-.type-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  border: 1px solid;
-  flex-shrink: 0;
-}
-.menu-hint {
-  margin-top: 4px;
-  padding: 4px 8px;
-  font-size: 10px;
-  color: #64748b;
-  font-style: italic;
-  border-top: 1px solid #1e293b;
-}
-/* DX-586 — section labels inside the drawer's List dropdown, one per
-   semantic ListType (Backlog / Review / Ready / etc.). Renders above
-   the lists of that type — pure visual grouping, not interactive. */
-.menu-group-label {
-  padding: 6px 10px 2px;
-  font-size: 9px;
-  font-weight: 700;
-  color: #475569;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.menu-group-label:not(:first-child) {
-  margin-top: 4px;
-  border-top: 1px solid #1e293b;
-  padding-top: 8px;
-}
-.list-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 9999px;
-  margin-right: 4px;
-  vertical-align: middle;
-}
-.list-btn :deep(button) {
-  font-weight: 600;
-}
-.menu-error {
-  margin-top: 4px;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  color: #fca5a5;
-  background: rgb(239 68 68 / 0.12);
-  border: 1px solid rgb(239 68 68 / 0.3);
-}
-.delete-dialog-body {
-  font-size: 14px;
-  color: #cbd5e1;
-  line-height: 1.5;
-}
-.delete-dialog-body p {
-  margin: 0 0 10px 0;
-}
-.delete-dialog-body p:last-child {
-  margin-bottom: 0;
-}
-.delete-dialog-error {
-  color: #fca5a5;
-  font-weight: 500;
 }
 </style>
