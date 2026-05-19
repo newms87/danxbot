@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, toRef, watch } from "vue";
 import { useIssues } from "../../composables/useIssues";
 import { useListColors } from "../../composables/useListColors";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
@@ -56,17 +56,15 @@ const {
   cascadeIssueList,
 } = useIssues(toRef(selectedRepo), includeClosed);
 
-// DX-586 — single per-page `useListColors` instance owns the per-repo
-// taxonomy. shallowRef so a repo flip can swap to a fresh instance
-// without leaking the old repo's lists.
-const listsApi = shallowRef(useListColors(selectedRepo.value));
+// DX-682 — `useListColors(repo)` is a refcounted shared per-repo registry,
+// so a computed facade per current repo collapses the prior shallowRef
+// swap dance; the registry handles cross-repo cache isolation.
+const listsApi = computed(() => useListColors(selectedRepo.value));
 onMounted(() => listsApi.value.init());
 onBeforeUnmount(() => listsApi.value.destroy());
-watch(selectedRepo, (next, prev) => {
-  if (next === prev) return;
-  listsApi.value.destroy();
-  listsApi.value = useListColors(next);
-  listsApi.value.init();
+watch(listsApi, (next, prev) => {
+  prev.destroy();
+  next.init();
 });
 
 const boardLists = computed(() => listsApi.value.lists.value);
