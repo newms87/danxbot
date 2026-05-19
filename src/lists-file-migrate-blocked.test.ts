@@ -47,13 +47,62 @@ function track(d: string): string {
 
 const PRE_DX658_FILE = {
   lists: [
-    { id: "id-archived",    name: "Backlog",     type: "archived",    order: 0, is_default_for_type: true, color: "#64748b" },
-    { id: "id-review",      name: "Review",      type: "review",      order: 1, is_default_for_type: true, color: "#3b82f6" },
-    { id: "id-ready",       name: "To Do",       type: "ready",       order: 2, is_default_for_type: true, color: "#22d3ee" },
-    { id: "id-blocked",     name: "Blocked",     type: "blocked",     order: 3, is_default_for_type: true, color: "#ef4444" },
-    { id: "id-in_progress", name: "In Progress", type: "in_progress", order: 4, is_default_for_type: true, color: "#f59e0b" },
-    { id: "id-completed",   name: "Done",        type: "completed",   order: 5, is_default_for_type: true, color: "#22c55e" },
-    { id: "id-cancelled",   name: "Cancelled",   type: "cancelled",   order: 6, is_default_for_type: true, color: "#71717a" },
+    {
+      id: "id-archived",
+      name: "Backlog",
+      type: "archived",
+      order: 0,
+      is_default_for_type: true,
+      color: "#64748b",
+    },
+    {
+      id: "id-review",
+      name: "Review",
+      type: "review",
+      order: 1,
+      is_default_for_type: true,
+      color: "#3b82f6",
+    },
+    {
+      id: "id-ready",
+      name: "To Do",
+      type: "ready",
+      order: 2,
+      is_default_for_type: true,
+      color: "#22d3ee",
+    },
+    {
+      id: "id-blocked",
+      name: "Blocked",
+      type: "blocked",
+      order: 3,
+      is_default_for_type: true,
+      color: "#ef4444",
+    },
+    {
+      id: "id-in_progress",
+      name: "In Progress",
+      type: "in_progress",
+      order: 4,
+      is_default_for_type: true,
+      color: "#f59e0b",
+    },
+    {
+      id: "id-completed",
+      name: "Done",
+      type: "completed",
+      order: 5,
+      is_default_for_type: true,
+      color: "#22c55e",
+    },
+    {
+      id: "id-cancelled",
+      name: "Cancelled",
+      type: "cancelled",
+      order: 6,
+      is_default_for_type: true,
+      color: "#71717a",
+    },
   ],
   tombstone_ids: [],
 };
@@ -129,6 +178,83 @@ describe("migrateListsFileForDx658", () => {
     expect(saved.tombstone_ids).toContain("id-blocked");
   });
 
+  it("backfills missing `color` on a pre-DX-601 file so the strict write-side validator does not reject the migrated shape", async () => {
+    const dir = track(setupRepoDir());
+    const path = listsFilePath(dir);
+    // Pre-DX-601 shape: no `color` field on any entry. One of them is
+    // the legacy `type: "blocked"` list the migration must remove.
+    const preColorFile = {
+      lists: [
+        {
+          id: "id-archived",
+          name: "Backlog",
+          type: "archived",
+          order: 0,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-review",
+          name: "Review",
+          type: "review",
+          order: 1,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-ready",
+          name: "To Do",
+          type: "ready",
+          order: 2,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-blocked",
+          name: "Blocked",
+          type: "blocked",
+          order: 3,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-in_progress",
+          name: "In Progress",
+          type: "in_progress",
+          order: 4,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-completed",
+          name: "Done",
+          type: "completed",
+          order: 5,
+          is_default_for_type: true,
+        },
+        {
+          id: "id-cancelled",
+          name: "Cancelled",
+          type: "cancelled",
+          order: 6,
+          is_default_for_type: true,
+        },
+      ],
+      tombstone_ids: [],
+    };
+    writeFileSync(path, stringifyYaml(preColorFile, { lineWidth: 0 }));
+
+    const result = await migrateListsFileForDx658(dir);
+
+    expect(result.migrated).toBe(true);
+    expect(result.removedIds).toEqual(["id-blocked"]);
+
+    const saved = parseYaml(readFileSync(path, "utf-8"));
+    // Blocked stripped; remaining 6 entries each carry a hex color
+    // backfilled from the type → seed mapping (no NEUTRAL fallback for
+    // these — every type is in LIST_TYPES_SET).
+    expect(saved.lists).toHaveLength(6);
+    for (const l of saved.lists as Array<{ type: string; color: string }>) {
+      expect(l.color).toMatch(/^#[0-9a-fA-F]{3,6}$/);
+    }
+    expect(saved.tombstone_ids).toContain("id-blocked");
+  });
+
   it("preserves any pre-existing tombstone_ids entries", async () => {
     const dir = track(setupRepoDir());
     const path = listsFilePath(dir);
@@ -142,9 +268,6 @@ describe("migrateListsFileForDx658", () => {
 
     expect(result.migrated).toBe(true);
     const saved = parseYaml(readFileSync(path, "utf-8"));
-    expect(saved.tombstone_ids).toEqual([
-      "prior-tombstoned-id",
-      "id-blocked",
-    ]);
+    expect(saved.tombstone_ids).toEqual(["prior-tombstoned-id", "id-blocked"]);
   });
 });

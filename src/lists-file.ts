@@ -88,6 +88,46 @@ export function isValidHexColor(value: unknown): value is string {
 const NEUTRAL_LIST_COLOR = "#94a3b8";
 
 /**
+ * Type → seed-color lookup. Used by both `normalize()` (read-side
+ * backfill for pre-DX-601 files) and `migrateListsFileForDx658`
+ * (one-shot migration's write-side backfill so the strict `writeLists`
+ * validator does not reject pre-color files). Sourced from
+ * `SEED_SPECS` so the seed + backfill cannot diverge.
+ *
+ * Lazily populated to avoid a forward reference to `SEED_SPECS`
+ * (declared further down) at module top-level.
+ */
+let _seedColorByType: Map<ListType, string> | null = null;
+function seedColorByType(): Map<ListType, string> {
+  if (_seedColorByType) return _seedColorByType;
+  _seedColorByType = new Map<ListType, string>(
+    SEED_SPECS.map((s) => [s.type, s.color] as const),
+  );
+  return _seedColorByType;
+}
+
+/**
+ * Backfill `color` on entries that pre-date DX-601. Known `type`s map to
+ * their seed color; unknown types (including legacy `"blocked"`) get
+ * `NEUTRAL_LIST_COLOR`. Entries that already carry a non-empty string
+ * `color` pass through unchanged (idempotent). Non-object entries pass
+ * through verbatim — downstream validation will reject them with the
+ * correct message; backfill stays single-purpose.
+ */
+export function backfillListColors<T>(entries: readonly T[]): T[] {
+  const colors = seedColorByType();
+  return entries.map((entry) => {
+    if (!entry || typeof entry !== "object") return entry;
+    const e = entry as unknown as Record<string, unknown>;
+    if (typeof e.color === "string" && e.color.length > 0) return entry;
+    const fallback = LIST_TYPES_SET.has(e.type as string)
+      ? colors.get(e.type as ListType) ?? NEUTRAL_LIST_COLOR
+      : NEUTRAL_LIST_COLOR;
+    return { ...e, color: fallback } as T;
+  });
+}
+
+/**
  * Discriminator for `ListsValidationError` (DX-616). Dashboard route
  * handlers branch on `err.code` to map an error to its HTTP status
  * instead of regex-matching `errors[]` prose — user-visible strings are
@@ -132,7 +172,9 @@ export class ListsValidationError extends Error {
  * when a new code lands; route handlers call this directly so the
  * status ladder lives in one place.
  */
-export function httpStatusForListsValidationCode(code: ListsValidationCode): number {
+export function httpStatusForListsValidationCode(
+  code: ListsValidationCode,
+): number {
   switch (code) {
     case "not_found":
       return 404;
@@ -178,12 +220,12 @@ interface SeedSpec {
 }
 
 const SEED_SPECS: readonly SeedSpec[] = [
-  { type: "archived",    name: "Backlog",     order: 0, color: "#64748b" },
-  { type: "review",      name: "Review",      order: 1, color: "#3b82f6" },
-  { type: "ready",       name: "To Do",       order: 2, color: "#22d3ee" },
+  { type: "archived", name: "Backlog", order: 0, color: "#64748b" },
+  { type: "review", name: "Review", order: 1, color: "#3b82f6" },
+  { type: "ready", name: "To Do", order: 2, color: "#22d3ee" },
   { type: "in_progress", name: "In Progress", order: 3, color: "#f59e0b" },
-  { type: "completed",   name: "Done",        order: 4, color: "#22c55e" },
-  { type: "cancelled",   name: "Cancelled",   order: 5, color: "#71717a" },
+  { type: "completed", name: "Done", order: 4, color: "#22c55e" },
+  { type: "cancelled", name: "Cancelled", order: 5, color: "#71717a" },
 ] as const;
 
 export function defaultLists(deps: SeedDeps = {}): ListsFile {
@@ -227,25 +269,15 @@ function normalize(raw: Partial<ListsFile> | null | undefined): ListsFile {
   // `color` field (DX-601). A pre-bump file shape passes every other
   // invariant; we map type → seeded color so reads stay non-throwing
   // and the next operator write re-persists the backfilled shape.
-  // Non-default entries fall back to the type's seed color too — a
-  // user-created "Triage" list seeded from a "Review" parent gets the
-  // review hue, matching applyCreateList's inheritance path.
-  const seedColorByType = new Map<ListType, string>(
-    SEED_SPECS.map((s) => [s.type, s.color] as const),
-  );
-  const backfilled = rawLists
-    .map((entry) => {
-      if (!entry || typeof entry !== "object") return entry;
-      const e = entry as unknown as Record<string, unknown>;
-      if (typeof e.color === "string" && e.color.length > 0) return entry;
-      const fallback = LIST_TYPES_SET.has(e.type as string)
-        ? seedColorByType.get(e.type as ListType) ?? NEUTRAL_LIST_COLOR
-        : NEUTRAL_LIST_COLOR;
-      return { ...e, color: fallback };
-    });
+  // Shared with `migrateListsFileForDx658` via `backfillListColors` so
+  // read-side and write-side migration agree on the same backfill — see
+  // the helper's docblock for the type-fallback policy.
+  const backfilled = backfillListColors(rawLists);
   const lists = backfilled.filter(isValidListShape);
   const tombstone_ids = Array.isArray(raw.tombstone_ids)
-    ? raw.tombstone_ids.filter((id): id is string => typeof id === "string" && id.length > 0)
+    ? raw.tombstone_ids.filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
+      )
     : [];
   // Read-side never throws on invariant violations — that surface is
   // the write path. Read returns the on-disk state as-is so a manual
@@ -258,10 +290,14 @@ function isValidListShape(raw: unknown): raw is List {
   if (!raw || typeof raw !== "object") return false;
   const r = raw as Record<string, unknown>;
   return (
-    typeof r.id === "string" && r.id.length > 0 &&
-    typeof r.name === "string" && r.name.length > 0 &&
-    typeof r.type === "string" && LIST_TYPES_SET.has(r.type) &&
-    typeof r.order === "number" && Number.isFinite(r.order) &&
+    typeof r.id === "string" &&
+    r.id.length > 0 &&
+    typeof r.name === "string" &&
+    r.name.length > 0 &&
+    typeof r.type === "string" &&
+    LIST_TYPES_SET.has(r.type) &&
+    typeof r.order === "number" &&
+    Number.isFinite(r.order) &&
     typeof r.is_default_for_type === "boolean" &&
     isValidHexColor(r.color)
   );
@@ -291,10 +327,14 @@ export function validateLists(file: ListsFile): void {
       if (
         lr &&
         typeof lr === "object" &&
-        typeof lr.id === "string" && (lr.id as string).length > 0 &&
-        typeof lr.name === "string" && (lr.name as string).length > 0 &&
-        typeof lr.type === "string" && LIST_TYPES_SET.has(lr.type as string) &&
-        typeof lr.order === "number" && Number.isFinite(lr.order) &&
+        typeof lr.id === "string" &&
+        (lr.id as string).length > 0 &&
+        typeof lr.name === "string" &&
+        (lr.name as string).length > 0 &&
+        typeof lr.type === "string" &&
+        LIST_TYPES_SET.has(lr.type as string) &&
+        typeof lr.order === "number" &&
+        Number.isFinite(lr.order) &&
         typeof lr.is_default_for_type === "boolean" &&
         !isValidHexColor(lr.color)
       ) {
@@ -311,7 +351,9 @@ export function validateLists(file: ListsFile): void {
     }
     seenIds.add(l.id);
     if (tombstone.has(l.id)) {
-      errors.push(`lists[${i}].id "${l.id}" was previously deleted — ids never reused`);
+      errors.push(
+        `lists[${i}].id "${l.id}" was previously deleted — ids never reused`,
+      );
     }
     if (l.order < 0) {
       errors.push(`lists[${i}].order must be ≥ 0 (got ${l.order})`);
@@ -332,7 +374,9 @@ export function validateLists(file: ListsFile): void {
   for (const type of LIST_TYPES) {
     const bucket = byType.get(type) ?? [];
     if (bucket.length === 0) {
-      errors.push(`No list defined for type "${type}" — every type requires ≥1 list`);
+      errors.push(
+        `No list defined for type "${type}" — every type requires ≥1 list`,
+      );
       continue;
     }
     const defaults = bucket.filter((l) => l.is_default_for_type);
@@ -358,10 +402,7 @@ export function validateLists(file: ListsFile): void {
  * as a real bug; the read-side normalize wrapper above prevents
  * normal hot-path corruption.
  */
-export function getDefaultListForType(
-  localPath: string,
-  type: ListType,
-): List {
+export function getDefaultListForType(localPath: string, type: ListType): List {
   const file = readLists(localPath);
   const match = file.lists.find(
     (l) => l.type === type && l.is_default_for_type,
@@ -394,12 +435,10 @@ export async function ensureListsFile(
 
 const inProcessQueues = new Map<string, Promise<unknown>>();
 
-function enqueueWrite<T>(
-  localPath: string,
-  run: () => Promise<T>,
-): Promise<T> {
+function enqueueWrite<T>(localPath: string, run: () => Promise<T>): Promise<T> {
   const key = listsFilePath(localPath);
-  const prev = (inProcessQueues.get(key) ?? Promise.resolve()) as Promise<unknown>;
+  const prev = (inProcessQueues.get(key) ??
+    Promise.resolve()) as Promise<unknown>;
   const next = prev.then(run, run);
   inProcessQueues.set(key, next);
   next
@@ -587,8 +626,8 @@ export function applyCreateList(
   // empty and still produce a visually-coherent row. Falls back to
   // a neutral gray when the type is freshly empty.
   const inheritedColor =
-    file.lists.find((l) => l.type === input.type && l.is_default_for_type)?.color ??
-    NEUTRAL_LIST_COLOR;
+    file.lists.find((l) => l.type === input.type && l.is_default_for_type)
+      ?.color ?? NEUTRAL_LIST_COLOR;
   const created: List = {
     id,
     name: input.name,
@@ -623,7 +662,10 @@ function validateCreateInput(input: CreateListInput): void {
       errors.push("order must be ≥ 0");
     }
   }
-  if (input.is_default_for_type !== undefined && typeof input.is_default_for_type !== "boolean") {
+  if (
+    input.is_default_for_type !== undefined &&
+    typeof input.is_default_for_type !== "boolean"
+  ) {
     errors.push("is_default_for_type must be a boolean");
   }
   if (input.color !== undefined && !isValidHexColor(input.color)) {
@@ -699,7 +741,10 @@ function validateUpdateInput(patch: UpdateListInput): void {
       errors.push("order must be ≥ 0");
     }
   }
-  if (patch.is_default_for_type !== undefined && typeof patch.is_default_for_type !== "boolean") {
+  if (
+    patch.is_default_for_type !== undefined &&
+    typeof patch.is_default_for_type !== "boolean"
+  ) {
     errors.push("is_default_for_type must be a boolean");
   }
   if (patch.color !== undefined && !isValidHexColor(patch.color)) {
@@ -729,10 +774,7 @@ export interface DeleteListResult {
  * route layer uses `reassignTo` to update affected card YAMLs that
  * carried `list_name == deleted.name`.
  */
-export function applyDeleteList(
-  file: ListsFile,
-  id: string,
-): DeleteListResult {
+export function applyDeleteList(file: ListsFile, id: string): DeleteListResult {
   const target = file.lists.find((l) => l.id === id);
   if (!target) {
     throw new ListsValidationError([`No list with id "${id}"`], "not_found");
@@ -756,7 +798,9 @@ export function applyDeleteList(
   const existingDefault = siblings.find((l) => l.is_default_for_type);
   const reassignTo =
     existingDefault ??
-    [...siblings].sort((a, b) => a.order - b.order || a.id.localeCompare(b.id))[0];
+    [...siblings].sort(
+      (a, b) => a.order - b.order || a.id.localeCompare(b.id),
+    )[0];
 
   const lists = file.lists
     .filter((l) => l.id !== id)
@@ -791,17 +835,25 @@ export function applySwapOrder(
   aId: string,
   bId: string,
 ): ListsFile {
-  if (typeof aId !== "string" || aId.length === 0 ||
-      typeof bId !== "string" || bId.length === 0) {
+  if (
+    typeof aId !== "string" ||
+    aId.length === 0 ||
+    typeof bId !== "string" ||
+    bId.length === 0
+  ) {
     throw new ListsValidationError(["a_id and b_id must be non-empty strings"]);
   }
   if (aId === bId) {
-    throw new ListsValidationError([`a_id and b_id must differ (got "${aId}")`]);
+    throw new ListsValidationError([
+      `a_id and b_id must differ (got "${aId}")`,
+    ]);
   }
   const a = file.lists.find((l) => l.id === aId);
   const b = file.lists.find((l) => l.id === bId);
-  if (!a) throw new ListsValidationError([`No list with id "${aId}"`], "not_found");
-  if (!b) throw new ListsValidationError([`No list with id "${bId}"`], "not_found");
+  if (!a)
+    throw new ListsValidationError([`No list with id "${aId}"`], "not_found");
+  if (!b)
+    throw new ListsValidationError([`No list with id "${bId}"`], "not_found");
   if (a.type !== b.type) {
     throw new ListsValidationError(
       [

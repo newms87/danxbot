@@ -28,6 +28,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { parse as parseYaml } from "yaml";
 import {
+  backfillListColors,
   listsFilePath,
   writeLists,
   type ListsFile,
@@ -104,7 +105,13 @@ export async function migrateListsFileForDx658(
     ...rawTombstones,
     ...removedIds.filter((id) => !rawTombstones.includes(id)),
   ];
-  const next: ListsFile = { lists: kept, tombstone_ids };
+  // Backfill `color` on any pre-DX-601 entries before write-side
+  // validation. `writeLists` runs the strict `isValidListShape` check,
+  // which rejects entries missing `color`. The read-side `normalize()`
+  // already does the same backfill — sharing the helper keeps the
+  // two surfaces in agreement.
+  const kept_with_colors = backfillListColors(kept) as List[];
+  const next: ListsFile = { lists: kept_with_colors, tombstone_ids };
 
   try {
     await writeLists(localPath, next);
