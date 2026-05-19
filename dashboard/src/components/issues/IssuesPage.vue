@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, toRef, watch } f
 import { useIssues } from "../../composables/useIssues";
 import { useListColors } from "../../composables/useListColors";
 import { isInScope, useIssueFilters } from "../../composables/useIssueFilters";
+import { useCascadeMove } from "../../composables/useCascadeMove";
+import { useIssueDrawer } from "../../composables/useIssueDrawer";
 import { DanxDialog, DanxSplitPanel, DanxTooltip } from "@thehammer/danx-ui";
 import CreateCardButton from "./CreateCardButton.vue";
 import FilterToolbar from "./FilterToolbar.vue";
@@ -14,19 +16,13 @@ import BoardChatOverlay from "../chat/BoardChatOverlay.vue";
 import EpicMoveCascadeDialog from "./EpicMoveCascadeDialog.vue";
 import { typeToId } from "./issuePalette";
 import { nextPriority } from "../../composables/cardPriority";
-import type { CascadeAction } from "../../api";
-import type { Issue, IssueDetail, IssueListItem, List } from "../../types";
+import type { IssueListItem } from "../../types";
 
 const selectedRepo = defineModel<string>("selectedRepo", { required: true });
 
 const emit = defineEmits<{
   select: [issue: IssueListItem];
-  /**
-   * Fired when the user clicks the agent badge in the drawer header.
-   * App.vue handles by switching `activeTab` to `agents` (the
-   * AgentsPage already scopes to `selectedRepo`, so the agent's roster
-   * card is in view).
-   */
+  // App.vue handles by switching `activeTab` to `agents`.
   "open-agent": [];
 }>();
 
@@ -41,11 +37,9 @@ const {
   toggleType,
 } = useIssueFilters(selectedRepo);
 
-// DX-523 — closed cards beyond the recent-50 cap are pull-on-demand.
-// `showClosed` drives the GET /api/issues `include_closed` query param,
-// so flipping the toggle re-hydrates with the widened (or narrowed) scope
-// instead of being a pure client-side filter that silently hides anything
-// outside the recent slice.
+// DX-523 — closed cards beyond the recent-50 cap are pull-on-demand;
+// `showClosed` drives the `include_closed` query param rather than being
+// a client-side filter that hides anything outside the recent slice.
 const includeClosed = computed<"recent" | "all">(() =>
   showClosed.value ? "all" : "recent",
 );
@@ -63,11 +57,8 @@ const {
 } = useIssues(toRef(selectedRepo), includeClosed);
 
 // DX-586 — single per-page `useListColors` instance owns the per-repo
-// taxonomy. The board reads `lists` for column derivation; the
-// onMove handler reads it to resolve INTO-blocked / OUT-of-blocked
-// dialog routing. Wrapped in a shallowRef so a repo flip can
-// transparently swap to a fresh instance without leaking the old
-// repo's lists into the new repo's board.
+// taxonomy. shallowRef so a repo flip can swap to a fresh instance
+// without leaking the old repo's lists.
 const listsApi = shallowRef(useListColors(selectedRepo.value));
 onMounted(() => listsApi.value.init());
 onBeforeUnmount(() => listsApi.value.destroy());
@@ -80,187 +71,53 @@ watch(selectedRepo, (next, prev) => {
 
 const boardLists = computed(() => listsApi.value.lists.value);
 
-function onUpdateIssue(updated: Issue): void {
-  // Invalidate the cached detail entry. The board list-row updates
-  // arrive via SSE `issue:updated` carrying the canonical projected
-  // IssueListItem — no client-side projection.
-  applyIssueUpdate(updated.id);
-  // Reflect the change immediately in the drawer's current detail view
-  // by merging the new Issue fields onto the IssueDetail (detail-only
-  // fields — created_at, raw_yaml — stay; the next drawer open
-  // re-fetches the full record via fetchIssueDetail).
-  if (selectedDetail.value && selectedDetail.value.id === updated.id) {
-    selectedDetail.value = {
-      ...selectedDetail.value,
-      ...updated,
-      updated_at: Date.now(),
-    };
-  }
-}
+// DX-694 — drawer state + cascade-dialog state machines extracted.
+const {
+  selectedIssueId,
+  selectedDetail,
+  detailLoading,
+  detailError,
+  openDrawer,
+  closeDrawer,
+  mergeIssuePatch,
+  mergeIssueUpdateAndInvalidate,
+  readUrlIssue,
+} = useIssueDrawer({ fetchDetail, applyIssueUpdate });
 
-// DX-632 (Phase 6) — cascade dialog state. Fires when the operator
-// drags any card whose `children.length > 0`. DX-658 retired the
-// INTO-blocked / OUT-of-blocked single-card dialogs from the
-// list-move flow — Blocked is now a dispatch gate, not a column.
-interface PendingCascade {
-  kind: "cascade";
-  issue: IssueListItem;
-  destList: List;
-  descendants: IssueListItem[];
-  defaults: Record<string, CascadeAction>;
-}
-const pendingMove = ref<PendingCascade | null>(null);
-const moveDialogBusy = ref(false);
-const moveDialogError = ref<string | null>(null);
+const {
+  pendingMove,
+  moveDialogBusy,
+  moveDialogError,
+  onMove,
+  onCascadeConfirm,
+  onCascadeCancel,
+} = useCascadeMove({ issues, moveIssueList, cascadeIssueList });
 
-/**
- * BFS-flatten every descendant of `epic` from the in-memory `all`
- * snapshot. The cascade dialog renders rows for every reachable
- * descendant — recursive children, not just direct ones — and the
- * server's helper applies the spec table to each. Cards not present in
- * `all` (closed beyond the recent slice, hidden by filters) are simply
- * absent — the server is the authoritative writer and will visit them
- * via its own DB query, so a missing-from-SPA descendant still gets
- * the right write applied. The dialog's pre-view is operator-facing
- * transparency, not a write surface.
- */
-function collectDescendants(
-  epic: IssueListItem,
-  all: IssueListItem[],
-): IssueListItem[] {
-  const byParent = new Map<string, IssueListItem[]>();
-  for (const i of all) {
-    if (i.parent_id === null) continue;
-    if (!byParent.has(i.parent_id)) byParent.set(i.parent_id, []);
-    byParent.get(i.parent_id)!.push(i);
-  }
-  const out: IssueListItem[] = [];
-  const queue: string[] = [epic.id];
-  const seen = new Set<string>([epic.id]);
-  while (queue.length > 0) {
-    const pid = queue.shift()!;
-    const kids = byParent.get(pid) ?? [];
-    for (const kid of kids) {
-      if (seen.has(kid.id)) continue;
-      seen.add(kid.id);
-      out.push(kid);
-      queue.push(kid.id);
-    }
-  }
-  return out;
-}
-
-/**
- * Pre-view of per-descendant default actions for the cascade dialog.
- * Mirrors the terminal-source row of the helper's spec table — done
- * + cancelled descendants never auto-move; every other descendant
- * defaults to follow the parent (`move_same_type`). The server's
- * `cascadeEpicMove` is the authoritative source — defaults shown
- * here are an operator-friendly pre-view; submitting without override
- * sends an empty `overrides` and lets the helper re-derive.
- */
-function computeCascadeDefaults(
-  descendants: IssueListItem[],
-): Record<string, CascadeAction> {
-  const out: Record<string, CascadeAction> = {};
-  for (const d of descendants) {
-    if (d.status === "Done" || d.status === "Cancelled") {
-      out[d.id] = { kind: "stay" };
-    } else {
-      out[d.id] = { kind: "move_same_type" };
-    }
-  }
-  return out;
-}
-
-function onMove(issue: IssueListItem, toList: List): void {
-  // DX-632 — children-bearing card → cascade dialog (covers BOTH the
-  // into-blocked and out-of-blocked transitions for epics, since the
-  // dialog merges both gates).
-  if (issue.children.length > 0) {
-    moveDialogError.value = null;
-    const descendants = collectDescendants(issue, issues.value);
-    const defaults = computeCascadeDefaults(descendants);
-    pendingMove.value = {
-      kind: "cascade",
-      issue,
-      destList: toList,
-      descendants,
-      defaults,
-    };
-    return;
-  }
-  // DX-658 — no dialog routing for blocked transitions. Blocked is a
-  // pure dispatch gate now; clearing / setting it happens via the
-  // dispatch-gates badge UI (Phase 3 of DX-656).
-  void moveIssueList(issue.id, { name: toList.name, type: toList.type }).catch(() => {});
-}
-
-async function onCascadeDialogConfirm(payload: {
-  overrides: Record<string, CascadeAction>;
-}): Promise<void> {
-  const p = pendingMove.value;
-  if (!p || p.kind !== "cascade") return;
-  moveDialogBusy.value = true;
-  moveDialogError.value = null;
-  try {
-    await cascadeIssueList(p.issue.id, {
-      dest_list_name: p.destList.name,
-      overrides: payload.overrides,
-    });
-    pendingMove.value = null;
-  } catch (err) {
-    moveDialogError.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    moveDialogBusy.value = false;
-  }
-}
-
-function onMoveDialogCancel(): void {
-  pendingMove.value = null;
-  moveDialogError.value = null;
-  moveDialogBusy.value = false;
-}
-
-/**
- * DX-629 — drag-reorder slot drop. The board emits the (before, after)
- * neighbor pair; we compute the new priority decimal via `nextPriority`
- * and PATCH `{priority}`. The optimistic update inside
- * `moveIssuePriority` re-sorts the column within the same tick; SSE
- * re-affirms within ~50ms.
- */
+// DX-629 — drag-reorder slot drop. Board emits the (before, after)
+// neighbor pair; nextPriority computes a midpoint decimal.
 function onReorder(
   issue: IssueListItem,
   before: IssueListItem | null,
   after: IssueListItem | null,
 ): void {
-  const beforeP = before?.priority ?? null;
-  const afterP = after?.priority ?? null;
-  const priority = nextPriority(beforeP, afterP);
+  const priority = nextPriority(before?.priority ?? null, after?.priority ?? null);
   void moveIssuePriority(issue.id, priority).catch(() => {});
 }
 
 const scopedEpicTitle = computed<string | null>(() => {
   if (!scopedEpicId.value) return null;
-  const hit = issues.value.find((i) => i.id === scopedEpicId.value);
-  return hit?.title ?? null;
+  return issues.value.find((i) => i.id === scopedEpicId.value)?.title ?? null;
 });
 
-/**
- * Client-side filter pipeline. Runs over `issues[]` already loaded by
- * `useIssues`; no re-fetch on filter change. Order: show-closed visibility
- * gate -> type chips -> blocked-only -> case-insensitive search across
- * id + title + description.
- *
- * Show-closed off: drop Cancelled entirely; let Done flow through so
- * `IssueBoard`'s "Done (Recent)" column can pick the last-24h slice.
- */
 const epicIds = computed<Set<string>>(() => {
   const out = new Set<string>();
   for (const i of issues.value) if (i.type === "Epic") out.add(i.id);
   return out;
 });
 
+// Client-side filter pipeline over already-loaded `issues[]`.
+// Show-closed off: drop Cancelled entirely; let Done flow through so
+// IssueBoard's "Done (Recent)" column can pick the last-24h slice.
 const filteredIssues = computed<IssueListItem[]>(() => {
   const needle = q.value.trim().toLowerCase();
   const epics = epicIds.value;
@@ -274,16 +131,13 @@ const filteredIssues = computed<IssueListItem[]>(() => {
       const hay = `${i.id} ${i.title} ${i.description}`.toLowerCase();
       if (!hay.includes(needle)) return false;
     }
-    // Filter mode: drop out-of-scope cards. Highlight mode keeps every
-    // card visible — `IssueBoard` dims the out-of-scope ones via class.
+    // Filter mode drops out-of-scope; highlight mode dims via class.
     if (
       scopedEpicId.value &&
       scopeMode.value === "filter" &&
       !isInScope(i, scopedEpicId.value)
     ) return false;
-    // Hide every epic-child from the board by default. Drawer's
-    // Children tab is the canonical surface; the toolbar toggle (saved
-    // in localStorage) re-exposes them globally.
+    // Hide epic children by default; drawer's Children tab is canonical.
     if (
       !showEpicChildren.value &&
       i.parent_id !== null &&
@@ -293,21 +147,14 @@ const filteredIssues = computed<IssueListItem[]>(() => {
   });
 });
 
-const selectedIssueId = ref<string | null>(null);
-const selectedDetail = ref<IssueDetail | null>(null);
-const detailLoading = ref(false);
-const detailError = ref<string | null>(null);
 const boardChatOpen = ref(false);
 
 type CardPresentation = "drawer" | "dialog";
 
 function readPresentation(): CardPresentation {
   try {
-    const v = window.localStorage.getItem("issues.cardPresentation");
-    if (v === "dialog") return "dialog";
-  } catch {
-    /* localStorage disabled */
-  }
+    if (window.localStorage.getItem("issues.cardPresentation") === "dialog") return "dialog";
+  } catch { /* localStorage disabled */ }
   return "drawer";
 }
 
@@ -316,9 +163,7 @@ const cardPresentation = ref<CardPresentation>(readPresentation());
 watch(cardPresentation, (v) => {
   try {
     window.localStorage.setItem("issues.cardPresentation", v);
-  } catch {
-    /* localStorage disabled */
-  }
+  } catch { /* localStorage disabled */ }
 });
 
 const splitPanels = [
@@ -331,49 +176,7 @@ const activeSplitPanels = computed<string[]>(() =>
 );
 
 function onSplitPanelsUpdate(value: string[]): void {
-  // Closing the drawer panel via the SplitPanel's own toggle UI is
-  // equivalent to closing the issue detail.
   if (selectedIssueId.value && !value.includes("drawer")) closeDrawer();
-}
-
-function readUrlIssue(): string | null {
-  const params = new URLSearchParams(window.location.search);
-  return params.get("issue");
-}
-
-function writeUrlIssue(id: string | null): void {
-  const url = new URL(window.location.href);
-  if (id) {
-    url.searchParams.set("issue", id);
-  } else {
-    url.searchParams.delete("issue");
-  }
-  window.history.replaceState({}, "", url.toString());
-}
-
-async function openDrawer(id: string): Promise<void> {
-  selectedIssueId.value = id;
-  writeUrlIssue(id);
-  detailLoading.value = true;
-  detailError.value = null;
-  try {
-    const detail = await fetchDetail(id);
-    if (selectedIssueId.value !== id) return;
-    selectedDetail.value = detail;
-  } catch (err) {
-    if (selectedIssueId.value !== id) return;
-    detailError.value = err instanceof Error ? err.message : String(err);
-    selectedDetail.value = null;
-  } finally {
-    if (selectedIssueId.value === id) detailLoading.value = false;
-  }
-}
-
-function closeDrawer(): void {
-  selectedIssueId.value = null;
-  selectedDetail.value = null;
-  detailError.value = null;
-  writeUrlIssue(null);
 }
 
 function onSelect(issue: IssueListItem): void {
@@ -381,50 +184,13 @@ function onSelect(issue: IssueListItem): void {
   void openDrawer(issue.id);
 }
 
+// Issue ids are scoped per-repo, so any chip in this drawer references
+// a card in `selectedRepo` by data-model invariant.
 function onJumpIssue(id: string): void {
-  // Issue ids are scoped per-repo (<PREFIX>-N collides across repos), so any
-  // chip in this drawer references a card in `selectedRepo` by data-model
-  // invariant. If a future global-id model lands, branch here to switch
-  // `selectedRepo` before opening.
   void openDrawer(id);
 }
 
-// DX-350 — `CreateCardButton` emits `created` after the operator submits
-// the dialog. Open the drawer for the new card so the operator watches
-// the flesh-out happen in real time (SSE arrives within ~30-60s; the
-// drawer's existing detail-poll handles the refresh).
-function onCreatedFromDialog(issueId: string): void {
-  void openDrawer(issueId);
-}
-
-// DX-519 — Paste dialog state. Operator clicks the Paste button, dialog
-// opens, operator pastes (or auto-reads from clipboard) the JSON payload
-// produced by the drawer's Copy button. On successful import we open
-// the drawer on the new top-level card so the operator confirms the
-// duplicate landed correctly.
 const pasteDialogOpen = ref<boolean>(false);
-
-function onPasteImported(topId: string, _totalCards: number): void {
-  // Open the drawer on the new top-level card. The SSE round-trip
-  // re-affirms the list within ~50ms of the YAML writes; the drawer
-  // detail fetch reads the new YAML directly via fetchIssueDetail.
-  void openDrawer(topId);
-}
-
-function onParentClick(parentId: string): void {
-  scopedEpicId.value = parentId;
-}
-
-// DX-239 — `RequiresHumanPanel`'s PATCH returns the post-patch Issue.
-// Merge it into the open detail so the panel + indicators reflect the
-// new state immediately, without waiting for the chokidar mirror
-// debounce (~5s) and a separate re-fetch. The watcher's SSE event will
-// re-affirm later; the local merge is the optimistic path.
-function onIssuePatched(updated: import("../../types").Issue): void {
-  const current = selectedDetail.value;
-  if (!current || current.id !== updated.id) return;
-  selectedDetail.value = { ...current, ...updated };
-}
 
 function onToggleScope(): void {
   const detail = selectedDetail.value;
@@ -448,12 +214,9 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
 });
 
-watch(
-  selectedRepo,
-  () => {
-    if (selectedIssueId.value) closeDrawer();
-  },
-);
+watch(selectedRepo, () => {
+  if (selectedIssueId.value) closeDrawer();
+});
 </script>
 
 <template>
@@ -479,7 +242,7 @@ watch(
         </DanxTooltip>
         <CreateCardButton
           :repo="selectedRepo"
-          @created="onCreatedFromDialog"
+          @created="(id: string) => openDrawer(id)"
         />
       </div>
       <FilterToolbar
@@ -525,7 +288,7 @@ watch(
               :scoped-epic-id="scopedEpicId"
               :scope-mode="scopeMode"
               @select="onSelect"
-              @parent-click="onParentClick"
+              @parent-click="(pid: string) => (scopedEpicId = pid)"
               @move="onMove"
               @reorder="onReorder"
             />
@@ -543,8 +306,8 @@ watch(
             @jump-issue="onJumpIssue"
             @toggle-scope="onToggleScope"
             @open-agent="emit('open-agent')"
-            @issue-patched="onIssuePatched"
-            @update:issue="onUpdateIssue"
+            @issue-patched="mergeIssuePatch"
+            @update:issue="mergeIssueUpdateAndInvalidate"
           />
         </template>
       </DanxSplitPanel>
@@ -557,7 +320,7 @@ watch(
           :scoped-epic-id="scopedEpicId"
           :scope-mode="scopeMode"
           @select="onSelect"
-          @parent-click="onParentClick"
+          @parent-click="(pid: string) => (scopedEpicId = pid)"
           @move="onMove"
           @reorder="onReorder"
         />
@@ -574,10 +337,18 @@ watch(
       :all-lists="boardLists"
       :busy="moveDialogBusy"
       :error="moveDialogError"
-      @confirm="onCascadeDialogConfirm"
-      @cancel="onMoveDialogCancel"
+      @confirm="onCascadeConfirm"
+      @cancel="onCascadeCancel"
     />
 
+    <!--
+      Dialog-mode presentation. Identical bindings to the drawer-mode mount
+      modulo `:show-close-button="false"` (DanxDialog owns its own close
+      affordance via `close-x`). The two mounts sit in structurally
+      different parents (DanxSplitPanel slot vs. DanxDialog default slot)
+      so they cannot share a single render — the v-bind copy is the
+      minimal divergence.
+    -->
     <DanxDialog
       v-if="cardPresentation === 'dialog' && selectedIssueId"
       :model-value="!!selectedIssueId"
@@ -600,8 +371,8 @@ watch(
         @jump-issue="onJumpIssue"
         @toggle-scope="onToggleScope"
         @open-agent="emit('open-agent')"
-        @issue-patched="onIssuePatched"
-        @update:issue="onUpdateIssue"
+        @issue-patched="mergeIssuePatch"
+        @update:issue="mergeIssueUpdateAndInvalidate"
       />
     </DanxDialog>
     <BoardChatOverlay
@@ -613,7 +384,7 @@ watch(
       v-if="selectedRepo"
       v-model="pasteDialogOpen"
       :repo="selectedRepo"
-      @imported="onPasteImported"
+      @imported="(topId: string) => openDrawer(topId)"
     />
     <div v-if="detailError" class="error-banner detail-err">
       {{ detailError }}
