@@ -353,6 +353,7 @@ describe("listIssues", () => {
       requires_human: null,
       requires_human_child_count: 0,
       blocked: null,
+      blocked_descendants: [],
       list_name: "In Progress",
       conflict_on: [],
       conflict_on_active_count: 0,

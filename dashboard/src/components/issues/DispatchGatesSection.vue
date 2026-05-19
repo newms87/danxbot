@@ -57,6 +57,12 @@ const readyDefaultListName = computed<string | null>(() => {
 
 const requiresHuman = computed(() => props.issue.requires_human);
 const selfBlocked = computed(() => props.issue.blocked);
+const blockedDescendants = computed(
+  () => props.issue.blocked_descendants ?? [],
+);
+const inheritedBlocked = computed(
+  () => selfBlocked.value === null && blockedDescendants.value.length > 0,
+);
 const waitingOn = computed(() => props.issue.waiting_on);
 const conflictForward = computed(() => props.issue.conflict_on ?? []);
 const conflictReverse = computed(() => props.issue.conflict_on_reverse ?? []);
@@ -66,6 +72,7 @@ const hasAnyGate = computed(
   () =>
     requiresHuman.value !== null ||
     selfBlocked.value !== null ||
+    blockedDescendants.value.length > 0 ||
     waitingOn.value !== null ||
     conflictForward.value.length > 0 ||
     conflictReverse.value.length > 0,
@@ -186,7 +193,12 @@ async function clearConflictEntry(entry: ConflictOnEntry): Promise<void> {
 
 // ── summaries (collapsed 1-line) ───────────────────────────────────────
 const rhSummary = computed(() => requiresHuman.value?.reason ?? "");
-const blockedSummary = computed(() => selfBlocked.value?.reason ?? "");
+const blockedSummary = computed(() => {
+  if (selfBlocked.value) return selfBlocked.value.reason;
+  const desc = blockedDescendants.value;
+  if (desc.length === 0) return "";
+  return `Blocked by ${desc.length} descendant${desc.length === 1 ? "" : "s"}`;
+});
 const waitingSummary = computed(() => {
   const w = waitingOn.value;
   if (!w) return "";
@@ -283,9 +295,9 @@ const conflictSummary = computed(() => {
 
     <!-- blocked ──────────────────────────────────────────────────────── -->
     <div
-      v-if="selfBlocked"
+      v-if="selfBlocked || blockedDescendants.length > 0"
       class="gate gate-blocked"
-      :class="{ expanded: expanded.blocked }"
+      :class="{ expanded: expanded.blocked, 'gate-blocked-inherited': inheritedBlocked }"
       data-test="gate-blocked"
     >
       <button
@@ -300,13 +312,24 @@ const conflictSummary = computed(() => {
           class="chev"
         />
         <span class="gate-glyph" aria-hidden="true">🔒</span>
-        <span class="gate-label">Blocked</span>
+        <span class="gate-label">{{ inheritedBlocked ? "Blocked (inherited)" : "Blocked" }}</span>
         <span class="gate-summary">{{ blockedSummary }}</span>
-        <span class="gate-meta">{{ selfBlocked.at }}</span>
+        <span v-if="selfBlocked" class="gate-meta">{{ selfBlocked.at }}</span>
       </button>
       <div v-if="expanded.blocked" class="gate-body" data-test="gate-blocked-body">
-        <p class="gate-reason">{{ selfBlocked.reason }}</p>
-        <div class="gate-actions">
+        <p v-if="selfBlocked" class="gate-reason">{{ selfBlocked.reason }}</p>
+        <ul v-if="blockedDescendants.length > 0" class="partner-list" data-test="gate-blocked-descendants">
+          <li v-for="d in blockedDescendants" :key="d.id">
+            <button
+              type="button"
+              class="partner-chip"
+              :data-test="`gate-blocked-jump-${d.id}`"
+              @click="emit('jump-issue', d.id)"
+            >{{ d.id }}</button>
+            <span class="partner-title">{{ d.reason }}</span>
+          </li>
+        </ul>
+        <div v-if="selfBlocked" class="gate-actions">
           <DanxButton
             size="sm"
             variant="muted"

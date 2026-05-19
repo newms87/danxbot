@@ -25,6 +25,7 @@ import type {
 import { cloneTriage } from "../issue-tracker/interface.js";
 import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
 import { effectiveConflictOn } from "../issue/effective-conflict-on.js";
+import { effectiveBlocked } from "../issue/effective-blocked.js";
 import { deriveCreatedAt } from "./issue-created-at.js";
 import type {
   IssueListChild,
@@ -142,6 +143,7 @@ export function projectIssue(
     requires_human_child_count: childrenDetail.filter((c) => c.requires_human)
       .length,
     blocked: issue.blocked,
+    blocked_descendants: effectiveBlocked(issue, byId).inherited,
     list_name: issue.list_name,
     conflict_on: issue.conflict_on.map((e) => ({ ...e })),
     conflict_on_active_count:

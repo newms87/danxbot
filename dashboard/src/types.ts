@@ -108,6 +108,7 @@ export type {
   IssueListChildAssignment,
   IssueDetail,
 } from "@backend/dashboard/issues-reader.js";
+export type { InheritedBlocked } from "@backend/issue/effective-blocked.js";
 export { ISSUE_TYPES, ISSUE_STATUSES } from "@backend/issue-tracker/interface.js";
 export type {
   Issue,

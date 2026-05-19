@@ -20,6 +20,10 @@ import {
 import { repoNameFromPath } from "../poller/repo-name.js";
 import { createLogger } from "../logger.js";
 import { effectiveWaitingOn } from "../issue/effective-waiting-on.js";
+import {
+  effectiveBlocked,
+  type InheritedBlocked,
+} from "../issue/effective-blocked.js";
 import { deriveStatus } from "../issue/derive-status.js";
 import { projectIssue } from "./project-issue.js";
 
@@ -162,6 +166,16 @@ export interface IssueListItem {
    */
   blocked?: Blocked | null;
   /**
+   * Inherited block — every descendant (recursive) with a populated
+   * `Issue.blocked` gate. Empty when no descendant is blocked. Orthogonal
+   * to the raw `blocked` field (self) so the SPA can distinguish
+   * "this card is self-blocked" from "a phase is blocked" in the chip
+   * tooltip. Derived read-time via `effectiveBlocked(issue, byId)` —
+   * never persisted, never round-tripped to the YAML. DX-658 follow-up:
+   * epic UI now surfaces as blocked when any descendant carries the gate.
+   */
+  blocked_descendants?: InheritedBlocked[];
+  /**
    * DX-586 — the card's current per-repo list name from `lists.yaml`.
    * `null` for cards that pre-date the auto-resolve write path
    * (`src/issue/list-resolve.ts`) and haven't been touched since; the
@@ -253,6 +267,15 @@ export type IssueDetail = Issue & {
    * without a second fetch. Optional for test fixture back-compat.
    */
   conflict_on_reverse?: ConflictOnEntry[];
+  /**
+   * Inherited block — descendant cards (recursive) with `blocked != null`.
+   * Empty array when no descendant is blocked. Orthogonal to the raw
+   * `Issue.blocked` field already in scope via the `Issue` intersection.
+   * Derived read-time; never persisted. The drawer renders the BLOCKED
+   * banner when self OR inherited has a populated record. Optional on
+   * the type for test fixture back-compat; server always emits.
+   */
+  blocked_descendants?: InheritedBlocked[];
 };
 
 export { deriveCreatedAt } from "./issue-created-at.js";
@@ -577,6 +600,16 @@ export async function readIssueDetail(
     }
   }
 
+  // Build a full-open-tree map so `effectiveBlocked` can recurse into
+  // grandchildren the targeted `idsToFetch` set did not include. The
+  // open issue set is already loaded above for reverse-conflict lookup.
+  const fullById = new Map<string, Issue>();
+  for (const o of openIssues) fullById.set(o.id, o);
+  // Overlay any byId entries that came from `idsToFetch` (which may
+  // include closed deps) so the walk still resolves them.
+  for (const [k, v] of byId) if (!fullById.has(k)) fullById.set(k, v);
+  const blocked_descendants = effectiveBlocked(raw.issue, fullById).inherited;
+
   return {
     ...raw.issue,
     waiting_on,
@@ -586,6 +619,7 @@ export async function readIssueDetail(
     requires_human_child_count,
     conflict_on_partners,
     conflict_on_reverse,
+    blocked_descendants,
   };
 }
 

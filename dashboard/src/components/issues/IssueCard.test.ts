@@ -304,6 +304,39 @@ describe("IssueCard — dispatch gate pills (DX-309)", () => {
     expect(pill.classes()).toContain("gate-conflict-audit");
   });
 
+  it("renders inherited BLOCKED pill when blocked_descendants is non-empty and self is null", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        status: "ToDo",
+        blocked: null,
+        blocked_descendants: [
+          { id: "DX-99", reason: "phase wedged", at: "2026-05-18T00:00:00Z" },
+          { id: "DX-100", reason: "schema gap", at: "2026-05-18T00:00:00Z" },
+        ],
+      }),
+    );
+    const pill = w.get("[data-test='blocked-pill']");
+    expect(pill.text()).toContain("BLOCKED");
+    expect(pill.text()).toContain("2");
+    expect(pill.classes()).toContain("gate-blocked-inherited");
+  });
+
+  it("self-block wins when both self and descendants are blocked (no inherited modifier)", () => {
+    const w = mountCard(
+      makeListItem({
+        type: "Epic",
+        blocked: { reason: "self gate", at: "2026-05-18T00:00:00Z" },
+        blocked_descendants: [
+          { id: "DX-99", reason: "phase wedged", at: "2026-05-18T00:00:00Z" },
+        ],
+      }),
+    );
+    const pill = w.get("[data-test='blocked-pill']");
+    expect(pill.text()).toContain("BLOCKED");
+    expect(pill.classes()).not.toContain("gate-blocked-inherited");
+  });
+
   it("renders ALL three pills together when every gate is set", () => {
     const w = mountCard(
       makeListItem({

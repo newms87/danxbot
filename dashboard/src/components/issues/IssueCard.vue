@@ -51,7 +51,20 @@ const emit = defineEmits<{
 const isEpic = computed(() => props.issue.type === "Epic");
 // DX-309 — three independent dispatch gates rendered as separate pills.
 // Legacy single-`blocked` (mapping to waiting_on) replaced by the trio.
-const selfBlocked = computed(() => props.issue.blocked);
+const selfBlocked = computed(() => props.issue.blocked ?? null);
+const blockedDescendants = computed(
+  () => props.issue.blocked_descendants ?? [],
+);
+const effectivelyBlocked = computed(
+  () => selfBlocked.value !== null || blockedDescendants.value.length > 0,
+);
+const blockedTooltip = computed<string | undefined>(() => {
+  if (selfBlocked.value) return selfBlocked.value.reason;
+  const desc = blockedDescendants.value;
+  if (desc.length === 0) return undefined;
+  const lines = desc.map((d) => `${d.id}: ${d.reason}`).join("\n");
+  return `Blocked by ${desc.length} descendant${desc.length === 1 ? "" : "s"}:\n${lines}`;
+});
 const waitingOn = computed(() => props.issue.waiting_on);
 const waitingOnIds = computed(() => props.issue.waiting_on_by ?? []);
 const conflictEntries = computed(() => props.issue.conflict_on ?? []);
@@ -60,7 +73,7 @@ const conflictActiveCount = computed(
 );
 const hasAnyGate = computed(
   () =>
-    selfBlocked.value !== null ||
+    effectivelyBlocked.value ||
     waitingOn.value ||
     conflictActiveCount.value > 0 ||
     conflictEntries.value.length > 0,
@@ -159,7 +172,7 @@ function onParentClick(e: MouseEvent): void {
 <template>
   <div
     class="issue-card"
-    :class="{ epic: isEpic, 'self-blocked': selfBlocked, 'waiting-on': waitingOn && !selfBlocked, conflict: conflictActiveCount > 0 && !selfBlocked && !waitingOn, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
+    :class="{ epic: isEpic, 'self-blocked': effectivelyBlocked, 'inherited-blocked': !selfBlocked && blockedDescendants.length > 0, 'waiting-on': waitingOn && !effectivelyBlocked, conflict: conflictActiveCount > 0 && !effectivelyBlocked && !waitingOn, dimmed: props.dimmed, scoped: props.scoped, 'is-dragging': props.dragging }"
     role="button"
     tabindex="0"
     :draggable="props.dragHandlers ? true : undefined"
@@ -203,13 +216,17 @@ function onParentClick(e: MouseEvent): void {
       </DanxTooltip>
       <span v-if="hasAnyGate" class="gates-wrap">
       <DanxTooltip
-        v-if="selfBlocked"
-        :tooltip="selfBlocked.reason"
+        v-if="effectivelyBlocked"
+        :tooltip="blockedTooltip"
       >
         <template #trigger>
-          <span class="gate-pill gate-blocked" data-test="blocked-pill">
+          <span
+            class="gate-pill gate-blocked"
+            :class="{ 'gate-blocked-inherited': !selfBlocked }"
+            data-test="blocked-pill"
+          >
             <span class="gate-glyph">🔒</span>
-            BLOCKED
+            BLOCKED{{ !selfBlocked && blockedDescendants.length > 0 ? ` ${blockedDescendants.length}` : "" }}
           </span>
         </template>
       </DanxTooltip>
