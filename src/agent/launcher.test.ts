@@ -418,6 +418,36 @@ describe("spawnAgent", () => {
     expect(job.dispatchKind).toBe("prep");
   });
 
+  it("DX-713: stamps options.apiToken onto the constructed AgentJob (load-bearing for /api/get-app auth)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
+      apiToken: "per-dispatch-tok-42",
+    });
+
+    expect(job.apiToken).toBe("per-dispatch-tok-42");
+  });
+
+  it("DX-713: apiToken omitted leaves AgentJob.apiToken undefined (poller-style launches)", async () => {
+    const child = createMockChildProcess();
+    mockSpawn.mockReturnValue(child);
+
+    const job = await spawnAgent({
+      prompt: "/danx-next",
+      repoName: "platform",
+      timeoutMs: 60_000,
+      cwd: "/tmp/test-workspace",
+      // apiToken omitted
+    });
+
+    expect(job.apiToken).toBeUndefined();
+  });
+
   it("DX-296: dispatchKind=undefined leaves AgentJob.dispatchKind undefined (Slack/ideator/external launches)", async () => {
     const child = createMockChildProcess();
     mockSpawn.mockReturnValue(child);

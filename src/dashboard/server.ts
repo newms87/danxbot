@@ -33,6 +33,7 @@ import {
 } from "./sync-root-routes.js";
 import { eventBus } from "./event-bus.js";
 import {
+  handleGetAppProxy,
   handleLaunchProxy,
   handleResumeProxy,
   handleFleshOutProxy,
@@ -258,6 +259,23 @@ async function route(
 
   if (method === "POST" && url.pathname === "/api/chat") {
     await handleChatProxy(req, res, dispatchDeps);
+    return true;
+  }
+
+  // DX-713 — URL-pull bundle GET. Binary-safe pass-through (gzip bytes
+  // would corrupt through `proxyToWorker`'s utf-8 coercion). Auth lives
+  // on the worker side via per-job apiToken; dashboard pipes the inbound
+  // Authorization header verbatim. Matched ahead of the JSON proxy table
+  // so the binary-safe path always wins for this prefix.
+  const getAppMatch = url.pathname.match(/^\/api\/get-app\/([^/]+)$/);
+  if (method === "GET" && getAppMatch) {
+    await handleGetAppProxy(
+      req,
+      res,
+      decodeURIComponent(getAppMatch[1]),
+      url.searchParams.get("repo"),
+      dispatchDeps,
+    );
     return true;
   }
 

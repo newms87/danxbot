@@ -28,8 +28,11 @@ import {
   clearCachedWorkerHost,
   probeReachable,
   proxyToWorkerWithFallback,
+  handleGetAppProxy,
   _setProbeForTesting,
 } from "./dispatch-proxy.js";
+import { createHash } from "node:crypto";
+import { request as httpRequest } from "http";
 import { createMockReqRes } from "../__tests__/helpers/http-mocks.js";
 import type { RepoConfig } from "../types.js";
 
@@ -1352,5 +1355,289 @@ describe("proxyToWorkerWithFallback", () => {
     // Then the wrapper falls through the remaining candidate ordering.
     expect(probedHosts).toContain("danxbot-worker-test");
     expect(probedHosts).toContain("host.docker.internal");
+  });
+});
+
+describe("handleGetAppProxy (DX-713 binary-safe pass-through)", () => {
+  // Real http servers on 127.0.0.1 — a Buffer→string coercion regression
+  // would corrupt the bytes here and the sha256 check fails immediately.
+  interface BinWorker {
+    server: Server;
+    port: number;
+    lastAuth: string | undefined;
+    payload: Buffer;
+    status: number;
+    contentType: string;
+  }
+
+  function startBinWorker(payload: Buffer): Promise<BinWorker> {
+    const w: Partial<BinWorker> & { payload: Buffer } = {
+      payload,
+      status: 200,
+      contentType: "application/gzip",
+      lastAuth: undefined,
+    };
+    const server = createServer(
+      (req: IncomingMessage, res: ServerResponse) => {
+        w.lastAuth =
+          typeof req.headers["authorization"] === "string"
+            ? req.headers["authorization"]
+            : undefined;
+        res.writeHead(w.status!, {
+          "Content-Type": w.contentType!,
+          "Content-Length": String(w.payload.length),
+          "Cache-Control": "private, no-store",
+        });
+        res.end(w.payload);
+      },
+    );
+    return new Promise<BinWorker>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const port = (server.address() as AddressInfo).port;
+        const out: BinWorker = {
+          server,
+          port,
+          get lastAuth() {
+            return w.lastAuth;
+          },
+          get payload() {
+            return w.payload;
+          },
+          get status() {
+            return w.status!;
+          },
+          set status(v: number) {
+            w.status = v;
+          },
+          get contentType() {
+            return w.contentType!;
+          },
+          set contentType(v: string) {
+            w.contentType = v;
+          },
+        };
+        // Re-bind setters/getters above don't work for `payload` since
+        // we never reassign it after creation in these tests. Return as-is.
+        resolve(out);
+      });
+    });
+  }
+
+  // Random binary payload — not valid utf-8 — to catch any string
+  // coercion regression in the proxy return path.
+  const binaryPayload = Buffer.from([
+    0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xff, 0xfe,
+    0xfd, 0xfc, 0x00, 0xc0, 0xc1, 0xc2,
+  ]);
+
+  let bin: BinWorker;
+  let outer: Server;
+  let outerPort: number;
+  let originalProbe: typeof probeReachable;
+
+  beforeAll(async () => {
+    bin = await startBinWorker(binaryPayload);
+    // Mock probe so resolveReachableHost accepts 127.0.0.1 immediately.
+    originalProbe = _setProbeForTesting(async () => true);
+
+    const deps = {
+      token: "dispatch-token",
+      repos: [
+        {
+          name: "bin-repo",
+          url: "https://x/b.git",
+          localPath: "/danxbot/repos/bin-repo",
+          hostPath: "/danxbot/repos/bin-repo",
+          workerPort: bin.port,
+        },
+      ] as RepoConfig[],
+      resolveHost: () => "127.0.0.1",
+    };
+
+    outer = createServer(async (req, res) => {
+      const u = new URL(req.url ?? "/", "http://127.0.0.1");
+      const m = u.pathname.match(/^\/api\/get-app\/([^/?]+)$/);
+      if (!m) {
+        res.writeHead(404).end();
+        return;
+      }
+      await handleGetAppProxy(req, res, m[1], u.searchParams.get("repo"), deps);
+    });
+    await new Promise<void>((resolve) =>
+      outer.listen(0, "127.0.0.1", () => resolve()),
+    );
+    outerPort = (outer.address() as AddressInfo).port;
+  });
+
+  afterAll(async () => {
+    _setProbeForTesting(originalProbe);
+    await new Promise<void>((r) => outer.close(() => r()));
+    await new Promise<void>((r) => bin.server.close(() => r()));
+  });
+
+  beforeEach(() => {
+    clearCachedWorkerHost();
+    bin.status = 200;
+    bin.contentType = "application/gzip";
+  });
+
+  function get(path: string, headers: Record<string, string> = {}) {
+    return new Promise<{
+      status: number;
+      headers: Record<string, string | string[] | undefined>;
+      body: Buffer;
+    }>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: outerPort,
+          path,
+          method: "GET",
+          headers,
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c: Buffer) => chunks.push(c));
+          res.on("end", () =>
+            resolve({
+              status: res.statusCode ?? 0,
+              headers: res.headers,
+              body: Buffer.concat(chunks),
+            }),
+          );
+          res.on("error", reject);
+        },
+      );
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("400s when ?repo= is missing", async () => {
+    const res = await get("/api/get-app/d1");
+    expect(res.status).toBe(400);
+  });
+
+  it("404s when the repo is not configured", async () => {
+    const res = await get("/api/get-app/d1?repo=unknown");
+    expect(res.status).toBe(404);
+  });
+
+  it("forwards binary bytes byte-exact (no UTF-8 coercion)", async () => {
+    const res = await get("/api/get-app/d1?repo=bin-repo", {
+      Authorization: "Bearer per-dispatch-tok",
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers["content-type"]).toBe("application/gzip");
+    expect(res.headers["content-length"]).toBe(String(binaryPayload.length));
+    expect(res.headers["cache-control"]).toBe("private, no-store");
+    expect(createHash("sha256").update(res.body).digest("hex")).toBe(
+      createHash("sha256").update(binaryPayload).digest("hex"),
+    );
+  });
+
+  it("passes the inbound Authorization header through verbatim", async () => {
+    await get("/api/get-app/d1?repo=bin-repo", {
+      Authorization: "Bearer some-per-dispatch-token-123",
+    });
+    expect(bin.lastAuth).toBe("Bearer some-per-dispatch-token-123");
+  });
+
+  it("502s when no candidate host is reachable", async () => {
+    const prev = _setProbeForTesting(async () => false);
+    try {
+      const res = await get("/api/get-app/d1?repo=bin-repo", {
+        Authorization: "Bearer tok",
+      });
+      expect(res.status).toBe(502);
+    } finally {
+      _setProbeForTesting(prev);
+      _setProbeForTesting(async () => true);
+    }
+  });
+
+  it("URL-encodes the dispatchId when forwarding (prevents path injection)", async () => {
+    // SPA decodes the URL once, handler re-encodes before forwarding;
+    // verify a `/`-bearing id round-trips encoded so the worker side
+    // sees a single segment.
+    const seen: string[] = [];
+    const probe = createServer((req: IncomingMessage, res: ServerResponse) => {
+      seen.push(req.url ?? "");
+      res.writeHead(200, {
+        "Content-Type": "application/gzip",
+        "Content-Length": "0",
+      });
+      res.end();
+    });
+    await new Promise<void>((r) => probe.listen(0, "127.0.0.1", () => r()));
+    const probePort = (probe.address() as AddressInfo).port;
+    const probeDeps = {
+      token: "dispatch-token",
+      repos: [
+        {
+          name: "probe-repo",
+          url: "https://x/p.git",
+          localPath: "/x",
+          hostPath: "/x",
+          workerPort: probePort,
+        },
+      ] as RepoConfig[],
+      resolveHost: () => "127.0.0.1",
+    };
+    const outerProbe = createServer(async (req, res) => {
+      const u = new URL(req.url ?? "/", "http://127.0.0.1");
+      const m = u.pathname.match(/^\/api\/get-app\/([^/?]+)$/);
+      if (!m) {
+        res.writeHead(404).end();
+        return;
+      }
+      await handleGetAppProxy(
+        req,
+        res,
+        decodeURIComponent(m[1]),
+        u.searchParams.get("repo"),
+        probeDeps,
+      );
+    });
+    await new Promise<void>((r) =>
+      outerProbe.listen(0, "127.0.0.1", () => r()),
+    );
+    const outerProbePort = (outerProbe.address() as AddressInfo).port;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        // dispatchId with `/` percent-encoded into a single path segment.
+        const req = httpRequest(
+          {
+            host: "127.0.0.1",
+            port: outerProbePort,
+            // pre-encoded id: literal `d%2F1` on the wire
+            path: "/api/get-app/d%2F1?repo=probe-repo",
+            method: "GET",
+          },
+          (r) => {
+            r.on("data", () => {});
+            r.on("end", () => resolve());
+          },
+        );
+        req.on("error", reject);
+        req.end();
+      });
+      expect(seen).toHaveLength(1);
+      // Worker side MUST see a single segment, not `/d/1`.
+      expect(seen[0]).toBe("/api/get-app/d%2F1");
+    } finally {
+      await new Promise<void>((r) => outerProbe.close(() => r()));
+      await new Promise<void>((r) => probe.close(() => r()));
+    }
+  });
+
+  it("propagates upstream non-200 status with body bytes", async () => {
+    bin.status = 401;
+    bin.contentType = "application/json";
+    const res = await get("/api/get-app/d1?repo=bin-repo", {
+      Authorization: "Bearer wrong",
+    });
+    expect(res.status).toBe(401);
+    expect(res.headers["content-type"]).toBe("application/json");
   });
 });

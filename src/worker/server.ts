@@ -40,6 +40,7 @@ import {
   handleSlackUpdate,
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
+import { handleGetApp } from "./get-app-route.js";
 import { handleSetPickupPrefix } from "./test-isolation-route.js";
 import { handleIssueCreate } from "./issue-route.js";
 import {
@@ -200,6 +201,19 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
 
     if (method === "GET" && url.pathname === "/api/template-hmr/active") {
       handleTemplateHmrActive(req, res);
+      return;
+    }
+
+    // DX-713 — URL-pull bundle. Method allowlist (only GET) is enforced
+    // INSIDE the handler so non-GET hits get the spec'd 405 instead of
+    // falling through to the default 404.
+    const getAppMatch = url.pathname.match(/^\/api\/get-app\/([^/]+)$/);
+    if (getAppMatch) {
+      // Decode parity with the dashboard proxy (which decodes then
+      // re-encodes for forwarding) — activeJobs is keyed by the
+      // decoded dispatchId, so the raw URL segment would mismatch
+      // any id containing `%`-escapes.
+      await handleGetApp(req, res, decodeURIComponent(getAppMatch[1]));
       return;
     }
 

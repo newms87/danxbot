@@ -80,6 +80,18 @@ export interface AgentJob {
   completedAt?: Date;
   statusUrl?: string;
   /**
+   * Per-dispatch bearer token from the launch / resume payload. Stamped on
+   * the job at spawn time and used by routes that need to authenticate the
+   * caller against this dispatch specifically — currently
+   * `GET /api/get-app/:dispatchId` (DX-713) for the URL-pull bundle.
+   *
+   * Optional: poller-driven dispatches (Trello / per-issue) omit it,
+   * external `/api/launch` callers may include it via `body.api_token`.
+   * Routes that need it MUST 401 when absent — never fall through to "no
+   * auth" because the field is empty.
+   */
+  apiToken?: string;
+  /**
    * Running totals accumulated from every assistant entry's `message.usage`
    * in the single dispatch JSONL. Claude Code emits per-turn usage on each
    * assistant entry; total = sum across entries. One JSONL per dispatch

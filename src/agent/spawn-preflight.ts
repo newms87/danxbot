@@ -99,6 +99,7 @@ export async function runSpawnPreflight(
     summary: "",
     startedAt: new Date(),
     statusUrl: options.statusUrl,
+    apiToken: options.apiToken,
     stop: async () => {
       throw new Error(
         `spawnAgent: job.stop called before initialization (jobId=${jobId})`,

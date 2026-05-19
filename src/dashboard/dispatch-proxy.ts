@@ -484,6 +484,140 @@ export async function proxyToWorkerWithFallback(
 }
 
 /**
+ * Binary-safe GET proxy used for `/api/get-app/:dispatchId` (DX-713).
+ *
+ * The worker route streams a `tar.gz` bundle; running it through
+ * `proxyToWorker` would `.toString("utf-8")` the body and silently corrupt
+ * the gzip bytes (same regression class that `playwright-proxy.ts`
+ * exists to avoid for PNG screenshots). This forwarder:
+ *
+ * - Passes the inbound `Authorization` header through verbatim — the
+ *   worker validates Bearer against the per-job `apiToken`, and the
+ *   dashboard never holds that token, so a strip-and-replace is wrong.
+ * - Streams the upstream response body as raw bytes (no string coercion).
+ * - Forwards `Content-Type`, `Content-Length`, and `Cache-Control` headers
+ *   from the worker response so the consumer sees the spec'd values
+ *   without re-deriving them here.
+ *
+ * The dashboard performs NO auth of its own on this route — the worker
+ * owns auth via the per-dispatch apiToken match. Workers are private to
+ * `danxbot-net`, so the dashboard is the only public entry; the worker's
+ * 401 IS the gate.
+ */
+export async function handleGetAppProxy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  dispatchId: string,
+  repoName: string | null,
+  deps: DispatchProxyDeps,
+): Promise<void> {
+  if (!repoName) {
+    json(res, 400, {
+      error: "`repo` query parameter is required",
+    });
+    return;
+  }
+  const repo = resolveRepo(repoName, deps.repos);
+  if (!repo) {
+    json(res, 404, { error: `Repo "${repoName}" is not configured` });
+    return;
+  }
+
+  const reachableHost = await resolveReachableHost(
+    repo.name,
+    deps.resolveHost(repo.name),
+    repo.workerPort,
+  );
+  if (!reachableHost) {
+    sendUpstreamError(
+      res,
+      502,
+      `Worker for repo "${repo.name}" is not reachable on any candidate host`,
+    );
+    return;
+  }
+
+  const outgoingHeaders: Record<string, string> = {};
+  const auth = req.headers["authorization"];
+  if (typeof auth === "string") outgoingHeaders["Authorization"] = auth;
+
+  return new Promise<void>((resolve) => {
+    const upstreamReq = httpRequest(
+      {
+        host: reachableHost,
+        port: repo.workerPort,
+        path: `/api/get-app/${encodeURIComponent(dispatchId)}`,
+        method: "GET",
+        headers: outgoingHeaders,
+        timeout: UPSTREAM_TIMEOUT_MS,
+      },
+      (upstreamRes) => {
+        const status = upstreamRes.statusCode ?? 502;
+        const responseHeaders: Record<string, string> = {};
+        for (const key of [
+          "content-type",
+          "content-length",
+          "cache-control",
+        ] as const) {
+          const v = upstreamRes.headers[key];
+          if (typeof v === "string") {
+            // Re-titlecase for downstream consistency; case-insensitive in
+            // HTTP but `node-fetch` etc. lowercase response headers on read.
+            const out =
+              key === "content-type"
+                ? "Content-Type"
+                : key === "content-length"
+                  ? "Content-Length"
+                  : "Cache-Control";
+            responseHeaders[out] = v;
+          }
+        }
+        res.writeHead(status, responseHeaders);
+        // `pipe` preserves byte boundaries — no `.toString()` anywhere
+        // on the return path. This is the load-bearing line.
+        upstreamRes.pipe(res);
+        upstreamRes.on("end", () => resolve());
+        upstreamRes.on("error", (err) => {
+          log.error(
+            `Get-app upstream read error (${reachableHost}:${repo.workerPort}): ${err.message}`,
+          );
+          if (!res.headersSent) {
+            sendUpstreamError(res, 502, `Upstream read failed: ${err.message}`);
+          } else {
+            res.end();
+          }
+          resolve();
+        });
+      },
+    );
+
+    upstreamReq.on("error", (err) => {
+      log.warn(
+        `Get-app upstream unreachable (${reachableHost}:${repo.workerPort}): ${err.message}`,
+      );
+      // Self-heal: if the host we just locked in fails the real request,
+      // evict the cache so the next attempt re-resolves through the full
+      // candidate list.
+      if (cachedWorkerHost.get(repo.name)?.host === reachableHost) {
+        cachedWorkerHost.delete(repo.name);
+      }
+      sendUpstreamError(
+        res,
+        502,
+        `Worker for this request is not reachable (${err.message})`,
+      );
+      resolve();
+    });
+
+    upstreamReq.on("timeout", () => {
+      upstreamReq.destroy(new Error("Upstream timeout"));
+    });
+
+    upstreamReq.end();
+  });
+}
+
+/**
  * Load the dispatch bearer token from env. Returns empty string when unset —
  * `checkAuth` translates that to a 500 with a clear message so the dashboard
  * can still boot for non-dispatch use (Trello polling, Slack agent, UI).
