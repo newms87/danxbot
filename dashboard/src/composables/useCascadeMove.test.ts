@@ -5,6 +5,7 @@ import {
   computeCascadeDefaults,
   useCascadeMove,
 } from "./useCascadeMove";
+import type { CascadeIssueListBody, CascadeIssueListResult } from "../api/issues";
 import type { IssueListItem, List } from "../types";
 
 function makeIssue(
@@ -84,10 +85,14 @@ describe("computeCascadeDefaults", () => {
 describe("useCascadeMove", () => {
   function setup() {
     const issuesRef = ref<IssueListItem[]>([]);
-    const moveIssueList = vi.fn(async () => {});
-    const cascadeIssueList = vi.fn(
-      async () => ({ updated: [], skipped: [] }),
-    );
+    const moveIssueList =
+      vi.fn<(id: string, dest: { name: string; type: string }) => Promise<void>>(
+        async () => {},
+      );
+    const cascadeIssueList =
+      vi.fn<(epicId: string, body: Omit<CascadeIssueListBody, "epic_id">) => Promise<CascadeIssueListResult>>(
+        async () => ({ updated: [], skipped: [] }),
+      );
     const api = useCascadeMove({
       issues: issuesRef,
       moveIssueList,

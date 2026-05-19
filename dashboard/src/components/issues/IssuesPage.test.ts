@@ -1,7 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mount, flushPromises, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, h, ref } from "vue";
 import type { IssueListItem, List } from "../../types";
+
+// Per-file timeout bump — IssuesPage.vue is a heavy SFC; under parallel
+// full-suite load the first mount in the file pays the full SFC
+// transform cost. The defense-in-depth bump pairs with afterEach
+// unmount (below) so a slow mount can't leak its still-pending
+// moveIssueListMock call into the next test's assertion window
+// (DX-711 cross-test contamination).
+vi.setConfig({ testTimeout: 60000 });
 
 // Capture the latest stub instances so each test can reach in and
 // fire a move from the board stub via `boardEmit("move", issue, list)`.
@@ -174,12 +182,23 @@ const globalStubs = {
   DanxDialog: DanxDialogStub,
 };
 
+// Static import — vi.mock is hoisted so the mocks above apply before
+// this resolves. Hoisting the import out of mountPage() pays the SFC
+// transform cost once per process instead of once per test.
+import IssuesPage from "./IssuesPage.vue";
+
+// Track the live wrapper so afterEach can unmount it — a still-mounted
+// IssuesPage from a slow/timed-out prior test holds reactive
+// subscriptions that can fire its `moveIssueListMock` call into the
+// next test's window (DX-711 root cause).
+let currentWrapper: VueWrapper | null = null;
+
 async function mountPage() {
-  const { default: IssuesPage } = await import("./IssuesPage.vue");
   const w = mount(IssuesPage, {
     props: { selectedRepo: "danxbot" },
     global: { stubs: globalStubs },
   });
+  currentWrapper = w;
   await flushPromises();
   return w;
 }
@@ -222,6 +241,19 @@ describe("IssuesPage onMove routing", () => {
     cascadeIssueListMock.mockClear();
     boardEmit = null;
     cascadeConfirmPayload = { overrides: {} };
+    issuesRef.value = [];
+  });
+
+  afterEach(async () => {
+    // Tear down the prior mount BEFORE the next beforeEach so any
+    // queued reactive effects flush and record their calls under THIS
+    // test's window — then mockClear in the next beforeEach is
+    // guaranteed to catch them.
+    if (currentWrapper) {
+      currentWrapper.unmount();
+      currentWrapper = null;
+      await flushPromises();
+    }
   });
 
   it("no-children card → direct PATCH via moveIssueList; cascade dialog does NOT open", async () => {
