@@ -857,7 +857,7 @@ function seedAgent(localPath: string, name: string, over?: Partial<AgentRecord>)
   const settings: Settings = {
     overrides: {
       slack: { enabled: null },
-      issuePoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },

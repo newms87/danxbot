@@ -155,7 +155,7 @@ function writeSettings(
   const body: Record<string, unknown> = {
     overrides: {
       slack: { enabled: null },
-      issuePoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },

@@ -40,6 +40,7 @@ import {
   handleSlackUpdate,
 } from "./dispatch.js";
 import { handleClearCriticalFailure } from "./critical-failure-route.js";
+import { handleSetPickupPrefix } from "./test-isolation-route.js";
 import { handleIssueCreate } from "./issue-route.js";
 import {
   handleWorktreeBootstrap,
@@ -213,6 +214,17 @@ export async function startWorkerServer(repo: RepoContext): Promise<Server> {
       url.pathname === "/api/poller/critical-failure"
     ) {
       await handleClearCriticalFailure(req, res, repo);
+      return;
+    }
+
+    // DX-701 — system-test isolation hook. Sole caller is the Layer 3
+    // harness; the worker writes through `writeSettings` so the canonical
+    // drift-file path resolves under both runtimes.
+    if (
+      method === "POST" &&
+      url.pathname === "/api/test-isolation/pickup-prefix"
+    ) {
+      await handleSetPickupPrefix(req, res, repo);
       return;
     }
 

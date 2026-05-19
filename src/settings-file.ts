@@ -132,24 +132,9 @@ export interface FeatureOverride {
   enabled: boolean | null;
 }
 
-/**
- * Issue-poller-specific override carrying both the standard `enabled`
- * toggle and the optional `pickupNamePrefix` filter. When the prefix is
- * a non-empty string, the poller only picks up ToDo cards whose name
- * starts with it — used for system-test isolation so a fixture card
- * doesn't race real ToDo cards. `null`/missing means "no filter".
- *
- * Lives on the `issuePoller` slot of `SettingsOverrides` so the rest
- * of the override surface stays a flat enabled-toggle. See
- * `.claude/rules/settings-file.md` for the full schema contract.
- */
-export interface IssuePollerOverride extends FeatureOverride {
-  pickupNamePrefix?: string | null;
-}
-
 export interface SettingsOverrides {
   slack: FeatureOverride;
-  issuePoller: IssuePollerOverride;
+  issuePoller: FeatureOverride;
   dispatchApi: FeatureOverride;
   ideator: FeatureOverride;
   autoTriage: FeatureOverride;
@@ -178,6 +163,27 @@ export interface SettingsOverrides {
    * Trello legs and never blocks dispatching.
    */
   trelloSync: FeatureOverride;
+}
+
+/**
+ * DX-701 — system-test isolation state for the issue poller. Lives on
+ * the runtime-drift file (`<runtime-volume>/<repo>/settings-runtime.json`)
+ * NOT the contract file, because the Layer 3 system-test harness
+ * writes/clears `pickupNamePrefix` on every run and the resulting
+ * `meta` bump on the contract file is exactly the runtime-state-into-
+ * consumed-repo pattern DX-668 (Worker Cleanup) was designed to prevent.
+ *
+ * `pickupNamePrefix` — when non-empty, the poller picks up only ToDo
+ * cards whose name starts with this prefix. Used by the system-test
+ * harness so a fixture card doesn't race real ToDo cards. `null` /
+ * missing / empty string = no filter.
+ *
+ * Operator-settable? No. The dashboard does not surface this field;
+ * setup / deploy do not seed it. The only writer is the system-test
+ * harness (`src/__tests__/system/run-system-tests.sh`).
+ */
+export interface TestIsolationSettings {
+  pickupNamePrefix?: string | null;
 }
 
 export interface SettingsDisplayWorker {
@@ -591,12 +597,18 @@ export interface Settings {
    * see a stable shape. {@link DEFAULT_SELF_REPAIR_THRESHOLD} = 3.
    */
   selfRepair?: SelfRepairSettings;
+  /**
+   * DX-701 — system-test isolation state on the drift file. Optional
+   * in the type; `normalize` always materializes `{}` so reads see a
+   * stable shape.
+   */
+  testIsolation?: TestIsolationSettings;
   meta: SettingsMeta;
 }
 
 export interface WriteSettingsPatchOverrides {
   slack?: FeatureOverride;
-  issuePoller?: IssuePollerOverride;
+  issuePoller?: FeatureOverride;
   dispatchApi?: FeatureOverride;
   ideator?: FeatureOverride;
   autoTriage?: FeatureOverride;
@@ -640,6 +652,12 @@ export interface WriteSettingsPatch {
    * Pass `{}` to clear the threshold back to its env default.
    */
   selfRepair?: SelfRepairSettings;
+  /**
+   * DX-701 — atomic replace of the drift-file `testIsolation` block.
+   * `undefined` (or omitted) preserves the existing on-disk block.
+   * Pass `{pickupNamePrefix: null}` (or `{}`) to clear the prefix.
+   */
+  testIsolation?: TestIsolationSettings;
   writtenBy: SettingsWriter;
 }
 
@@ -667,7 +685,7 @@ export function defaultSettings(): Settings {
   return {
     overrides: {
       slack: { enabled: null },
-      issuePoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },
@@ -679,6 +697,7 @@ export function defaultSettings(): Settings {
     effortLevels: DEFAULT_EFFORT_LEVELS.map((r) => ({ ...r })),
     effortAssignmentPrompt: DEFAULT_EFFORT_ASSIGNMENT_PROMPT,
     selfRepair: {},
+    testIsolation: {},
     meta: { updatedAt: new Date(0).toISOString(), updatedBy: "worker" },
   };
 }
@@ -763,15 +782,17 @@ function normalizePickupNamePrefix(raw: unknown): string | null {
   return raw;
 }
 
-function normalizeIssuePollerOverride(raw: unknown): IssuePollerOverride {
-  const base = normalizeOverride(raw);
-  let pickupNamePrefix: string | null = null;
-  if (raw && typeof raw === "object" && "pickupNamePrefix" in raw) {
-    pickupNamePrefix = normalizePickupNamePrefix(
-      (raw as { pickupNamePrefix?: unknown }).pickupNamePrefix,
-    );
-  }
-  return { enabled: base.enabled, pickupNamePrefix };
+/**
+ * DX-701 — normalize the drift-file `testIsolation` block. Anything
+ * that isn't an object normalizes to `{}`. `pickupNamePrefix` is
+ * filtered through `normalizePickupNamePrefix` so non-string / empty
+ * values land as the canonical null.
+ */
+function normalizeTestIsolation(raw: unknown): TestIsolationSettings {
+  if (!raw || typeof raw !== "object") return {};
+  const r = raw as Record<string, unknown>;
+  const prefix = normalizePickupNamePrefix(r.pickupNamePrefix);
+  return prefix === null ? {} : { pickupNamePrefix: prefix };
 }
 
 /**
@@ -1155,13 +1176,16 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
     overrides: {
       slack: normalizeOverride(partial.overrides?.slack),
       // Legacy-key migration: pre-rename settings.json files carry
-      // `overrides.trelloPoller`. Read it as a fallback when the new
-      // `issuePoller` slot is absent so deployed boxes keep their
-      // operator toggles + pickupNamePrefix across the rename. Write-
-      // side never emits the legacy key, so the next write
-      // canonicalizes the file. Retire the fallback in a follow-up
-      // card after one release.
-      issuePoller: normalizeIssuePollerOverride(
+      // `overrides.trelloPoller`. Read its `enabled` field as a
+      // fallback when the new `issuePoller` slot is absent so deployed
+      // boxes keep their operator toggle across the rename. Write-side
+      // never emits the legacy key, so the next write canonicalizes
+      // the file. A legacy `pickupNamePrefix` on `trelloPoller` is
+      // dropped on read — DX-701 moved that field out of contract
+      // overrides entirely; the system-test harness rewrites the prefix
+      // every run via the drift file, so a single dropped value has no
+      // observable effect.
+      issuePoller: normalizeOverride(
         partial.overrides?.issuePoller ??
           (partial.overrides as { trelloPoller?: unknown } | undefined)
             ?.trelloPoller,
@@ -1182,6 +1206,7 @@ function normalize(partial: Partial<Settings> | null | undefined): Settings {
       partial.effortAssignmentPrompt,
     ),
     selfRepair: normalizeSelfRepair(partial.selfRepair),
+    testIsolation: normalizeTestIsolation(partial.testIsolation),
     meta,
   };
 }
@@ -1241,6 +1266,7 @@ export function readSettings(localPath: string): Settings {
     effortLevels: contract.effortLevels,
     effortAssignmentPrompt: contract.effortAssignmentPrompt,
     selfRepair: contract.selfRepair,
+    testIsolation: drift.testIsolation,
     meta,
   };
 }
@@ -1259,8 +1285,9 @@ function readContractFile(localPath: string): Settings {
     const partial = JSON.parse(raw) as Partial<Settings>;
     const normalized = normalize(partial);
     // Read path is canonical-only: even if a pre-migration file has
-    // `display` baked in, ignore it here and let the drift file own it.
-    return { ...normalized, display: {} };
+    // `display` baked in, ignore it here and let the drift file own
+    // it. Same direction for `testIsolation` (DX-701).
+    return { ...normalized, display: {}, testIsolation: {} };
   } catch (err) {
     logParseErrorOnce(path, err);
     return defaultSettings();
@@ -1275,7 +1302,7 @@ function readDriftFile(localPath: string): DriftShape {
   const path = runtimeSettingsFilePath(localPath);
   if (!existsSync(path)) {
     const d = defaultSettings();
-    return { display: d.display, meta: d.meta };
+    return { display: d.display, testIsolation: d.testIsolation ?? {}, meta: d.meta };
   }
   return safeParseDrift(path);
 }
@@ -1324,7 +1351,7 @@ function categorizePatch(patch: WriteSettingsPatch): {
       patch.effortLevels !== undefined ||
       patch.effortAssignmentPrompt !== undefined ||
       patch.selfRepair !== undefined,
-    drift: patch.display !== undefined,
+    drift: patch.display !== undefined || patch.testIsolation !== undefined,
   };
 }
 
@@ -1495,8 +1522,19 @@ async function writeDriftFile(
       ? { ...existing.display, ...patch.display }
       : existing.display;
 
+    // DX-701 — testIsolation is an atomic-replace block (no shallow
+    // merge): the only writer is the system-test harness which always
+    // sends the canonical shape, so a partial patch would mean
+    // ambiguous "clear or preserve" semantics. Pass `{}` to clear,
+    // omit to preserve.
+    const testIsolation =
+      patch.testIsolation !== undefined
+        ? normalizeTestIsolation(patch.testIsolation)
+        : (existing.testIsolation ?? {});
+
     const driftShape = {
       display,
+      testIsolation,
       meta: {
         updatedAt: new Date().toISOString(),
         updatedBy: patch.writtenBy,
@@ -1536,6 +1574,7 @@ function safeParseContract(path: string): Settings {
  */
 interface DriftShape {
   display: SettingsDisplay;
+  testIsolation: TestIsolationSettings;
   meta: SettingsMeta;
 }
 
@@ -1544,11 +1583,19 @@ function safeParseDrift(path: string): DriftShape {
     const normalized = normalize(
       JSON.parse(readFileSync(path, "utf-8")) as Partial<Settings>,
     );
-    return { display: normalized.display, meta: normalized.meta };
+    return {
+      display: normalized.display,
+      testIsolation: normalized.testIsolation ?? {},
+      meta: normalized.meta,
+    };
   } catch (err) {
     logParseErrorOnce(path, err);
     const d = defaultSettings();
-    return { display: d.display, meta: d.meta };
+    return {
+      display: d.display,
+      testIsolation: d.testIsolation ?? {},
+      meta: d.meta,
+    };
   }
 }
 
@@ -1694,10 +1741,18 @@ export function isFeatureEnabled(ctx: RepoContext, feature: Feature): boolean {
 
 /**
  * The optional "only pick up cards whose name starts with this prefix"
- * filter for the issue poller. Reads `overrides.issuePoller.pickupNamePrefix`
- * from the per-repo settings file. Returns the prefix when set as a
- * non-empty string; returns `null` when the file is missing, the prefix
- * is unset / null / empty / non-string, or any read error occurs.
+ * filter for the issue poller. Reads `testIsolation.pickupNamePrefix`
+ * from the drift-side settings file (DX-701 — was previously on
+ * `overrides.issuePoller.pickupNamePrefix` on the contract file). The
+ * field lives on the runtime-drift surface because the only writer is
+ * the Layer 3 system-test harness, and harness writes have no operator
+ * intent — keeping them off the contract file prevents the consumed
+ * repo's `.danxbot/settings.json` from getting a meta-only diff on
+ * every test run (DX-668 anti-pattern).
+ *
+ * Returns the prefix when set as a non-empty string; returns `null`
+ * when the file is missing, the prefix is unset / null / empty /
+ * non-string, or any read error occurs.
  *
  * The poller calls this on every tick (`src/cron/sync-and-audit.ts#runSync`) so
  * the test harness can write the prefix, run a fixture card through the
@@ -1714,7 +1769,7 @@ export function getIssuePollerPickupPrefix(
 ): string | null {
   try {
     const settings = readSettings(localPath);
-    return settings.overrides.issuePoller.pickupNamePrefix ?? null;
+    return settings.testIsolation?.pickupNamePrefix ?? null;
   } catch (err) {
     log.error(
       `getIssuePollerPickupPrefix threw — returning null for ${localPath}`,

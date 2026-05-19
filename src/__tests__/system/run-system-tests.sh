@@ -640,13 +640,22 @@ test_cron_sweep() {
   # It creates a real card, waits for the poller to process it, and cleans up.
   # Skipped by default since it requires a full environment setup.
   #
-  # Isolation: writes overrides.issuePoller.pickupNamePrefix into the
-  # repo's settings.json BEFORE creating the card so the poller only
-  # picks up cards starting with the test prefix. Without this filter, a
-  # pre-existing real ToDo card (or a stuck in-flight dispatch) races the
-  # test card and the 120s pickup deadline expires while the worker is
-  # busy with unrelated work. Cleared on every exit path. See Trello
-  # `IleofrBj` and `getIssuePollerPickupPrefix` in `src/settings-file.ts`.
+  # Isolation: routes through the worker's
+  # `POST /api/test-isolation/pickup-prefix` endpoint (DX-701) which
+  # writes `testIsolation.pickupNamePrefix` on the drift-side settings
+  # file BEFORE we create the card, so the poller only picks up cards
+  # starting with the test prefix. Without this filter, a pre-existing
+  # real ToDo card (or a stuck in-flight dispatch) races the test card
+  # and the 120s pickup deadline expires while the worker is busy with
+  # unrelated work. Cleared on every exit path. See Trello `IleofrBj`
+  # and `getIssuePollerPickupPrefix` in `src/settings-file.ts`.
+  #
+  # Pre-DX-701 the field lived on the contract file
+  # (`<repo>/.danxbot/settings.json`) and the harness wrote it
+  # directly; that left a meta-only diff on the consumed repo on every
+  # run (DX-668 anti-pattern). The drift-file location is on the
+  # worker's runtime volume, so the harness writes through the worker
+  # endpoint regardless of host vs docker runtime.
 
   if [[ -z "${TRELLO_API_KEY:-}" || -z "${TRELLO_API_TOKEN:-}" ]]; then
     skip "Poller test requires TRELLO_API_KEY and TRELLO_API_TOKEN env vars"
@@ -660,14 +669,12 @@ test_cron_sweep() {
   local in_progress_list="${TRELLO_IN_PROGRESS_LIST_ID:-69ddc39f8208297c5bf74a32}"
   local feature_label="${TRELLO_FEATURE_LABEL_ID:-69ddc215fd43f1b7f1a7117d}"
 
-  local repo_dir="${PROJECT_ROOT}/repos/danxbot"
-  local settings_file="${repo_dir}/.danxbot/settings.json"
   local pickup_prefix="[System Test]"
 
   # Engage the poller filter before doing anything else. The repo's worker
   # re-reads settings on every poll tick — no restart required.
-  if ! _cron_set_pickup_prefix "$settings_file" "$pickup_prefix"; then
-    fail "Failed to write pickupNamePrefix to $settings_file"
+  if ! _cron_set_pickup_prefix "$pickup_prefix"; then
+    fail "Failed to set pickupNamePrefix via worker endpoint"
     return
   fi
   log_info "Engaged poller pickupNamePrefix=\"${pickup_prefix}\""
@@ -733,7 +740,7 @@ test_cron_sweep() {
 
   if [[ -z "$card_id" ]]; then
     fail "Failed to create test card: $card_response"
-    _cron_clear_pickup_prefix "$settings_file"
+    _cron_clear_pickup_prefix
     return
   fi
   pass "Test card created (id: $card_id)"
@@ -763,10 +770,10 @@ test_cron_sweep() {
   if [[ "$card_list" == "$in_progress_list" || "$card_list" == "$done_list" ]]; then
     pass "Card moved to In Progress or Done"
   else
-    fail "Card still in original list after 120s — pickupNamePrefix filter failed to deliver the card. Check worker logs for the filter line ('pickupNamePrefix=...') and confirm settings.json was written before the card was created."
+    fail "Card still in original list after 120s — pickupNamePrefix filter failed to deliver the card. Check worker logs for the filter line ('pickupNamePrefix=...') and confirm the drift-side prefix POST succeeded before the card was created."
     # Cleanup
     curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
-    _cron_clear_pickup_prefix "$settings_file"
+    _cron_clear_pickup_prefix
     return
   fi
 
@@ -811,75 +818,41 @@ test_cron_sweep() {
   # Cleanup: delete the test card and clear the poller filter
   curl -s -X DELETE "https://api.trello.com/1/cards/${card_id}?key=${TRELLO_API_KEY}&token=${TRELLO_API_TOKEN}" >/dev/null 2>&1
   pass "Test card cleaned up"
-  _cron_clear_pickup_prefix "$settings_file"
+  _cron_clear_pickup_prefix
   log_info "Cleared poller pickupNamePrefix"
 
   log_info "Completed in $((SECONDS - start_time))s"
 }
 
-# Helper: write a `pickupNamePrefix` into the repo's settings.json so the
-# poller only dispatches matching cards. Merges into existing settings via
-# node so unrelated overrides / display sections survive. Stamps the
-# writer as `setup` (the closest existing SettingsWriter literal — the
-# system test runner is operator-driven, not the dashboard). Returns
-# non-zero on failure so the caller can `fail` cleanly.
+# Helper: engage the poller's `pickupNamePrefix` filter via the worker's
+# DX-701 endpoint. The worker resolves the drift-file path (host vs
+# docker runtime) and writes through `writeSettings` so the read path
+# is canonical. Returns non-zero on transport failure or non-2xx status
+# so the caller can `fail` cleanly.
 _cron_set_pickup_prefix() {
-  local settings_file="$1"
-  local prefix="$2"
-  mkdir -p "$(dirname "$settings_file")"
-  node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    const prefix = process.argv[2];
-    let cur = {
-      overrides: {
-        slack: { enabled: null },
-        issuePoller: { enabled: null, pickupNamePrefix: null },
-        dispatchApi: { enabled: null },
-        ideator: { enabled: null },
-      },
-      display: {},
-      meta: {},
-    };
-    if (fs.existsSync(path)) {
-      try { cur = JSON.parse(fs.readFileSync(path, "utf-8")); } catch {}
-    }
-    cur.overrides = cur.overrides || {};
-    cur.overrides.issuePoller = {
-      ...(cur.overrides.issuePoller || {}),
-      enabled: cur.overrides.issuePoller?.enabled ?? null,
-      pickupNamePrefix: prefix,
-    };
-    cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };
-    fs.writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
-  ' "$settings_file" "$prefix" 2>/dev/null
+  local prefix="$1"
+  local body
+  body=$(node -e '
+    const prefix = process.argv[1];
+    process.stdout.write(JSON.stringify({ prefix }));
+  ' "$prefix")
+  local http_code
+  http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 10 -X POST \
+    -H "Content-Type: application/json" \
+    -d "$body" \
+    "${WORKER_URL}/api/test-isolation/pickup-prefix")
+  [[ "$http_code" == "200" ]]
 }
 
-# Helper: clear `pickupNamePrefix` (set to null) and stamp meta. Always
-# safe to call — missing file becomes a no-op since there's nothing
-# to filter on. Used on every test_cron_sweep exit path so a failed test
-# never leaves the live worker filtered to a deleted test card.
+# Helper: clear the prefix (sets it to null) via the same DX-701 endpoint.
+# Idempotent — safe to call on every exit path; a transport failure here
+# is logged but not fatal because the leftover prefix has no operator
+# effect outside the test harness window.
 _cron_clear_pickup_prefix() {
-  local settings_file="$1"
-  if [[ ! -f "$settings_file" ]]; then return 0; fi
-  node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    let cur;
-    try {
-      cur = JSON.parse(fs.readFileSync(path, "utf-8"));
-    } catch {
-      process.exit(0);
-    }
-    cur.overrides = cur.overrides || {};
-    cur.overrides.issuePoller = {
-      ...(cur.overrides.issuePoller || {}),
-      enabled: cur.overrides.issuePoller?.enabled ?? null,
-      pickupNamePrefix: null,
-    };
-    cur.meta = { updatedAt: new Date().toISOString(), updatedBy: "setup" };
-    fs.writeFileSync(path, JSON.stringify(cur, null, 2) + "\n");
-  ' "$settings_file" 2>/dev/null || true
+  curl -s --max-time 10 -X POST \
+    -H "Content-Type: application/json" \
+    -d '{"prefix":null}' \
+    "${WORKER_URL}/api/test-isolation/pickup-prefix" >/dev/null 2>&1 || true
 }
 
 test_yaml_memory() {
@@ -1263,7 +1236,7 @@ _multi_worker_seed_agents() {
     let cur = {
       overrides: {
         slack: { enabled: null },
-        issuePoller: { enabled: null, pickupNamePrefix: null },
+        issuePoller: { enabled: null },
         dispatchApi: { enabled: null },
         ideator: { enabled: null },
       },

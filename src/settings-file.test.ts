@@ -287,12 +287,16 @@ describe("settings-file", () => {
       expect(s).toEqual(defaultSettings());
     });
 
-    it("migrates legacy `trelloPoller` key into the `issuePoller` slot on read", () => {
+    it("migrates legacy `trelloPoller.enabled` into the `issuePoller` slot on read", () => {
       // Pre-rename settings.json files (deployed boxes that haven't been
-      // re-written yet) carry `overrides.trelloPoller` with both
-      // `enabled` and `pickupNamePrefix`. The read path migrates that
-      // value into the new `issuePoller` slot so operator toggles +
-      // prefix survive the rename without a forced rewrite.
+      // re-written yet) carry `overrides.trelloPoller`. The read path
+      // migrates the `enabled` half into the new `issuePoller` slot so
+      // operator toggles survive the rename without a forced rewrite.
+      // DX-701 — a legacy `pickupNamePrefix` on `trelloPoller` is
+      // dropped on read (the field moved to the drift file's
+      // `testIsolation` block); the system-test harness rewrites the
+      // prefix every run via the drift file so a single dropped value
+      // has no observable effect.
       writeFileSync(
         settingsFilePath(localPath),
         JSON.stringify({
@@ -305,13 +309,9 @@ describe("settings-file", () => {
       );
       const s = readSettings(localPath);
       expect(s.overrides.issuePoller.enabled).toBe(false);
-      expect(s.overrides.issuePoller.pickupNamePrefix).toBe("[Legacy]");
     });
 
-    it("migrates legacy `trelloPoller` carrying only `enabled` (no prefix) without leaking enabled", () => {
-      // Regression guard: the migration shape must not depend on the
-      // legacy payload also having `pickupNamePrefix`. Bare
-      // `{ enabled: true }` must surface the boolean cleanly.
+    it("migrates legacy `trelloPoller` carrying only `enabled` without leaking the boolean", () => {
       writeFileSync(
         settingsFilePath(localPath),
         JSON.stringify({
@@ -324,7 +324,6 @@ describe("settings-file", () => {
       );
       const s = readSettings(localPath);
       expect(s.overrides.issuePoller.enabled).toBe(true);
-      expect(s.overrides.issuePoller.pickupNamePrefix).toBeNull();
     });
 
     it("prefers the new `issuePoller` slot when both legacy and new keys are present", () => {
@@ -333,15 +332,14 @@ describe("settings-file", () => {
         JSON.stringify({
           overrides: {
             slack: { enabled: null },
-            issuePoller: { enabled: true, pickupNamePrefix: "[New]" },
-            trelloPoller: { enabled: false, pickupNamePrefix: "[Legacy]" },
+            issuePoller: { enabled: true },
+            trelloPoller: { enabled: false },
             dispatchApi: { enabled: null },
           },
         }),
       );
       const s = readSettings(localPath);
       expect(s.overrides.issuePoller.enabled).toBe(true);
-      expect(s.overrides.issuePoller.pickupNamePrefix).toBe("[New]");
     });
 
     it("normalizes unknown override shapes to null", () => {
@@ -1199,9 +1197,7 @@ describe("settings-file", () => {
 
     it("returns the prefix when set as a non-empty string", async () => {
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: "[System Test]" },
-        },
+        testIsolation: { pickupNamePrefix: "[System Test]" },
         writtenBy: "setup",
       });
       expect(getIssuePollerPickupPrefix(localPath)).toBe("[System Test]");
@@ -1209,9 +1205,7 @@ describe("settings-file", () => {
 
     it("returns null when prefix is empty string", async () => {
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: "" },
-        },
+        testIsolation: { pickupNamePrefix: "" },
         writtenBy: "setup",
       });
       expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
@@ -1224,12 +1218,11 @@ describe("settings-file", () => {
 
     it("preserves pickupNamePrefix across an unrelated override patch", async () => {
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
-        },
+        testIsolation: { pickupNamePrefix: "[X]" },
         writtenBy: "setup",
       });
-      // Operator toggles slack — must not clobber the issuePoller prefix.
+      // Operator toggles slack (contract) — must not clobber the
+      // drift-side prefix.
       await writeSettings(localPath, {
         overrides: { slack: { enabled: false } },
         writtenBy: "dashboard:test",
@@ -1237,11 +1230,9 @@ describe("settings-file", () => {
       expect(getIssuePollerPickupPrefix(localPath)).toBe("[X]");
     });
 
-    it("preserves pickupNamePrefix across a display-only patch", async () => {
+    it("preserves pickupNamePrefix across an unrelated display-only patch", async () => {
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
-        },
+        testIsolation: { pickupNamePrefix: "[X]" },
         writtenBy: "setup",
       });
       await writeSettings(localPath, {
@@ -1251,15 +1242,19 @@ describe("settings-file", () => {
       expect(getIssuePollerPickupPrefix(localPath)).toBe("[X]");
     });
 
-    it("normalizes non-string prefix to null without throwing", () => {
+    it("normalizes non-string prefix to null without throwing", async () => {
+      // Seed the drift file via writeSettings so the runtime-volume
+      // directory exists, then plant a malformed payload directly.
+      await writeSettings(localPath, {
+        testIsolation: { pickupNamePrefix: "[seed]" },
+        writtenBy: "setup",
+      });
       writeFileSync(
-        settingsFilePath(localPath),
+        runtimeSettingsFilePath(localPath),
         JSON.stringify({
-          overrides: {
-            slack: { enabled: null },
-            issuePoller: { enabled: null, pickupNamePrefix: 42 },
-            dispatchApi: { enabled: null },
-          },
+          display: {},
+          testIsolation: { pickupNamePrefix: 42 },
+          meta: { updatedAt: "2026-05-19T00:00:00Z", updatedBy: "worker" },
         }),
       );
       expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
@@ -1267,29 +1262,37 @@ describe("settings-file", () => {
 
     it("clears pickupNamePrefix when patch sets it to null", async () => {
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: "[X]" },
-        },
+        testIsolation: { pickupNamePrefix: "[X]" },
         writtenBy: "setup",
       });
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: null, pickupNamePrefix: null },
-        },
+        testIsolation: { pickupNamePrefix: null },
         writtenBy: "setup",
       });
       expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
     });
 
-    it("preserves the enabled toggle when only the prefix is patched", async () => {
+    it("atomic-replace: writeSettings({testIsolation: {}}) clears the prefix", async () => {
+      await writeSettings(localPath, {
+        testIsolation: { pickupNamePrefix: "[X]" },
+        writtenBy: "setup",
+      });
+      // Empty object on the patch atomically replaces the block — no
+      // shallow merge — so the pickupNamePrefix is dropped entirely.
+      await writeSettings(localPath, {
+        testIsolation: {},
+        writtenBy: "setup",
+      });
+      expect(getIssuePollerPickupPrefix(localPath)).toBeNull();
+    });
+
+    it("contract-side `enabled` and drift-side prefix patch independently", async () => {
       await writeSettings(localPath, {
         overrides: { issuePoller: { enabled: false } },
         writtenBy: "dashboard:test",
       });
       await writeSettings(localPath, {
-        overrides: {
-          issuePoller: { enabled: false, pickupNamePrefix: "[X]" },
-        },
+        testIsolation: { pickupNamePrefix: "[X]" },
         writtenBy: "setup",
       });
       const s = readSettings(localPath);
@@ -1357,10 +1360,10 @@ describe("settings-file", () => {
       const raw = JSON.parse(
         readFileSync(settingsFilePath(localPath), "utf-8"),
       );
-      expect(raw.overrides.issuePoller).toEqual({
-        enabled: true,
-        pickupNamePrefix: "[X]",
-      });
+      // DX-701 — pickupNamePrefix moved to the drift file's
+      // testIsolation block; legacy `trelloPoller.pickupNamePrefix` on
+      // the contract file is dropped on read.
+      expect(raw.overrides.issuePoller).toEqual({ enabled: true });
       expect(raw.overrides.trelloPoller).toBeUndefined();
     });
   });

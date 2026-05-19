@@ -114,7 +114,7 @@ function seedRepo(agentName: string): { repoLocalPath: string; cleanup: () => vo
   const settings = {
     overrides: {
       slack: { enabled: null },
-      issuePoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },

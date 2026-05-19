@@ -86,7 +86,7 @@ function seed(localPath: string, name: string, over?: Partial<AgentRecord>): voi
   const settings: Settings = {
     overrides: {
       slack: { enabled: null },
-      issuePoller: { enabled: null, pickupNamePrefix: null },
+      issuePoller: { enabled: null },
       dispatchApi: { enabled: null },
       ideator: { enabled: null },
       autoTriage: { enabled: null },

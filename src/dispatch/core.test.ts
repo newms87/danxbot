@@ -578,7 +578,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
     writeFileSync(
       resolve(tmpRepoDir, ".danxbot", "settings.json"),
       JSON.stringify({
-        overrides: { issuePoller: { enabled: true, pickupNamePrefix: null } },
+        overrides: { issuePoller: { enabled: true } },
       }),
     );
     issueRepo = makeRepoContext({
@@ -1058,7 +1058,7 @@ describe("dispatch() — issue-worker integration (Phase 3 of ISS-90, DX-203 fol
     writeFileSync(
       resolve(tmpRepoDir, ".danxbot", "settings.json"),
       JSON.stringify({
-        overrides: { issuePoller: { enabled: false, pickupNamePrefix: null } },
+        overrides: { issuePoller: { enabled: false } },
       }),
     );
 
