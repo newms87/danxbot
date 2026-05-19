@@ -259,14 +259,15 @@ function onSaved(_next: GithubCredentialsSnapshot): void {
         >
           {{ buttonLabel }}
         </DanxButton>
-        <button
-          type="button"
-          class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+        <DanxButton
+          variant="muted"
+          size="xs"
+          class="github-credentials-instructions-toggle-btn"
           data-test="github-credentials-instructions-toggle"
           @click="toggleInstructions"
         >
           {{ instructionsExpanded ? "Hide" : "How do I create a GitHub token?" }}
-        </button>
+        </DanxButton>
       </div>
 
       <div

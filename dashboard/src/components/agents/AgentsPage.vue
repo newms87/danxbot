@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { DanxTooltip } from "@thehammer/danx-ui";
+import { DanxButton, DanxTooltip } from "@thehammer/danx-ui";
 import {
   clearAgentBroken,
   createAgent,
@@ -387,20 +387,15 @@ async function confirmResolve(): Promise<void> {
       <DanxTooltip :tooltip="newButtonTitle">
         <template #trigger>
           <span class="inline-flex" data-test="new-agent-tooltip">
-            <button
-              type="button"
-              class="rounded-md px-3 py-1.5 text-sm font-medium"
-              :class="
-                newButtonDisabled
-                  ? 'bg-gray-300 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
-              "
+            <DanxButton
+              variant=""
+              size="sm"
               :disabled="newButtonDisabled"
               data-test="new-agent-button"
               @click="openCreate"
             >
               + New Agent
-            </button>
+            </DanxButton>
           </span>
         </template>
       </DanxTooltip>
@@ -411,7 +406,7 @@ async function confirmResolve(): Promise<void> {
       class="rounded-md border border-red-400 bg-red-50 dark:bg-red-900/20 dark:border-red-600 p-3 text-sm text-red-700 dark:text-red-300 mb-4"
     >
       {{ error }}
-      <button type="button" class="ml-2 underline" @click="loadRoster">retry</button>
+      <DanxButton variant="muted" size="xs" class="ml-2 bg-transparent border-0 underline" @click="loadRoster">retry</DanxButton>
     </div>
 
     <div

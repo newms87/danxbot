@@ -5,7 +5,7 @@
 import { ref, watch } from "vue";
 import type { Issue, IssueDetail } from "../../types";
 import { patchIssue } from "../../api";
-import { MarkdownEditor } from "@thehammer/danx-ui";
+import { DanxButton, MarkdownEditor } from "@thehammer/danx-ui";
 import CardTimeline from "./CardTimeline.vue";
 
 const props = defineProps<{
@@ -70,13 +70,14 @@ async function save(): Promise<void> {
     <section v-if="issue.description || editing">
       <div class="section-label">
         <span>Description</span>
-        <button
+        <DanxButton
           v-if="!editing"
-          type="button"
+          variant="muted"
+          size="xs"
           class="edit-btn"
           data-test="overview-edit-description"
           @click="startEdit"
-        >Edit</button>
+        >Edit</DanxButton>
       </div>
       <template v-if="editing">
         <div class="editor-wrap" data-test="overview-description-editor-wrap">
@@ -88,20 +89,23 @@ async function save(): Promise<void> {
         </div>
         <div v-if="errorMsg" class="error" data-test="overview-description-error">{{ errorMsg }}</div>
         <div class="actions">
-          <button
-            type="button"
+          <DanxButton
+            variant=""
+            size="xs"
             class="save-btn"
             :disabled="saving"
+            :loading="saving"
             data-test="overview-save-description"
             @click="save"
-          >{{ saving ? "Saving…" : "Save" }}</button>
-          <button
-            type="button"
+          >{{ saving ? "Saving…" : "Save" }}</DanxButton>
+          <DanxButton
+            variant="muted"
+            size="xs"
             class="cancel-btn"
             :disabled="saving"
             data-test="overview-cancel-description"
             @click="cancel"
-          >Cancel</button>
+          >Cancel</DanxButton>
         </div>
       </template>
       <MarkdownEditor

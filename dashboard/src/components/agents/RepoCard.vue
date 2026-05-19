@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, toRef, watch } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import type { AgentSnapshot, Feature } from "../../types";
 import { envDefaultForFeature } from "../../featureDefaults";
 import { useAgentRuntimeState } from "../../composables/useAgentRuntimeState";
@@ -233,14 +234,15 @@ const effectiveCriticalFailure = computed(
           2-4 uppercase letters
         </span>
       </div>
-      <button
-        type="button"
-        class="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+      <DanxButton
+        variant=""
+        size="sm"
         :disabled="prefixSaveDisabled"
+        :loading="!!savingIssuePrefix"
         @click="onSavePrefix"
       >
         {{ savingIssuePrefix ? "Saving…" : "Save prefix" }}
-      </button>
+      </DanxButton>
       <span
         v-if="prefixDirty && !prefixValid"
         class="text-xs text-red-600 dark:text-red-400"

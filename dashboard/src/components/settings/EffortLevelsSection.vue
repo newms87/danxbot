@@ -18,6 +18,7 @@
  * the prop, so the operator sees the default they will get.
  */
 import { computed, ref, watch } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import { patchEffortSettings, type ToggleError } from "../../api";
 import type {
   EffortLevelMapping,
@@ -205,15 +206,16 @@ async function onSave(): Promise<void> {
         ></textarea>
       </label>
       <div class="mt-2 flex justify-end">
-        <button
-          type="button"
-          class="text-xs text-blue-700 dark:text-blue-300 underline disabled:opacity-50"
+        <DanxButton
+          variant="muted"
+          size="xs"
+          class="effort-prompt-reset-btn"
           :disabled="saving"
           data-test="effort-prompt-reset"
           @click="onResetPrompt"
         >
           Reset to default
-        </button>
+        </DanxButton>
       </div>
     </div>
 
@@ -226,15 +228,16 @@ async function onSave(): Promise<void> {
     </div>
 
     <div class="mt-4 flex items-center justify-end gap-2">
-      <button
-        type="button"
-        class="rounded-md px-3 py-1.5 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:text-gray-500 disabled:cursor-not-allowed"
+      <DanxButton
+        variant=""
+        size="sm"
         :disabled="!canSave"
+        :loading="saving"
         data-test="effort-settings-save"
         @click="onSave"
       >
         {{ saving ? "Saving…" : "Save" }}
-      </button>
+      </DanxButton>
     </div>
   </section>
 </template>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import type { IssueDetail } from "../../types";
 import type { ChatBlock, ChatSession } from "./chatTypes";
 import { fetchBoardSessions, fetchIssueSessions, useChat } from "../../composables/useChat";
@@ -215,7 +216,7 @@ onBeforeUnmount(() => {
     <div v-else-if="loading" class="loading">Loading chat…</div>
     <template v-else-if="chat.session.value || mode === 'board'">
       <div v-if="mode === 'board'" class="top-actions">
-        <button type="button" class="back" @click="backToPicker">← All sessions</button>
+        <DanxButton variant="muted" size="xs" class="back" @click="backToPicker">← All sessions</DanxButton>
         <span class="active-title">
           {{ chat.session.value?.title ?? `New chat about ${repo}` }}
         </span>

@@ -170,15 +170,16 @@ function dismissConflict(): void {
           data-test="backlog-bootstrap-conflict"
         >
           <span>{{ conflict.message }}</span>
-          <button
-            type="button"
-            class="text-amber-900 dark:text-amber-100 hover:opacity-70"
+          <DanxButton
+            variant="warning"
+            size="xs"
+            class="bg-transparent border-0"
             aria-label="Dismiss"
             data-test="backlog-bootstrap-conflict-dismiss"
             @click="dismissConflict"
           >
             ✕
-          </button>
+          </DanxButton>
         </div>
       </div>
       <DanxButton

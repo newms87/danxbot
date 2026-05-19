@@ -16,7 +16,7 @@
  * strings so the UI stays in sync with the canonical validator.
  */
 import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
-import { MarkdownEditor } from "@thehammer/danx-ui";
+import { DanxButton, MarkdownEditor } from "@thehammer/danx-ui";
 import type {
   AgentRecordWithName,
   AgentSchedule,
@@ -209,12 +209,13 @@ onBeforeUnmount(revokeAvatarPreview);
     <form class="panel" @submit.prevent="onSubmit">
       <header class="head">
         <h2>{{ titleText }}</h2>
-        <button
-          type="button"
-          class="close"
+        <DanxButton
+          variant="muted"
+          size="xs"
+          class="close bg-transparent border-0"
           aria-label="Close"
           @click="$emit('cancel')"
-        >×</button>
+        >×</DanxButton>
       </header>
       <div class="body">
         <section class="field">
@@ -329,20 +330,24 @@ onBeforeUnmount(revokeAvatarPreview);
       </div>
 
       <footer class="foot">
-        <button
-          type="button"
+        <DanxButton
+          variant="muted"
+          size="sm"
           class="btn btn-cancel"
           :disabled="busy"
           @click="$emit('cancel')"
-        >Cancel</button>
-        <button
+        >Cancel</DanxButton>
+        <DanxButton
+          variant=""
+          size="sm"
           type="submit"
           class="btn btn-save"
           :disabled="busy || !!validation"
+          :loading="busy"
           data-test="agent-form-submit"
         >
           {{ busy ? "Saving…" : isCreate ? "Create agent" : "Save changes" }}
-        </button>
+        </DanxButton>
       </footer>
     </form>
   </aside>

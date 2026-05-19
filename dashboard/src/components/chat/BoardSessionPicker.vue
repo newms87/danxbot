@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import type { ChatSession } from "./chatTypes";
 import { relativeTime } from "../../utils/relativeTime";
 
@@ -24,7 +25,7 @@ const repoSessions = computed(() =>
   <div class="picker">
     <div class="picker-header">
       <div class="label">Recent sessions<template v-if="repo"> · {{ repo }}</template></div>
-      <button type="button" class="new-chat" @click="emit('start-new')">+ New chat</button>
+      <DanxButton variant="" size="xs" class="new-chat" @click="emit('start-new')">+ New chat</DanxButton>
     </div>
     <div v-if="loading" class="empty">Loading sessions…</div>
     <div v-else-if="error" class="empty error">{{ error }}</div>

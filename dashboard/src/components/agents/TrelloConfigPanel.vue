@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import type { AgentSnapshot, Feature } from "../../types";
 import {
   patchTrelloCredentials,
@@ -219,15 +220,16 @@ async function onCopyBoardId(): Promise<void> {
             class="font-mono text-xs text-gray-900 dark:text-gray-100"
             data-test="trello-board-id"
           >{{ displayString("boardId") }}</code>
-          <button
-            type="button"
-            class="text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+          <DanxButton
+            variant="muted"
+            size="xs"
+            class="bg-transparent border-0 underline"
             data-test="trello-copy-board-id"
             :disabled="displayString('boardId') === '(not set)'"
             @click="onCopyBoardId"
           >
             copy
-          </button>
+          </DanxButton>
           <span
             v-if="copyState === 'copied'"
             class="text-xs text-green-600 dark:text-green-400"
@@ -263,15 +265,16 @@ async function onCopyBoardId(): Promise<void> {
             class="font-mono text-xs text-gray-900 dark:text-gray-100"
             :data-test="`trello-${field}-masked`"
           >{{ maskedValue(field) }}</code>
-          <button
-            type="button"
-            class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+          <DanxButton
+            variant="muted"
+            size="xs"
+            class="bg-transparent border-0 underline"
             :data-test="`trello-${field}-edit`"
             :disabled="saving"
             @click="startEdit(field)"
           >
             edit
-          </button>
+          </DanxButton>
         </span>
         <span v-else class="flex flex-1 items-center justify-end gap-2">
           <input
@@ -284,25 +287,27 @@ async function onCopyBoardId(): Promise<void> {
             :data-test="`trello-${field}-input`"
             :disabled="saving"
           />
-          <button
+          <DanxButton
             v-if="showReveal"
-            type="button"
-            class="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+            variant="muted"
+            size="xs"
+            class="bg-transparent border-0 underline"
             :data-test="`trello-${field}-reveal`"
             :disabled="saving"
             @click="toggleReveal(field)"
           >
             {{ rows[field].revealing ? "hide" : "reveal" }}
-          </button>
-          <button
-            type="button"
-            class="text-xs text-gray-500 dark:text-gray-400 hover:underline"
+          </DanxButton>
+          <DanxButton
+            variant="muted"
+            size="xs"
+            class="bg-transparent border-0 underline"
             :data-test="`trello-${field}-cancel`"
             :disabled="saving"
             @click="cancelEdit(field)"
           >
             cancel
-          </button>
+          </DanxButton>
         </span>
       </div>
     </div>
@@ -316,15 +321,16 @@ async function onCopyBoardId(): Promise<void> {
         {{ errorMessage }}
       </p>
       <span v-else class="flex-1" aria-hidden="true" />
-      <button
-        type="button"
-        class="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+      <DanxButton
+        variant=""
+        size="sm"
         data-test="trello-save"
         :disabled="saveDisabled"
+        :loading="saving"
         @click="onSave"
       >
         {{ saving ? "Saving…" : "Save" }}
-      </button>
+      </DanxButton>
     </div>
   </article>
 </template>

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import { h } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import AgentConfirmModal from "./AgentConfirmModal.vue";
 
 function mountWith(over: {
@@ -41,18 +42,21 @@ describe("AgentConfirmModal", () => {
     expect(wrapper.attributes("aria-label")).toBe("Test aria");
   });
 
-  it("applies btn-danger class when variant is danger", () => {
+  it("passes danger variant to the confirm DanxButton when variant is danger", () => {
     const wrapper = mountWith({ variant: "danger", testPrefix: "agent-delete" });
-    const btn = wrapper.find('[data-test="agent-delete-confirm"]');
-    expect(btn.classes()).toContain("btn-danger");
-    expect(btn.classes()).not.toContain("btn-success");
+    // Two DanxButtons render: cancel (muted) + confirm (variant-driven). Second = confirm.
+    const buttons = wrapper.findAllComponents(DanxButton);
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].props("variant")).toBe("muted");
+    expect(buttons[1].props("variant")).toBe("danger");
   });
 
-  it("applies btn-success class when variant is success", () => {
+  it("passes success variant to the confirm DanxButton when variant is success", () => {
     const wrapper = mountWith({ variant: "success", testPrefix: "agent-resolve" });
-    const btn = wrapper.find('[data-test="agent-resolve-confirm"]');
-    expect(btn.classes()).toContain("btn-success");
-    expect(btn.classes()).not.toContain("btn-danger");
+    const buttons = wrapper.findAllComponents(DanxButton);
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].props("variant")).toBe("muted");
+    expect(buttons[1].props("variant")).toBe("success");
   });
 
   it("shows confirmLabel normally and busyLabel when busy=true; disables both buttons while busy", () => {

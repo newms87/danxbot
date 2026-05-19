@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
+import type { ComponentPublicInstance } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import AgentChat from "./AgentChat.vue";
 
 defineProps<{ repo: string | null }>();
 const emit = defineEmits<{ close: [] }>();
 
-const closeButtonRef = ref<HTMLButtonElement | null>(null);
+const closeButtonRef = ref<ComponentPublicInstance | null>(null);
 
 function onKeydown(e: KeyboardEvent): void {
   if (e.key === "Escape") {
@@ -16,7 +18,7 @@ function onKeydown(e: KeyboardEvent): void {
 
 onMounted(() => {
   window.addEventListener("keydown", onKeydown);
-  closeButtonRef.value?.focus();
+  (closeButtonRef.value?.$el as HTMLElement | undefined)?.focus();
 });
 
 onBeforeUnmount(() => {
@@ -32,13 +34,14 @@ onBeforeUnmount(() => {
         <span class="title">Chat with danxbot</span>
         <span v-if="repo" class="repo-chip">{{ repo }} board</span>
       </div>
-      <button
+      <DanxButton
         ref="closeButtonRef"
-        type="button"
-        class="close"
+        variant="muted"
+        size="xs"
+        class="close bg-transparent border-0"
         aria-label="Close chat"
         @click="emit('close')"
-      >✕</button>
+      >✕</DanxButton>
     </div>
     <div class="body">
       <AgentChat mode="board" :repo="repo" />

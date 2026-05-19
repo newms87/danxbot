@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 import type { CriticalFailurePayload } from "../../types";
 
 /**
@@ -179,14 +180,16 @@ const clearButtonClass = computed(() =>
           >view card ↗</a>
         </div>
       </div>
-      <button
-        type="button"
+      <DanxButton
+        variant="danger"
+        size="sm"
         :class="clearButtonClass"
         :disabled="busy"
+        :loading="busy"
         @click="$emit('clear', repoName)"
       >
         {{ busy ? "Clearing…" : "Clear flag" }}
-      </button>
+      </DanxButton>
     </div>
   </div>
 </template>

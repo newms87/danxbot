@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { DanxTooltip } from "@thehammer/danx-ui";
+import { DanxButton, DanxTooltip } from "@thehammer/danx-ui";
 import type { ChatSession } from "./chatTypes";
 import TokenMeter from "./TokenMeter.vue";
 
@@ -40,15 +40,16 @@ const dispatchShort = computed(() =>
       <TokenMeter :session="session" />
       <DanxTooltip tooltip="Interrupt the agent">
         <template #trigger>
-          <button
+          <DanxButton
             v-if="streaming"
-            type="button"
+            variant="danger"
+            size="xs"
             class="stop"
             @click="emit('stop')"
           >
             <span class="square" />
             Stop
-          </button>
+          </DanxButton>
         </template>
       </DanxTooltip>
     </span>

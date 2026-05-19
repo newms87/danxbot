@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref } from "vue";
+import { DanxButton } from "@thehammer/danx-ui";
 
 const props = defineProps<{
   disabled: boolean;
@@ -57,12 +58,13 @@ function onKeydown(e: KeyboardEvent): void {
         @input="onInput"
         @keydown="onKeydown"
       />
-      <button
-        type="button"
+      <DanxButton
+        variant=""
+        size="sm"
         class="send"
         :disabled="!text.trim() || disabled"
         @click="submit"
-      >Send ↵</button>
+      >Send ↵</DanxButton>
     </div>
     <div class="footer">
       <span>↵ to send · ⇧↵ for newline</span>

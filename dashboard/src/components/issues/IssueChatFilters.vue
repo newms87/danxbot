@@ -44,6 +44,8 @@ export function readInitialFilters(): {
 </script>
 
 <script setup lang="ts">
+import { DanxButton } from "@thehammer/danx-ui";
+
 const props = defineProps<{
   hideBash: boolean;
   hideThinking: boolean;
@@ -78,8 +80,9 @@ function toggleThinking(): void {
 <template>
   <div class="chat-filters" data-test="chat-filters">
     <span class="label">Hide</span>
-    <button
-      type="button"
+    <DanxButton
+      variant="muted"
+      size="xs"
       class="toggle"
       :class="{ active: hideBash }"
       :aria-pressed="hideBash"
@@ -88,9 +91,10 @@ function toggleThinking(): void {
     >
       <span class="dot" />
       Bash
-    </button>
-    <button
-      type="button"
+    </DanxButton>
+    <DanxButton
+      variant="muted"
+      size="xs"
       class="toggle"
       :class="{ active: hideThinking }"
       :aria-pressed="hideThinking"
@@ -99,7 +103,7 @@ function toggleThinking(): void {
     >
       <span class="dot" />
       Thinking
-    </button>
+    </DanxButton>
   </div>
 </template>
 

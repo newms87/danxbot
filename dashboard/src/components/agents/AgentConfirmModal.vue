@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { DanxButton } from "@thehammer/danx-ui";
+
 defineProps<{
   busy: boolean;
   error: string | null;
@@ -30,21 +32,23 @@ defineEmits<{ confirm: []; cancel: [] }>();
         :data-test="`${testPrefix}-error`"
       >{{ error }}</div>
       <footer class="actions">
-        <button
-          type="button"
+        <DanxButton
+          variant="muted"
+          size="sm"
           class="btn btn-cancel"
           :disabled="busy"
           :data-test="`${testPrefix}-cancel`"
           @click="$emit('cancel')"
-        >Cancel</button>
-        <button
-          type="button"
+        >Cancel</DanxButton>
+        <DanxButton
+          :variant="variant"
+          size="sm"
           class="btn btn-confirm"
-          :class="variant === 'danger' ? 'btn-danger' : 'btn-success'"
           :disabled="busy"
+          :loading="busy"
           :data-test="`${testPrefix}-confirm`"
           @click="$emit('confirm')"
-        >{{ busy ? busyLabel : confirmLabel }}</button>
+        >{{ busy ? busyLabel : confirmLabel }}</DanxButton>
       </footer>
     </div>
   </div>
