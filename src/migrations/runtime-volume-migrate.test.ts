@@ -143,12 +143,35 @@ describe("migrateRuntimeVolume", () => {
       expect(after.overrides.slack.enabled).toBe(true);
     });
 
-    it("PARTITIONS a pre-split single-file shape: drift file gets display, in-repo file loses display; all other contract fields preserved verbatim", () => {
+    it("PARTITIONS a pre-split single-file shape and CANONICALIZES the contract file (DX-702)", () => {
+      // Valid full-shape fixture: a complete agent record + canonical
+      // effortLevels + canonical agentDefaults. Re-normalizing a canonical
+      // shape is a no-op, so verbatim equality holds on these fields.
+      const aliceAgent = {
+        type: "agent",
+        bio: "test",
+        capabilities: ["issue-worker"],
+        schedule: {
+          tz: "America/Chicago",
+          always_on: true,
+          mon: ["00:00-23:59"],
+          tue: ["00:00-23:59"],
+          wed: ["00:00-23:59"],
+          thu: ["00:00-23:59"],
+          fri: ["00:00-23:59"],
+          sat: ["00:00-23:59"],
+          sun: ["00:00-23:59"],
+        },
+        enabled: true,
+        broken: null,
+        strikes: { count: 0, history: [] },
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      };
       const legacyBody = {
         overrides: { slack: { enabled: false }, dispatchApi: { enabled: true } },
-        agents: { alice: { type: "agent", bio: "test" } },
+        agents: { alice: aliceAgent },
         agentDefaults: { prepMode: "separate" },
-        effortLevels: [{ name: "medium", model: "x", effort: "low" }],
         effortAssignmentPrompt: "operator prompt",
         selfRepair: { threshold: 5 },
         display: { worker: { port: 1234, runtime: "host" } },
@@ -165,18 +188,81 @@ describe("migrateRuntimeVolume", () => {
       expect(drift.display).toEqual({ worker: { port: 1234, runtime: "host" } });
       expect(drift.meta).toEqual(legacyBody.meta);
 
-      // In-repo file rewritten without display; every OTHER contract
-      // field preserved verbatim (no normalize-on-migrate — the writers
-      // re-normalize on next read, the migration is purely structural).
+      // In-repo file rewritten without display AND canonicalized — every
+      // override slot materialized (legacyBody only set slack +
+      // dispatchApi; normalize materializes the rest to {enabled: null}),
+      // effortLevels expanded to the full 7-entry ladder from defaults
+      // (absent in fixture). Operator-authored slots preserved verbatim.
       const contract = JSON.parse(readFileSync(settingsInRepoPath(), "utf-8"));
       expect(contract.display).toBeUndefined();
-      expect(contract.overrides).toEqual(legacyBody.overrides);
-      expect(contract.agents).toEqual(legacyBody.agents);
-      expect(contract.agentDefaults).toEqual(legacyBody.agentDefaults);
-      expect(contract.effortLevels).toEqual(legacyBody.effortLevels);
-      expect(contract.effortAssignmentPrompt).toEqual(legacyBody.effortAssignmentPrompt);
-      expect(contract.selfRepair).toEqual(legacyBody.selfRepair);
+      expect(contract.overrides).toEqual({
+        slack: { enabled: false },
+        issuePoller: { enabled: null },
+        dispatchApi: { enabled: true },
+        ideator: { enabled: null },
+        autoTriage: { enabled: null },
+        trelloSync: { enabled: null },
+      });
+      expect(contract.agents).toEqual({ alice: aliceAgent });
+      expect(contract.agentDefaults).toEqual({ prepMode: "separate" });
+      expect(Array.isArray(contract.effortLevels)).toBe(true);
+      expect(contract.effortLevels).toHaveLength(7);
+      expect(contract.effortAssignmentPrompt).toEqual("operator prompt");
+      expect(contract.selfRepair).toEqual({ threshold: 5 });
       expect(contract.meta).toEqual(legacyBody.meta);
+    });
+
+    it("CANONICALIZES on migrate — drops stranded legacy keys + unknown garbage + invalid agents (DX-702)", () => {
+      // Garbage-bearing legacy fixture: pre-rename `overrides.trelloPoller`
+      // key (the read path migrates inline; canonicalize-on-migrate strips
+      // it at the partition boundary), legacy `pickupNamePrefix` on
+      // issuePoller (DX-701 moved that field out of contract overrides),
+      // an unknown top-level garbage key from a hypothetical future writer
+      // or hand-edit, and an invalid agent record (missing required
+      // capabilities — normalizeAgents drops it).
+      // No `issuePoller` slot in the fixture so the legacy `trelloPoller`
+      // fallback can fire through normalize (the inline fallback only
+      // triggers when `issuePoller` is absent from the partial). The
+      // legacy `pickupNamePrefix` lives on the legacy `trelloPoller` slot
+      // and is dropped wholesale because the new `issuePoller` shape has
+      // no such field (DX-701 moved it out of contract overrides).
+      const legacyBody = {
+        overrides: {
+          trelloPoller: { enabled: true, pickupNamePrefix: "stale-prefix" },
+        },
+        agents: { bogus: { type: "agent", bio: "missing fields" } },
+        unknownGarbageKey: { foo: "bar" },
+        display: { worker: { port: 5555, runtime: "docker" } },
+        meta: { updatedAt: "2026-05-17T00:00:00Z", updatedBy: "worker" },
+      };
+      writeFileSync(settingsInRepoPath(), JSON.stringify(legacyBody));
+
+      migrateRuntimeVolume(repoName, repoLocalPath);
+
+      const contract = JSON.parse(readFileSync(settingsInRepoPath(), "utf-8"));
+
+      // Legacy `overrides.trelloPoller` migrated forward into `issuePoller`
+      // via normalize's fallback (the new slot was null, so the legacy
+      // slot wins). The legacy key itself is gone from the file.
+      expect(contract.overrides.trelloPoller).toBeUndefined();
+      expect(contract.overrides.issuePoller).toEqual({ enabled: true });
+      // Stranded `pickupNamePrefix` dropped (no longer a contract field).
+      expect(contract.overrides.issuePoller.pickupNamePrefix).toBeUndefined();
+      // Unknown top-level garbage stripped.
+      expect(contract.unknownGarbageKey).toBeUndefined();
+      // Invalid agent dropped.
+      expect(contract.agents).toEqual({});
+      // No `display` field (moved to drift).
+      expect(contract.display).toBeUndefined();
+      // Every override slot present and canonical.
+      expect(Object.keys(contract.overrides).sort()).toEqual([
+        "autoTriage",
+        "dispatchApi",
+        "ideator",
+        "issuePoller",
+        "slack",
+        "trelloSync",
+      ]);
     });
 
     it("partitions a legacy file with NO meta block — drift gets display, no meta key", () => {
@@ -253,6 +339,48 @@ describe("migrateRuntimeVolume", () => {
       const contract = JSON.parse(readFileSync(settingsInRepoPath(), "utf-8"));
       expect(contract.display).toBeUndefined();
       expect(contract.overrides.slack.enabled).toBe(true);
+    });
+
+    it("CANONICALIZES the contract file even when the drift file already exists (DX-702 — `alreadyMigrated` branch)", () => {
+      // Operator pre-populated drift; in-repo file ALSO carries garbage.
+      // The `driftPresent` branch must still route the contract rewrite
+      // through `normalize()` — otherwise a future refactor that moves
+      // canonicalization inside the `if (!driftPresent)` block would
+      // silently regress without coverage.
+      mkdirSync(join(process.env.DANX_RUNTIME_ROOT!, repoName), {
+        recursive: true,
+      });
+      writeFileSync(
+        settingsDriftPath(),
+        JSON.stringify({
+          display: { worker: { port: 9, runtime: "host" } },
+          meta: { updatedAt: "2026-05-18T05:00:00Z", updatedBy: "deploy" },
+        }),
+      );
+      writeFileSync(
+        settingsInRepoPath(),
+        JSON.stringify({
+          overrides: {
+            trelloPoller: { enabled: false, pickupNamePrefix: "stale" },
+          },
+          unknownGarbage: { keep: "out" },
+          agents: { invalid: { type: "agent", bio: "missing fields" } },
+          display: { worker: { port: 1, runtime: "docker" } },
+          meta: { updatedAt: "2026-05-17T00:00:00Z", updatedBy: "worker" },
+        }),
+      );
+
+      const result = migrateRuntimeVolume(repoName, repoLocalPath);
+      expect(result.alreadyMigrated).toContain("settings.json");
+
+      const contract = JSON.parse(readFileSync(settingsInRepoPath(), "utf-8"));
+      // Canonicalization fired in the drift-present branch too.
+      expect(contract.display).toBeUndefined();
+      expect(contract.overrides.trelloPoller).toBeUndefined();
+      expect(contract.overrides.issuePoller).toEqual({ enabled: false });
+      expect(contract.overrides.issuePoller.pickupNamePrefix).toBeUndefined();
+      expect(contract.unknownGarbage).toBeUndefined();
+      expect(contract.agents).toEqual({});
     });
 
     it("skips when in-repo settings.json fails to parse (leaves both files untouched)", () => {

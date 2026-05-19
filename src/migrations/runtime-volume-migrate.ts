@@ -43,6 +43,7 @@ import {
   ensureRepoRuntimeDir,
   runtimeVolumePath,
 } from "../runtime-volume.js";
+import { normalize, type Settings } from "../settings-file.js";
 
 const log = createLogger("runtime-volume-migrate");
 
@@ -175,6 +176,17 @@ function migrateOneFile(
  * file is written FIRST so a crash between the two writes leaves the
  * data preserved in BOTH locations — the next boot sees both-present
  * branch and tidies the in-repo residue.
+ *
+ * DX-702 — the contract-file rewrite ROUTES through `normalize()` so the
+ * post-migration file matches the strict canonical schema (every override
+ * slot materialized, agent records validated, legacy keys dropped,
+ * unknown garbage stripped). Pre-DX-702 the rewrite preserved the
+ * operator-authored shape verbatim, which let stranded legacy keys
+ * (`overrides.trelloPoller`, `overrides.issuePoller.pickupNamePrefix`)
+ * and partial shapes survive the migration boundary — only the read path
+ * tolerated them inline. The migration is the canonical partition point;
+ * canonicalizing here means the on-disk file matches what `readSettings`
+ * would return on next read, with no silent drift surface.
  */
 export function migrateSettingsSplit(
   repoName: string,
@@ -230,11 +242,28 @@ export function migrateSettingsSplit(
     writeJsonAtomic(driftPath, driftShape);
   }
 
-  // Rewrite in-repo file without `display`. Idempotent regardless of
-  // whether the drift file was just written or already existed.
+  // Rewrite in-repo file without `display`, routed through `normalize()`
+  // so the post-migration shape is strict-canonical (DX-702). `normalize`
+  // materializes every override slot, drops stranded legacy keys
+  // (e.g. `overrides.trelloPoller`, `overrides.issuePoller.pickupNamePrefix`),
+  // validates agent records, drops unknown garbage, and stamps fallback
+  // defaults on malformed `meta.updatedBy`. The resulting `Settings`
+  // shape includes drift fields (`display: {}`, `testIsolation: {}`) by
+  // construction; we strip both before writing so the contract file
+  // holds zero drift fields (matches what `readContractFile` forcibly
+  // returns — see `src/settings-file.ts#readContractFile`).
+  // Idempotent regardless of whether the drift file was just written or
+  // already existed — re-normalizing a canonical shape is a no-op.
   const { display: _stripped, ...rest } = parsed;
   void _stripped;
-  writeJsonAtomic(inRepoPath, rest);
+  const {
+    display: _normalizedDisplay,
+    testIsolation: _normalizedTestIsolation,
+    ...canonical
+  } = normalize(rest as Partial<Settings>);
+  void _normalizedDisplay;
+  void _normalizedTestIsolation;
+  writeJsonAtomic(inRepoPath, canonical);
 
   if (driftPresent) {
     result.alreadyMigrated.push(label);

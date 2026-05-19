@@ -1160,7 +1160,7 @@ function normalizeAgentDefaults(raw: unknown): AgentDefaults {
   return { prepMode };
 }
 
-function normalize(partial: Partial<Settings> | null | undefined): Settings {
+export function normalize(partial: Partial<Settings> | null | undefined): Settings {
   const d = defaultSettings();
   if (!partial || typeof partial !== "object") return d;
 
