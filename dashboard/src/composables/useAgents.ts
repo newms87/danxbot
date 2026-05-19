@@ -1,4 +1,3 @@
-import { ref } from "vue";
 import type { Ref } from "vue";
 import {
   clearCriticalFailure as clearCriticalFailureApi,
@@ -8,13 +7,8 @@ import {
   putIssuePrefix,
   type ToggleError,
 } from "../api";
-import {
-  createHydrationBuffer,
-  useStream,
-  type HydrationBuffer,
-  type StreamEvent,
-  type UseStreamReturn,
-} from "./useStream";
+import type { StreamEvent } from "./useStream";
+import { createStreamCache } from "./streamCache";
 import type { AgentSnapshot, Feature } from "../types";
 
 export interface UseAgents {
@@ -72,18 +66,6 @@ export function applyAgentEvent(
   return [...state.slice(0, idx), snapshot, ...state.slice(idx + 1)];
 }
 
-// Module-scoped singletons — DX-687. Mirrors `useDispatches` /
-// `useSelfRepairErrors`: one fetch, one SSE subscription, one reducer
-// shared across every caller (SettingsPage, BrokenAgentsBanner via
-// useBrokenAgents). App.vue owns the lifecycle via `init()` / `destroy()`.
-// Tests reset by `vi.resetModules` + re-importing.
-const agents = ref<AgentSnapshot[]>([]);
-const loading = ref<boolean>(false);
-const error = ref<string | null>(null);
-
-let stream: UseStreamReturn | null = null;
-let buffer: HydrationBuffer<AgentSnapshot[]> | null = null;
-
 function applyOne(
   state: AgentSnapshot[],
   event: StreamEvent,
@@ -96,47 +78,27 @@ function applyOne(
   return applyAgentEvent(state, event.data);
 }
 
-async function hydrate(): Promise<void> {
-  if (!buffer) return;
-  loading.value = true;
-  try {
-    agents.value = await buffer.hydrate(() => fetchAgents(), applyOne);
-    error.value = null;
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    loading.value = false;
-  }
-}
+// Module-singleton (DX-687, re-implemented over DX-689 factory). N callers
+// share ONE fetch, ONE SSE subscription, ONE reducer. App.vue owns the
+// lifecycle via init() / destroy().
+const cache = createStreamCache<AgentSnapshot[]>({
+  topic: "agent:updated",
+  initialState: () => [],
+  fetchFn: () => fetchAgents(),
+  applyOne,
+});
 
-function init(): void {
-  if (stream) return; // idempotent
-  stream = useStream();
-  buffer = createHydrationBuffer<AgentSnapshot[]>(stream, "agent:updated");
-  buffer.onLiveEvent((event) => {
-    agents.value = applyOne(agents.value, event);
-  });
-  void hydrate();
-}
-
-function destroy(): void {
-  buffer?.close();
-  buffer = null;
-  stream?.disconnect();
-  stream = null;
-}
-
-/** Replace one row in `agents.value` by name; no-op when the row is gone. */
+/** Replace one row in agents.value by name; no-op when the row is gone. */
 function replaceAgentByName(
   repo: string,
   replacement: AgentSnapshot,
 ): void {
-  const idx = agents.value.findIndex((a) => a.name === repo);
+  const idx = cache.state.value.findIndex((a) => a.name === repo);
   if (idx === -1) return;
-  agents.value = [
-    ...agents.value.slice(0, idx),
+  cache.state.value = [
+    ...cache.state.value.slice(0, idx),
     replacement,
-    ...agents.value.slice(idx + 1),
+    ...cache.state.value.slice(idx + 1),
   ];
 }
 
@@ -152,16 +114,16 @@ async function toggle(
   feature: Feature,
   enabled: boolean | null,
 ): Promise<void> {
-  const index = agents.value.findIndex((a) => a.name === repo);
+  const index = cache.state.value.findIndex((a) => a.name === repo);
   if (index === -1) {
-    error.value = `Unknown repo: ${repo}`;
+    cache.error.value = `Unknown repo: ${repo}`;
     return;
   }
-  const snapshot = agents.value[index];
+  const snapshot = cache.state.value[index];
   const previous = snapshot.settings.overrides[feature].enabled;
 
-  agents.value = [
-    ...agents.value.slice(0, index),
+  cache.state.value = [
+    ...cache.state.value.slice(0, index),
     {
       ...snapshot,
       settings: {
@@ -172,17 +134,17 @@ async function toggle(
         },
       },
     },
-    ...agents.value.slice(index + 1),
+    ...cache.state.value.slice(index + 1),
   ];
 
   try {
     const refreshed = await patchToggle(repo, feature, enabled);
     replaceAgentByName(repo, refreshed);
-    error.value = null;
+    cache.error.value = null;
   } catch (err) {
     const te = err as ToggleError;
     rollback(repo, index, previous, feature);
-    error.value = te?.serverMessage ?? te?.message ?? "Toggle failed.";
+    cache.error.value = te?.serverMessage ?? te?.message ?? "Toggle failed.";
   }
 }
 
@@ -193,13 +155,13 @@ function rollback(
   feature: Feature,
 ): void {
   const idx =
-    agents.value[indexHint]?.name === repo
+    cache.state.value[indexHint]?.name === repo
       ? indexHint
-      : agents.value.findIndex((a) => a.name === repo);
+      : cache.state.value.findIndex((a) => a.name === repo);
   if (idx === -1) return;
-  const snap = agents.value[idx];
-  agents.value = [
-    ...agents.value.slice(0, idx),
+  const snap = cache.state.value[idx];
+  cache.state.value = [
+    ...cache.state.value.slice(0, idx),
     {
       ...snap,
       settings: {
@@ -210,7 +172,7 @@ function rollback(
         },
       },
     },
-    ...agents.value.slice(idx + 1),
+    ...cache.state.value.slice(idx + 1),
   ];
 }
 
@@ -227,10 +189,10 @@ async function clearCriticalFailure(repo: string): Promise<void> {
     await clearCriticalFailureApi(repo);
     const refreshed = await fetchAgent(repo);
     replaceAgentByName(repo, refreshed);
-    error.value = null;
+    cache.error.value = null;
   } catch (err) {
     const te = err as ToggleError;
-    error.value =
+    cache.error.value =
       te?.serverMessage ?? te?.message ?? "Clear critical failure failed.";
   }
 }
@@ -248,19 +210,20 @@ async function saveIssuePrefix(repo: string, prefix: string): Promise<void> {
     await putIssuePrefix(repo, prefix);
     const refreshed = await fetchAgent(repo);
     replaceAgentByName(repo, refreshed);
-    error.value = null;
+    cache.error.value = null;
   } catch (err) {
     const te = err as ToggleError;
-    error.value =
+    cache.error.value =
       te?.serverMessage ?? te?.message ?? "Save issue prefix failed.";
   }
 }
 
 /**
- * Build the Agents tab state. Module-scoped singleton (DX-687) — N
- * callers share ONE fetch, ONE SSE subscription, ONE reducer.
- * Lifecycle is owned by App.vue's `init()` / `destroy()` calls in
- * `loadDashboard` / `onAuthExpired` / `onUnmounted`.
+ * Build the Agents tab state. Module-scoped singleton (DX-687, factored
+ * over the DX-689 `createStreamCache` factory) — N callers share ONE
+ * fetch, ONE SSE subscription, ONE reducer. Lifecycle is owned by
+ * App.vue's `init()` / `destroy()` calls in `loadDashboard` /
+ * `onAuthExpired` / `onUnmounted`.
  *
  * ### Wire contract
  *
@@ -270,19 +233,17 @@ async function saveIssuePrefix(repo: string, prefix: string): Promise<void> {
  * a successful settings write. The `DELETE /critical-failure` route does
  * NOT publish — `clearCriticalFailure` re-fetches the single repo via
  * `fetchAgent` afterward.
- *
- * Hydrate-then-patch race handled by `createHydrationBuffer`.
  */
 export function useAgents(): UseAgents {
   return {
-    agents,
-    loading,
-    error,
+    agents: cache.state,
+    loading: cache.loading,
+    error: cache.error,
     toggle,
     clearCriticalFailure,
     saveIssuePrefix,
-    refresh: hydrate,
-    init,
-    destroy,
+    refresh: cache.hydrate,
+    init: cache.init,
+    destroy: cache.destroy,
   };
 }

@@ -1,46 +1,30 @@
-import { ref, computed, watch } from "vue";
+import { computed, watch } from "vue";
 import { fetchRepairErrors } from "../api";
-import {
-  createHydrationBuffer,
-  useStream,
-  type HydrationBuffer,
-  type StreamEvent,
-  type UseStreamReturn,
-} from "./useStream";
+import type { StreamEvent } from "./useStream";
+import { createStreamCache } from "./streamCache";
+import { ref } from "vue";
 import type { RepairErrorWithAttempts } from "../types";
 
 /**
  * DX-565 (Phase 5 of DX-560 — Self-Repair) — SSE-driven state for the
  * Self-Repair tab.
  *
- * Mirrors the `useDispatches` pattern (DX-227 mandate): the REST
- * fetch seeds the initial snapshot, then a single SSE subscription on
+ * Mirrors the DX-689 stream-cache factory: the REST fetch seeds the
+ * initial snapshot, then a single SSE subscription on
  * `system-repair-error:updated` reduces every subsequent mutation into
  * the same in-memory list. No `setInterval`, no polling fallback —
  * the backend's `publishRepairErrorUpdated` helper fans out every
  * write (Phase 2 recordError bumps, Phase 3 dispatcher status flips,
  * Phase 3 finalize verdicts, Phase 5 operator actions).
  *
- * Module-scoped singletons match the other composables — `App.vue`
- * owns the lifecycle via `init()` / `destroy()`; tests reset by
- * `vi.resetModules` + re-importing.
+ * Module-singleton: App.vue owns the lifecycle via `init()` / `destroy()`.
  */
 
-const errors = ref<RepairErrorWithAttempts[]>([]);
-const loading = ref(false);
-const error = ref<string | null>(null);
 const selectedRepo = ref<string>("");
 
 const filters = computed(() => ({
   ...(selectedRepo.value ? { repo: selectedRepo.value } : {}),
 }));
-
-export const unfixableCount = computed<number>(() =>
-  errors.value.reduce(
-    (n, e) => (e.error.status === "unfixable" ? n + 1 : n),
-    0,
-  ),
-);
 
 /**
  * Apply one bus payload to the snapshot. Two variants:
@@ -94,10 +78,6 @@ function isUpdatePayload(
   );
 }
 
-let stream: UseStreamReturn | null = null;
-let buffer: HydrationBuffer<RepairErrorWithAttempts[]> | null = null;
-let stopWatch: (() => void) | null = null;
-
 function applyOne(
   state: RepairErrorWithAttempts[],
   event: StreamEvent,
@@ -114,54 +94,44 @@ function applyOne(
   return applyRepairErrorEvent(state, event.data);
 }
 
-async function hydrate(): Promise<void> {
-  if (!buffer) return;
-  loading.value = true;
-  error.value = null;
-  try {
-    errors.value = await buffer.hydrate(
-      () => fetchRepairErrors(filters.value),
-      applyOne,
-    );
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    loading.value = false;
-  }
-}
+const cache = createStreamCache<RepairErrorWithAttempts[]>({
+  topic: "system-repair-error:updated",
+  initialState: () => [],
+  fetchFn: () => fetchRepairErrors(filters.value),
+  applyOne,
+});
+
+export const unfixableCount = computed<number>(() =>
+  cache.state.value.reduce(
+    (n, e) => (e.error.status === "unfixable" ? n + 1 : n),
+    0,
+  ),
+);
+
+let stopWatch: (() => void) | null = null;
 
 function init(): void {
-  if (stream) return;
-  stream = useStream();
-  buffer = createHydrationBuffer<RepairErrorWithAttempts[]>(stream, [
-    "system-repair-error:updated",
-  ]);
-  buffer.onLiveEvent((event) => {
-    errors.value = applyOne(errors.value, event);
-  });
-  void hydrate();
+  cache.init();
+  if (stopWatch) return; // idempotent across repeated init() calls
   stopWatch = watch(filters, () => {
-    void hydrate();
+    void cache.hydrate();
   });
 }
 
 function destroy(): void {
-  buffer?.close();
-  buffer = null;
-  stream?.disconnect();
-  stream = null;
+  cache.destroy();
   stopWatch?.();
   stopWatch = null;
 }
 
 export function useSelfRepairErrors() {
   return {
-    errors,
-    loading,
-    error,
+    errors: cache.state,
+    loading: cache.loading,
+    error: cache.error,
     selectedRepo,
     unfixableCount,
-    refresh: hydrate,
+    refresh: cache.hydrate,
     init,
     destroy,
   };

@@ -1,12 +1,7 @@
 import { ref, computed, watch } from "vue";
 import { fetchDispatches } from "../api";
-import {
-  createHydrationBuffer,
-  useStream,
-  type HydrationBuffer,
-  type StreamEvent,
-  type UseStreamReturn,
-} from "./useStream";
+import type { StreamEvent } from "./useStream";
+import { createStreamCache } from "./streamCache";
 import type {
   Dispatch,
   DispatchFilters,
@@ -14,9 +9,6 @@ import type {
   TriggerType,
 } from "../types";
 
-const dispatches = ref<Dispatch[]>([]);
-const loading = ref(false);
-const error = ref<string | null>(null);
 const selectedRepo = ref<string>("");
 const selectedTrigger = ref<TriggerType | "">("");
 const selectedStatus = ref<DispatchStatus | "">("");
@@ -116,25 +108,9 @@ function isDispatchPatch(
 }
 
 /**
- * Stream lifecycle. Module-scoped singletons — `App.vue::useDispatches()`
- * is the only caller, and its mount/unmount owns `init()`/`destroy()`.
- * Tests reset via `vi.resetModules` + re-import.
- *
- * One `HydrationBuffer` covers BOTH topics. The buffer keeps a single
- * subscription per topic across the buffered→live transition, so there
- * is no microtask gap where events can be lost (the bug Phase 4
- * hand-rolled around with `hydrating` + `pendingCreated`/`pendingUpdated`,
- * deleted in Phase 7).
- */
-let stream: UseStreamReturn | null = null;
-let buffer: HydrationBuffer<Dispatch[]> | null = null;
-let stopWatch: (() => void) | null = null;
-
-/**
- * Apply one StreamEvent to a Dispatch[] snapshot. Used for BOTH the
- * pre-hydrate queue drain (inside buffer.hydrate) and live events (via
- * buffer.onLiveEvent). Single source of truth for topic→reducer dispatch
- * + payload validation.
+ * Single source of truth for topic→reducer dispatch + payload validation.
+ * Used for BOTH the pre-hydrate queue drain (inside buffer.hydrate) and
+ * live events (via buffer.onLiveEvent).
  */
 function applyOne(state: Dispatch[], event: StreamEvent): Dispatch[] {
   if (event.topic === "dispatch:created") {
@@ -159,64 +135,46 @@ function applyOne(state: Dispatch[], event: StreamEvent): Dispatch[] {
   return state;
 }
 
-async function hydrate(): Promise<void> {
-  if (!buffer) return;
-  loading.value = true;
-  error.value = null;
-  try {
-    dispatches.value = await buffer.hydrate(
-      () => fetchDispatches(filters.value),
-      applyOne,
-    );
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : String(err);
-  } finally {
-    loading.value = false;
-  }
-}
+// Module-singleton (DX-689 factory). App.vue::useDispatches() is the only
+// caller, and its mount/unmount owns init() / destroy().
+const cache = createStreamCache<Dispatch[]>({
+  topic: ["dispatch:created", "dispatch:updated"],
+  initialState: () => [],
+  fetchFn: () => fetchDispatches(filters.value),
+  applyOne,
+});
+
+let stopWatch: (() => void) | null = null;
 
 function init(): void {
-  if (stream) return; // idempotent — App.vue may call init() more than once
-  stream = useStream();
-  buffer = createHydrationBuffer<Dispatch[]>(stream, [
-    "dispatch:created",
-    "dispatch:updated",
-  ]);
-  buffer.onLiveEvent((event) => {
-    dispatches.value = applyOne(dispatches.value, event);
-  });
-
-  void hydrate();
-
-  // Filter changes drop stale rows via a fresh REST fetch. The buffer
-  // re-buffers events that fire mid-refetch and replays them on top of
-  // the new snapshot via applyOne (no events lost under the new filter).
+  cache.init();
+  if (stopWatch) return;
+  // Filter changes drop stale rows via a fresh REST fetch. The hydration
+  // buffer re-buffers events that fire mid-refetch and replays them on top
+  // of the new snapshot via applyOne (no events lost under the new filter).
   stopWatch = watch(filters, () => {
-    void hydrate();
+    void cache.hydrate();
   });
 }
 
 function destroy(): void {
-  buffer?.close();
-  buffer = null;
-  stream?.disconnect();
-  stream = null;
+  cache.destroy();
   stopWatch?.();
   stopWatch = null;
 }
 
 export function useDispatches() {
   return {
-    dispatches,
-    loading,
-    error,
+    dispatches: cache.state,
+    loading: cache.loading,
+    error: cache.error,
     selectedRepo,
     selectedTrigger,
     selectedStatus,
     searchQuery,
     // The DashboardHeader's @refresh manual-reload button shares the
     // mount-time hydrate code path — one way to get fresh data, not two.
-    refresh: hydrate,
+    refresh: cache.hydrate,
     init,
     destroy,
   };

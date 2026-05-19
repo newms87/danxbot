@@ -1,12 +1,12 @@
-import { ref } from "vue";
-import type { Ref } from "vue";
+import { computed, ref, type Ref } from "vue";
 import {
   fetchTrelloBoardLists,
   fetchTrelloListMapping,
   patchTrelloListMapping,
   type TrelloListMappingResponse,
 } from "../api";
-import { useStream, type UseStreamReturn } from "./useStream";
+import type { StreamEvent } from "./useStream";
+import { createKeyedStreamCache } from "./streamCache";
 import type {
   TrelloListMap,
   TrelloListSummary,
@@ -16,7 +16,8 @@ import type {
  * DX-611 (Phase 8b.3 of DX-575) — Vue composable that owns the wire
  * state for the Settings UI's Trello list-mapping panel.
  *
- * **Per-repo shared instance with refcount (DX-688).** Every call to
+ * **Per-repo shared instance with refcount (DX-688, factored over the
+ * DX-689 `createKeyedStreamCache` factory).** Every call to
  * `useTrelloListMapping(repo)` for the same `repo` returns a facade
  * backed by ONE shared per-repo cache. Two Settings-page components
  * mount with the SAME repo prop (`TrelloListMapping.vue` +
@@ -40,6 +41,13 @@ import type {
  *    requires a fresh trello-lists fetch — operators see the dropdown
  *    selections jump to the new map immediately; badges refresh on the
  *    next mount/refresh).
+ *
+ * The shape of the cached state is a combined record: BOTH the
+ * `mapping` response AND the cached `boardLists` ride one stream-cache
+ * instance — the `boardLists` array is fetched in parallel with the
+ * mapping on first hydrate so the dropdowns are populated on first
+ * paint (the Re-fetch button calls `refetchBoardLists` to refresh
+ * separately with the server's 30s cache bypassed).
  */
 export interface UseTrelloListMappingReturn {
   mapping: Ref<TrelloListMappingResponse | null>;
@@ -79,113 +87,85 @@ function isMapUpdatedPayload(
   return typeof inner === "object" && inner !== null;
 }
 
-interface SharedTrelloListMappingInstance {
-  mapping: Ref<TrelloListMappingResponse | null>;
-  boardLists: Ref<TrelloListSummary[]>;
-  loading: Ref<boolean>;
-  saving: Ref<boolean>;
-  error: Ref<string | null>;
-  hydrate: () => Promise<void>;
-  refetchBoardLists: () => Promise<void>;
-  save: (next: TrelloListMap) => Promise<void>;
-  /** Number of facades that have called init() and not yet destroy(). */
-  refCount: number;
-  /** Live SSE stream; null when refCount === 0. */
-  stream: UseStreamReturn | null;
-  unsubscribe: (() => void) | null;
+interface CombinedState {
+  mapping: TrelloListMappingResponse | null;
+  boardLists: TrelloListSummary[];
 }
 
-const sharedByRepo = new Map<string, SharedTrelloListMappingInstance>();
-
-function getOrCreateShared(repo: string): SharedTrelloListMappingInstance {
-  const cached = sharedByRepo.get(repo);
-  if (cached) return cached;
-
-  const mapping = ref<TrelloListMappingResponse | null>(null);
-  const boardLists = ref<TrelloListSummary[]>([]);
-  const loading = ref<boolean>(false);
-  const saving = ref<boolean>(false);
-  const error = ref<string | null>(null);
-
-  async function hydrate(): Promise<void> {
-    loading.value = true;
-    error.value = null;
-    // Fetch BOTH the mapping AND the cached board lists in parallel —
-    // the dropdowns need `boardLists` populated on first paint, otherwise
-    // the operator sees only "(unmapped)" until they click Re-fetch
-    // (reviewer S1). Board lists ride the same 30s server cache; this
-    // is one extra round-trip the dashboard can afford.
-    const [mappingResult, boardListsResult] = await Promise.allSettled([
-      fetchTrelloListMapping(repo),
-      fetchTrelloBoardLists(repo),
-    ]);
-    if (mappingResult.status === "fulfilled") {
-      mapping.value = mappingResult.value;
-    } else {
-      error.value =
-        mappingResult.reason instanceof Error
-          ? mappingResult.reason.message
-          : String(mappingResult.reason);
-    }
-    if (boardListsResult.status === "fulfilled") {
-      boardLists.value = boardListsResult.value;
-    } else if (mappingResult.status === "fulfilled") {
-      // Mapping arrived, board lists failed — surface the Trello-side
-      // failure on `error.value` so the operator's banner explains why
-      // the dropdowns are empty. Mapping error wins when both fail.
-      error.value =
-        boardListsResult.reason instanceof Error
-          ? boardListsResult.reason.message
-          : String(boardListsResult.reason);
-    }
-    loading.value = false;
+function applyOne(
+  state: CombinedState,
+  event: StreamEvent,
+  repo: string,
+): CombinedState {
+  if (event.topic !== "trello-list-map:updated") return state;
+  if (!isMapUpdatedPayload(event.data)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "useTrelloListMapping: malformed trello-list-map:updated event",
+      event,
+    );
+    return state;
   }
-
-  async function refetchBoardLists(): Promise<void> {
-    error.value = null;
-    try {
-      boardLists.value = await fetchTrelloBoardLists(repo, { refresh: true });
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err);
-      return;
-    }
-    await hydrate();
-  }
-
-  async function save(next: TrelloListMap): Promise<void> {
-    if (saving.value) return;
-    saving.value = true;
-    error.value = null;
-    try {
-      const written = await patchTrelloListMapping(repo, next);
-      const prev = mapping.value;
-      if (prev) {
-        mapping.value = { ...prev, map: written };
-      }
-    } catch (err) {
-      error.value = err instanceof Error ? err.message : String(err);
-      throw err;
-    } finally {
-      saving.value = false;
-    }
-  }
-
-  const instance: SharedTrelloListMappingInstance = {
-    mapping,
-    boardLists,
-    loading,
-    saving,
-    error,
-    hydrate,
-    refetchBoardLists,
-    save,
-    refCount: 0,
-    stream: null,
-    unsubscribe: null,
+  if (event.data.repoName !== repo) return state;
+  if (!state.mapping) return state;
+  return {
+    ...state,
+    mapping: { ...state.mapping, map: event.data.map },
   };
+}
 
-  sharedByRepo.set(repo, instance);
-  return instance;
+/**
+ * Both REST sources fan into a single combined state so one
+ * `createKeyedStreamCache` instance owns the per-repo cache.
+ *
+ * On either rejection the whole hydrate fails — state stays at its
+ * prior value (initial `null` / `[]` on first paint), `error.value`
+ * carries the failure, the panel renders empty + a banner, operator
+ * clicks Re-fetch. This is an all-or-nothing simplification from the
+ * pre-DX-689 partial-render behavior (mapping ok + boardLists fail
+ * used to paint the mapping panel with empty dropdowns). Trade-off
+ * weighed: factory API surface area (a per-key `setState` callback
+ * threaded through `fetchFn`) was deemed too costly for one
+ * consumer's UX nuance. Partial Trello backend failures are rare
+ * (both endpoints share availability) and the operator-recovery
+ * path is one click. Mapping error wins when both fail.
+ */
+async function hydrateCombined(repo: string): Promise<CombinedState> {
+  const [mappingResult, boardListsResult] = await Promise.allSettled([
+    fetchTrelloListMapping(repo),
+    fetchTrelloBoardLists(repo),
+  ]);
+  if (mappingResult.status === "rejected") {
+    throw mappingResult.reason;
+  }
+  if (boardListsResult.status === "rejected") {
+    // Mapping landed; surface the board-list error so the operator's
+    // banner explains why the dropdowns are empty.
+    throw boardListsResult.reason;
+  }
+  return {
+    mapping: mappingResult.value,
+    boardLists: boardListsResult.value,
+  };
+}
+
+const cacheFactory = createKeyedStreamCache<CombinedState, string>({
+  topic: "trello-list-map:updated",
+  initialState: () => ({ mapping: null, boardLists: [] }),
+  fetchFn: hydrateCombined,
+  applyOne,
+});
+
+// Per-repo `saving` ref. Lives outside the factory because it is purely
+// a PATCH-in-flight flag, not SSE-driven state.
+const savingByRepo = new Map<string, Ref<boolean>>();
+
+function getSavingRef(repo: string): Ref<boolean> {
+  const cached = savingByRepo.get(repo);
+  if (cached) return cached;
+  const r = ref<boolean>(false);
+  savingByRepo.set(repo, r);
+  return r;
 }
 
 /**
@@ -194,70 +174,74 @@ function getOrCreateShared(repo: string): SharedTrelloListMappingInstance {
  * cases.
  */
 export function __resetSharedTrelloListMappingForTesting(): void {
-  for (const inst of sharedByRepo.values()) {
-    inst.unsubscribe?.();
-    inst.stream?.disconnect();
-  }
-  sharedByRepo.clear();
+  cacheFactory.__resetForTesting();
+  savingByRepo.clear();
 }
 
 export function useTrelloListMapping(repo: string): UseTrelloListMappingReturn {
-  const shared = getOrCreateShared(repo);
-  // Each facade tracks whether IT called init() so destroy() decrements
-  // exactly once even on double-destroy calls.
-  let attached = false;
+  const cache = cacheFactory(repo);
+  const saving = getSavingRef(repo);
 
-  function init(): void {
-    if (attached) return; // idempotent per facade
-    attached = true;
-    shared.refCount++;
-    if (shared.refCount === 1) {
-      // First consumer for this repo — open the stream + fire initial hydrate.
-      shared.stream = useStream();
-      shared.unsubscribe = shared.stream.subscribe(
-        "trello-list-map:updated",
-        (event) => {
-          if (!isMapUpdatedPayload(event.data)) {
-            // eslint-disable-next-line no-console
-            console.warn(
-              "useTrelloListMapping: malformed trello-list-map:updated event",
-              event,
-            );
-            return;
-          }
-          if (event.data.repoName !== repo) return;
-          const prev = shared.mapping.value;
-          if (!prev) return;
-          shared.mapping.value = { ...prev, map: event.data.map };
-        },
-      );
-      void shared.hydrate();
+  // Expose the two halves of the combined state as `WritableComputedRef`
+  // projections. Real refs (carry `__v_isRef`), so they behave correctly
+  // under `isRef` / `unref` / template auto-unwrap / `watch(mapping, fn)`.
+  const mapping = computed<TrelloListMappingResponse | null>({
+    get: () => cache.state.value.mapping,
+    set: (v) => {
+      cache.state.value = { ...cache.state.value, mapping: v };
+    },
+  });
+
+  const boardLists = computed<TrelloListSummary[]>({
+    get: () => cache.state.value.boardLists,
+    set: (v) => {
+      cache.state.value = { ...cache.state.value, boardLists: v };
+    },
+  });
+
+  async function refetchBoardLists(): Promise<void> {
+    cache.error.value = null;
+    try {
+      const next = await fetchTrelloBoardLists(repo, { refresh: true });
+      cache.state.value = { ...cache.state.value, boardLists: next };
+    } catch (err) {
+      cache.error.value = err instanceof Error ? err.message : String(err);
+      return;
     }
+    await cache.hydrate();
   }
 
-  function destroy(): void {
-    if (!attached) return; // idempotent per facade
-    attached = false;
-    shared.refCount--;
-    if (shared.refCount <= 0) {
-      shared.refCount = 0;
-      shared.unsubscribe?.();
-      shared.unsubscribe = null;
-      shared.stream?.disconnect();
-      shared.stream = null;
+  async function save(next: TrelloListMap): Promise<void> {
+    if (saving.value) return;
+    saving.value = true;
+    cache.error.value = null;
+    try {
+      const written = await patchTrelloListMapping(repo, next);
+      const prev = cache.state.value.mapping;
+      if (prev) {
+        cache.state.value = {
+          ...cache.state.value,
+          mapping: { ...prev, map: written },
+        };
+      }
+    } catch (err) {
+      cache.error.value = err instanceof Error ? err.message : String(err);
+      throw err;
+    } finally {
+      saving.value = false;
     }
   }
 
   return {
-    mapping: shared.mapping,
-    boardLists: shared.boardLists,
-    loading: shared.loading,
-    saving: shared.saving,
-    error: shared.error,
-    init,
-    destroy,
-    refresh: shared.hydrate,
-    refetchBoardLists: shared.refetchBoardLists,
-    save: shared.save,
+    mapping,
+    boardLists,
+    loading: cache.loading,
+    saving,
+    error: cache.error,
+    init: cache.init,
+    destroy: cache.destroy,
+    refresh: cache.hydrate,
+    refetchBoardLists,
+    save,
   };
 }

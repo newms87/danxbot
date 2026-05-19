@@ -1,13 +1,8 @@
-import { ref, computed } from "vue";
+import { computed } from "vue";
 import type { ComputedRef, Ref } from "vue";
 import { fetchLists } from "../api";
-import {
-  createHydrationBuffer,
-  useStream,
-  type HydrationBuffer,
-  type StreamEvent,
-  type UseStreamReturn,
-} from "./useStream";
+import type { StreamEvent } from "./useStream";
+import { createKeyedStreamCache } from "./streamCache";
 import type { List, ListsFile } from "../types";
 
 /**
@@ -21,7 +16,8 @@ import type { List, ListsFile } from "../types";
  * per-file source check in `useListColors.test.ts` is the tighter
  * fast-fail.
  *
- * **Per-repo shared instance with refcount (DX-682).** Every call to
+ * **Per-repo shared instance with refcount (DX-682, factored over the
+ * DX-689 `createKeyedStreamCache` factory).** Every call to
  * `useListColors(repo)` for the same `repo` returns a facade backed by
  * ONE shared per-repo cache. The card-detail drawer mounts three
  * components that each call `useListColors(repo)` (CardTimeline,
@@ -30,8 +26,8 @@ import type { List, ListsFile } from "../types";
  * per repo regardless of how many components mount, refcounting the
  * underlying SSE subscription so the connection survives any single
  * component unmounting and only tears down when the last consumer
- * detaches. The dashboard is multi-repo, so the cache is keyed by repo
- * — different repos still get independent fetches + subscriptions.
+ * detaches. Different repos still get independent fetches +
+ * subscriptions.
  *
  * Wire contract:
  * - `GET /api/lists?repo=` returns `{file: ListsFile}` (see `fetchLists`
@@ -75,10 +71,9 @@ export interface UseListColorsReturn {
 /**
  * Runtime guard for `lists:updated` SSE payloads. The wire is `JSON.parse`
  * of untyped text — schema drift in the producer would otherwise smear a
- * half-filled file silently. Mirrors the philosophy of
- * `useAgents.isAgentSnapshot` / `useDispatches.isDispatchCreated`:
- * enforce the minimum shape the reducer accesses, drop with `console.warn`
- * on a mismatch instead of half-rendering.
+ * half-filled file silently. Enforce the minimum shape the reducer
+ * accesses; drop with `console.warn` on a mismatch instead of
+ * half-rendering.
  */
 function isListsUpdatedPayload(
   data: unknown,
@@ -91,76 +86,42 @@ function isListsUpdatedPayload(
   return Array.isArray(file.lists);
 }
 
-interface SharedListColorsInstance {
-  lists: Ref<List[]>;
-  loading: Ref<boolean>;
-  error: Ref<string | null>;
-  indexByName: ComputedRef<Map<string, string>>;
-  refresh: () => Promise<void>;
-  applyOne: (state: List[], event: StreamEvent) => List[];
-  /** Number of facades that have called init() and not yet destroy(). */
-  refCount: number;
-  /** Live SSE stream + hydration buffer; null when refCount === 0. */
-  stream: UseStreamReturn | null;
-  buffer: HydrationBuffer<List[]> | null;
+function applyOne(state: List[], event: StreamEvent, repo: string): List[] {
+  if (event.topic !== "lists:updated") return state;
+  if (!isListsUpdatedPayload(event.data)) {
+    // eslint-disable-next-line no-console
+    console.warn("useListColors: malformed lists:updated event", event);
+    return state;
+  }
+  if (event.data.repoName !== repo) return state;
+  return event.data.file.lists;
 }
 
-const sharedByRepo = new Map<string, SharedListColorsInstance>();
+const cacheFactory = createKeyedStreamCache<List[], string>({
+  topic: "lists:updated",
+  initialState: () => [],
+  fetchFn: async (repo) => (await fetchLists(repo)).lists,
+  applyOne,
+});
 
-function getOrCreateShared(repo: string): SharedListColorsInstance {
-  const cached = sharedByRepo.get(repo);
+// Per-repo computed index cache. Each repo gets its own ComputedRef<Map>
+// derived off the shared cache's `state` ref so colorFor is O(1) and the
+// computed memoization survives across facade instances for the same repo.
+const indexByRepo = new Map<string, ComputedRef<Map<string, string>>>();
+
+function getIndex(
+  repo: string,
+  lists: Ref<List[]>,
+): ComputedRef<Map<string, string>> {
+  const cached = indexByRepo.get(repo);
   if (cached) return cached;
-
-  const lists = ref<List[]>([]);
-  const loading = ref<boolean>(false);
-  const error = ref<string | null>(null);
-
-  const indexByName = computed<Map<string, string>>(() => {
+  const idx = computed<Map<string, string>>(() => {
     const map = new Map<string, string>();
     for (const l of lists.value) map.set(l.name, l.color);
     return map;
   });
-
-  function applyOne(state: List[], event: StreamEvent): List[] {
-    if (event.topic !== "lists:updated") return state;
-    if (!isListsUpdatedPayload(event.data)) {
-      // eslint-disable-next-line no-console
-      console.warn("useListColors: malformed lists:updated event", event);
-      return state;
-    }
-    if (event.data.repoName !== repo) return state;
-    return event.data.file.lists;
-  }
-
-  const instance: SharedListColorsInstance = {
-    lists,
-    loading,
-    error,
-    indexByName,
-    applyOne,
-    refresh: async () => {
-      if (!instance.buffer) return;
-      loading.value = true;
-      error.value = null;
-      try {
-        const next = await instance.buffer.hydrate(
-          async () => (await fetchLists(repo)).lists,
-          applyOne,
-        );
-        lists.value = next;
-      } catch (err) {
-        error.value = err instanceof Error ? err.message : String(err);
-      } finally {
-        loading.value = false;
-      }
-    },
-    refCount: 0,
-    stream: null,
-    buffer: null,
-  };
-
-  sharedByRepo.set(repo, instance);
-  return instance;
+  indexByRepo.set(repo, idx);
+  return idx;
 }
 
 /**
@@ -169,60 +130,25 @@ function getOrCreateShared(repo: string): SharedListColorsInstance {
  * cases.
  */
 export function __resetSharedListColorsForTesting(): void {
-  for (const inst of sharedByRepo.values()) {
-    inst.buffer?.close();
-    inst.stream?.disconnect();
-  }
-  sharedByRepo.clear();
+  cacheFactory.__resetForTesting();
+  indexByRepo.clear();
 }
 
 export function useListColors(repo: string): UseListColorsReturn {
-  const shared = getOrCreateShared(repo);
-  // Each facade tracks whether IT called init() so destroy() decrements
-  // exactly once even on double-destroy calls.
-  let attached = false;
+  const cache = cacheFactory(repo);
+  const indexByName = getIndex(repo, cache.state);
 
   function colorFor(listName: string): string {
-    return shared.indexByName.value.get(listName) ?? NEUTRAL_LIST_COLOR;
-  }
-
-  function init(): void {
-    if (attached) return; // idempotent per facade
-    attached = true;
-    shared.refCount++;
-    if (shared.refCount === 1) {
-      // First consumer for this repo — open the stream + fire initial hydrate.
-      shared.stream = useStream();
-      shared.buffer = createHydrationBuffer<List[]>(shared.stream, [
-        "lists:updated",
-      ]);
-      shared.buffer.onLiveEvent((event) => {
-        shared.lists.value = shared.applyOne(shared.lists.value, event);
-      });
-      void shared.refresh();
-    }
-  }
-
-  function destroy(): void {
-    if (!attached) return; // idempotent per facade
-    attached = false;
-    shared.refCount--;
-    if (shared.refCount <= 0) {
-      shared.refCount = 0;
-      shared.buffer?.close();
-      shared.buffer = null;
-      shared.stream?.disconnect();
-      shared.stream = null;
-    }
+    return indexByName.value.get(listName) ?? NEUTRAL_LIST_COLOR;
   }
 
   return {
-    lists: shared.lists,
-    loading: shared.loading,
-    error: shared.error,
+    lists: cache.state,
+    loading: cache.loading,
+    error: cache.error,
     colorFor,
-    refresh: shared.refresh,
-    init,
-    destroy,
+    refresh: cache.hydrate,
+    init: cache.init,
+    destroy: cache.destroy,
   };
 }

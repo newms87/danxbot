@@ -303,6 +303,105 @@ describe("useTrelloListMapping", () => {
     c.destroy();
   });
 
+  it("save() in-flight guard — second save call while first is pending is a no-op", async () => {
+    mockFetchListMapping.mockResolvedValueOnce(SEED_RESPONSE);
+    let resolveFirstPatch!: (v: { list_id_to_trello_list_id: Record<string, string> }) => void;
+    mockPatchListMapping.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolveFirstPatch = res;
+        }),
+    );
+    const { init, destroy, save, saving } = useTrelloListMapping("danxbot");
+    init();
+    await flushPromises();
+    await flushPromises();
+    void save({ list_id_to_trello_list_id: { "l-todo": "tl-a" } });
+    await Promise.resolve();
+    expect(saving.value).toBe(true);
+    // Second call while saving=true must NOT trigger another PATCH.
+    await save({ list_id_to_trello_list_id: { "l-todo": "tl-b" } });
+    expect(mockPatchListMapping).toHaveBeenCalledTimes(1);
+    // Resolve the first to leave saving in a clean state.
+    resolveFirstPatch({ list_id_to_trello_list_id: { "l-todo": "tl-a" } });
+    await flushPromises();
+    expect(saving.value).toBe(false);
+    destroy();
+  });
+
+  it("saving ref is per-repo (cross-repo isolation)", async () => {
+    mockFetchListMapping.mockResolvedValue(SEED_RESPONSE);
+    let resolvePatch!: (v: { list_id_to_trello_list_id: Record<string, string> }) => void;
+    mockPatchListMapping.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          resolvePatch = res;
+        }),
+    );
+    const a = useTrelloListMapping("repo-a");
+    const b = useTrelloListMapping("repo-b");
+    a.init();
+    b.init();
+    await flushPromises();
+    await flushPromises();
+    void a.save({ list_id_to_trello_list_id: { "l-todo": "tl-a" } });
+    await Promise.resolve();
+    expect(a.saving.value).toBe(true);
+    expect(b.saving.value).toBe(false);
+    resolvePatch({ list_id_to_trello_list_id: { "l-todo": "tl-a" } });
+    await flushPromises();
+    a.destroy();
+    b.destroy();
+  });
+
+  it("refetchBoardLists failure sets error and skips the follow-up hydrate", async () => {
+    mockFetchListMapping.mockResolvedValueOnce(SEED_RESPONSE);
+    mockFetchBoardLists.mockResolvedValueOnce([
+      { id: "tl1", name: "Review on board" },
+    ]);
+    const { init, destroy, refetchBoardLists, error, boardLists } =
+      useTrelloListMapping("danxbot");
+    init();
+    await flushPromises();
+    await flushPromises();
+    const fetchListMappingCallsBefore = mockFetchListMapping.mock.calls.length;
+    const priorBoardLists = boardLists.value;
+    // Re-fetch fails.
+    mockFetchBoardLists.mockRejectedValueOnce(new Error("trello-503"));
+    await refetchBoardLists();
+    expect(error.value).toBe("trello-503");
+    // No follow-up mapping re-hydrate fires when the refetch errors.
+    expect(mockFetchListMapping.mock.calls.length).toBe(
+      fetchListMappingCallsBefore,
+    );
+    // boardLists is left untouched.
+    expect(boardLists.value).toBe(priorBoardLists);
+    destroy();
+  });
+
+  it("SSE update preserves classification + trello_available + board_configured (only `map` mutates)", async () => {
+    mockFetchListMapping.mockResolvedValueOnce(SEED_RESPONSE);
+    const { init, destroy, mapping } = useTrelloListMapping("danxbot");
+    init();
+    await flushPromises();
+    await flushPromises();
+    const classificationBefore = mapping.value?.classification;
+    const trelloAvailableBefore = mapping.value?.trello_available;
+    const boardConfiguredBefore = mapping.value?.board_configured;
+    deliverSse({
+      repoName: "danxbot",
+      map: { list_id_to_trello_list_id: { "l-blocked": "tl-fresh" } },
+    });
+    expect(
+      mapping.value?.map.list_id_to_trello_list_id["l-blocked"],
+    ).toBe("tl-fresh");
+    // Non-map fields untouched.
+    expect(mapping.value?.classification).toBe(classificationBefore);
+    expect(mapping.value?.trello_available).toBe(trelloAvailableBefore);
+    expect(mapping.value?.board_configured).toBe(boardConfiguredBefore);
+    destroy();
+  });
+
   it("malformed SSE payload is dropped via runtime guard (does NOT clobber mapping)", async () => {
     mockFetchListMapping.mockResolvedValueOnce(SEED_RESPONSE);
     const { init, destroy, mapping } = useTrelloListMapping("danxbot");
